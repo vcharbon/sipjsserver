@@ -1,0 +1,73 @@
+services:
+  sip-b2bua:
+    build: .
+    container_name: sip-b2bua
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "5060:5060/udp"
+      - "3002:3002"
+      # Uncomment if EMERGENCY_LISTENER_ENABLED=true:
+      # - "5070:5070/udp"
+    environment:
+      # ---------------------------------------------------------------
+      # REQUIRED -- SIP_LOCAL_IP must be the host IP that remote SIP
+      # endpoints can reach. It is embedded in Via/Contact SIP headers.
+      # Do NOT use 0.0.0.0 (the UDP socket already binds to 0.0.0.0).
+      # Example: SIP_LOCAL_IP=192.168.1.100
+      # ---------------------------------------------------------------
+      - SIP_LOCAL_IP=${SIP_LOCAL_IP:?Set SIP_LOCAL_IP to the host IP reachable by SIP endpoints}
+      - SIP_LOCAL_PORT=5060
+      - REDIS_URL=redis://redis:6379
+      - CDR_FILE_PATH=/data/cdr/cdr.jsonl
+      - HTTP_STATUS_PORT=3002
+      - CLUSTER_WORKERS=0
+      - EFFECT_LOG_LEVEL=Info
+      # Call control API -- point to your external routing service:
+      # - CALL_CONTROL_URL=http://host.docker.internal:3002
+      # Tracing (OTel collector) -- traces fail silently if collector is down:
+      # - OTEL_TRACES_URL=http://otel-collector:4318/v1/traces
+      # Emergency listener (secondary SIP port):
+      # - EMERGENCY_LISTENER_ENABLED=true
+      # - EMERGENCY_LISTENER_PORT=5070
+    volumes:
+      - cdr-data:/data/cdr
+    tmpfs:
+      - /tmp
+    depends_on:
+      redis:
+        condition: service_healthy
+    # -------------------------------------------------------------------
+    # HOST NETWORKING (production SIP)
+    # For high call rates or to avoid Docker NAT on UDP, uncomment
+    # network_mode and remove the "ports" section above. Linux only.
+    # -------------------------------------------------------------------
+    # network_mode: host
+
+  redis:
+    image: redis:7-alpine
+    container_name: sip-redis
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - redis-data:/data
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  cdr-data:
+  redis-data:

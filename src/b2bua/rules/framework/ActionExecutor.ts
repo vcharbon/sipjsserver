@@ -1,0 +1,1021 @@
+/**
+ * ActionExecutor — translates RuleAction[] into HandlerResult.
+ *
+ * Owns CSeq management, tag rewriting, dialog state transitions, and
+ * message construction. Rules express high-level decisions; this module
+ * converts them to SIP wire format.
+ *
+ * Maintains a working copy of Call state that accumulates changes
+ * across actions executed sequentially.
+ */
+
+import type { RuleAction, RuleContext, MessageTransform } from "./RuleDefinition.js"
+import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
+import type { SipRequest, SipResponse } from "../../../sip/types.js"
+import type { TimerEntry, Leg, Dialog } from "../../../call/CallModel.js"
+import {
+  type Call,
+  addCdrEvent,
+  addBLeg,
+  bumpLocalCSeq,
+  deactivateRule,
+  findBLeg,
+  getPeer,
+  mergeLeg,
+  randomInitialCSeq,
+  relayCSeqDelta,
+  setByeDisposition,
+  setLegState,
+  splitLeg,
+  updateRemoteCSeq,
+  findByATag,
+  findByBTag,
+  addTagMapping,
+  makeEmptyDialog,
+  makeDialogFromIncoming,
+  b2buaTag,
+  remoteTag,
+  updateLeg,
+  updateDialog,
+  addPendingReInvite,
+  findPendingReInvite,
+  removePendingReInvite,
+} from "../../../call/CallModel.js"
+import {
+  buildAck,
+  buildBye,
+  buildCancel,
+  buildRejectResponse,
+  buildRelayedAck,
+  buildRelayedBye,
+  buildRelayedReInvite,
+  buildRelayedPrack,
+  extractContactUri,
+  extractHostPort,
+  getHeader,
+  getHeaders,
+  newTag,
+  relayResponse,
+  stripTag,
+  buildBLegInvite,
+  buildOptions,
+} from "../../../sip/MessageFactory.js"
+import { generateBLegCallId } from "../../../cluster/HashUtils.js"
+
+// ── Internal working state ─────────────────────────────────────────────────
+
+interface ExecutionState {
+  call: Call
+  outbound: OutboundEnvelope[]
+  effects: SideEffect[]
+  spanEvents: Array<{ name: string; attributes?: Record<string, unknown> }>
+}
+
+// ── Leg target resolution ──────────────────────────────────────────────────
+
+/** Resolve destination host:port for a leg (from dialog contact or source). */
+function legTarget(leg: Leg): { host: string; port: number } {
+  const dialog = leg.dialogs[0]
+  if (dialog !== undefined && dialog.contact) {
+    const uri = extractContactUri(dialog.contact)
+    const hp = extractHostPort(uri)
+    if (hp) return hp
+  }
+  return { host: leg.source.address, port: leg.source.port }
+}
+
+/** Resolve a leg by ID (a-leg or b-leg). */
+function findLeg(call: Call, legId: string): Leg | undefined {
+  if (legId === "a") return call.aLeg
+  return findBLeg(call, legId)
+}
+
+// ── Main executor ──────────────────────────────────────────────────────────
+
+/**
+ * Execute a sequence of RuleActions, accumulating into a HandlerResult.
+ * The ActionExecutor maintains a working copy of Call that each action updates.
+ */
+export function executeActions(
+  actions: ReadonlyArray<RuleAction>,
+  ctx: RuleContext,
+  ruleId: string,
+): HandlerResult {
+  const state: ExecutionState = {
+    call: ctx.call,
+    outbound: [],
+    effects: [],
+    spanEvents: [],
+  }
+
+  for (const action of actions) {
+    executeAction(action, ctx, state, ruleId)
+  }
+
+  return {
+    call: state.call,
+    outbound: state.outbound,
+    effects: state.effects,
+    ...(state.spanEvents.length > 0 ? { spanEvents: state.spanEvents } : {}),
+  }
+}
+
+// ── Action dispatch ────────────────────────────────────────────────────────
+
+function executeAction(
+  action: RuleAction,
+  ctx: RuleContext,
+  state: ExecutionState,
+  ruleId: string,
+): void {
+  switch (action.type) {
+    case "respond":
+      executeRespond(action, ctx, state)
+      break
+    case "relay-to-peer":
+      executeRelayToPeer(action, ctx, state)
+      break
+    case "relay-to-leg":
+      executeRelayToLeg(action, ctx, state)
+      break
+    case "ack-leg":
+      executeAckLeg(action, ctx, state)
+      break
+    case "send-request-to-leg":
+      executeSendRequestToLeg(action, ctx, state)
+      break
+    case "confirm-dialog":
+      executeConfirmDialog(ctx, state)
+      break
+    case "create-leg":
+      executeCreateLeg(action, ctx, state)
+      break
+    case "destroy-leg":
+      executeDestroyLeg(action, ctx, state)
+      break
+    case "merge":
+      state.call = mergeLeg(state.call, action.legA, action.legB)
+      break
+    case "split":
+      state.call = splitLeg(state.call, action.legId)
+      break
+    case "schedule-timer":
+      executeScheduleTimer(action, ctx, state)
+      break
+    case "cancel-timer":
+      state.effects.push({ type: "cancel-timer", id: action.timerId })
+      break
+    case "cancel-all-timers":
+      state.effects.push({ type: "cancel-all-timers" })
+      break
+    case "terminate-call":
+      executeTerminateCall(ctx, state)
+      break
+    case "begin-termination":
+      executeBeginTermination(ctx, state)
+      break
+    case "terminate-leg":
+      state.call = setLegState(state.call, action.legId, "terminated")
+      if (action.byeDisposition !== undefined) {
+        state.call = setByeDisposition(state.call, action.legId, action.byeDisposition)
+      }
+      break
+    case "add-cdr-event":
+      state.call = addCdrEvent(state.call, {
+        type: action.eventType,
+        timestamp: ctx.nowMs,
+        legId: action.legId,
+        statusCode: action.statusCode,
+        reason: action.reason,
+      })
+      break
+    case "deactivate-rule":
+      state.call = deactivateRule(state.call, ruleId)
+      break
+    case "add-tag-mapping":
+      state.call = addTagMapping(state.call, {
+        aTag: action.aTag, bLegId: action.bLegId, bTag: action.bTag,
+      })
+      break
+    case "send-raw":
+      state.outbound.push({
+        message: action.message,
+        destination: { host: action.destination.address, port: action.destination.port },
+        label: action.label,
+      })
+      break
+  }
+}
+
+// ── respond ────────────────────────────────────────────────────────────────
+
+function executeRespond(
+  action: Extract<RuleAction, { type: "respond" }>,
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  if (ctx.event.type !== "sip") return
+  const msg = ctx.event.message
+  if (msg.type !== "request") return
+
+  const response = buildRejectResponse(msg, action.status, action.reason ?? "")
+  state.outbound.push({
+    message: response,
+    destination: { host: ctx.event.rinfo.address, port: ctx.event.rinfo.port },
+    label: `respond ${action.status}`,
+  })
+}
+
+// ── relay-to-peer ──────────────────────────────────────────────────────────
+
+function executeRelayToPeer(
+  action: Extract<RuleAction, { type: "relay-to-peer" }>,
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  let peerLegId = getPeer(state.call, ctx.sourceLeg.legId)
+
+  // Fallback: during early dialog (before merge), b-leg's implicit peer is "a".
+  if (peerLegId === undefined && ctx.sourceLeg.legId !== "a") {
+    peerLegId = "a"
+  }
+
+  // Fallback: a-leg with no activePeer — resolve target b-leg from To-tag.
+  // During early dialog (PRACK, UPDATE), the a-leg isn't merged yet.
+  // The To-tag on the request maps to a specific b-leg via tagMap.
+  // We also carry the bTag to pick the right dialog on the target leg
+  // (important for forking — multiple early dialogs on one b-leg).
+  let targetToTag: string | undefined
+  if (peerLegId === undefined && ctx.sourceLeg.legId === "a" && ctx.event.type === "sip") {
+    const toTag = ctx.event.message.parsed?.to?.tag
+    if (toTag) {
+      const mapping = findByATag(state.call, toTag)
+      if (mapping) {
+        peerLegId = mapping.bLegId
+        targetToTag = mapping.bTag
+      }
+    }
+    // Single b-leg fallback
+    if (peerLegId === undefined && state.call.bLegs.length === 1) {
+      peerLegId = state.call.bLegs[0]!.legId
+    }
+  }
+
+  if (peerLegId === undefined) return
+
+  executeRelayToTarget(peerLegId, action.transform, ctx, state, targetToTag)
+}
+
+// ── relay-to-leg ───────────────────────────────────────────────────────────
+
+function executeRelayToLeg(
+  action: Extract<RuleAction, { type: "relay-to-leg" }>,
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  executeRelayToTarget(action.legId, action.transform, ctx, state)
+}
+
+// ── Core relay implementation ──────────────────────────────────────────────
+
+/**
+ * Relay the current event to a target leg.
+ * Handles CSeq computation, tag rewriting, dialog state, and message construction.
+ * This is the core of the ActionExecutor — all relay actions funnel through here.
+ */
+function executeRelayToTarget(
+  targetLegId: string,
+  transform: MessageTransform | undefined,
+  ctx: RuleContext,
+  state: ExecutionState,
+  targetToTag?: string,
+): void {
+  if (ctx.event.type !== "sip") return
+  const msg = ctx.event.message
+
+  const targetLeg = findLeg(state.call, targetLegId)
+  if (targetLeg === undefined) return
+  // When a specific dialog is indicated (e.g. forking — multiple early dialogs),
+  // pick it by To-tag. Otherwise default to the first dialog.
+  const targetDialog = targetToTag
+    ? targetLeg.dialogs.find((d) => d.toTag === targetToTag) ?? targetLeg.dialogs[0]
+    : targetLeg.dialogs[0]
+  const target = legTarget(targetLeg)
+
+  if (msg.type === "request") {
+    relayRequest(msg, ctx, state, targetLeg, targetDialog, target, transform)
+  } else {
+    relayResponseMsg(msg, ctx, state, targetLeg, targetDialog, target, transform)
+  }
+}
+
+/** Relay an inbound SIP request to a target leg. */
+function relayRequest(
+  req: SipRequest,
+  ctx: RuleContext,
+  state: ExecutionState,
+  targetLeg: Leg,
+  targetDialog: Dialog | undefined,
+  target: { host: string; port: number },
+  transform: MessageTransform | undefined,
+): void {
+  if (targetDialog === undefined) return
+
+  const inboundCSeqRaw = getHeader(req.headers, "cseq") ?? "1 UNKNOWN"
+  const inboundCSeq = parseInt(inboundCSeqRaw, 10)
+  const sourceDialog = ctx.sourceDialog
+
+  // ACK for 2xx reuses the INVITE CSeq and does NOT advance the dialog
+  // sequence counter (RFC 3261 §13.2.2.4). Skip CSeq bookkeeping for ACK.
+  const isAck = req.method === "ACK"
+  const delta = isAck ? 0 : relayCSeqDelta(inboundCSeq, sourceDialog?.remoteCSeq ?? null)
+  const outboundCSeq = targetDialog.localCSeq + delta
+
+  if (!isAck) {
+    // Update source leg's remoteCSeq
+    if (sourceDialog) {
+      state.call = updateRemoteCSeq(state.call, ctx.sourceLeg.legId, sourceDialog.toTag, inboundCSeq)
+    }
+    // Bump target leg's localCSeq
+    state.call = bumpLocalCSeq(state.call, targetLeg.legId, targetDialog.toTag, delta)
+  }
+
+  const targetUri = extractContactUri(targetDialog.contact) || `sip:target@${target.host}:${target.port}`
+
+  let relayed: SipRequest | SipResponse
+  switch (req.method) {
+    case "INVITE": {
+      // For a-leg: swap from/to tags (B2BUA is the remote party for Alice)
+      const reInvFromTag = targetLeg.legId === "a" ? (b2buaTag(state.call, "a") ?? "") : targetLeg.fromTag
+      const reInvToTag = targetLeg.legId === "a" ? (remoteTag(state.call, "a") ?? "") : targetDialog.toTag
+      relayed = buildRelayedReInvite(req, targetLeg.callId, reInvFromTag, reInvToTag, targetUri, outboundCSeq)
+      // Track pending re-INVITE for response correlation
+      state.call = addPendingReInvite(state.call, targetLeg.legId, targetDialog.toTag, {
+        outboundCSeq,
+        inboundCSeq,
+        sourceVias: getHeaders(req.headers, "via"),
+        sourceCallId: ctx.sourceLeg.callId,
+        sourceFrom: getHeader(req.headers, "from") ?? "",
+        sourceTo: getHeader(req.headers, "to") ?? "",
+        direction: ctx.direction,
+      })
+      break
+    }
+    case "ACK": {
+      const ackFromTag = targetLeg.legId === "a" ? (b2buaTag(state.call, "a") ?? "") : targetLeg.fromTag
+      const ackToTag = targetLeg.legId === "a" ? (remoteTag(state.call, "a") ?? "") : targetDialog.toTag
+      relayed = buildRelayedAck(req, targetLeg.callId, ackFromTag, ackToTag, targetUri, targetDialog.localCSeq)
+      break
+    }
+    case "BYE": {
+      const b2buaFromTag = targetLeg.legId === "a" ? (b2buaTag(state.call, "a") ?? "") : targetLeg.fromTag
+      const remoteToTag = targetLeg.legId === "a" ? (remoteTag(state.call, "a") ?? "") : targetDialog.toTag
+      relayed = buildRelayedBye(
+        req, targetLeg.callId, b2buaFromTag, remoteToTag, targetUri,
+        `${outboundCSeq} BYE`,
+        targetLeg.legId === "a" ? "b-to-a" : "a-to-b",
+      )
+      break
+    }
+    case "PRACK": {
+      const rack = getHeader(req.headers, "rack") ?? ""
+      relayed = buildRelayedPrack(req, targetLeg.callId, targetLeg.fromTag, targetDialog.toTag, targetUri, outboundCSeq, rack)
+      // Save source leg's Vias for response relay
+      if (ctx.sourceLeg.legId === "a") {
+        state.call = { ...state.call, aLegPendingVias: getHeaders(req.headers, "via") }
+      }
+      break
+    }
+    default:
+      // Generic request relay — use re-INVITE builder as it preserves body/headers
+      relayed = buildRelayedReInvite(req, targetLeg.callId, targetLeg.fromTag, targetDialog.toTag, targetUri, outboundCSeq)
+      break
+  }
+
+  // Apply transform if provided
+  if (transform && relayed.type === "request") {
+    if (transform.headers) {
+      let headers = relayed.headers
+      for (const [name, value] of Object.entries(transform.headers)) {
+        headers = value === null
+          ? headers.filter((h) => h.name.toLowerCase() !== name.toLowerCase())
+          : [...headers.filter((h) => h.name.toLowerCase() !== name.toLowerCase()), { name, value }]
+      }
+      relayed = { ...relayed, headers }
+    }
+    if (transform.body !== undefined) {
+      const newBody = transform.body ?? new Uint8Array(0)
+      relayed = {
+        ...relayed,
+        body: newBody,
+        headers: relayed.headers.map((hdr) =>
+          hdr.name.toLowerCase() === "content-length"
+            ? { name: hdr.name, value: String(newBody.byteLength) }
+            : hdr
+        ),
+      }
+    }
+  }
+
+  state.outbound.push({
+    message: relayed,
+    destination: target,
+    label: `relay ${req.method} to ${targetLeg.legId}`,
+  })
+}
+
+/** Relay an inbound SIP response to a target leg. */
+function relayResponseMsg(
+  resp: SipResponse,
+  ctx: RuleContext,
+  state: ExecutionState,
+  targetLeg: Leg,
+  _targetDialog: Dialog | undefined,
+  _target: { host: string; port: number },
+  transform: MessageTransform | undefined,
+): void {
+  // Determine effective status/reason (may be transformed, e.g., 183→200)
+  const effectiveStatus = transform?.status ?? resp.status
+  const effectiveReason = transform?.reason ?? resp.reason
+
+  // Build the relayed response with target leg's identifiers
+  const toTag = resp.parsed?.to?.tag ?? ""
+
+  // ── Detect re-INVITE response correlation ──
+  // If the source dialog has a pending re-INVITE matching this response's CSeq,
+  // we must rebuild the relayed response from the pending entry's snapshot
+  // (original Call-ID, Vias, From, To, CSeq) rather than the leg's current
+  // headers. This is the framework-side counterpart to addPendingReInvite() in
+  // relayRequest above. See AdvancedCallModel.md §"Limitations" for context.
+  const cseqHeader = getHeader(resp.headers, "cseq") ?? ""
+  const cseqMethod = cseqHeader.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
+  const cseqNum = parseInt(cseqHeader, 10)
+  const pending = ctx.sourceDialog !== undefined && cseqMethod === "INVITE"
+    ? findPendingReInvite(ctx.sourceDialog, cseqNum)
+    : undefined
+
+  let relayed: SipResponse
+
+  if (pending !== undefined) {
+    // ── Pending re-INVITE response path ──
+    // Rebuild headers from the snapshot captured when the request was relayed.
+    relayed = relayResponse(
+      resp,
+      pending.sourceCallId,
+      pending.sourceVias,
+      pending.sourceFrom,
+      pending.sourceTo,
+      `${pending.inboundCSeq} INVITE`,
+    )
+  } else {
+    // ── Default response relay path (initial INVITE, PRACK/UPDATE, INFO, etc.) ──
+
+    // Tag mapping: if response comes from a b-leg, map the tag to a-facing tag
+    let aFacingToTag: string | undefined
+    if (ctx.sourceLeg.legId !== "a" && toTag) {
+      const mapping = findByBTag(state.call, ctx.sourceLeg.legId, toTag)
+      if (mapping) {
+        aFacingToTag = mapping.aTag
+      } else if (effectiveStatus >= 100) {
+        // New tag from b-leg — create mapping
+        aFacingToTag = newTag()
+        state.call = addTagMapping(state.call, { aTag: aFacingToTag, bLegId: ctx.sourceLeg.legId, bTag: toTag })
+      }
+    }
+
+    // Determine which Vias/From/To to use for the relayed response
+    const viasForRelay = state.call.aLegPendingVias ?? state.call.aLegVias
+    const toWithTag = aFacingToTag
+      ? `${stripTag(state.call.aLegTo)};tag=${aFacingToTag}`
+      : undefined
+
+    const aLegCSeq = targetLeg.legId === "a"
+      ? `${state.call.aLeg.initialCSeq ?? 1} ${cseqMethod}`
+      : undefined
+
+    relayed = relayResponse(resp, targetLeg.callId, viasForRelay, state.call.aLegFrom, toWithTag, aLegCSeq)
+
+    // Track early dialog on source leg for provisional responses
+    if (resp.status >= 100 && resp.status < 200 && toTag && ctx.sourceLeg.legId !== "a") {
+      const sourceLeg = ctx.sourceLeg
+      if (!sourceLeg.dialogs.some((d) => d.toTag === toTag)) {
+        const contact = resp.parsed?.contact?.uri ?? ""
+        const maxCSeq = sourceLeg.dialogs.length > 0
+          ? Math.max(...sourceLeg.dialogs.map((d) => d.localCSeq))
+          : (sourceLeg.initialCSeq ?? randomInitialCSeq())
+        const dialog = { ...makeEmptyDialog(toTag), contact, localCSeq: maxCSeq }
+        state.call = updateLeg(state.call, sourceLeg.legId, (l) => ({
+          ...l, state: "early" as const, dialogs: [...l.dialogs, dialog],
+        }))
+      }
+    }
+
+    // Ensure a-leg has a dialog when relaying provisional/answer
+    if (targetLeg.legId === "a" && state.call.aLeg.dialogs.length === 0 && aFacingToTag) {
+      state.call = updateLeg(state.call, "a", (l) => ({
+        ...l, dialogs: [makeDialogFromIncoming(aFacingToTag!, state.call.aLeg.initialCSeq ?? 1)],
+      }))
+    }
+
+    // Clear pending Vias after use (PRACK response relay)
+    if (state.call.aLegPendingVias !== undefined) {
+      state.call = { ...state.call, aLegPendingVias: undefined }
+    }
+  }
+
+  // Apply status/reason transform (applies to both branches)
+  if (transform?.status !== undefined || transform?.reason !== undefined) {
+    relayed = { ...relayed, status: effectiveStatus, reason: effectiveReason }
+  }
+
+  // Apply header transform
+  if (transform?.headers) {
+    let headers = relayed.headers
+    for (const [name, value] of Object.entries(transform.headers)) {
+      headers = value === null
+        ? headers.filter((h) => h.name.toLowerCase() !== name.toLowerCase())
+        : [...headers.filter((h) => h.name.toLowerCase() !== name.toLowerCase()), { name, value }]
+    }
+    relayed = { ...relayed, headers }
+  }
+
+  // Apply body transform — also update Content-Length to match
+  if (transform?.body !== undefined) {
+    const newBody = transform.body ?? new Uint8Array(0)
+    relayed = {
+      ...relayed,
+      body: newBody,
+      headers: relayed.headers.map((hdr) =>
+        hdr.name.toLowerCase() === "content-length"
+          ? { name: hdr.name, value: String(newBody.byteLength) }
+          : hdr
+      ),
+    }
+  }
+
+  const destination = targetLeg.legId === "a"
+    ? { host: state.call.aLeg.source.address, port: state.call.aLeg.source.port }
+    : legTarget(targetLeg)
+
+  state.outbound.push({
+    message: relayed,
+    destination,
+    label: `relay ${effectiveStatus} to ${targetLeg.legId}`,
+  })
+
+  // ── Pending re-INVITE cleanup on final response ──
+  // 2xx: update source dialog's contact if response carries a new Contact
+  //      (subsequent in-dialog requests must route to the refreshed target).
+  // Any final (>= 200): remove the pending entry to avoid leaks.
+  if (pending !== undefined && resp.status >= 200 && ctx.sourceDialog !== undefined) {
+    if (resp.status < 300) {
+      const newContact = resp.parsed?.contact?.uri ?? ""
+      if (newContact) {
+        state.call = updateDialog(state.call, ctx.sourceLeg.legId, ctx.sourceDialog.toTag, (d) => ({
+          ...d, contact: newContact,
+        }))
+      }
+    }
+    state.call = removePendingReInvite(state.call, ctx.sourceLeg.legId, ctx.sourceDialog.toTag, pending.outboundCSeq)
+  }
+}
+
+// ── confirm-dialog ────────────────────────────────────────────────────────
+
+/**
+ * Confirm dialog on 200 OK INVITE from b-leg.
+ *
+ * - Source leg (b-leg): state → "confirmed", disposition → "bridged",
+ *   dialog updated with contact from 200 OK.
+ * - A-leg: state → "confirmed", dialog created/updated with winning tag.
+ * - Tag mapping created if not already present.
+ *
+ * Must be the first action in the sequence — before merge and relay-to-peer.
+ */
+function executeConfirmDialog(
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  if (ctx.event.type !== "sip") return
+  const resp = ctx.event.message
+  if (resp.type !== "response") return
+
+  const bLeg = ctx.sourceLeg
+  const toTag = resp.parsed?.to?.tag ?? ""
+  const bLegContact = resp.parsed?.contact?.uri ?? ""
+
+  // Update b-leg dialog — confirm existing early dialog or create new one.
+  // On confirmation, localCSeq resets to initialCSeq: the confirmed dialog
+  // inherits the INVITE CSeq (ACK for 2xx must match the INVITE CSeq),
+  // and subsequent requests (BYE, re-INVITE) increment from there.
+  const baseCSeq = bLeg.initialCSeq ?? randomInitialCSeq()
+  const existingDialog = bLeg.dialogs.find((d) => d.toTag === toTag)
+  const dialog = existingDialog
+    ? { ...existingDialog, contact: bLegContact, localCSeq: baseCSeq }
+    : { ...makeEmptyDialog(toTag), contact: bLegContact, localCSeq: baseCSeq }
+
+  state.call = updateLeg(state.call, bLeg.legId, (l) => ({
+    ...l,
+    state: "confirmed" as const,
+    disposition: "bridged" as const,
+    dialogs: [dialog],
+  }))
+
+  // Resolve or create tag mapping for this b-leg toTag
+  const existingMapping = findByBTag(state.call, bLeg.legId, toTag)
+  const aFacingTag = existingMapping ? existingMapping.aTag : newTag()
+
+  if (!existingMapping) {
+    state.call = addTagMapping(state.call, { aTag: aFacingTag, bLegId: bLeg.legId, bTag: toTag })
+  }
+
+  // Ensure a-leg has a dialog, or update its toTag to the winning aFacingTag
+  if (state.call.aLeg.dialogs.length === 0) {
+    state.call = updateLeg(state.call, "a", (l) => ({
+      ...l,
+      state: "confirmed" as const,
+      dialogs: [makeDialogFromIncoming(aFacingTag, state.call.aLeg.initialCSeq ?? 1)],
+    }))
+  } else {
+    const existing = state.call.aLeg.dialogs[0]!
+    state.call = updateLeg(state.call, "a", (l) => ({
+      ...l,
+      state: "confirmed" as const,
+      dialogs: [{
+        ...existing,
+        toTag: aFacingTag,
+      }],
+    }))
+  }
+}
+
+// ── ack-leg ────────────────────────────────────────────────────────────────
+
+function executeAckLeg(
+  action: Extract<RuleAction, { type: "ack-leg" }>,
+  _ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const leg = findLeg(state.call, action.legId)
+  if (leg === undefined) return
+  const dialog = leg.dialogs[0]
+  if (dialog === undefined) return
+
+  const target = legTarget(leg)
+  const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+  const ackCSeq = dialog.localCSeq || leg.initialCSeq || 1
+
+  state.outbound.push({
+    message: buildAck(leg.callId, leg.fromTag, dialog.toTag, targetUri, ackCSeq),
+    destination: target,
+    label: `ACK ${action.legId}`,
+  })
+}
+
+// ── send-request-to-leg ───────────────────────────────────────────────────
+
+/**
+ * Generate a new SIP request (e.g., OPTIONS, INFO, UPDATE) and send it to a leg.
+ * Framework handles CSeq bump, tag lookup, and message construction.
+ * Used by keepalive (OPTIONS), and potentially by custom rules (INFO, UPDATE).
+ */
+function executeSendRequestToLeg(
+  action: Extract<RuleAction, { type: "send-request-to-leg" }>,
+  _ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const leg = findLeg(state.call, action.legId)
+  if (leg === undefined || leg.state === "terminated") return
+  const dialog = leg.dialogs[0]
+  if (dialog === undefined) return
+
+  const target = legTarget(leg)
+  const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+
+  // Bump CSeq for the new request
+  state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
+  const cseq = dialog.localCSeq + 1
+
+  // Build the request based on method
+  const fromTag = leg.legId === "a"
+    ? (b2buaTag(state.call, "a") ?? "")
+    : leg.fromTag
+  const toTag = leg.legId === "a"
+    ? (remoteTag(state.call, "a") ?? "")
+    : dialog.toTag
+
+  if (action.method === "OPTIONS") {
+    state.outbound.push({
+      message: buildOptions(leg.callId, fromTag, toTag, targetUri, cseq),
+      destination: target,
+      label: `${action.method} to ${action.legId}`,
+    })
+  } else {
+    // Generic request construction for INFO, UPDATE, etc.
+    // Uses OPTIONS builder as base (no body by default) — can be extended
+    const msg = buildOptions(leg.callId, fromTag, toTag, targetUri, cseq)
+    // Override method and CSeq
+    const updatedMsg = {
+      ...msg,
+      method: action.method,
+      headers: msg.headers.map((h) =>
+        h.name.toLowerCase() === "cseq" ? { ...h, value: `${cseq} ${action.method}` } : h,
+      ),
+    }
+    if (action.body !== undefined && action.body !== null) {
+      updatedMsg.body = action.body
+      updatedMsg.headers = updatedMsg.headers.map((hdr) =>
+        hdr.name.toLowerCase() === "content-length"
+          ? { name: hdr.name, value: String(action.body!.byteLength) }
+          : hdr
+      )
+    }
+    state.outbound.push({
+      message: updatedMsg,
+      destination: target,
+      label: `${action.method} to ${action.legId}`,
+    })
+  }
+}
+
+// ── create-leg ─────────────────────────────────────────────────────────────
+
+function executeCreateLeg(
+  action: Extract<RuleAction, { type: "create-leg" }>,
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const legNumber = state.call.bLegs.length + 1
+  const legId = `b-${legNumber}`
+  const bLegFromTag = newTag()
+  const config = ctx.config
+
+  const bLegCallId = config.workerIndex >= 0
+    ? generateBLegCallId(legNumber, config.workerIndex, config.clusterWorkers, config.sipLocalIp)
+    : `${legNumber}-${state.call.aLeg.callId}`
+
+  const initialCSeq = randomInitialCSeq()
+  const port = action.destination.port ?? 5060
+
+  const bLeg: Leg = {
+    legId,
+    callId: bLegCallId,
+    fromTag: bLegFromTag,
+    source: { address: config.sipLocalIp, port: config.sipLocalPort },
+    state: "trying",
+    disposition: "pending",
+    dialogs: [],
+    noAnswerTimeoutSec: action.noAnswerTimeoutSec ?? config.noAnswerTimeoutSec,
+    initialCSeq,
+  }
+
+  // Resolve the base INVITE to clone
+  let baseInvite: SipRequest | undefined
+  if (action.fromInvite === "snapshot" && state.call.aLegInviteSnapshot) {
+    const snapshot = state.call.aLegInviteSnapshot
+    baseInvite = {
+      type: "request", method: "INVITE", uri: snapshot.uri,
+      version: "SIP/2.0",
+      headers: snapshot.headers.map((h) => ({ name: h.name, value: h.value })),
+      body: snapshot.body, raw: Buffer.from(snapshot.body),
+    }
+  } else if (action.fromInvite !== undefined && action.fromInvite !== "snapshot") {
+    baseInvite = action.fromInvite
+  }
+
+  if (baseInvite !== undefined) {
+    // Merge policy-level header overrides (e.g. strip 100rel from Supported)
+    // with action-level overrides. Action headers take precedence.
+    const mergedHeaders: Record<string, string | null> | undefined =
+      (state.call.policyUpdateHeaders || action.updateHeaders)
+        ? { ...(state.call.policyUpdateHeaders as Record<string, string | null> ?? {}),
+            ...(action.updateHeaders as Record<string, string | null> ?? {}) }
+        : undefined
+
+    const bLegInvite = buildBLegInvite(
+      baseInvite, bLegCallId, bLegFromTag,
+      undefined, // new_ruri — handled by destination
+      mergedHeaders,
+      initialCSeq,
+    )
+
+    state.outbound.push({
+      message: bLegInvite,
+      destination: { host: action.destination.host, port },
+      label: `send ${legId} INVITE`,
+    })
+  }
+
+  state.call = addBLeg(state.call, bLeg)
+  state.call = addCdrEvent(state.call, { type: "invite_sent", timestamp: ctx.nowMs, legId })
+
+  // Schedule no-answer timer
+  const noAnswerTimeout = action.noAnswerTimeoutSec ?? ctx.config.noAnswerTimeoutSec
+  const noAnswerTimer: TimerEntry = {
+    id: `no-answer-${ctx.callRef}-${legId}`,
+    type: "no_answer",
+    fireAt: ctx.nowMs + noAnswerTimeout * 1000,
+    legId,
+  }
+  state.call = { ...state.call, timers: [...state.call.timers, noAnswerTimer] }
+  state.effects.push({ type: "schedule-timer", timer: noAnswerTimer })
+  state.effects.push({ type: "flush-redis" })
+}
+
+// ── destroy-leg ────────────────────────────────────────────────────────────
+
+function executeDestroyLeg(
+  action: Extract<RuleAction, { type: "destroy-leg" }>,
+  _ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const leg = findLeg(state.call, action.legId)
+  if (leg === undefined || leg.state === "terminated") return
+
+  const target = legTarget(leg)
+
+  if (leg.state === "confirmed") {
+    // BYE a confirmed leg
+    const dialog = leg.dialogs[0]
+    if (dialog !== undefined) {
+      const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+      state.outbound.push({
+        message: buildBye(leg.callId, leg.fromTag, dialog.toTag, targetUri, dialog.localCSeq + 1),
+        destination: target,
+        label: `BYE ${action.legId}`,
+      })
+    }
+    state.call = setByeDisposition(state.call, action.legId, "bye_sent")
+  } else {
+    // CANCEL an early/trying leg
+    state.outbound.push({
+      message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1),
+      destination: target,
+      label: `CANCEL ${action.legId}`,
+    })
+    state.call = setByeDisposition(state.call, action.legId, "cancelled")
+  }
+
+  state.call = setLegState(state.call, action.legId, "terminated")
+  // Split from peer if peered
+  state.call = splitLeg(state.call, action.legId)
+}
+
+// ── schedule-timer ─────────────────────────────────────────────────────────
+
+function executeScheduleTimer(
+  action: Extract<RuleAction, { type: "schedule-timer" }>,
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const timerId = `${action.timerType}-${ctx.callRef}${action.legId ? `-${action.legId}` : ""}`
+  const timer: TimerEntry = {
+    id: timerId,
+    type: action.timerType,
+    fireAt: ctx.nowMs + action.delaySec * 1000,
+    legId: action.legId,
+  }
+  state.call = { ...state.call, timers: [...state.call.timers, timer] }
+  state.effects.push({ type: "schedule-timer", timer })
+}
+
+// ── terminate-call ─────────────────────────────────────────────────────────
+
+/**
+ * Terminate the entire call. Marks all legs terminated, sends BYE/CANCEL
+ * to all peered legs. The InvariantEnforcer adds limiter/timer/CDR/removal.
+ */
+function executeTerminateCall(
+  _ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  // BYE or CANCEL all legs that are still alive and peered
+  for (const leg of [state.call.aLeg, ...state.call.bLegs]) {
+    if (leg.state === "terminated") continue
+
+    if (leg.state === "confirmed") {
+      const dialog = leg.dialogs[0]
+      if (dialog !== undefined) {
+        const target = legTarget(leg)
+        const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+        const fromTag = leg.legId === "a"
+          ? (b2buaTag(state.call, "a") ?? "")
+          : leg.fromTag
+        const toTag = leg.legId === "a"
+          ? (remoteTag(state.call, "a") ?? "")
+          : dialog.toTag
+        state.outbound.push({
+          message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1),
+          destination: target,
+          label: `BYE ${leg.legId} (terminate)`,
+        })
+      }
+    } else if (leg.state === "trying" || leg.state === "early") {
+      if (leg.legId !== "a") {
+        const target = legTarget(leg)
+        state.outbound.push({
+          message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1),
+          destination: target,
+          label: `CANCEL ${leg.legId} (terminate)`,
+        })
+      }
+    }
+  }
+
+  // Mark everything terminated
+  state.call = {
+    ...state.call,
+    state: "terminated",
+    activePeer: null,
+    aLeg: { ...state.call.aLeg, state: "terminated" },
+    bLegs: state.call.bLegs.map((l) => ({ ...l, state: "terminated" as const })),
+  }
+}
+
+// ── begin-termination ─────────────────────────────────────────────────────
+
+/**
+ * Graceful call termination — the standard teardown path for all rules.
+ *
+ * For each leg that doesn't already have a byeDisposition set:
+ *   - confirmed → send BYE, set byeDisposition: "bye_sent" (await 200 OK)
+ *   - trying/early b-leg → send CANCEL, set byeDisposition: "cancelled"
+ *   - trying/early a-leg → set byeDisposition: "none" (nothing to send)
+ *   - already terminated → skip
+ *
+ * Rules MUST pre-mark legs they already handled (e.g., the leg that sent
+ * us a BYE gets byeDisposition: "bye_received" via terminate-leg action)
+ * before emitting begin-termination. This prevents duplicate BYE sends.
+ *
+ * After marking all legs, transitions to call.state = "terminating",
+ * cancels active timers, schedules 64s safety timer, writes CDR, and
+ * flushes to Redis. The framework (RuleExecutor) checks isFullyResolved()
+ * after this — if all legs are already resolved, immediate transition to
+ * "terminated" happens without waiting.
+ */
+function executeBeginTermination(
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  for (const leg of [state.call.aLeg, ...state.call.bLegs]) {
+    // Skip legs already handled by the rule or already resolved
+    if (leg.state === "terminated") continue
+    if (leg.byeDisposition !== undefined) continue
+
+    if (leg.state === "confirmed") {
+      // Send BYE to confirmed leg — await 200 OK or timeout
+      const dialog = leg.dialogs[0]
+      if (dialog !== undefined) {
+        const target = legTarget(leg)
+        const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+        const fromTag = leg.legId === "a"
+          ? (b2buaTag(state.call, "a") ?? "")
+          : leg.fromTag
+        const toTag = leg.legId === "a"
+          ? (remoteTag(state.call, "a") ?? "")
+          : dialog.toTag
+        state.outbound.push({
+          message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1),
+          destination: target,
+          label: `BYE ${leg.legId} (begin-termination)`,
+        })
+      }
+      state.call = setByeDisposition(state.call, leg.legId, "bye_sent")
+    } else if (leg.state === "trying" || leg.state === "early") {
+      if (leg.legId !== "a") {
+        // CANCEL trying/early b-legs
+        const target = legTarget(leg)
+        state.outbound.push({
+          message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1),
+          destination: target,
+          label: `CANCEL ${leg.legId} (begin-termination)`,
+        })
+        state.call = setByeDisposition(state.call, leg.legId, "cancelled")
+        state.call = setLegState(state.call, leg.legId, "terminated")
+      } else {
+        // a-leg in trying/early — no SIP message needed (rule already handled it)
+        state.call = setByeDisposition(state.call, leg.legId, "none")
+      }
+    }
+  }
+
+  // Transition to "terminating"
+  state.call = { ...state.call, state: "terminating" }
+
+  // Cancel all active timers (keepalive, duration, etc.)
+  state.effects.push({ type: "cancel-all-timers" })
+
+  // Schedule 64s safety timer (2x RFC 3261 Timer B/F)
+  const TERMINATING_TIMEOUT_MS = 64_000
+  const safetyTimer: TimerEntry = {
+    id: `terminating-timeout-${ctx.callRef}`,
+    type: "terminating_timeout",
+    fireAt: ctx.nowMs + TERMINATING_TIMEOUT_MS,
+  }
+  state.call = { ...state.call, timers: [...state.call.timers, safetyTimer] }
+  state.effects.push({ type: "schedule-timer", timer: safetyTimer })
+
+  // Write CDR and flush to Redis for crash recovery
+  state.effects.push({ type: "write-cdr" })
+  state.effects.push({ type: "flush-redis" })
+}

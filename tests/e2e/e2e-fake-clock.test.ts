@@ -1,0 +1,75 @@
+/**
+ * E2E test suite — fake clock (TestClock) variants.
+ *
+ * All tests in this file run under @effect/vitest's TestClock so virtual
+ * time is advanced by `pause()` steps. The B2BUA runs in-process inside
+ * the same Effect runtime and shares the same TestClock — pauses become
+ * effectively instant.
+ *
+ * If a scenario needs real wall-clock behaviour (live UDP, real Redis
+ * timing windows, peer-to-peer agents) put it in `e2e-real-clock.test.ts`.
+ */
+
+import { describe, it } from "@effect/vitest"
+import { afterAll } from "vitest"
+import { basicCall } from "./scenarios/basic-call.js"
+import { callReject } from "./scenarios/call-reject.js"
+import { cancelCall } from "./scenarios/cancel.js"
+import { prackCall } from "./scenarios/prack.js"
+import { prackForkingCall } from "./scenarios/prack-forking.js"
+import { cancelCrossing200Ok } from "./scenarios/cancel-200ok-crossing.js"
+import { callerHangup, calleeHangup } from "./scenarios/bye-directions.js"
+import { aliceReInvite, bobReInvite, crossingReInvite } from "./scenarios/reinvite.js"
+import { explicitRouteCall, failoverWithHeaders } from "./scenarios/shared-port.js"
+import { recordRouteBasic, recordRouteFakeRR } from "./scenarios/record-route.js"
+import { suppress18xBasic, suppress18xFailoverNoAnswer, suppress18xFailoverReject, suppress18xDisabled } from "./scenarios/suppress-18x.js"
+import { unknownDialogReject } from "./scenarios/indialog-unknown-reject.js"
+import { createSimulatedRunner, flushIndexReport } from "./helpers/harness.js"
+
+const OUTPUT_DIR = "test-results/fake-clock"
+
+afterAll(() => flushIndexReport(OUTPUT_DIR))
+
+// ---------------------------------------------------------------------------
+// Simulated backend tests
+// ---------------------------------------------------------------------------
+
+describe("E2E (fake clock) — simulated backend", () => {
+  const run = createSimulatedRunner({ outputDir: OUTPUT_DIR })
+
+  it.effect("basic call", () => run(basicCall.toScenario()), { timeout: 30_000 })
+  it.effect("call rejection (403)", () => run(callReject.toScenario()), { timeout: 30_000 })
+  it.effect("CANCEL during early dialog", () => run(cancelCall.toScenario()), { timeout: 30_000 })
+  it.effect.skip("CANCEL ↔ 200 OK crossing", () => run(cancelCrossing200Ok.toScenario()), { timeout: 30_000 })
+  it.effect("PRACK flow", () => run(prackCall.toScenario()), { timeout: 30_000 })
+  it.effect("PRACK forking flow", () => run(prackForkingCall.toScenario()), { timeout: 30_000 })
+  it.effect("caller hangup (composed)", () => run(callerHangup.toScenario()), { timeout: 30_000 })
+  it.effect("callee hangup (composed)", () => run(calleeHangup.toScenario()), { timeout: 30_000 })
+  it.effect("re-INVITE from caller (SDP in ACK)", () => run(aliceReInvite.toScenario()), { timeout: 30_000 })
+  it.effect("re-INVITE from callee", () => run(bobReInvite.toScenario()), { timeout: 30_000 })
+  it.effect("crossing re-INVITEs (glare → 491)", () => run(crossingReInvite.toScenario()), { timeout: 30_000 })
+  it.effect("Record-Route basic compliance", () => run(recordRouteBasic.toScenario()), { timeout: 30_000 })
+  it.effect("Record-Route fake RR from UAS stripped", () => run(recordRouteFakeRR.toScenario()), { timeout: 30_000 })
+
+  // suppress-18x policy tests
+  it.effect("suppress-18x: basic (183→180, suppression, 200 OK)", () => run(suppress18xBasic.toScenario()), { timeout: 30_000 })
+  it.effect("suppress-18x: failover no-answer (tag consistency)", () => run(suppress18xFailoverNoAnswer.toScenario()), { timeout: 30_000 })
+  it.effect("suppress-18x: failover reject (tag consistency)", () => run(suppress18xFailoverReject.toScenario()), { timeout: 30_000 })
+  it.effect("suppress-18x: disabled (normal 180 relay)", () => run(suppress18xDisabled.toScenario()), { timeout: 30_000 })
+  it.effect("in-dialog unknown dialog → 481 reject", () => run(unknownDialogReject.toScenario()), { timeout: 30_000 })
+})
+
+// ---------------------------------------------------------------------------
+// Simulated backend tests — shared-port demuxing (separate B2BUA instance)
+// ---------------------------------------------------------------------------
+
+describe("E2E (fake clock) — simulated backend (shared-port)", () => {
+  const run = createSimulatedRunner({
+    sipPort: 15090,
+    httpPort: 13032,
+    outputDir: OUTPUT_DIR,
+  })
+
+  it.effect("explicit routing via X-Api-Call", () => run(explicitRouteCall.toScenario()), { timeout: 30_000 })
+  it.effect("failover with update_headers (bob1 reject → bob2)", () => run(failoverWithHeaders.toScenario()), { timeout: 30_000 })
+})

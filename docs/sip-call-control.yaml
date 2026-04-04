@@ -1,0 +1,619 @@
+openapi: 3.0.3
+info:
+  title: SIP Call Control API
+  version: 1.0.0
+  description: |
+    HTTP call-control API for a SIP proxy/B2BUA. The SIP layer posts incoming
+    events (new call, failure, in-dialog REFER) to this API; the application
+    responds with routing/modification instructions.
+
+    ## Flow
+    1. **POST /call/new** – called synchronously on INVITE receipt. The response
+       tells the proxy what to do with the call.
+    2. **POST /call/failure** – called when a call attempt fails (non-2xx, timeout,
+       call-limiter hit). The response may instruct a failover attempt.
+    3. **POST /call/refer** – called when an in-dialog REFER is received. The
+       response authorises or rejects the transfer.
+
+servers:
+  - url: http://localhost:3002/
+    description: Production
+
+# ─────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────
+paths:
+
+  # ── 1. New call ──────────────────────────────
+  /call/new:
+    post:
+      operationId: newCall
+      summary: New inbound call (INVITE)
+      description: |
+        Called by the SIP proxy when it receives an INVITE. The entire SIP
+        message is forwarded so the application can make routing decisions
+        based on any header or the SDP body.
+
+        The response instructs the proxy to:
+        - **route** the call (forward to a destination with optional modifications), or
+        - **reject** the call with a chosen SIP response code.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewCallRequest'
+            example:
+              call_id: "abc123@proxy.example.com"
+              ruri: "sip:+15551234567@proxy.example.com"
+              from: "\"Alice\" <sip:alice@example.com>;tag=1928301774"
+              to: "sip:+15551234567@proxy.example.com"
+              via:
+                - "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK776asdhds"
+              contact: "<sip:alice@192.0.2.10:5060>"
+              content_type: "application/sdp"
+              sip_headers:
+                X-Customer-ID: "cust-9876"
+                P-Asserted-Identity: "<sip:alice@example.com>"
+              sip_body: "v=0\r\no=alice 2890844526 2890844526 IN IP4 192.0.2.10\r\n..."
+      responses:
+        "200":
+          description: Routing instruction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewCallResponse'
+              examples:
+                route:
+                  summary: Route the call
+                  value:
+                    action: route
+                    destination:
+                      host: "10.0.1.50"
+                      port: 5060
+                      transport: udp
+                    new_ruri: "sip:+15551234567@10.0.1.50"
+                    update_headers:
+                      X-Routing-Tag: "premium"
+                      X-Session-ID: "sess-001"
+                    update_body: null
+                    no_answer_timeout_sec: 30
+                    call_limiter:
+                      - id: "user:alice"
+                        limit: 5
+                      - id: "trunk:carrier-A"
+                        limit: 100
+                    callback_context: '{"crm_ticket":"TKT-42","priority":"high"}'
+                    subscribe_to:
+                      - method: INFO
+                        content_type: "application/dtmf-relay"
+                      - method: UPDATE
+                reject:
+                  summary: Reject the call
+                  value:
+                    action: reject
+                    reject_code: 403
+                    reject_reason: "Forbidden"
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "500":
+          $ref: '#/components/responses/ServerError'
+
+  # ── 2. Failure callback ───────────────────────
+  /call/failure:
+    post:
+      operationId: callFailure
+      summary: Call attempt failure notification
+      description: |
+        Called by the SIP proxy when a routed call attempt fails. Failure may
+        be:
+
+        - **Internal**: `no_answer_timeout` (proxy-generated), `call_limiter`
+          (a limiter counter was exceeded).
+        - **External**: a non-2xx SIP final response received from the
+          downstream UA/gateway.
+
+        The application may respond with a failover routing instruction or
+        acknowledge with `terminate`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CallFailureRequest'
+            example:
+              call_id: "abc123@proxy.example.com"
+              callback_context: '{"crm_ticket":"TKT-42","priority":"high"}'
+              failure:
+                origin: external
+                sip_code: 486
+                sip_reason: "Busy Here"
+                sip_response_headers:
+                  Retry-After: "120"
+                  Warning: "370 proxy.example.com \"Insufficient bandwidth\""
+      responses:
+        "200":
+          description: Failure handling instruction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallFailureResponse'
+              examples:
+                failover:
+                  summary: Failover to another destination
+                  value:
+                    action: failover
+                    destination:
+                      host: "10.0.2.50"
+                      port: 5060
+                      transport: udp
+                    new_ruri: "sip:+15551234567@10.0.2.50"
+                    no_answer_timeout_sec: 20
+                    callback_context: '{"crm_ticket":"TKT-42","attempt":2}'
+                terminate:
+                  summary: Let the call fail
+                  value:
+                    action: terminate
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "500":
+          $ref: '#/components/responses/ServerError'
+
+  # ── 3. In-dialog REFER ────────────────────────
+  /call/refer:
+    post:
+      operationId: callRefer
+      summary: In-dialog REFER received
+      description: |
+        Called by the SIP proxy when an in-dialog REFER is received on an
+        established call. The application may authorise the transfer
+        (optionally modifying the Refer-To target) or reject it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CallReferRequest'
+            example:
+              call_id: "abc123@proxy.example.com"
+              dialog_id: "abc123@proxy.example.com;to-tag=5ecbc9"
+              callback_context: '{"crm_ticket":"TKT-42"}'
+              refer_to: "sip:bob@192.0.2.20?Replaces=def456%40proxy%3Bto-tag%3D1234%3Bfrom-tag%3D5678"
+              referred_by: "<sip:alice@example.com>"
+              sip_headers:
+                Contact: "<sip:alice@192.0.2.10:5060>"
+      responses:
+        "200":
+          description: REFER handling instruction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallReferResponse'
+              examples:
+                allow:
+                  summary: Allow the transfer
+                  value:
+                    action: allow
+                    new_refer_to: "sip:bob@10.0.1.20"
+                    callback_context: '{"transfer_to":"bob","crm_ticket":"TKT-42"}'
+                reject:
+                  summary: Reject the transfer
+                  value:
+                    action: reject
+                    reject_code: 603
+                    reject_reason: "Declined"
+        "400":
+          $ref: '#/components/responses/BadRequest'
+        "500":
+          $ref: '#/components/responses/ServerError'
+
+
+# ─────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────
+components:
+
+  # ── Shared types ──────────────────────────────
+  schemas:
+
+    # ── SIP destination ──
+    SipDestination:
+      type: object
+      required: [host]
+      properties:
+        host:
+          type: string
+          description: IP address or FQDN of the next-hop SIP server.
+          example: "10.0.1.50"
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          default: 5060
+          example: 5060
+        transport:
+          type: string
+          enum: [udp, tcp, tls, ws, wss]
+          default: udp
+
+    # ── Call limiter entry ──
+    CallLimiterEntry:
+      type: object
+      required: [id, limit]
+      description: |
+        Associates this call with a named counter. The proxy increments the
+        counter on call setup and decrements on teardown. If the counter would
+        exceed `limit`, the call is rejected and `POST /call/failure` is
+        triggered with `origin: call_limiter`.
+      properties:
+        id:
+          type: string
+          description: Opaque limiter identifier (e.g. "user:alice", "trunk:carrier-A").
+          example: "user:alice"
+        limit:
+          type: integer
+          minimum: 1
+          description: Maximum concurrent calls allowed for this counter.
+          example: 5
+
+    # ── Header modifications ──
+    SipHeaderUpdates:
+      type: object
+      additionalProperties:
+        type: string
+      description: |
+        Map of SIP header name → value. These headers will be added or
+        overwritten in the forwarded INVITE. Use a null value to remove
+        an existing header.
+      example:
+        X-Routing-Tag: "premium"
+        X-Session-ID: "sess-001"
+        P-Asserted-Identity: null
+
+    # ── Dialog subscription ──
+    DialogSubscription:
+      type: object
+      required: [method]
+      description: |
+        Instructs the proxy to deliver a webhook (to a URL established
+        out-of-band, or derived from the call_id) when the specified
+        in-dialog message is received.
+      properties:
+        method:
+          type: string
+          description: SIP method to subscribe to (e.g. INFO, UPDATE, NOTIFY, PRACK).
+          example: INFO
+        content_type:
+          type: string
+          description: |
+            Optional MIME type filter. If specified, only messages whose
+            Content-Type matches will be forwarded.
+          example: "application/dtmf-relay"
+
+    # ──────────────────────────────────────────────
+    # /call/new – request
+    # ──────────────────────────────────────────────
+    NewCallRequest:
+      type: object
+      required: [call_id, ruri, from, to, via]
+      properties:
+        call_id:
+          type: string
+          description: SIP Call-ID header value.
+          example: "abc123@proxy.example.com"
+        ruri:
+          type: string
+          description: Request-URI of the received INVITE.
+          example: "sip:+15551234567@proxy.example.com"
+        from:
+          type: string
+          description: SIP From header value (including tag).
+        to:
+          type: string
+          description: SIP To header value.
+        via:
+          type: array
+          items:
+            type: string
+          description: Ordered list of Via header values from the INVITE.
+        contact:
+          type: string
+          description: SIP Contact header value from the INVITE.
+        content_type:
+          type: string
+          description: Content-Type of the SIP body (usually application/sdp).
+          example: "application/sdp"
+        sip_headers:
+          $ref: '#/components/schemas/SipHeaderUpdates'
+          description: |
+            All non-mandatory headers from the original INVITE, as a flat
+            name→value map. Multi-value headers are comma-joined.
+        sip_body:
+          type: string
+          description: Raw SIP message body (e.g. SDP offer), UTF-8 encoded.
+
+    # ──────────────────────────────────────────────
+    # /call/new – response
+    # ──────────────────────────────────────────────
+    NewCallResponse:
+      type: object
+      required: [action]
+      discriminator:
+        propertyName: action
+      properties:
+        action:
+          type: string
+          enum: [route, reject]
+          description: Top-level disposition for the call.
+
+        # ── route fields ──
+        destination:
+          $ref: '#/components/schemas/SipDestination'
+          description: Required when action=route. Next-hop SIP server.
+        new_ruri:
+          type: string
+          description: |
+            New Request-URI to use in the forwarded INVITE. If omitted, the
+            original RURI is preserved.
+          example: "sip:+15551234567@10.0.1.50"
+        update_headers:
+          $ref: '#/components/schemas/SipHeaderUpdates'
+          description: |
+            Headers to add/overwrite/remove in the forwarded INVITE.
+        update_body:
+          type: string
+          nullable: true
+          description: |
+            If set, replaces the entire SIP body in the forwarded INVITE
+            (e.g. a modified SDP offer). Null preserves the original body.
+        no_answer_timeout_sec:
+          type: integer
+          minimum: 1
+          maximum: 300
+          description: |
+            Seconds to wait for a 200 OK before triggering POST /call/failure
+            with origin=no_answer_timeout. Defaults to the proxy's global
+            setting if omitted.
+          example: 30
+        call_limiter:
+          type: array
+          items:
+            $ref: '#/components/schemas/CallLimiterEntry'
+          description: |
+            Zero or more limiter IDs to associate with this call attempt.
+        callback_context:
+          type: string
+          description: |
+            Free-form JSON string (opaque to the proxy). The proxy stores this
+            value and echoes it back verbatim in every subsequent callback
+            (failure, refer) related to this call. Use it to carry session
+            metadata (CRM ticket, user ID, routing policy, etc.).
+          example: '{"crm_ticket":"TKT-42","priority":"high"}'
+        subscribe_to:
+          type: array
+          items:
+            $ref: '#/components/schemas/DialogSubscription'
+          description: |
+            In-dialog SIP messages the application wants to receive via
+            webhook once the call is established.
+
+        # ── reject fields ──
+        reject_code:
+          type: integer
+          minimum: 400
+          maximum: 699
+          description: SIP response code to send back to the caller. Required when action=reject.
+          example: 403
+        reject_reason:
+          type: string
+          description: SIP reason phrase. Defaults to the standard phrase for reject_code.
+          example: "Forbidden"
+
+    # ──────────────────────────────────────────────
+    # /call/failure – request
+    # ──────────────────────────────────────────────
+    FailureDetail:
+      type: object
+      required: [origin]
+      properties:
+        origin:
+          type: string
+          enum: [external, no_answer_timeout, call_limiter]
+          description: |
+            - `external`: A non-2xx SIP response was received from the downstream UA.
+            - `no_answer_timeout`: The no_answer_timeout_sec timer fired.
+            - `call_limiter`: A limiter count would have been exceeded.
+        sip_code:
+          type: integer
+          minimum: 400
+          maximum: 699
+          description: SIP response code. Present only when origin=external.
+          example: 486
+        sip_reason:
+          type: string
+          description: SIP reason phrase from the final response.
+          example: "Busy Here"
+        sip_response_headers:
+          $ref: '#/components/schemas/SipHeaderUpdates'
+          description: |
+            Headers from the received non-2xx response (e.g. Retry-After,
+            Warning). Present only when origin=external.
+        limiter_id:
+          type: string
+          description: |
+            The limiter ID that was exceeded. Present only when
+            origin=call_limiter.
+          example: "trunk:carrier-A"
+
+    CallFailureRequest:
+      type: object
+      required: [call_id, failure]
+      properties:
+        call_id:
+          type: string
+          example: "abc123@proxy.example.com"
+        callback_context:
+          type: string
+          description: Echoed from the original NewCallResponse (or preceding failover response).
+          example: '{"crm_ticket":"TKT-42","priority":"high"}'
+        failure:
+          $ref: '#/components/schemas/FailureDetail'
+
+    # ──────────────────────────────────────────────
+    # /call/failure – response
+    # ──────────────────────────────────────────────
+    CallFailureResponse:
+      oneOf:
+        - $ref: '#/components/schemas/CallFailureFailover'
+        - $ref: '#/components/schemas/CallFailureTerminate'
+      discriminator:
+        propertyName: action
+
+    CallFailureFailover:
+      type: object
+      required: [action, destination]
+      properties:
+        action:
+          type: string
+          enum: [failover]
+          description: Retry the call to a new destination.
+        destination:
+          $ref: '#/components/schemas/SipDestination'
+        new_ruri:
+          type: string
+          example: "sip:+15551234567@10.0.2.50"
+        update_headers:
+          $ref: '#/components/schemas/SipHeaderUpdates'
+        update_body:
+          type: string
+          nullable: true
+        no_answer_timeout_sec:
+          type: integer
+          minimum: 1
+          maximum: 300
+          example: 20
+        call_limiter:
+          type: array
+          items:
+            $ref: '#/components/schemas/CallLimiterEntry'
+        callback_context:
+          type: string
+          description: New context to use for this retry leg.
+          example: '{"crm_ticket":"TKT-42","attempt":2}'
+
+    CallFailureTerminate:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [terminate]
+          description: Allow the failure to propagate to the caller.
+
+    # ──────────────────────────────────────────────
+    # /call/refer – request
+    # ──────────────────────────────────────────────
+    CallReferRequest:
+      type: object
+      required: [call_id, dialog_id, refer_to]
+      properties:
+        call_id:
+          type: string
+          example: "abc123@proxy.example.com"
+        dialog_id:
+          type: string
+          description: |
+            Fully-qualified dialog identifier (Call-ID;to-tag=...;from-tag=...).
+          example: "abc123@proxy.example.com;to-tag=5ecbc9"
+        callback_context:
+          type: string
+          description: Echoed from the established-call context.
+        refer_to:
+          type: string
+          description: |
+            Value of the Refer-To header from the REFER request (may include
+            a Replaces parameter for attended transfer).
+          example: "sip:bob@192.0.2.20"
+        referred_by:
+          type: string
+          description: Value of the Referred-By header, if present.
+          example: "<sip:alice@example.com>"
+        sip_headers:
+          $ref: '#/components/schemas/SipHeaderUpdates'
+          description: Other headers from the REFER message.
+
+    # ──────────────────────────────────────────────
+    # /call/refer – response
+    # ──────────────────────────────────────────────
+    CallReferResponse:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [allow, reject]
+          description: |
+            - `allow`: Proxy proceeds with the transfer.
+            - `reject`: Proxy sends a non-2xx final response to the REFER.
+
+        # ── allow fields ──
+        new_refer_to:
+          type: string
+          description: |
+            Overrides the Refer-To target. If omitted, the original
+            refer_to value is used.
+          example: "sip:bob@10.0.1.20"
+        callback_context:
+          type: string
+          description: Updated context to carry on the transferred leg.
+
+        # ── reject fields ──
+        reject_code:
+          type: integer
+          minimum: 400
+          maximum: 699
+          example: 603
+        reject_reason:
+          type: string
+          example: "Declined"
+
+    # ── Error envelope ──
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Human-readable error description.
+          example: "Missing required field: call_id"
+
+  # ── Shared responses ──────────────────────────
+  responses:
+    BadRequest:
+      description: The request payload is malformed or missing required fields.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServerError:
+      description: Unexpected server error. The proxy will apply its default policy.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Security ──────────────────────────────────
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Shared secret between the SIP proxy and the application server.
+    BearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+security:
+  - ApiKeyHeader: []
+  - BearerToken: []
