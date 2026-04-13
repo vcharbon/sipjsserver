@@ -400,6 +400,16 @@ function executeSend(
       dialogState.callIdConfirmed = true
     }
 
+    // Track the To URI from sent INVITE as the dialog's remote URI (UAC side).
+    // RFC 3261 §12.1.2: remote URI = URI in the To field of the initial request.
+    if (msg.type === "request" && msg.method === "INVITE" && !dialogState.dialogRemoteUri) {
+      const toHdr = msg.headers.find((h) => h.name.toLowerCase() === "to")?.value ?? ""
+      const toUriMatch = /<([^>]+)>/.exec(toHdr)
+      if (toUriMatch?.[1]) {
+        dialogState.dialogRemoteUri = toUriMatch[1]
+      }
+    }
+
     // Track sent requests for response correlation
     if (msg.type === "request") {
       const cseqRaw = msg.headers.find((h) => h.name.toLowerCase() === "cseq")?.value ?? ""
@@ -677,6 +687,15 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
   if (msg.type === "request" && msg.method === "INVITE" && callIdHeader) {
     ds.callId = callIdHeader
     ds.callIdConfirmed = true
+  }
+
+  // Track the remote URI from received INVITE (UAS side).
+  // RFC 3261 §12.1.2: remote URI = URI in the From field of the initial request.
+  if (msg.type === "request" && msg.method === "INVITE" && !ds.dialogRemoteUri) {
+    const fromUriMatch = /<([^>]+)>/.exec(fromHeader)
+    if (fromUriMatch?.[1]) {
+      ds.dialogRemoteUri = fromUriMatch[1]
+    }
   }
 
   if (msg.type === "response") {

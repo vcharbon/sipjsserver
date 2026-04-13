@@ -20,9 +20,12 @@ export type ValidationCheckName =
   | "callId"
   | "maxForwards"
   | "contentLength"
+  | "contentType"
   | "contactPresence"
   | "toTagPresence"
   | "branchPrefix"
+  | "dialogUri"
+  | "recordRoute"
 
 export type ValidationFn = (
   msg: SipMessage,
@@ -37,9 +40,12 @@ export interface ValidationOverrides {
   readonly tags?: ValidationFn
   readonly maxForwards?: ValidationFn
   readonly contentLength?: ValidationFn
+  readonly contentType?: ValidationFn
   readonly contactPresence?: ValidationFn
   readonly toTagPresence?: ValidationFn
   readonly branchPrefix?: ValidationFn
+  readonly dialogUri?: ValidationFn
+  readonly recordRoute?: ValidationFn
 }
 
 export interface PendingRequest {
@@ -288,6 +294,12 @@ function validateMaxForwards(
     return [`Invalid Max-Forwards value: "${mf}"`]
   }
 
+  // RFC 3261 §8.1.1.6: A UAC creating a new request SHOULD set Max-Forwards to 70.
+  // B2BUAs are UAs — they should reset, not decrement (proxy behavior).
+  if (val !== 70) {
+    return [`Max-Forwards is ${val}, expected 70 — B2BUA should reset (not decrement) per RFC 3261 §8.1.1.6`]
+  }
+
   return []
 }
 
@@ -311,6 +323,26 @@ function validateContentLength(
   const actualSize = msg.body.byteLength
   if (declared !== actualSize) {
     return [`Content-Length mismatch: header says ${declared} but body is ${actualSize} bytes`]
+  }
+
+  return []
+}
+
+/**
+ * Content-Type validation.
+ * RFC 3261 §7.4.1: If a request/response contains a message body,
+ * the Content-Type header field MUST be present.
+ */
+function validateContentType(
+  msg: SipMessage,
+  _dialogState: AgentDialogState,
+  _correlatedRequest: SipMessage | undefined
+): string[] {
+  if (msg.body.byteLength === 0) return []
+
+  const ct = getHeaderValue(msg.headers, "content-type")
+  if (!ct) {
+    return ["Missing Content-Type header on message with body (required by RFC 3261 §7.4.1)"]
   }
 
   return []
@@ -385,6 +417,71 @@ function validateBranchPrefix(
   return errors
 }
 
+/**
+ * Dialog URI consistency validation.
+ * RFC 3261 §12.2.1.1: Within a dialog, the From URI MUST be set to the
+ * local URI and the To URI MUST be set to the remote URI from the dialog state.
+ *
+ * For received requests: the From URI should match the remote party's URI
+ * that was established when the dialog was created (from the initial INVITE).
+ */
+function validateDialogUri(
+  msg: SipMessage,
+  dialogState: AgentDialogState,
+  _correlatedRequest: SipMessage | undefined
+): string[] {
+  // Only validate once dialog is established (remoteTag set) and we know the remote URI
+  if (!dialogState.remoteTag) return []
+  if (!dialogState.dialogRemoteUri) return []
+  if (msg.type !== "request") return []
+
+  const errors: string[] = []
+  const fromHeader = getHeaderValue(msg.headers, "from") ?? ""
+  const fromUri = extractUriFromNameAddr(fromHeader)
+
+  if (fromUri && fromUri !== dialogState.dialogRemoteUri) {
+    errors.push(
+      `From URI "${fromUri}" differs from dialog-established URI "${dialogState.dialogRemoteUri}" (RFC 3261 §12.2.1.1)`
+    )
+  }
+
+  return errors
+}
+
+/** Extract the URI from a Name-Addr or addr-spec header value (e.g., `<sip:alice@test>;tag=x` → `sip:alice@test`). */
+function extractUriFromNameAddr(headerValue: string): string | undefined {
+  const m = /<([^>]+)>/.exec(headerValue)
+  return m?.[1]
+}
+
+/**
+ * Record-Route validation for B2BUA-originated messages.
+ * RFC 3261 §16.6: Record-Route is a proxy mechanism.
+ * A B2BUA (which acts as a UA) MUST NOT insert Record-Route.
+ *
+ * Detects Record-Route headers containing B2BUA markers (callRef=, leg=)
+ * on received requests. Responses may legitimately echo Record-Route
+ * from requests, so this check only applies to requests.
+ */
+function validateRecordRoute(
+  msg: SipMessage,
+  _dialogState: AgentDialogState,
+  _correlatedRequest: SipMessage | undefined
+): string[] {
+  if (msg.type !== "request") return []
+
+  const rrHeaders = getAllHeaderValues(msg.headers, "record-route")
+  const b2buaRRs = rrHeaders.filter((v) => v.includes("callRef=") || v.includes("leg="))
+
+  if (b2buaRRs.length > 0) {
+    return [
+      `B2BUA inserted Record-Route in request — B2BUAs are UAs and MUST NOT use Record-Route (RFC 3261 §16.6). Found: ${b2buaRRs[0]}`
+    ]
+  }
+
+  return []
+}
+
 // ---------------------------------------------------------------------------
 // Default check registry
 // ---------------------------------------------------------------------------
@@ -396,9 +493,12 @@ const defaultChecks: Record<ValidationCheckName, ValidationFn> = {
   callId: validateCallId,
   maxForwards: validateMaxForwards,
   contentLength: validateContentLength,
+  contentType: validateContentType,
   contactPresence: validateContactPresence,
   toTagPresence: validateToTagPresence,
   branchPrefix: validateBranchPrefix,
+  dialogUri: validateDialogUri,
+  recordRoute: validateRecordRoute,
 }
 
 // ---------------------------------------------------------------------------

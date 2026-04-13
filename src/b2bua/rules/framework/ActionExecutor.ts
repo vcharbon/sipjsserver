@@ -50,8 +50,8 @@ import {
   buildRelayedBye,
   buildRelayedReInvite,
   buildRelayedPrack,
-  extractContactUri,
   extractHostPort,
+  extractNameAddrUri,
   getHeader,
   getHeaders,
   newTag,
@@ -77,8 +77,7 @@ interface ExecutionState {
 function legTarget(leg: Leg): { host: string; port: number } {
   const dialog = leg.dialogs[0]
   if (dialog !== undefined && dialog.contact) {
-    const uri = extractContactUri(dialog.contact)
-    const hp = extractHostPort(uri)
+    const hp = extractHostPort(dialog.contact)
     if (hp) return hp
   }
   return { host: leg.source.address, port: leg.source.port }
@@ -340,7 +339,7 @@ function relayRequest(
     state.call = bumpLocalCSeq(state.call, targetLeg.legId, targetDialog.toTag, delta)
   }
 
-  const targetUri = extractContactUri(targetDialog.contact) || `sip:target@${target.host}:${target.port}`
+  const targetUri = targetDialog.contact || `sip:target@${target.host}:${target.port}`
 
   let relayed: SipRequest | SipResponse
   switch (req.method) {
@@ -348,7 +347,7 @@ function relayRequest(
       // For a-leg: swap from/to tags (B2BUA is the remote party for Alice)
       const reInvFromTag = targetLeg.legId === "a" ? (b2buaTag(state.call, "a") ?? "") : targetLeg.fromTag
       const reInvToTag = targetLeg.legId === "a" ? (remoteTag(state.call, "a") ?? "") : targetDialog.toTag
-      relayed = buildRelayedReInvite(req, targetLeg.callId, reInvFromTag, reInvToTag, targetUri, outboundCSeq)
+      relayed = buildRelayedReInvite(req, targetLeg.callId, reInvFromTag, reInvToTag, targetUri, outboundCSeq, targetLeg.localUri, targetLeg.remoteUri)
       // Track pending re-INVITE for response correlation
       state.call = addPendingReInvite(state.call, targetLeg.legId, targetDialog.toTag, {
         outboundCSeq,
@@ -364,7 +363,7 @@ function relayRequest(
     case "ACK": {
       const ackFromTag = targetLeg.legId === "a" ? (b2buaTag(state.call, "a") ?? "") : targetLeg.fromTag
       const ackToTag = targetLeg.legId === "a" ? (remoteTag(state.call, "a") ?? "") : targetDialog.toTag
-      relayed = buildRelayedAck(req, targetLeg.callId, ackFromTag, ackToTag, targetUri, targetDialog.localCSeq)
+      relayed = buildRelayedAck(req, targetLeg.callId, ackFromTag, ackToTag, targetUri, targetDialog.localCSeq, targetLeg.localUri, targetLeg.remoteUri)
       break
     }
     case "BYE": {
@@ -374,12 +373,13 @@ function relayRequest(
         req, targetLeg.callId, b2buaFromTag, remoteToTag, targetUri,
         `${outboundCSeq} BYE`,
         targetLeg.legId === "a" ? "b-to-a" : "a-to-b",
+        targetLeg.localUri, targetLeg.remoteUri,
       )
       break
     }
     case "PRACK": {
       const rack = getHeader(req.headers, "rack") ?? ""
-      relayed = buildRelayedPrack(req, targetLeg.callId, targetLeg.fromTag, targetDialog.toTag, targetUri, outboundCSeq, rack)
+      relayed = buildRelayedPrack(req, targetLeg.callId, targetLeg.fromTag, targetDialog.toTag, targetUri, outboundCSeq, rack, targetLeg.localUri, targetLeg.remoteUri)
       // Save source leg's Vias for response relay
       if (ctx.sourceLeg.legId === "a") {
         state.call = { ...state.call, aLegPendingVias: getHeaders(req.headers, "via") }
@@ -388,7 +388,7 @@ function relayRequest(
     }
     default:
       // Generic request relay — use re-INVITE builder as it preserves body/headers
-      relayed = buildRelayedReInvite(req, targetLeg.callId, targetLeg.fromTag, targetDialog.toTag, targetUri, outboundCSeq)
+      relayed = buildRelayedReInvite(req, targetLeg.callId, targetLeg.fromTag, targetDialog.toTag, targetUri, outboundCSeq, targetLeg.localUri, targetLeg.remoteUri)
       break
   }
 
@@ -662,11 +662,11 @@ function executeAckLeg(
   if (dialog === undefined) return
 
   const target = legTarget(leg)
-  const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+  const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
   const ackCSeq = dialog.localCSeq || leg.initialCSeq || 1
 
   state.outbound.push({
-    message: buildAck(leg.callId, leg.fromTag, dialog.toTag, targetUri, ackCSeq),
+    message: buildAck(leg.callId, leg.fromTag, dialog.toTag, targetUri, ackCSeq, leg.localUri, leg.remoteUri),
     destination: target,
     label: `ACK ${action.legId}`,
   })
@@ -690,7 +690,7 @@ function executeSendRequestToLeg(
   if (dialog === undefined) return
 
   const target = legTarget(leg)
-  const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+  const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
 
   // Bump CSeq for the new request
   state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
@@ -706,14 +706,14 @@ function executeSendRequestToLeg(
 
   if (action.method === "OPTIONS") {
     state.outbound.push({
-      message: buildOptions(leg.callId, fromTag, toTag, targetUri, cseq),
+      message: buildOptions(leg.callId, fromTag, toTag, targetUri, cseq, leg.localUri, leg.remoteUri),
       destination: target,
       label: `${action.method} to ${action.legId}`,
     })
   } else {
     // Generic request construction for INFO, UPDATE, etc.
     // Uses OPTIONS builder as base (no body by default) — can be extended
-    const msg = buildOptions(leg.callId, fromTag, toTag, targetUri, cseq)
+    const msg = buildOptions(leg.callId, fromTag, toTag, targetUri, cseq, leg.localUri, leg.remoteUri)
     // Override method and CSeq
     const updatedMsg = {
       ...msg,
@@ -767,6 +767,10 @@ function executeCreateLeg(
     dialogs: [],
     noAnswerTimeoutSec: action.noAnswerTimeoutSec ?? config.noAnswerTimeoutSec,
     initialCSeq,
+    // RFC 3261 §12.2.1.1: track local/remote URIs for in-dialog header construction
+    // B2BUA is UAC on b-leg: localUri = From URI (Alice's identity), remoteUri = To URI (callee)
+    localUri: extractNameAddrUri(stripTag(state.call.aLegFrom)),
+    remoteUri: extractNameAddrUri(stripTag(state.call.aLegTo)),
   }
 
   // Resolve the base INVITE to clone
@@ -838,9 +842,9 @@ function executeDestroyLeg(
     // BYE a confirmed leg
     const dialog = leg.dialogs[0]
     if (dialog !== undefined) {
-      const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+      const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
       state.outbound.push({
-        message: buildBye(leg.callId, leg.fromTag, dialog.toTag, targetUri, dialog.localCSeq + 1),
+        message: buildBye(leg.callId, leg.fromTag, dialog.toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri),
         destination: target,
         label: `BYE ${action.legId}`,
       })
@@ -849,7 +853,7 @@ function executeDestroyLeg(
   } else {
     // CANCEL an early/trying leg
     state.outbound.push({
-      message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1),
+      message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1, leg.localUri, leg.remoteUri),
       destination: target,
       label: `CANCEL ${action.legId}`,
     })
@@ -897,7 +901,7 @@ function executeTerminateCall(
       const dialog = leg.dialogs[0]
       if (dialog !== undefined) {
         const target = legTarget(leg)
-        const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+        const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
         const fromTag = leg.legId === "a"
           ? (b2buaTag(state.call, "a") ?? "")
           : leg.fromTag
@@ -905,7 +909,7 @@ function executeTerminateCall(
           ? (remoteTag(state.call, "a") ?? "")
           : dialog.toTag
         state.outbound.push({
-          message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1),
+          message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri),
           destination: target,
           label: `BYE ${leg.legId} (terminate)`,
         })
@@ -914,7 +918,7 @@ function executeTerminateCall(
       if (leg.legId !== "a") {
         const target = legTarget(leg)
         state.outbound.push({
-          message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1),
+          message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1, leg.localUri, leg.remoteUri),
           destination: target,
           label: `CANCEL ${leg.legId} (terminate)`,
         })
@@ -967,7 +971,7 @@ function executeBeginTermination(
       const dialog = leg.dialogs[0]
       if (dialog !== undefined) {
         const target = legTarget(leg)
-        const targetUri = extractContactUri(dialog.contact) || `sip:target@${target.host}:${target.port}`
+        const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
         const fromTag = leg.legId === "a"
           ? (b2buaTag(state.call, "a") ?? "")
           : leg.fromTag
@@ -975,7 +979,7 @@ function executeBeginTermination(
           ? (remoteTag(state.call, "a") ?? "")
           : dialog.toTag
         state.outbound.push({
-          message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1),
+          message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri),
           destination: target,
           label: `BYE ${leg.legId} (begin-termination)`,
         })
@@ -986,7 +990,7 @@ function executeBeginTermination(
         // CANCEL trying/early b-legs
         const target = legTarget(leg)
         state.outbound.push({
-          message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1),
+          message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1, leg.localUri, leg.remoteUri),
           destination: target,
           label: `CANCEL ${leg.legId} (begin-termination)`,
         })

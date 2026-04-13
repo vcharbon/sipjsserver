@@ -5,8 +5,8 @@ dist/
 .env.*
 .clinic/
 test-results/
-out.log
-cdr.jsonl
+*.log
+*.jsonl
 report.html
 __pycache__/
 *.pyc

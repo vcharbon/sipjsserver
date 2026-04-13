@@ -7,7 +7,7 @@ import { addBLeg, addCdrEvent, randomInitialCSeq } from "../call/CallModel.js"
 import type { SideEffect, OutboundEnvelope } from "../sip/SipRouter.js"
 import type { SipRequest } from "../sip/types.js"
 import type { AppConfigData } from "../config/AppConfig.js"
-import { buildBLegInvite, newTag } from "../sip/MessageFactory.js"
+import { buildBLegInvite, extractNameAddrUri, newTag, stripTag } from "../sip/MessageFactory.js"
 import { generateBLegCallId } from "../cluster/HashUtils.js"
 
 // ---------------------------------------------------------------------------
@@ -136,6 +136,8 @@ export function createBLegFromRoute(
 
   const initialCSeq = randomInitialCSeq()
 
+  // RFC 3261 §12.2.1.1: track local/remote URIs for in-dialog header construction
+  // B2BUA is UAC on b-leg: localUri = From URI (Alice's identity), remoteUri = To URI (callee)
   const bLeg: Leg = {
     legId,
     callId: bLegCallId,
@@ -145,7 +147,9 @@ export function createBLegFromRoute(
     disposition: "pending",
     dialogs: [],
     noAnswerTimeoutSec: route.no_answer_timeout_sec ?? config.noAnswerTimeoutSec,
-    initialCSeq
+    initialCSeq,
+    localUri: extractNameAddrUri(stripTag(call.aLegFrom)),
+    remoteUri: extractNameAddrUri(stripTag(call.aLegTo)),
   }
 
   // Merge policy-level header overrides (e.g. strip 100rel from Supported)

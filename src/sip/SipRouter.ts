@@ -16,6 +16,7 @@ import { TransactionLayer, type TransactionEvent } from "./TransactionLayer.js"
 import { serialize, sipSummary, messageSummary } from "./Serializer.js"
 import {
   buildRejectResponse,
+  extractNameAddrUri,
   getHeader,
   getHeaders,
   isEmergencyRequest,
@@ -147,18 +148,12 @@ function buildVia(localIp: string, localPort: number, callRef: string, leg: stri
   return isEmergency ? `${base};em=1` : base
 }
 
-/** Build a Record-Route with callRef/leg encoded. */
-function buildRecordRoute(localIp: string, localPort: number, callRef: string, leg: string, isEmergency: boolean): string {
-  const base = `sip:b2bua@${localIp}:${localPort};callRef=${encodeParam(callRef)};leg=${encodeParam(leg)};lr`
-  return isEmergency ? `<${base};emerg=1>` : `<${base}>`
-}
-
 /**
- * Stamp Via, Contact, and Record-Route on an outbound message with
- * callRef/leg params. When `isEmergency` is true, also stamps the
- * `;emerg=1` (URI) and `;em=1` (Via) markers used by the dispatcher
- * byte-classifier to route subsequent in-dialog packets into the
- * emergency priority queue.
+ * Stamp Via and Contact on an outbound message with callRef/leg params.
+ * B2BUA does NOT insert Record-Route (RFC 3261 §16.6 — only proxies use Record-Route).
+ * When `isEmergency` is true, also stamps the `;emerg=1` (URI) and `;em=1` (Via)
+ * markers used by the dispatcher byte-classifier to route subsequent in-dialog
+ * packets into the emergency priority queue.
  */
 function stampHeaders(
   msg: SipRequest | SipResponse,
@@ -175,9 +170,6 @@ function stampHeaders(
     }
     if (lower === "contact" && h.value === "__PLACEHOLDER__") {
       return { name: h.name, value: `<${buildContactUri(localIp, localPort, callRef, leg, isEmergency)}>` }
-    }
-    if (lower === "record-route" && h.value === "__PLACEHOLDER__") {
-      return { name: h.name, value: buildRecordRoute(localIp, localPort, callRef, leg, isEmergency) }
     }
     return h
   })
@@ -613,6 +605,8 @@ export class SipRouter extends ServiceMap.Service<
           const aLegCSeqNum = parseInt(aLegCSeqRaw, 10) || 1
 
           // Create skeleton call with a-leg
+          // RFC 3261 §12.2.1.1: track local/remote URIs for in-dialog header construction
+          // B2BUA is UAS on a-leg: localUri = To URI (our identity), remoteUri = From URI (Alice)
           const aLeg: Leg = {
             legId: "a",
             callId,
@@ -622,7 +616,9 @@ export class SipRouter extends ServiceMap.Service<
             disposition: "bridged",
             dialogs: [],
             noAnswerTimeoutSec: undefined,
-            initialCSeq: aLegCSeqNum
+            initialCSeq: aLegCSeqNum,
+            localUri: extractNameAddrUri(aLegTo),
+            remoteUri: extractNameAddrUri(aLegFrom),
           }
 
           const isEmergency = isEmergencyRequest(req)

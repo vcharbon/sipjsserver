@@ -143,7 +143,21 @@ export const Leg = Schema.Struct({
    * when the leg is otherwise resolved (CANCEL, reject, timeout).
    * See ByeDisposition for the full state machine.
    */
-  byeDisposition: Schema.optional(ByeDisposition)
+  byeDisposition: Schema.optional(ByeDisposition),
+  /**
+   * B2BUA's local URI for this leg (used in From header for outbound requests).
+   * RFC 3261 §12.2.1.1: local URI from dialog state.
+   * - a-leg: To URI from Alice's INVITE (B2BUA's identity as UAS)
+   * - b-leg: From URI used in the b-leg INVITE (Alice's identity, impersonated)
+   */
+  localUri: Schema.optional(Schema.String),
+  /**
+   * Remote party's URI for this leg (used in To header for outbound requests).
+   * RFC 3261 §12.2.1.1: remote URI from dialog state.
+   * - a-leg: From URI from Alice's INVITE (Alice's identity)
+   * - b-leg: To URI used in the b-leg INVITE (called party's identity)
+   */
+  remoteUri: Schema.optional(Schema.String),
 })
 
 export type Leg = typeof Leg.Type

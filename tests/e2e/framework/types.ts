@@ -83,6 +83,8 @@ export interface DialogInfo {
   readonly routeSet: string[]
   readonly localCSeq: number
   readonly remoteCSeq: number | undefined
+  /** Remote URI from dialog establishment (RFC 3261 §12.2.1.1). */
+  readonly remoteUri: string
 }
 
 export interface MessageContext {

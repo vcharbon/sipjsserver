@@ -48,6 +48,13 @@ export interface AgentDialogState {
   lastInviteUri: string
   /** Remote party's Contact URI — used as Request-URI for in-dialog requests. */
   remoteContact: string
+  /**
+   * Remote URI for the To header in in-dialog requests (RFC 3261 §12.2.1.1).
+   * For UAC: the To URI from the original INVITE sent.
+   * For UAS: the From URI from the received INVITE.
+   * Ensures the To header preserves the user part across the dialog.
+   */
+  dialogRemoteUri: string
   /** True once callId has been confirmed by a received message (for B-side agents). */
   callIdConfirmed: boolean
   /** Received requests awaiting a final response (for inResponseTo auto-resolution). */
@@ -71,6 +78,7 @@ export function createAgentDialogState(localIp: string): AgentDialogState {
     lastInviteBranch: "",
     lastInviteUri: "",
     remoteContact: "",
+    dialogRemoteUri: "",
     callIdConfirmed: false,
     pendingRequests: [],
     sentRequests: [],
@@ -104,6 +112,7 @@ export function buildMessageContext(
       routeSet: dialogState.routeSet,
       localCSeq: dialogState.localCSeq,
       remoteCSeq: dialogState.remoteCSeq,
+      remoteUri: dialogState.dialogRemoteUri,
     },
     call: {
       number: callNumber,
@@ -222,6 +231,10 @@ export function buildRequest(
     if (merged.body) body = merged.body
   }
 
+  // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
+  if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
+    headers.push(h("Content-Type", "application/sdp"))
+  }
   headers.push(h("Content-Length", String(body.byteLength)))
 
   const finalUri = step.uri ?? uri ?? `sip:${ctx.remote.ip}:${ctx.remote.port}`
@@ -285,6 +298,10 @@ export function buildResponse(
     if (merged.body) body = merged.body
   }
 
+  // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
+  if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
+    headers.push(h("Content-Type", "application/sdp"))
+  }
   headers.push(h("Content-Length", String(body.byteLength)))
 
   const msg: SipResponse = {
@@ -311,7 +328,10 @@ function buildToHeader(
   ctx: MessageContext,
   dialogState: AgentDialogState
 ): string {
-  const toUri = uri ?? `sip:${ctx.remote.ip}:${ctx.remote.port}`
+  // RFC 3261 §12.2.1.1: In-dialog requests use the dialog's remote URI
+  const toUri = uri
+    ?? (dialogState.dialogRemoteUri || undefined)
+    ?? `sip:${ctx.remote.ip}:${ctx.remote.port}`
   // CANCEL must NOT include a To tag — it's outside the dialog (RFC 3261 §9.1)
   if (method === "CANCEL") {
     return `<${toUri}>`

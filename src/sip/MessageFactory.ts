@@ -88,6 +88,14 @@ export function stripTag(headerValue: string): string {
 }
 
 /**
+ * Extracts the URI from a From/To header value (Name-Addr format).
+ * Quote-aware — uses structured parser.
+ */
+export function extractNameAddrUri(headerValue: string): string {
+  return parseNameAddr(headerValue).uri
+}
+
+/**
  * Extracts the URI from a Contact header value.
  * Quote-aware — uses structured parser.
  */
@@ -256,15 +264,13 @@ export function buildBLegInvite(
   const from = getHeader(aLeg.headers, "from") ?? "unknown"
   const to = getHeader(aLeg.headers, "to") ?? aLeg.uri
   const cseq = cseqNum !== undefined ? `${cseqNum} INVITE` : (getHeader(aLeg.headers, "cseq") ?? "1 INVITE")
-  const maxForwardsRaw = getHeader(aLeg.headers, "max-forwards")
-  const maxForwards = Math.max(0, parseInt(maxForwardsRaw ?? "70", 10) - 1)
   const body = aLeg.body
 
   const headers: SipHeader[] = [
     // Via placeholder — SipRouter stamps with cr/lg params
     h("Via", "__PLACEHOLDER__"),
-    h("Record-Route", "__PLACEHOLDER__"),
-    h("Max-Forwards", String(maxForwards)),
+    // B2BUA is a UAC on the b-leg — reset Max-Forwards (RFC 3261 §8.1.1.6)
+    h("Max-Forwards", "70"),
     h("From", `${stripTag(from)};tag=${bLegFromTag}`),
     h("To", stripTag(to)),
     h("Call-ID", bLegCallId),
@@ -292,6 +298,10 @@ export function buildBLegInvite(
     }
   }
 
+  // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
+  if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
+    headers.push(h("Content-Type", "application/sdp"))
+  }
   headers.push(h("Content-Length", String(body.byteLength)))
 
   const requestUri = overrideUri ?? aLeg.uri
@@ -322,9 +332,6 @@ export function relayResponse(
     headers.push(h("Via", via))
   }
 
-  // Record-Route placeholder — SipRouter stamps with a-leg callRef/leg params
-  headers.push(h("Record-Route", "__PLACEHOLDER__"))
-
   // Copy all non-structural headers transparently
   // From/To conditionally rewritten below — skip them if we have replacements
   const skipExtra = new Set<string>()
@@ -354,6 +361,10 @@ export function relayResponse(
   headers.push(h("CSeq", cseq))
   // Contact placeholder — stamped by SipRouter with callRef;leg params
   headers.push(h("Contact", "__PLACEHOLDER__"))
+  // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
+  if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
+    headers.push(h("Content-Type", "application/sdp"))
+  }
   headers.push(h("Content-Length", String(body.byteLength)))
 
   return makeResponse(bLegResp.status, bLegResp.reason, headers, body)
@@ -366,140 +377,178 @@ export function relayResponse(
 /**
  * Builds the ACK request to send to a leg after receiving its 200 OK.
  * Via and Contact are placeholders.
+ *
+ * @param requestUri - Contact URI for the Request-URI line
+ * @param fromUri - B2BUA's local URI for the From header (falls back to requestUri)
+ * @param dialogToUri - Remote party's URI for the To header (falls back to requestUri)
  */
 export function buildAck(
   callId: string,
   fromTag: string,
   toTag: string,
-  toUri: string,
+  requestUri: string,
   cseq: number = 1,
-  fromUri?: string
+  fromUri?: string,
+  dialogToUri?: string
 ): SipRequest {
-  const from = fromUri ?? toUri
+  const from = fromUri ?? requestUri
+  const to = dialogToUri ?? requestUri
   const headers: SipHeader[] = [
     h("Via", "__PLACEHOLDER__"),
     h("Max-Forwards", "70"),
     h("From", `<${from}>;tag=${fromTag}`),
-    h("To", toTag ? `<${toUri}>;tag=${toTag}` : `<${toUri}>`),
+    h("To", toTag ? `<${to}>;tag=${toTag}` : `<${to}>`),
     h("Call-ID", callId),
     h("CSeq", `${cseq} ACK`),
     h("Content-Length", "0"),
   ]
 
-  return makeRequest("ACK", toUri, headers)
+  return makeRequest("ACK", requestUri, headers)
 }
 
 /**
  * Builds a relayed ACK for the b-leg, preserving the original body (may contain SDP).
  * Via and Contact are placeholders.
+ *
+ * @param requestUri - Contact URI for the Request-URI line
+ * @param fromUri - B2BUA's local URI for the From header (falls back to requestUri)
+ * @param dialogToUri - Remote party's URI for the To header (falls back to requestUri)
  */
 export function buildRelayedAck(
   origAck: SipRequest,
   callId: string,
   fromTag: string,
   toTag: string,
-  toUri: string,
+  requestUri: string,
   cseq: number = 1,
-  fromUri?: string
+  fromUri?: string,
+  dialogToUri?: string
 ): SipRequest {
   const body = origAck.body
-  const from = fromUri ?? toUri
+  const from = fromUri ?? requestUri
+  const to = dialogToUri ?? requestUri
 
   const headers: SipHeader[] = [
     h("Via", "__PLACEHOLDER__"),
     h("Max-Forwards", "70"),
     h("From", `<${from}>;tag=${fromTag}`),
-    h("To", toTag ? `<${toUri}>;tag=${toTag}` : `<${toUri}>`),
+    h("To", toTag ? `<${to}>;tag=${toTag}` : `<${to}>`),
     h("Call-ID", callId),
     h("CSeq", `${cseq} ACK`),
     h("Contact", "__PLACEHOLDER__"),
   ]
   copyTransparentHeaders(origAck.headers, headers)
+  // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
+  if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
+    headers.push(h("Content-Type", "application/sdp"))
+  }
   headers.push(h("Content-Length", String(body.byteLength)))
 
-  return makeRequest("ACK", toUri, headers, body)
+  return makeRequest("ACK", requestUri, headers, body)
 }
 
 // ---------------------------------------------------------------------------
 // BYE
 // ---------------------------------------------------------------------------
 
-/** Builds a BYE request. Via and Contact are placeholders. */
+/**
+ * Builds a BYE request. Via and Contact are placeholders.
+ *
+ * @param requestUri - Contact URI for the Request-URI line
+ * @param fromUri - B2BUA's local URI for the From header (falls back to requestUri)
+ * @param dialogToUri - Remote party's URI for the To header (falls back to requestUri)
+ */
 export function buildBye(
   callId: string,
   fromTag: string,
   toTag: string,
-  toUri: string,
+  requestUri: string,
   cseq: number,
-  fromUri?: string
+  fromUri?: string,
+  dialogToUri?: string
 ): SipRequest {
-  const from = fromUri ?? toUri
+  const from = fromUri ?? requestUri
+  const to = dialogToUri ?? requestUri
   const headers: SipHeader[] = [
     h("Via", "__PLACEHOLDER__"),
     h("Max-Forwards", "70"),
     h("From", `<${from}>;tag=${fromTag}`),
-    h("To", `<${toUri}>;tag=${toTag}`),
+    h("To", `<${to}>;tag=${toTag}`),
     h("Call-ID", callId),
     h("CSeq", `${cseq} BYE`),
     h("Content-Length", "0"),
   ]
 
-  return makeRequest("BYE", toUri, headers)
+  return makeRequest("BYE", requestUri, headers)
 }
 
 /**
  * Builds a relayed BYE from one leg to the other with translated headers.
  * Via and Contact are placeholders.
+ *
+ * @param requestUri - Contact URI for the Request-URI line
+ * @param fromUri - B2BUA's local URI for the From header (falls back to requestUri)
+ * @param dialogToUri - Remote party's URI for the To header (falls back to requestUri)
  */
 export function buildRelayedBye(
   origBye: SipRequest,
   callId: string,
   fromTag: string,
   toTag: string,
-  toUri: string,
+  requestUri: string,
   cseq: string,
   direction: "a-to-b" | "b-to-a",
-  fromUri?: string
+  fromUri?: string,
+  dialogToUri?: string
 ): SipRequest {
-  const from = fromUri ?? toUri
+  const from = fromUri ?? requestUri
+  const to = dialogToUri ?? requestUri
   const headers: SipHeader[] = [
     h("Via", "__PLACEHOLDER__"),
     h("Max-Forwards", "70"),
     h("From", `<${from}>;tag=${fromTag}`),
-    h("To", `<${toUri}>;tag=${toTag}`),
+    h("To", `<${to}>;tag=${toTag}`),
     h("Call-ID", callId),
     h("CSeq", cseq),
   ]
   copyTransparentHeaders(origBye.headers, headers)
   headers.push(h("Content-Length", "0"))
 
-  return makeRequest("BYE", toUri, headers)
+  return makeRequest("BYE", requestUri, headers)
 }
 
 // ---------------------------------------------------------------------------
 // CANCEL
 // ---------------------------------------------------------------------------
 
-/** Builds a CANCEL for an outgoing INVITE. Via and Contact are placeholders. */
+/**
+ * Builds a CANCEL for an outgoing INVITE. Via and Contact are placeholders.
+ *
+ * @param requestUri - Request-URI (must match the INVITE's Request-URI)
+ * @param fromUri - B2BUA's local URI for the From header (falls back to requestUri)
+ * @param dialogToUri - Remote party's URI for the To header (falls back to requestUri)
+ */
 export function buildCancel(
   callId: string,
   fromTag: string,
-  toUri: string,
+  requestUri: string,
   cseq: number,
-  fromUri?: string
+  fromUri?: string,
+  dialogToUri?: string
 ): SipRequest {
-  const from = fromUri ?? toUri
+  const from = fromUri ?? requestUri
+  const to = dialogToUri ?? requestUri
   const headers: SipHeader[] = [
     h("Via", "__PLACEHOLDER__"),
     h("Max-Forwards", "70"),
     h("From", `<${from}>;tag=${fromTag}`),
-    h("To", `<${toUri}>`),
+    h("To", `<${to}>`),
     h("Call-ID", callId),
     h("CSeq", `${cseq} CANCEL`),
     h("Content-Length", "0"),
   ]
 
-  return makeRequest("CANCEL", toUri, headers)
+  return makeRequest("CANCEL", requestUri, headers)
 }
 
 // ---------------------------------------------------------------------------
@@ -849,21 +898,29 @@ export function bufferHasToTag(raw: Buffer): boolean {
 // OPTIONS (keepalive)
 // ---------------------------------------------------------------------------
 
-/** Builds an OPTIONS request for in-dialog keepalive. Via and Contact are placeholders. */
+/**
+ * Builds an OPTIONS request for in-dialog keepalive. Via and Contact are placeholders.
+ *
+ * @param requestUri - Contact URI for the Request-URI line
+ * @param fromUri - B2BUA's local URI for the From header (falls back to requestUri)
+ * @param dialogToUri - Remote party's URI for the To header (falls back to requestUri)
+ */
 export function buildOptions(
   callId: string,
   fromTag: string,
   toTag: string,
-  toUri: string,
+  requestUri: string,
   cseq: number,
-  fromUri?: string
+  fromUri?: string,
+  dialogToUri?: string
 ): SipRequest {
-  const from = fromUri ?? toUri
+  const from = fromUri ?? requestUri
+  const to = dialogToUri ?? requestUri
   const headers: SipHeader[] = [
     h("Via", "__PLACEHOLDER__"),
     h("Max-Forwards", "70"),
     h("From", `<${from}>;tag=${fromTag}`),
-    h("To", `<${toUri}>;tag=${toTag}`),
+    h("To", `<${to}>;tag=${toTag}`),
     h("Call-ID", callId),
     h("CSeq", `${cseq} OPTIONS`),
     h("Contact", "__PLACEHOLDER__"),
@@ -871,71 +928,95 @@ export function buildOptions(
     h("Content-Length", "0"),
   ]
 
-  return makeRequest("OPTIONS", toUri, headers)
+  return makeRequest("OPTIONS", requestUri, headers)
 }
 
 // ---------------------------------------------------------------------------
 // PRACK relay
 // ---------------------------------------------------------------------------
 
-/** Builds a relayed PRACK. Via and Contact are placeholders. */
+/**
+ * Builds a relayed PRACK. Via and Contact are placeholders.
+ *
+ * @param requestUri - Contact URI for the Request-URI line
+ * @param fromUri - B2BUA's local URI for the From header (falls back to requestUri)
+ * @param dialogToUri - Remote party's URI for the To header (falls back to requestUri)
+ */
 export function buildRelayedPrack(
   origPrack: SipRequest,
   callId: string,
   fromTag: string,
   toTag: string,
-  toUri: string,
+  requestUri: string,
   cseq: number,
   rack: string,
-  fromUri?: string
+  fromUri?: string,
+  dialogToUri?: string
 ): SipRequest {
   const body = origPrack.body
-  const from = fromUri ?? toUri
+  const from = fromUri ?? requestUri
+  const to = dialogToUri ?? requestUri
 
   const headers: SipHeader[] = [
     h("Via", "__PLACEHOLDER__"),
     h("Max-Forwards", "70"),
     h("From", `<${from}>;tag=${fromTag}`),
-    h("To", `<${toUri}>;tag=${toTag}`),
+    h("To", `<${to}>;tag=${toTag}`),
     h("Call-ID", callId),
     h("CSeq", `${cseq} PRACK`),
     h("Contact", "__PLACEHOLDER__"),
     h("RAck", rack),
   ]
   copyTransparentHeaders(origPrack.headers, headers)
+  // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
+  if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
+    headers.push(h("Content-Type", "application/sdp"))
+  }
   headers.push(h("Content-Length", String(body.byteLength)))
 
-  return makeRequest("PRACK", toUri, headers, body)
+  return makeRequest("PRACK", requestUri, headers, body)
 }
 
 // ---------------------------------------------------------------------------
 // re-INVITE relay
 // ---------------------------------------------------------------------------
 
-/** Builds a relayed re-INVITE. Via and Contact are placeholders. Preserves body (SDP) and passthrough headers. */
+/**
+ * Builds a relayed re-INVITE. Via and Contact are placeholders. Preserves body (SDP) and passthrough headers.
+ *
+ * @param requestUri - Contact URI for the Request-URI line
+ * @param fromUri - B2BUA's local URI for the From header (falls back to requestUri)
+ * @param dialogToUri - Remote party's URI for the To header (falls back to requestUri)
+ */
 export function buildRelayedReInvite(
   origInvite: SipRequest,
   callId: string,
   fromTag: string,
   toTag: string,
-  toUri: string,
+  requestUri: string,
   cseq: number,
-  fromUri?: string
+  fromUri?: string,
+  dialogToUri?: string
 ): SipRequest {
   const body = origInvite.body
-  const from = fromUri ?? toUri
+  const from = fromUri ?? requestUri
+  const to = dialogToUri ?? requestUri
 
   const headers: SipHeader[] = [
     h("Via", "__PLACEHOLDER__"),
     h("Max-Forwards", "70"),
     h("From", `<${from}>;tag=${fromTag}`),
-    h("To", `<${toUri}>;tag=${toTag}`),
+    h("To", `<${to}>;tag=${toTag}`),
     h("Call-ID", callId),
     h("CSeq", `${cseq} INVITE`),
     h("Contact", "__PLACEHOLDER__"),
   ]
   copyTransparentHeaders(origInvite.headers, headers)
+  // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
+  if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
+    headers.push(h("Content-Type", "application/sdp"))
+  }
   headers.push(h("Content-Length", String(body.byteLength)))
 
-  return makeRequest("INVITE", toUri, headers, body)
+  return makeRequest("INVITE", requestUri, headers, body)
 }
