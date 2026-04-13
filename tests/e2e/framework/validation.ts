@@ -294,10 +294,10 @@ function validateMaxForwards(
     return [`Invalid Max-Forwards value: "${mf}"`]
   }
 
-  // RFC 3261 §8.1.1.6: A UAC creating a new request SHOULD set Max-Forwards to 70.
-  // B2BUAs are UAs — they should reset, not decrement (proxy behavior).
-  if (val !== 70) {
-    return [`Max-Forwards is ${val}, expected 70 — B2BUA should reset (not decrement) per RFC 3261 §8.1.1.6`]
+  // Max-Forwards should be <= 70. Values above 70 indicate a bug;
+  // values below are expected after B2BUA/proxy decrement.
+  if (val > 70) {
+    return [`Max-Forwards is ${val}, exceeds 70 — per RFC 3261 §8.1.1.6`]
   }
 
   return []

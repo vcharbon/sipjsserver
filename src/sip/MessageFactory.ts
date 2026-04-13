@@ -264,13 +264,14 @@ export function buildBLegInvite(
   const from = getHeader(aLeg.headers, "from") ?? "unknown"
   const to = getHeader(aLeg.headers, "to") ?? aLeg.uri
   const cseq = cseqNum !== undefined ? `${cseqNum} INVITE` : (getHeader(aLeg.headers, "cseq") ?? "1 INVITE")
+  const maxForwardsRaw = getHeader(aLeg.headers, "max-forwards")
+  const maxForwards = Math.max(0, parseInt(maxForwardsRaw ?? "70", 10) - 1)
   const body = aLeg.body
 
   const headers: SipHeader[] = [
     // Via placeholder — SipRouter stamps with cr/lg params
     h("Via", "__PLACEHOLDER__"),
-    // B2BUA is a UAC on the b-leg — reset Max-Forwards (RFC 3261 §8.1.1.6)
-    h("Max-Forwards", "70"),
+    h("Max-Forwards", String(maxForwards)),
     h("From", `${stripTag(from)};tag=${bLegFromTag}`),
     h("To", stripTag(to)),
     h("Call-ID", bLegCallId),

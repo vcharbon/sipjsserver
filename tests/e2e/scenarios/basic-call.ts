@@ -4,6 +4,11 @@
 
 import { scenario } from "../framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../helpers/sdp.js"
+import type { SipHeader } from "../../../src/sip/types.js"
+
+function getHeaderValue(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {
+  return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value
+}
 
 export const basicCall = scenario("basic-call", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })
@@ -18,8 +23,10 @@ export const basicCall = scenario("basic-call", (s) => {
   // Alice receives 100 Trying from B2BUA
   aliceInviteTxn.expect(100)
 
-  // Bob receives the INVITE from B2BUA
-  const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite()
+  // Bob receives the INVITE from B2BUA — verify Max-Forwards decremented to 69
+  const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite({
+    predicate: (msg) => getHeaderValue(msg.headers, "max-forwards") === "69",
+  })
 
   // Bob sends 180 Ringing
   bobInviteTxn.reply(180)
