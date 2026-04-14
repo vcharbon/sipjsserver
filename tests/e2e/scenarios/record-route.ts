@@ -88,11 +88,17 @@ export const recordRouteFakeRR = scenario("record-route-fake-rr", (s) => {
 
   const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite()
 
-  // Bob sends 180 with an extra fake Record-Route header
+  // Bob claims himself as the loose-router proxy for this dialog. We point the
+  // fake Record-Route URI at bob's own listen address (127.0.0.1:5666) with
+  // ;lr so the B2BUA routes subsequent b-leg in-dialog requests back through
+  // bob (RFC 3261 §12.1.2 / §12.2.1.1). This lets the test validate the
+  // B2BUA honors downstream RR without requiring a separate proxy agent.
+  const fakeRoute = "<sip:fake-proxy@127.0.0.1:5666;lr>"
+
   bobInviteTxn.reply(180, {
     overrides: {
       extraHeaders: [
-        { name: "Record-Route", value: "<sip:fake-proxy@10.0.0.99:5060;lr>" },
+        { name: "Record-Route", value: fakeRoute },
       ],
     },
   })
@@ -111,7 +117,7 @@ export const recordRouteFakeRR = scenario("record-route-fake-rr", (s) => {
     body: sdpAnswer(),
     overrides: {
       extraHeaders: [
-        { name: "Record-Route", value: "<sip:fake-proxy@10.0.0.99:5060;lr>" },
+        { name: "Record-Route", value: fakeRoute },
       ],
     },
   })
@@ -125,12 +131,25 @@ export const recordRouteFakeRR = scenario("record-route-fake-rr", (s) => {
   })
 
   aliceDialog.ack()
-  bobDialog.expect("ACK")
+  // Bob MUST receive the ACK with a Route header echoing his prior Record-Route
+  // (RFC 3261 §12.2.1.1 — route set construction on UAC side = reversed RR list).
+  bobDialog.expect("ACK", {
+    predicate: (msg) => {
+      const route = getHeaders(msg.headers, "route")
+      return route.length === 1 && route[0] === fakeRoute
+    },
+  })
 
   s.pause(500)
 
   const aliceByeTxn = aliceDialog.bye()
-  const bobByeTxn = bobDialog.expect("BYE")
+  // Same check on BYE — all in-dialog requests on this leg carry the Route.
+  const bobByeTxn = bobDialog.expect("BYE", {
+    predicate: (msg) => {
+      const route = getHeaders(msg.headers, "route")
+      return route.length === 1 && route[0] === fakeRoute
+    },
+  })
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
 })

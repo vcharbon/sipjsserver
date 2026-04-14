@@ -77,8 +77,10 @@ Within the same UAS transaction on the a-leg, the UAS-generated To-tag changes b
 - Hop: `B2BUA → alice` 200 OK CANCEL
 - **Tests:** `cancel`
 
-### H3 · `record_route_dropped_b_leg` — RFC 3261 §12.1.2, §12.2.1.1
+### H3 · `record_route_dropped_b_leg` — RFC 3261 §12.1.2, §12.2.1.1 — **FIXED**
 Downstream sends `Record-Route: <sip:fake-proxy@…;lr>` in 180/200; B2BUA never builds a route set. Subsequent b-leg ACK/BYE are sent directly to Contact with no Route header, bypassing the loose router.
+
+**Fix:** `executeConfirmDialog` now captures the Record-Route list (reversed) into `Dialog.routeSet`. A shared `applyRouteSet` helper inserts the Route headers on every outbound b-leg in-dialog request (ACK, BYE, re-INVITE, PRACK, OPTIONS, INFO/UPDATE, and termination BYEs) and rewrites the destination to the first route URI when it carries `;lr` (loose routing). A-leg path is untouched. The `record-route-fake-rr` scenario now asserts the Route header is present on the ACK and BYE received by bob.
 
 - Hop: `B2BUA → bob` ACK, BYE
 - **Tests:** `record-route-fake-rr`

@@ -11,7 +11,7 @@
 
 import type { RuleAction, RuleContext, MessageTransform } from "./RuleDefinition.js"
 import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
-import type { SipRequest, SipResponse } from "../../../sip/types.js"
+import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
 import type { TimerEntry, Leg, Dialog } from "../../../call/CallModel.js"
 import {
   type Call,
@@ -78,6 +78,47 @@ function legTarget(leg: Leg): { host: string; port: number } {
     if (hp) return hp
   }
   return { host: leg.source.address, port: leg.source.port }
+}
+
+/** Extract the bare URI from `<uri>` or `name <uri>` form. */
+function extractUriFromRoute(headerValue: string): string {
+  const m = /<([^>]+)>/.exec(headerValue)
+  return m ? m[1]! : headerValue.trim()
+}
+
+/**
+ * Apply a dialog's route set to an outbound in-dialog request (RFC 3261
+ * §12.2.1.1 / §16.12). Inserts Route headers in dialog order and, when the
+ * first route is a loose router (`;lr` parameter), rewrites the destination
+ * to that URI while keeping the Request-URI at the remote target.
+ *
+ * When `dialog.routeSet` is empty the request and destination are returned
+ * unchanged. Strict routing (first route without `;lr`) is not implemented —
+ * we fall through to the unchanged request in that case.
+ */
+function applyRouteSet(
+  msg: SipRequest,
+  dialog: Dialog | undefined,
+  target: { host: string; port: number },
+): { msg: SipRequest; target: { host: string; port: number } } {
+  if (dialog === undefined || dialog.routeSet.length === 0) return { msg, target }
+
+  const firstRoute = dialog.routeSet[0]!
+  const firstUri = extractUriFromRoute(firstRoute)
+  const isLoose = /;lr(?![a-zA-Z0-9_-])/i.test(firstUri)
+  if (!isLoose) return { msg, target }
+
+  const routeHeaders: SipHeader[] = dialog.routeSet.map((uri) => ({ name: "Route", value: uri }))
+  const without = msg.headers.filter((h) => h.name.toLowerCase() !== "route")
+  const insertIdx = without.findIndex((h) => h.name.toLowerCase() === "content-length")
+  const newHeaders = insertIdx >= 0
+    ? [...without.slice(0, insertIdx), ...routeHeaders, ...without.slice(insertIdx)]
+    : [...without, ...routeHeaders]
+
+  const hp = extractHostPort(firstUri)
+  const newTarget = hp ?? target
+
+  return { msg: { ...msg, headers: newHeaders }, target: newTarget }
 }
 
 /** Resolve a leg by ID (a-leg or b-leg). */
@@ -458,9 +499,20 @@ function relayRequest(
     }
   }
 
+  // RFC 3261 §12.2.1.1: apply dialog route set to outbound in-dialog requests
+  // on the b-leg (the B2BUA is the UAC there). ACK, BYE, re-INVITE, PRACK and
+  // any other in-dialog method get Route headers and, for loose routers, a
+  // destination rewrite to the first route URI.
+  let finalTarget = target
+  if (targetLeg.legId !== "a" && relayed.type === "request") {
+    const routed = applyRouteSet(relayed, targetDialog, target)
+    relayed = routed.msg
+    finalTarget = routed.target
+  }
+
   state.outbound.push({
     message: relayed,
-    destination: target,
+    destination: finalTarget,
     label: `relay ${req.method} to ${targetLeg.legId}`,
     legId: targetLeg.legId,
   })
@@ -652,6 +704,13 @@ function executeConfirmDialog(
   const toTag = resp.parsed?.to?.tag ?? ""
   const bLegContact = resp.parsed?.contact?.uri ?? ""
 
+  // RFC 3261 §12.1.2: capture the route set from the response's Record-Route
+  // headers, in reverse order. The B2BUA is the UAC on the b-leg, so Bob's
+  // RR entries define the proxy path that subsequent in-dialog requests
+  // (ACK, BYE, re-INVITE, PRACK, INFO/UPDATE) must traverse.
+  const recordRoutes = getHeaders(resp.headers, "record-route")
+  const routeSet = recordRoutes.length > 0 ? [...recordRoutes].reverse() : []
+
   // Update b-leg dialog — confirm existing early dialog or create new one.
   // On confirmation, localCSeq resets to initialCSeq: the confirmed dialog
   // inherits the INVITE CSeq (ACK for 2xx must match the INVITE CSeq),
@@ -659,8 +718,8 @@ function executeConfirmDialog(
   const baseCSeq = bLeg.initialCSeq ?? randomInitialCSeq()
   const existingDialog = bLeg.dialogs.find((d) => d.toTag === toTag)
   const dialog = existingDialog
-    ? { ...existingDialog, contact: bLegContact, localCSeq: baseCSeq }
-    : { ...makeEmptyDialog(toTag), contact: bLegContact, localCSeq: baseCSeq }
+    ? { ...existingDialog, contact: bLegContact, localCSeq: baseCSeq, routeSet }
+    : { ...makeEmptyDialog(toTag), contact: bLegContact, localCSeq: baseCSeq, routeSet }
 
   state.call = updateLeg(state.call, bLeg.legId, (l) => ({
     ...l,
@@ -713,9 +772,12 @@ function executeAckLeg(
   const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
   const ackCSeq = dialog.localCSeq || leg.initialCSeq || 1
 
+  const ackMsg = buildAck(leg.callId, leg.fromTag, dialog.toTag, targetUri, ackCSeq, leg.localUri, leg.remoteUri)
+  const routed = leg.legId !== "a" ? applyRouteSet(ackMsg, dialog, target) : { msg: ackMsg, target }
+
   state.outbound.push({
-    message: buildAck(leg.callId, leg.fromTag, dialog.toTag, targetUri, ackCSeq, leg.localUri, leg.remoteUri),
-    destination: target,
+    message: routed.msg,
+    destination: routed.target,
     label: `ACK ${action.legId}`,
     legId: action.legId,
   })
@@ -754,9 +816,11 @@ function executeSendRequestToLeg(
     : dialog.toTag
 
   if (action.method === "OPTIONS") {
+    const optMsg = buildOptions(leg.callId, fromTag, toTag, targetUri, cseq, leg.localUri, leg.remoteUri)
+    const routed = leg.legId !== "a" ? applyRouteSet(optMsg, dialog, target) : { msg: optMsg, target }
     state.outbound.push({
-      message: buildOptions(leg.callId, fromTag, toTag, targetUri, cseq, leg.localUri, leg.remoteUri),
-      destination: target,
+      message: routed.msg,
+      destination: routed.target,
       label: `${action.method} to ${action.legId}`,
       legId: action.legId,
     })
@@ -780,9 +844,10 @@ function executeSendRequestToLeg(
           : hdr
       )
     }
+    const routed = leg.legId !== "a" ? applyRouteSet(updatedMsg, dialog, target) : { msg: updatedMsg, target }
     state.outbound.push({
-      message: updatedMsg,
-      destination: target,
+      message: routed.msg,
+      destination: routed.target,
       label: `${action.method} to ${action.legId}`,
       legId: action.legId,
     })
@@ -847,9 +912,11 @@ function executeDestroyLeg(
     const dialog = leg.dialogs[0]
     if (dialog !== undefined) {
       const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
+      const byeMsg = buildBye(leg.callId, leg.fromTag, dialog.toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri)
+      const routed = leg.legId !== "a" ? applyRouteSet(byeMsg, dialog, target) : { msg: byeMsg, target }
       state.outbound.push({
-        message: buildBye(leg.callId, leg.fromTag, dialog.toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri),
-        destination: target,
+        message: routed.msg,
+        destination: routed.target,
         label: `BYE ${action.legId}`,
         legId: action.legId,
       })
@@ -909,9 +976,11 @@ function executeTerminateCall(
         const toTag = leg.legId === "a"
           ? (remoteTag(state.call, "a") ?? "")
           : dialog.toTag
+        const byeMsg = buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri)
+        const routed = leg.legId !== "a" ? applyRouteSet(byeMsg, dialog, target) : { msg: byeMsg, target }
         state.outbound.push({
-          message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri),
-          destination: target,
+          message: routed.msg,
+          destination: routed.target,
           label: `BYE ${leg.legId} (terminate)`,
           legId: leg.legId,
         })
@@ -976,9 +1045,11 @@ function executeBeginTermination(
         const toTag = leg.legId === "a"
           ? (remoteTag(state.call, "a") ?? "")
           : dialog.toTag
+        const byeMsg = buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri)
+        const routed = leg.legId !== "a" ? applyRouteSet(byeMsg, dialog, target) : { msg: byeMsg, target }
         state.outbound.push({
-          message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri),
-          destination: target,
+          message: routed.msg,
+          destination: routed.target,
           label: `BYE ${leg.legId} (begin-termination)`,
           legId: leg.legId,
         })
