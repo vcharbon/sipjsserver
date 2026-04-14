@@ -851,8 +851,19 @@ function checkUnexpectedMessages(
           Effect.result
         )
 
-        // Skip allowed reemissions silently
+        // Allowed reemissions still go to the trace so the capture is
+        // complete for downstream review (e.g. hop-by-hop ACK for non-2xx
+        // via allowExtra("ACK")), but they do NOT fail the test.
         if (parseResult._tag === "Success" && isAllowedReemission(state, agentName, parseResult.success)) {
+          state.trace.push({
+            timestamp: clockTs,
+            from: state.sutNames[agentName] ?? "B2BUA",
+            to: agentName,
+            direction: "receive",
+            stepIndex: -1,
+            status: "pass",
+            message: parseResult.success,
+          })
           continue
         }
 
