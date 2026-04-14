@@ -30,6 +30,7 @@ export type ValidationCheckName =
   | "cancelViaBranch"
   | "responseCorrelation"
   | "rackCorrelation"
+  | "tagConsistency"
 
 export type ValidationFn = (
   msg: SipMessage,
@@ -54,6 +55,7 @@ export interface ValidationOverrides {
   readonly cancelViaBranch?: ValidationFn
   readonly responseCorrelation?: ValidationFn
   readonly rackCorrelation?: ValidationFn
+  readonly tagConsistency?: ValidationFn
 }
 
 export interface PendingRequest {
@@ -616,6 +618,56 @@ function validateResponseCorrelation(
   ]
 }
 
+/**
+ * UAS tag consistency across final responses (RFC 3261 §17.2.1 / §12.1.1).
+ *
+ * Provisional 1xx>100 responses on a single server transaction may legitimately
+ * introduce multiple To-tags when forking occurs (each fork establishes its own
+ * early dialog — RFC 3261 §13.2.2.4). A final response (>=200), however, must
+ * tie the transaction to exactly one dialog: its To-tag must match one of the
+ * To-tags already established by a prior provisional, OR — if no provisional
+ * was sent — introduce the dialog's tag.
+ *
+ * This flags the "cancel" anomaly: 180 with tag X then 487 with fresh tag Y on
+ * the same branch (the UAS manufactured a new tag for 487 instead of echoing
+ * the 180 tag), and the 200-OK-CANCEL that carries yet another fresh tag.
+ */
+function validateTagConsistency(
+  msg: SipMessage,
+  dialogState: AgentDialogState,
+  _correlatedRequest: SipMessage | undefined
+): string[] {
+  if (msg.type !== "response") return []
+  if (msg.status < 200) return []
+
+  const myVias = getAllHeaderValues(msg.headers, "via")
+  if (myVias.length === 0) return []
+  const myBranch = extractBranch(myVias[0]!)
+  if (!myBranch) return []
+
+  const myTag = extractTag(getHeaderValue(msg.headers, "to") ?? "")
+  if (!myTag) return []
+
+  const priorProvisionalTags: string[] = []
+  for (const prior of dialogState.messagesByRef.values()) {
+    if (prior === msg) continue
+    if (prior.type !== "response") continue
+    if (prior.status <= 100 || prior.status >= 200) continue
+    const priorVias = getAllHeaderValues(prior.headers, "via")
+    if (priorVias.length === 0) continue
+    if (extractBranch(priorVias[0]!) !== myBranch) continue
+    const priorTag = extractTag(getHeaderValue(prior.headers, "to") ?? "")
+    if (priorTag) priorProvisionalTags.push(priorTag)
+  }
+
+  if (priorProvisionalTags.length === 0) return []
+  if (priorProvisionalTags.includes(myTag)) return []
+
+  return [
+    `UAS To-tag mismatch on ${msg.status} (branch ${myBranch}): prior provisional(s) established tag(s) [${[...new Set(priorProvisionalTags)].join(", ")}] but final carries "${myTag}" — RFC 3261 §17.2.1 / §12.1.1`,
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // Default check registry
 // ---------------------------------------------------------------------------
@@ -637,6 +689,7 @@ const defaultChecks: Record<ValidationCheckName, ValidationFn> = {
   cancelViaBranch: validateCancelViaBranch,
   responseCorrelation: validateResponseCorrelation,
   rackCorrelation: validateRackCorrelation,
+  tagConsistency: validateTagConsistency,
 }
 
 // ---------------------------------------------------------------------------

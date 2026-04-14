@@ -556,10 +556,18 @@ export function buildCancel(
 // 200 OK (for BYE, CANCEL, OPTIONS)
 // ---------------------------------------------------------------------------
 
-/** Builds a 200 OK mirroring the original request's key headers. */
-export function build200Ok(request: SipRequest): SipResponse {
+/**
+ * Builds a 200 OK mirroring the original request's key headers.
+ * If `explicitToTag` is provided, it is used as the To-tag (for tag consistency
+ * across responses in the same server transaction, e.g. CANCEL's 200 OK echoing
+ * the INVITE UAS tag — RFC 3261 §12.1.1).
+ */
+export function build200Ok(request: SipRequest, explicitToTag?: string): SipResponse {
   const from = getHeader(request.headers, "from") ?? ""
-  const to = ensureToTag(getHeader(request.headers, "to") ?? "")
+  const rawTo = getHeader(request.headers, "to") ?? ""
+  const to = explicitToTag !== undefined
+    ? (/;tag=/i.test(rawTo) ? rawTo : `${rawTo};tag=${explicitToTag}`)
+    : ensureToTag(rawTo)
   const callId = getHeader(request.headers, "call-id") ?? ""
   const cseq = getHeader(request.headers, "cseq") ?? ""
   const via = getHeader(request.headers, "via") ?? ""
@@ -577,10 +585,17 @@ export function build200Ok(request: SipRequest): SipResponse {
   return makeResponse(200, "OK", headers)
 }
 
-/** Builds a 487 Request Terminated response. */
-export function build487(request: SipRequest): SipResponse {
+/**
+ * Builds a 487 Request Terminated response.
+ * If `explicitToTag` is provided, it is used as the To-tag (RFC 3261 §17.2.1:
+ * all responses in a server INVITE transaction share the same UAS tag).
+ */
+export function build487(request: SipRequest, explicitToTag?: string): SipResponse {
   const from = getHeader(request.headers, "from") ?? ""
-  const to = ensureToTag(getHeader(request.headers, "to") ?? "")
+  const rawTo = getHeader(request.headers, "to") ?? ""
+  const to = explicitToTag !== undefined
+    ? (/;tag=/i.test(rawTo) ? rawTo : `${rawTo};tag=${explicitToTag}`)
+    : ensureToTag(rawTo)
   const callId = getHeader(request.headers, "call-id") ?? ""
   const cseq = getHeader(request.headers, "cseq") ?? ""
   const via = getHeader(request.headers, "via") ?? ""

@@ -25,6 +25,7 @@ import {
   buildStatelessReject503Buffer,
   isEmergencyRequest,
   newBranch,
+  newTag,
 } from "./MessageFactory.js"
 import { OverloadController } from "../b2bua/OverloadController.js"
 import { parseVia, parseNameAddr } from "./parsers/custom/structured-headers.js"
@@ -62,6 +63,13 @@ interface Transaction {
   readonly destination: { host: string; port: number } | undefined
   readonly originalBuffer: Buffer | undefined
   createdAt: number
+  /**
+   * To-tag the UAS used for the first response on this server INVITE
+   * transaction. Captured on the first outbound >100 response and reused
+   * by the TransactionLayer when it must synthesize a later response in
+   * the same transaction (e.g. auto-487 on CANCEL) — RFC 3261 §17.2.1.
+   */
+  uasToTag: string | undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +121,14 @@ function extractFromTag(msg: SipMessage): string {
   const from = getHeaderValue(msg, "from")
   if (!from) return ""
   return parseNameAddr(from).tag ?? ""
+}
+
+/** Extract To tag from a message. */
+function extractToTag(msg: SipMessage): string | undefined {
+  if (msg.parsed?.to?.tag) return msg.parsed.to.tag
+  const to = getHeaderValue(msg, "to")
+  if (!to) return undefined
+  return parseNameAddr(to).tag
 }
 
 // ---------------------------------------------------------------------------
@@ -363,12 +379,10 @@ export class TransactionLayer extends ServiceMap.Service<
             const callId = req.parsed?.callId ?? ""
             const fromTag = req.parsed?.from?.tag ?? ""
 
-            // Send 200 OK to CANCEL (strip Contact placeholder — this bypasses SipRouter)
-            const cancelOkBase = build200Ok(req)
-            const cancelOk = { ...cancelOkBase, headers: cancelOkBase.headers.filter(h => h.name.toLowerCase() !== "contact") }
-            yield* sendBuffer(serialize(cancelOk), { host: rinfo.address, port: rinfo.port })
-
-            // Find and terminate the matching INVITE transaction
+            // Find the matching INVITE transaction first — we need its UAS
+            // To-tag so the 200 OK (CANCEL) and 487 (INVITE) echo the same
+            // tag as any prior 18x (RFC 3261 §17.2.1 / §12.1.1). If no 1xx>100
+            // was sent yet, fabricate a tag now and pin it on the txn.
             let matchedBranch: string | undefined
             let matchedTxn: Transaction | undefined
             for (const [txnBranch, txn] of txnMap) {
@@ -380,8 +394,26 @@ export class TransactionLayer extends ServiceMap.Service<
                 break
               }
             }
+            let uasToTag = matchedTxn?.uasToTag
+            if (matchedBranch !== undefined && matchedTxn !== undefined && uasToTag === undefined) {
+              uasToTag = newTag()
+              const pinnedTag = uasToTag
+              yield* Effect.sync(() => {
+                const opt = MutableHashMap.get(txnMap, matchedBranch!)
+                if (Option.isSome(opt)) {
+                  MutableHashMap.set(txnMap, matchedBranch!, { ...opt.value, uasToTag: pinnedTag })
+                }
+              })
+              matchedTxn = { ...matchedTxn, uasToTag }
+            }
+
+            // Send 200 OK to CANCEL (strip Contact placeholder — this bypasses SipRouter)
+            const cancelOkBase = build200Ok(req, uasToTag)
+            const cancelOk = { ...cancelOkBase, headers: cancelOkBase.headers.filter(h => h.name.toLowerCase() !== "contact") }
+            yield* sendBuffer(serialize(cancelOk), { host: rinfo.address, port: rinfo.port })
+
             if (matchedBranch !== undefined && matchedTxn !== undefined && matchedTxn.originalRequest) {
-              const terminated = build487(matchedTxn.originalRequest)
+              const terminated = build487(matchedTxn.originalRequest, uasToTag)
               const terminatedBuf = serialize(terminated)
               yield* sendBuffer(terminatedBuf, { host: rinfo.address, port: rinfo.port })
               yield* Effect.sync(() => {
@@ -461,7 +493,8 @@ export class TransactionLayer extends ServiceMap.Service<
             timeoutFiber: undefined,
             destination: undefined,
             originalBuffer: undefined,
-            createdAt: yield* Clock.currentTimeMillis
+            createdAt: yield* Clock.currentTimeMillis,
+            uasToTag: undefined,
           }
           yield* setTxn(branch, txn)
 
@@ -589,16 +622,23 @@ export class TransactionLayer extends ServiceMap.Service<
               const branch = extractBranch(msg)
               if (branch) {
                 const isFinal = msg.status >= 200
+                const outboundToTag = msg.status > 100 ? extractToTag(msg) : undefined
                 let completedKind: TxnKind | undefined
                 yield* Effect.sync(() => {
                   const opt = MutableHashMap.get(txnMap, branch)
                   if (Option.isSome(opt) && opt.value.role === "server") {
                     if (isFinal) completedKind = opt.value.kind
+                    // RFC 3261 §17.2.1 / §12.1.1: pin the UAS To-tag on the
+                    // first >100 response so later auto-synthesized responses
+                    // (487 on CANCEL, etc.) reuse the same tag and the UAC
+                    // sees one coherent dialog identity.
+                    const uasToTag = opt.value.uasToTag ?? outboundToTag
                     MutableHashMap.set(txnMap, branch, {
                       ...opt.value,
                       lastResponse: buf,
                       lastResponseStatus: msg.status,
                       state: isFinal ? "completed" : "proceeding",
+                      uasToTag,
                       // Free memory on completion — only lastResponse needed for retransmit absorption
                       originalRequest: isFinal ? undefined : opt.value.originalRequest,
                       originalBuffer: isFinal ? undefined : opt.value.originalBuffer,
@@ -647,7 +687,8 @@ export class TransactionLayer extends ServiceMap.Service<
             originalBuffer: buf,
             callRef: viaCustom.cr,
             legId: viaCustom.lg,
-            createdAt: yield* Clock.currentTimeMillis
+            createdAt: yield* Clock.currentTimeMillis,
+            uasToTag: undefined,
           }
           yield* setTxn(branch, txn)
 

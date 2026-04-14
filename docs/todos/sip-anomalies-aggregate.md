@@ -61,14 +61,18 @@ so bob can tear down the call. No B2BUA bug; capture is correct.
 
 ## HIGH (functional / interop bug)
 
-### H1 · `to_tag_mismatch_180_vs_487` — RFC 3261 §12.1.1 / §17.2.1
+### H1 · `to_tag_mismatch_180_vs_487` — RFC 3261 §12.1.1 / §17.2.1 — **FIXED**
 Within the same UAS transaction on the a-leg, the UAS-generated To-tag changes between the 180 provisional and the 487 final, breaking dialog identity.
+
+**Fix:** `TransactionLayer` now pins a `uasToTag` on the server INVITE transaction on the first outbound response >100 and reuses it for `build487` when synthesizing the 487 in response to CANCEL. Framework check `tagConsistency` flags a fresh To-tag on any final response that does not match a prior provisional's tag.
 
 - Hop: `B2BUA → alice` 180 vs 487
 - **Tests:** `cancel`
 
-### H2 · `cancel_200_tag_inconsistent` — RFC 3261 §9.2 / §12.1.1
+### H2 · `cancel_200_tag_inconsistent` — RFC 3261 §9.2 / §12.1.1 — **FIXED**
 `200 OK (CANCEL)` uses a third distinct To-tag on the same Call-ID, different from both the 180 tag and the 487 tag.
+
+**Fix:** CANCEL handler in `TransactionLayer` passes the pinned `uasToTag` to `build200Ok` (stripping Contact as before). Same framework check covers this since CANCEL reuses the INVITE's Via branch.
 
 - Hop: `B2BUA → alice` 200 OK CANCEL
 - **Tests:** `cancel`
