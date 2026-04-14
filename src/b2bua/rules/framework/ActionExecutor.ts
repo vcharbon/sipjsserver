@@ -16,13 +16,12 @@ import type { TimerEntry, Leg, Dialog } from "../../../call/CallModel.js"
 import {
   type Call,
   addCdrEvent,
-  addBLeg,
   bumpLocalCSeq,
+  randomInitialCSeq,
   deactivateRule,
   findBLeg,
   getPeer,
   mergeLeg,
-  randomInitialCSeq,
   relayCSeqDelta,
   setByeDisposition,
   setLegState,
@@ -51,16 +50,14 @@ import {
   buildRelayedReInvite,
   buildRelayedPrack,
   extractHostPort,
-  extractNameAddrUri,
   getHeader,
   getHeaders,
   newTag,
   relayResponse,
   stripTag,
-  buildBLegInvite,
   buildOptions,
 } from "../../../sip/MessageFactory.js"
-import { generateBLegCallId } from "../../../cluster/HashUtils.js"
+import { createBLegFromRoute } from "../../helpers.js"
 
 // ── Internal working state ─────────────────────────────────────────────────
 
@@ -87,6 +84,34 @@ function legTarget(leg: Leg): { host: string; port: number } {
 function findLeg(call: Call, legId: string): Leg | undefined {
   if (legId === "a") return call.aLeg
   return findBLeg(call, legId)
+}
+
+/**
+ * Build a CANCEL envelope for a b-leg's outstanding INVITE.
+ *
+ * RFC 3261 §9.1: CANCEL must copy Request-URI, CSeq number, and Via branch
+ * from the original INVITE. Request-URI and CSeq are restored from the leg's
+ * stored fields here; the Via branch is reused at stamp time by SipRouter
+ * via the stored `inviteBranch`.
+ */
+function buildCancelEnvelope(
+  leg: Leg,
+  target: { host: string; port: number },
+  labelSuffix: string,
+): OutboundEnvelope {
+  return {
+    message: buildCancel(
+      leg.callId,
+      leg.fromTag,
+      leg.inviteRequestUri ?? `sip:target@${target.host}:${target.port}`,
+      leg.initialCSeq ?? 1,
+      leg.localUri,
+      leg.remoteUri,
+    ),
+    destination: target,
+    label: `CANCEL ${leg.legId}${labelSuffix}`,
+    legId: leg.legId,
+  }
 }
 
 // ── Main executor ──────────────────────────────────────────────────────────
@@ -222,6 +247,7 @@ function executeRespond(
     message: response,
     destination: { host: ctx.event.rinfo.address, port: ctx.event.rinfo.port },
     label: `respond ${action.status}`,
+    legId: ctx.sourceLeg.legId,
   })
 }
 
@@ -421,6 +447,7 @@ function relayRequest(
     message: relayed,
     destination: target,
     label: `relay ${req.method} to ${targetLeg.legId}`,
+    legId: targetLeg.legId,
   })
 }
 
@@ -561,6 +588,7 @@ function relayResponseMsg(
     message: relayed,
     destination,
     label: `relay ${effectiveStatus} to ${targetLeg.legId}`,
+    legId: targetLeg.legId,
   })
 
   // ── Pending re-INVITE cleanup on final response ──
@@ -669,6 +697,7 @@ function executeAckLeg(
     message: buildAck(leg.callId, leg.fromTag, dialog.toTag, targetUri, ackCSeq, leg.localUri, leg.remoteUri),
     destination: target,
     label: `ACK ${action.legId}`,
+    legId: action.legId,
   })
 }
 
@@ -709,6 +738,7 @@ function executeSendRequestToLeg(
       message: buildOptions(leg.callId, fromTag, toTag, targetUri, cseq, leg.localUri, leg.remoteUri),
       destination: target,
       label: `${action.method} to ${action.legId}`,
+      legId: action.legId,
     })
   } else {
     // Generic request construction for INFO, UPDATE, etc.
@@ -734,6 +764,7 @@ function executeSendRequestToLeg(
       message: updatedMsg,
       destination: target,
       label: `${action.method} to ${action.legId}`,
+      legId: action.legId,
     })
   }
 }
@@ -745,34 +776,6 @@ function executeCreateLeg(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const legNumber = state.call.bLegs.length + 1
-  const legId = `b-${legNumber}`
-  const bLegFromTag = newTag()
-  const config = ctx.config
-
-  const bLegCallId = config.workerIndex >= 0
-    ? generateBLegCallId(legNumber, config.workerIndex, config.clusterWorkers, config.sipLocalIp)
-    : `${legNumber}-${state.call.aLeg.callId}`
-
-  const initialCSeq = randomInitialCSeq()
-  const port = action.destination.port ?? 5060
-
-  const bLeg: Leg = {
-    legId,
-    callId: bLegCallId,
-    fromTag: bLegFromTag,
-    source: { address: config.sipLocalIp, port: config.sipLocalPort },
-    state: "trying",
-    disposition: "pending",
-    dialogs: [],
-    noAnswerTimeoutSec: action.noAnswerTimeoutSec ?? config.noAnswerTimeoutSec,
-    initialCSeq,
-    // RFC 3261 §12.2.1.1: track local/remote URIs for in-dialog header construction
-    // B2BUA is UAC on b-leg: localUri = From URI (Alice's identity), remoteUri = To URI (callee)
-    localUri: extractNameAddrUri(stripTag(state.call.aLegFrom)),
-    remoteUri: extractNameAddrUri(stripTag(state.call.aLegTo)),
-  }
-
   // Resolve the base INVITE to clone
   let baseInvite: SipRequest | undefined
   if (action.fromInvite === "snapshot" && state.call.aLegInviteSnapshot) {
@@ -787,43 +790,24 @@ function executeCreateLeg(
     baseInvite = action.fromInvite
   }
 
-  if (baseInvite !== undefined) {
-    // Merge policy-level header overrides (e.g. strip 100rel from Supported)
-    // with action-level overrides. Action headers take precedence.
-    const mergedHeaders: Record<string, string | null> | undefined =
-      (state.call.policyUpdateHeaders || action.updateHeaders)
-        ? { ...(state.call.policyUpdateHeaders as Record<string, string | null> ?? {}),
-            ...(action.updateHeaders as Record<string, string | null> ?? {}) }
-        : undefined
-
-    const bLegInvite = buildBLegInvite(
-      baseInvite, bLegCallId, bLegFromTag,
-      undefined, // new_ruri — handled by destination
-      mergedHeaders,
-      initialCSeq,
-    )
-
-    state.outbound.push({
-      message: bLegInvite,
+  const port = action.destination.port ?? 5060
+  const result = createBLegFromRoute({
+    call: state.call,
+    baseInvite,
+    route: {
       destination: { host: action.destination.host, port },
-      label: `send ${legId} INVITE`,
-    })
-  }
+      new_ruri: action.newRuri,
+      update_headers: action.updateHeaders,
+      no_answer_timeout_sec: action.noAnswerTimeoutSec,
+      callback_context: action.callbackContext,
+    },
+    config: ctx.config,
+    nowMs: ctx.nowMs,
+  })
 
-  state.call = addBLeg(state.call, bLeg)
-  state.call = addCdrEvent(state.call, { type: "invite_sent", timestamp: ctx.nowMs, legId })
-
-  // Schedule no-answer timer
-  const noAnswerTimeout = action.noAnswerTimeoutSec ?? ctx.config.noAnswerTimeoutSec
-  const noAnswerTimer: TimerEntry = {
-    id: `no-answer-${ctx.callRef}-${legId}`,
-    type: "no_answer",
-    fireAt: ctx.nowMs + noAnswerTimeout * 1000,
-    legId,
-  }
-  state.call = { ...state.call, timers: [...state.call.timers, noAnswerTimer] }
-  state.effects.push({ type: "schedule-timer", timer: noAnswerTimer })
-  state.effects.push({ type: "flush-redis" })
+  state.call = result.call
+  state.outbound.push(...result.outbound)
+  state.effects.push(...result.effects)
 }
 
 // ── destroy-leg ────────────────────────────────────────────────────────────
@@ -847,16 +831,13 @@ function executeDestroyLeg(
         message: buildBye(leg.callId, leg.fromTag, dialog.toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri),
         destination: target,
         label: `BYE ${action.legId}`,
+        legId: action.legId,
       })
     }
     state.call = setByeDisposition(state.call, action.legId, "bye_sent")
   } else {
     // CANCEL an early/trying leg
-    state.outbound.push({
-      message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1, leg.localUri, leg.remoteUri),
-      destination: target,
-      label: `CANCEL ${action.legId}`,
-    })
+    state.outbound.push(buildCancelEnvelope(leg, target, ""))
     state.call = setByeDisposition(state.call, action.legId, "cancelled")
   }
 
@@ -912,16 +893,13 @@ function executeTerminateCall(
           message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri),
           destination: target,
           label: `BYE ${leg.legId} (terminate)`,
+          legId: leg.legId,
         })
       }
     } else if (leg.state === "trying" || leg.state === "early") {
       if (leg.legId !== "a") {
         const target = legTarget(leg)
-        state.outbound.push({
-          message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1, leg.localUri, leg.remoteUri),
-          destination: target,
-          label: `CANCEL ${leg.legId} (terminate)`,
-        })
+        state.outbound.push(buildCancelEnvelope(leg, target, " (terminate)"))
       }
     }
   }
@@ -982,6 +960,7 @@ function executeBeginTermination(
           message: buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri),
           destination: target,
           label: `BYE ${leg.legId} (begin-termination)`,
+          legId: leg.legId,
         })
       }
       state.call = setByeDisposition(state.call, leg.legId, "bye_sent")
@@ -989,11 +968,7 @@ function executeBeginTermination(
       if (leg.legId !== "a") {
         // CANCEL trying/early b-legs
         const target = legTarget(leg)
-        state.outbound.push({
-          message: buildCancel(leg.callId, leg.fromTag, `sip:target@${target.host}:${target.port}`, leg.initialCSeq ?? 1, leg.localUri, leg.remoteUri),
-          destination: target,
-          label: `CANCEL ${leg.legId} (begin-termination)`,
-        })
+        state.outbound.push(buildCancelEnvelope(leg, target, " (begin-termination)"))
         state.call = setByeDisposition(state.call, leg.legId, "cancelled")
         state.call = setLegState(state.call, leg.legId, "terminated")
       } else {

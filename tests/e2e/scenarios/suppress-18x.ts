@@ -134,8 +134,8 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
   const bob1 = s.agent("bob1", { uri: "sip:bob1@test", port: BOB1_PORT })
   const bob2 = s.agent("bob2", { uri: "sip:bob2@test", port: BOB2_PORT })
 
+  // Delayed offer: no SDP in INVITE — offer will come in Bob2's 200 OK
   const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite("sip:+1234@127.0.0.1:15060", {
-    body: sdpOffer(),
     headers: { "X-Api-Call": failoverNoAnswerInstruction },
   })
 
@@ -172,14 +172,23 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
   rcvCancel1.reply(200)
   bob1InviteTxn.reply(487)
 
-  // Bob2 receives new INVITE
-  const { dialog: bob2Dialog, transaction: bob2InviteTxn } = bob2.receiveInitialInvite()
+  // B2BUA must send ACK for the 487 (RFC 3261 §17.1.1.3)
+  bob1.allowExtra("ACK")
+
+  // Bob2 receives new INVITE — verify Request-URI is the failover new_ruri
+  const { dialog: bob2Dialog, transaction: bob2InviteTxn } = bob2.receiveInitialInvite({
+    predicate: (msg) => {
+      if (msg.type !== "request") return false
+      // RFC 3261 §8.1.1.1: Request-URI must be the configured new_ruri
+      return msg.uri === `sip:+1234@127.0.0.1:${BOB2_PORT}`
+    },
+  })
 
   // Bob2 sends 180 — should be suppressed (first 18x already sent)
   bob2InviteTxn.reply(180)
 
-  // Bob2 sends 200 OK
-  bob2InviteTxn.reply(200, { body: sdpAnswer() })
+  // Bob2 sends 200 OK WITH SDP offer (delayed-offer: Bob2 is the offerer)
+  bob2InviteTxn.reply(200, { body: sdpOffer() })
 
   // Alice receives 200 OK — To-tag must match the first 180
   aliceInviteTxn.expect(200, {
@@ -191,8 +200,17 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
     },
   })
 
-  aliceDialog.ack()
-  bob2Dialog.expect("ACK")
+  // Alice's ACK MUST include SDP answer (RFC 3264 §4: delayed-offer answer in ACK)
+  aliceDialog.ack({ body: sdpAnswer() })
+
+  // Bob2 validates ACK contains SDP answer for its offer
+  bob2Dialog.expect("ACK", {
+    predicate: (msg) => {
+      if (msg.type !== "request") return false
+      // RFC 3264 §4: ACK must contain SDP answer when 200 OK contained offer
+      return msg.body.length > 0
+    },
+  })
 
   s.pause(1000)
 
@@ -220,6 +238,9 @@ export const suppress18xFailoverReject = scenario("suppress-18x-failover-reject"
   const alice = s.agent("alice", { uri: "sip:alice@test" })
   const bob1 = s.agent("bob1", { uri: "sip:bob1@test", port: BOB1_PORT })
   const bob2 = s.agent("bob2", { uri: "sip:bob2@test", port: BOB2_PORT })
+
+  // Bob1 will receive ACK for the 503 (RFC 3261 §17.1.1.3 — auto-ACK for non-2xx)
+  bob1.allowExtra("ACK")
 
   const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite("sip:+1234@127.0.0.1:15060", {
     body: sdpOffer(),

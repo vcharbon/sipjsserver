@@ -413,6 +413,18 @@ export function createSimulatedTransport(opts?: {
         )
       }),
 
+    settle: () =>
+      // Yield the fiber scheduler enough times for any queued work
+      // (notably TransactionLayer auto-ACK generation for non-2xx final
+      // responses, which happens asynchronously after the response is
+      // received) to complete before we sweep for unexpected messages.
+      // 20 yields is empirically enough for multi-hop rule chains.
+      Effect.gen(function* () {
+        for (let i = 0; i < 20; i++) {
+          yield* Effect.yieldNow
+        }
+      }),
+
     verifyCleanState: () =>
       Effect.gen(function* () {
         const errors: string[] = []

@@ -26,6 +26,8 @@ export type ValidationCheckName =
   | "branchPrefix"
   | "dialogUri"
   | "recordRoute"
+  | "cancelRequestUri"
+  | "cancelViaBranch"
 
 export type ValidationFn = (
   msg: SipMessage,
@@ -46,6 +48,8 @@ export interface ValidationOverrides {
   readonly branchPrefix?: ValidationFn
   readonly dialogUri?: ValidationFn
   readonly recordRoute?: ValidationFn
+  readonly cancelRequestUri?: ValidationFn
+  readonly cancelViaBranch?: ValidationFn
 }
 
 export interface PendingRequest {
@@ -482,6 +486,56 @@ function validateRecordRoute(
   return []
 }
 
+/**
+ * CANCEL Request-URI validation.
+ * RFC 3261 §9.1: The Request-URI of the CANCEL request MUST be identical
+ * to the Request-URI of the request being cancelled (the INVITE).
+ */
+function validateCancelRequestUri(
+  msg: SipMessage,
+  dialogState: AgentDialogState,
+  _correlatedRequest: SipMessage | undefined
+): string[] {
+  if (msg.type !== "request" || msg.method !== "CANCEL") return []
+  if (!dialogState.receivedInviteUri) return []
+
+  if (msg.uri !== dialogState.receivedInviteUri) {
+    return [
+      `CANCEL Request-URI "${msg.uri}" differs from INVITE Request-URI "${dialogState.receivedInviteUri}" — RFC 3261 §9.1`
+    ]
+  }
+
+  return []
+}
+
+/**
+ * CANCEL Via branch validation.
+ * RFC 3261 §9.1: The CANCEL request MUST have a single Via header field
+ * value matching the top Via header field of the request being cancelled.
+ */
+function validateCancelViaBranch(
+  msg: SipMessage,
+  dialogState: AgentDialogState,
+  _correlatedRequest: SipMessage | undefined
+): string[] {
+  if (msg.type !== "request" || msg.method !== "CANCEL") return []
+  if (!dialogState.receivedInviteBranch) return []
+
+  const cancelVia = getAllHeaderValues(msg.headers, "via")
+  if (cancelVia.length === 0) return []
+
+  const cancelBranch = extractBranch(cancelVia[0]!)
+  if (!cancelBranch) return []
+
+  if (cancelBranch !== dialogState.receivedInviteBranch) {
+    return [
+      `CANCEL Via branch "${cancelBranch}" differs from INVITE Via branch "${dialogState.receivedInviteBranch}" — RFC 3261 §9.1`
+    ]
+  }
+
+  return []
+}
+
 // ---------------------------------------------------------------------------
 // Default check registry
 // ---------------------------------------------------------------------------
@@ -499,6 +553,8 @@ const defaultChecks: Record<ValidationCheckName, ValidationFn> = {
   branchPrefix: validateBranchPrefix,
   dialogUri: validateDialogUri,
   recordRoute: validateRecordRoute,
+  cancelRequestUri: validateCancelRequestUri,
+  cancelViaBranch: validateCancelViaBranch,
 }
 
 // ---------------------------------------------------------------------------

@@ -57,6 +57,10 @@ export interface AgentDialogState {
   dialogRemoteUri: string
   /** True once callId has been confirmed by a received message (for B-side agents). */
   callIdConfirmed: boolean
+  /** Request-URI from received INVITE (UAS side) — for CANCEL validation (RFC 3261 §9.1). */
+  receivedInviteUri: string
+  /** Via branch from received INVITE (UAS side) — for CANCEL validation (RFC 3261 §9.1). */
+  receivedInviteBranch: string
   /** Received requests awaiting a final response (for inResponseTo auto-resolution). */
   pendingRequests: PendingRequest[]
   /** Sent requests (for correlating received responses with what we sent). */
@@ -80,6 +84,8 @@ export function createAgentDialogState(localIp: string): AgentDialogState {
     remoteContact: "",
     dialogRemoteUri: "",
     callIdConfirmed: false,
+    receivedInviteUri: "",
+    receivedInviteBranch: "",
     pendingRequests: [],
     sentRequests: [],
   }

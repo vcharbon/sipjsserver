@@ -75,7 +75,8 @@ export const handleInitialInvite: Handler = (ctx) =>
       const outbound: OutboundEnvelope[] = [{
         message: rejectResp,
         destination: { host: rinfo.address, port: rinfo.port },
-        label: "reject 503 (call control unavailable)"
+        label: "reject 503 (call control unavailable)",
+        legId: "a",
       }]
       return {
         call, outbound, effects: terminateCallEffects(call),
@@ -92,7 +93,8 @@ export const handleInitialInvite: Handler = (ctx) =>
       const outbound: OutboundEnvelope[] = [{
         message: rejectResp,
         destination: { host: rinfo.address, port: rinfo.port },
-        label: `reject ${code}`
+        label: `reject ${code}`,
+        legId: "a",
       }]
       const updated = addCdrEvent(call, { type: "reject", timestamp: nowMs, legId: "a", statusCode: code, reason })
       return {
@@ -164,13 +166,19 @@ export const handleInitialInvite: Handler = (ctx) =>
               const dest = failureResp.destination
               const snapshot = { uri: req.uri, headers: [...req.headers], body: req.body }
               let failoverCall = { ...call, aLegInviteSnapshot: snapshot, callbackContext: failureResp.callback_context ?? routing.callback_context }
-              const bLegResult = createBLegFromRoute(failoverCall, req, {
-                destination: { host: dest.host, port: dest.port ?? 5060 },
-                new_ruri: failureResp.new_ruri,
-                update_headers: failureResp.update_headers as Record<string, string | null> | undefined,
-                no_answer_timeout_sec: failureResp.no_answer_timeout_sec,
-                callback_context: failureResp.callback_context,
-              }, config, nowMs)
+              const bLegResult = createBLegFromRoute({
+                call: failoverCall,
+                baseInvite: req,
+                route: {
+                  destination: { host: dest.host, port: dest.port ?? 5060 },
+                  new_ruri: failureResp.new_ruri,
+                  update_headers: failureResp.update_headers as Record<string, string | null> | undefined,
+                  no_answer_timeout_sec: failureResp.no_answer_timeout_sec,
+                  callback_context: failureResp.callback_context,
+                },
+                config,
+                nowMs,
+              })
               yield* Effect.logDebug(`Failover after limiter rejection: creating ${bLegResult.call.bLegs[0]?.legId}`)
               return bLegResult satisfies HandlerResult
             }
@@ -180,7 +188,7 @@ export const handleInitialInvite: Handler = (ctx) =>
           const rejected = addCdrEvent(call, { type: "reject", timestamp: nowMs, legId: "a", statusCode: 486, reason: "limiter" })
           return {
             call: rejected,
-            outbound: [{ message: rejectResp, destination: { host: rinfo.address, port: rinfo.port }, label: "reject 486 (limiter)" }],
+            outbound: [{ message: rejectResp, destination: { host: rinfo.address, port: rinfo.port }, label: "reject 486 (limiter)", legId: "a" }],
             effects: terminateCallEffects(rejected)
           } satisfies HandlerResult
         }
@@ -193,13 +201,19 @@ export const handleInitialInvite: Handler = (ctx) =>
     updated = { ...updated, aLegInviteSnapshot: { uri: req.uri, headers: req.headers, body: req.body } }
 
     // Create b-leg using shared helper
-    const bLegResult = createBLegFromRoute(updated, req, {
-      destination,
-      new_ruri: routing.new_ruri,
-      update_headers: routing.update_headers as Record<string, string | null> | undefined,
-      no_answer_timeout_sec: routing.no_answer_timeout_sec,
-      callback_context: routing.callback_context,
-    }, config, nowMs)
+    const bLegResult = createBLegFromRoute({
+      call: updated,
+      baseInvite: req,
+      route: {
+        destination,
+        new_ruri: routing.new_ruri,
+        update_headers: routing.update_headers as Record<string, string | null> | undefined,
+        no_answer_timeout_sec: routing.no_answer_timeout_sec,
+        callback_context: routing.callback_context,
+      },
+      config,
+      nowMs,
+    })
 
     yield* Effect.logDebug(`New call: callRef=${callRef} a-leg=${call.aLeg.callId} -> b-leg=${bLegResult.call.bLegs[0]?.callId}`)
 

@@ -15,6 +15,9 @@ export const cancelCall = scenario("cancel", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })
   const bob = s.agent("bob", { uri: "sip:bob@test", port: 5666 })
 
+  // Bob will receive ACK for the 487 (RFC 3261 §17.1.1.3 — auto-ACK for non-2xx)
+  bob.allowExtra("ACK")
+
   // Alice sends INVITE
   const { transaction: aliceInviteTxn } = alice.invite("sip:+1234@127.0.0.1:15060", {
     // MockCallControlServer routes to 127.0.0.1:5666 (bob's port)

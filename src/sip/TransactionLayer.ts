@@ -116,6 +116,46 @@ function extractFromTag(msg: SipMessage): string {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-ACK for non-2xx (RFC 3261 §17.1.1.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an ACK for a non-2xx final response on a client INVITE transaction.
+ * The ACK reuses the original INVITE's Via (with correct branch, cr/lg params),
+ * and copies From/To/Call-ID from the response.
+ */
+function buildAckForNon2xx(resp: SipResponse, originalInvite: SipRequest): Buffer | null {
+  const originalVia = getHeaderValue(originalInvite, "via")
+  if (!originalVia) return null
+
+  const from = getHeaderValue(resp, "from") ?? ""
+  const to = getHeaderValue(resp, "to") ?? ""
+  const callId = getHeaderValue(resp, "call-id") ?? ""
+  const cseqRaw = getHeaderValue(resp, "cseq") ?? "1 INVITE"
+  const cseqNum = parseInt(cseqRaw, 10) || 1
+
+  const ack: SipRequest = {
+    type: "request",
+    method: "ACK",
+    uri: originalInvite.uri,
+    version: "SIP/2.0",
+    headers: [
+      { name: "Via", value: originalVia },
+      { name: "Max-Forwards", value: "70" },
+      { name: "From", value: from },
+      { name: "To", value: to },
+      { name: "Call-ID", value: callId },
+      { name: "CSeq", value: `${cseqNum} ACK` },
+      { name: "Content-Length", value: "0" },
+    ],
+    body: new Uint8Array(0),
+    raw: Buffer.alloc(0),
+  }
+
+  return serialize(ack)
+}
+
+// ---------------------------------------------------------------------------
 // SIP timer constants (RFC 3261 §17)
 // ---------------------------------------------------------------------------
 
@@ -463,6 +503,17 @@ export class TransactionLayer extends ServiceMap.Service<
                 // Response retransmissions from b-leg UAS are handled by retransmit200Rule
                 // in the rule chain, so keeping the client txn for Timer D is unnecessary.
                 yield* stopTxnTimers(existing)
+
+                // RFC 3261 §17.1.1.3: INVITE client transaction MUST generate ACK for 300-699.
+                // The ACK is a hop-by-hop transaction-layer concern — not emitted to the application.
+                if (existing.kind === "invite" && resp.status >= 300 && existing.originalRequest && existing.destination) {
+                  const ackBuf = buildAckForNon2xx(resp, existing.originalRequest)
+                  if (ackBuf !== null) {
+                    yield* sendBuffer(ackBuf, existing.destination)
+                    yield* Effect.logDebug(`Auto-ACK for ${resp.status} sent to ${existing.destination.host}:${existing.destination.port}`)
+                  }
+                }
+
                 yield* deleteTxn(branch)
               }
             } else if (existing !== undefined && existing.role === "server") {
@@ -585,7 +636,8 @@ export class TransactionLayer extends ServiceMap.Service<
             kind: txnType,
             callId,
             fromTag,
-            originalRequest: undefined,
+            // Store original INVITE for ACK generation on non-2xx (RFC 3261 §17.1.1.3)
+            originalRequest: txnType === "invite" ? (msg as SipRequest) : undefined,
             lastResponse: undefined,
             lastResponseStatus: undefined,
             state: "trying",

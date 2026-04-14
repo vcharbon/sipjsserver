@@ -34,6 +34,9 @@ export const failoverReroute = scenario("failover-reroute", (s) => {
   const bob1 = s.agent("bob1", { uri: "sip:bob1@test", port: 5666 })
   const bob2 = s.agent("bob2", { uri: "sip:bob2@test", port: 5667 })
 
+  // Bob1 will receive ACK for the 503 (RFC 3261 §17.1.1.3 — auto-ACK for non-2xx)
+  bob1.allowExtra("ACK")
+
   // alice sends INVITE with failover instruction
   const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite("sip:+1234@127.0.0.1:15060", {
     body: sdpOffer(),

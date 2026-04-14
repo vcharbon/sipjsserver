@@ -183,13 +183,18 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
   }
 
   // --- Check for unexpected messages ---
-  // Yield once so any pending fibers (e.g. retransmits, deferred B2BUA
-  // sends) get scheduled before draining. We deliberately do NOT call
-  // `Effect.sleep` here: under TestClock the drain runs against a
-  // suspended virtual clock with nothing to advance it, so a sleep would
-  // hang the test. The drain itself uses the non-blocking Queue.poll
-  // path (timeoutMs=0).
+  // Settle any pending fibers (retransmits, deferred B2BUA sends,
+  // TransactionLayer auto-ACK-for-non-2xx) before draining. The transport's
+  // settle hook yields the fiber scheduler many times — required for
+  // deterministic detection of forgotten `allowExtra("ACK")` assertions.
+  // We deliberately do NOT call `Effect.sleep` here: under TestClock the
+  // drain runs against a suspended virtual clock with nothing to advance
+  // it, so a sleep would hang the test. The drain itself uses the
+  // non-blocking Queue.poll path (timeoutMs=0).
   yield* Effect.yieldNow
+  if (transport.settle !== undefined) {
+    yield* transport.settle()
+  }
   yield* checkUnexpectedMessages(state, transport)
 
   // --- Verify internal state is clean (no leaked calls/timers) ---
@@ -687,6 +692,13 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
   if (msg.type === "request" && msg.method === "INVITE" && callIdHeader) {
     ds.callId = callIdHeader
     ds.callIdConfirmed = true
+    // Capture INVITE Request-URI and Via branch for CANCEL validation (RFC 3261 §9.1)
+    ds.receivedInviteUri = msg.uri
+    const viaHeader = msg.headers.find((h) => h.name.toLowerCase() === "via")?.value ?? ""
+    const branchMatch = /;branch=([^\s;,>]+)/i.exec(viaHeader)
+    if (branchMatch?.[1]) {
+      ds.receivedInviteBranch = branchMatch[1]
+    }
   }
 
   // Track the remote URI from received INVITE (UAS side).

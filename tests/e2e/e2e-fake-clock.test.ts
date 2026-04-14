@@ -24,6 +24,7 @@ import { explicitRouteCall, failoverWithHeaders } from "./scenarios/shared-port.
 import { recordRouteBasic, recordRouteFakeRR } from "./scenarios/record-route.js"
 import { suppress18xBasic, suppress18xFailoverNoAnswer, suppress18xFailoverReject, suppress18xDisabled } from "./scenarios/suppress-18x.js"
 import { unknownDialogReject } from "./scenarios/indialog-unknown-reject.js"
+import { delayedOfferFailure } from "./scenarios/delayed-offer-failure.js"
 import { createSimulatedRunner, flushIndexReport } from "./helpers/harness.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
@@ -57,6 +58,7 @@ describe("E2E (fake clock) — simulated backend", () => {
   it.effect("suppress-18x: failover reject (tag consistency)", () => run(suppress18xFailoverReject.toScenario()), { timeout: 30_000 })
   it.effect("suppress-18x: disabled (normal 180 relay)", () => run(suppress18xDisabled.toScenario()), { timeout: 30_000 })
   it.effect("in-dialog unknown dialog → 481 reject", () => run(unknownDialogReject.toScenario()), { timeout: 30_000 })
+  it.effect("delayed-offer-failure: missing SDP answer in ACK", () => run(delayedOfferFailure.toScenario()), { timeout: 30_000 })
 })
 
 // ---------------------------------------------------------------------------

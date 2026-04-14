@@ -292,4 +292,14 @@ export interface TestTransport {
    * Returns an array of error strings (empty = clean).
    */
   readonly verifyCleanState?: () => Effect.Effect<string[]>
+  /**
+   * Optional settle hook: yields the fiber scheduler repeatedly to let
+   * any queued work drain before a check-for-unexpected-messages sweep.
+   *
+   * Required for deterministic detection of forgotten `allowExtra("ACK")`
+   * assertions — without a settle period, tests that end before the
+   * TransactionLayer has queued its auto-ACK (for non-2xx final responses)
+   * would silently pass.
+   */
+  readonly settle?: () => Effect.Effect<void>
 }

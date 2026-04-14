@@ -113,19 +113,30 @@ export interface RouteParams {
   readonly callback_context?: string | undefined
 }
 
+/** Options for creating a new b-leg. */
+export interface CreateBLegOptions {
+  readonly call: Call
+  /** Base INVITE to clone for the outbound b-leg INVITE. When undefined,
+   *  the b-leg Leg entry is created but no INVITE is sent (used when
+   *  the rule engine defers sending). */
+  readonly baseInvite: SipRequest | undefined
+  readonly route: RouteParams
+  readonly config: AppConfigData
+  readonly nowMs: number
+}
+
 /**
  * Create a new b-leg from routing parameters.
- * Returns the updated call, outbound INVITE envelope, and side effects (timer + flush).
+ * Returns the updated call, outbound INVITE envelope (if baseInvite provided),
+ * and side effects (timer + flush).
  *
- * Used by both InitialInviteHandler (first b-leg) and failover (subsequent b-legs).
+ * Single source of truth for b-leg creation — used by InitialInviteHandler
+ * (first b-leg), limiter failover, and the rule engine's create-leg action.
  */
 export function createBLegFromRoute(
-  call: Call,
-  originalInvite: SipRequest,
-  route: RouteParams,
-  config: AppConfigData,
-  nowMs: number
+  opts: CreateBLegOptions
 ): { call: Call; outbound: OutboundEnvelope[]; effects: SideEffect[] } {
+  const { call, baseInvite, route, config, nowMs } = opts
   const legNumber = call.bLegs.length + 1
   const legId = `b-${legNumber}`
   const bLegFromTag = newTag()
@@ -138,6 +149,7 @@ export function createBLegFromRoute(
 
   // RFC 3261 §12.2.1.1: track local/remote URIs for in-dialog header construction
   // B2BUA is UAC on b-leg: localUri = From URI (Alice's identity), remoteUri = To URI (callee)
+  const requestUri = route.new_ruri ?? baseInvite?.uri
   const bLeg: Leg = {
     legId,
     callId: bLegCallId,
@@ -150,24 +162,37 @@ export function createBLegFromRoute(
     initialCSeq,
     localUri: extractNameAddrUri(stripTag(call.aLegFrom)),
     remoteUri: extractNameAddrUri(stripTag(call.aLegTo)),
+    // RFC 3261 §9.1: CANCEL must copy Request-URI from original INVITE
+    inviteRequestUri: requestUri,
   }
 
-  // Merge policy-level header overrides (e.g. strip 100rel from Supported)
-  // with route-level overrides. Route headers take precedence.
-  const mergedHeaders: Record<string, string | null> | undefined =
-    (call.policyUpdateHeaders || route.update_headers)
-      ? { ...(call.policyUpdateHeaders as Record<string, string | null> ?? {}),
-          ...(route.update_headers as Record<string, string | null> ?? {}) }
-      : undefined
+  const outbound: OutboundEnvelope[] = []
 
-  const bLegInvite = buildBLegInvite(
-    originalInvite,
-    bLegCallId,
-    bLegFromTag,
-    route.new_ruri,
-    mergedHeaders,
-    initialCSeq
-  )
+  if (baseInvite !== undefined) {
+    // Merge policy-level header overrides (e.g. strip 100rel from Supported)
+    // with route-level overrides. Route headers take precedence.
+    const mergedHeaders: Record<string, string | null> | undefined =
+      (call.policyUpdateHeaders || route.update_headers)
+        ? { ...(call.policyUpdateHeaders as Record<string, string | null> ?? {}),
+            ...(route.update_headers as Record<string, string | null> ?? {}) }
+        : undefined
+
+    const bLegInvite = buildBLegInvite(
+      baseInvite,
+      bLegCallId,
+      bLegFromTag,
+      route.new_ruri,
+      mergedHeaders,
+      initialCSeq
+    )
+
+    outbound.push({
+      message: bLegInvite,
+      destination: route.destination,
+      label: `send ${legId} INVITE`,
+      legId,
+    })
+  }
 
   let updated = addBLeg(call, bLeg)
   updated = addCdrEvent(updated, { type: "invite_sent", timestamp: nowMs, legId })
@@ -184,12 +209,6 @@ export function createBLegFromRoute(
     legId
   }
   updated = { ...updated, timers: [...updated.timers, noAnswerTimer] }
-
-  const outbound: OutboundEnvelope[] = [{
-    message: bLegInvite,
-    destination: route.destination,
-    label: `send ${legId} INVITE`
-  }]
 
   const effects: SideEffect[] = [
     { type: "schedule-timer", timer: noAnswerTimer },

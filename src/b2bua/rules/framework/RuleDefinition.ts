@@ -102,7 +102,11 @@ export type RuleAction =
       readonly fromInvite?: "snapshot" | SipRequest;
       readonly updateHeaders?: Record<string, string | null>;
       readonly updateBody?: string | null;
-      readonly noAnswerTimeoutSec?: number }
+      readonly noAnswerTimeoutSec?: number;
+      /** Override Request-URI for the outbound INVITE (e.g. failover new_ruri). */
+      readonly newRuri?: string;
+      /** Propagate callback_context from failover response for subsequent failovers. */
+      readonly callbackContext?: string }
   | { readonly type: "destroy-leg"; readonly legId: string }
 
   // ── Peering (INAP split/merge) ──

@@ -87,6 +87,26 @@ Only added to the initial b-leg INVITE (`buildBLegInvite`). Stamped with `callRe
 - CANCEL reuses the original INVITE's CSeq number.
 - **re-INVITE CSeq rewriting:** When relaying a re-INVITE response, the B2BUA rewrites the CSeq number to match what the originator sent (stored in `PendingReInvite.inboundCSeq`), since each leg uses independent CSeq sequences.
 
+### CANCEL (RFC 3261 §9.1)
+
+A CANCEL request must match three fields of the INVITE it is cancelling so that the downstream UAS (and any intermediate proxies) can correlate it to the outstanding INVITE transaction:
+
+| Field | Source | Where stored |
+|-------|--------|--------------|
+| Request-URI | Must equal the INVITE's Request-URI | `leg.inviteRequestUri` — captured in `createBLegFromRoute` when the b-leg INVITE is built |
+| Top Via `branch` | Must equal the INVITE's top Via branch | `leg.inviteBranch` — captured from `stampHeaders()`'s return value in `SipRouter.processResult` Phase A, persisted to the leg *before* any outbound send |
+| CSeq number | Must equal the INVITE's CSeq number (method is `CANCEL`) | `leg.initialCSeq` |
+
+The CANCEL's From tag, To (without tag), and Call-ID are inherited from the INVITE; CSeq method is `CANCEL`; Max-Forwards is fresh (70). `buildCancel()` in `MessageFactory` takes these five inputs and produces a standards-compliant CANCEL.
+
+**Branch capture lifecycle.** `stampHeaders()` replaces the `__PLACEHOLDER__` Via with a freshly generated branch (or the caller-supplied `forceBranch`) and returns `{ message, branch }`. `processResult` runs in two phases so the branch can be persisted without violating the "state updates before sending" invariant:
+
+1. **Phase A (stamp):** iterate `result.outbound`, stamp each message, and when the result is an outbound INVITE targeting a b-leg, store `branch` on the corresponding b-leg (`inviteBranch`) in a local `workingCall`.
+2. Single `callState.update(callRef, () => workingCall)` persists the updated call (including any captured branches) before anything is sent.
+3. **Phase B (send):** iterate the stamped messages and hand them to `TransactionLayer` — no further state mutation, no regex-parsing the Via back out of a sent message.
+
+When a later CANCEL is sent for the same b-leg, `processResult` reads `leg.inviteBranch` and passes it as `forceBranch` to `stampHeaders`, reusing the exact value written on the wire during the original INVITE.
+
 ## Placeholder stamping pipeline
 
 All `MessageFactory` functions return messages with `__PLACEHOLDER__` values for Via, Contact, and Record-Route. These are replaced by `SipRouter.stampHeaders()` just before sending, which encodes the callRef and leg identifier into the header params.

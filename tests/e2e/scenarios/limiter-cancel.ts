@@ -31,6 +31,9 @@ const earlyDialogCancel = scenario("early-dialog-cancel", (s) => {
   const alice1 = s.agent("alice1", { uri: "sip:alice1@test" })
   const bob1 = s.agent("bob1", { uri: "sip:bob1@test", port: 5666 })
 
+  // Bob1 will receive ACK for the 487 (RFC 3261 §17.1.1.3 — auto-ACK for non-2xx)
+  bob1.allowExtra("ACK")
+
   // alice1 sends INVITE with limiter instruction
   const { transaction: alice1InviteTxn } = alice1.invite("sip:+1234@127.0.0.1:15060", {
     body: sdpOffer(),

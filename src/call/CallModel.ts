@@ -158,6 +158,16 @@ export const Leg = Schema.Struct({
    * - b-leg: To URI used in the b-leg INVITE (called party's identity)
    */
   remoteUri: Schema.optional(Schema.String),
+  /**
+   * Request-URI used in the outbound INVITE for this b-leg.
+   * Needed for CANCEL — RFC 3261 §9.1: CANCEL Request-URI must match the INVITE's.
+   */
+  inviteRequestUri: Schema.optional(Schema.String),
+  /**
+   * Via branch assigned to the outbound INVITE after SipRouter stamping.
+   * Needed for CANCEL — RFC 3261 §9.1: CANCEL Via must match the INVITE's top Via.
+   */
+  inviteBranch: Schema.optional(Schema.String),
 })
 
 export type Leg = typeof Leg.Type

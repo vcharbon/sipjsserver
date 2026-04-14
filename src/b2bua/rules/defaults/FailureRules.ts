@@ -90,6 +90,8 @@ export const routeFailureRule: RuleDefinition<undefined, undefined> = {
             fromInvite: "snapshot",
             ...(updateHeaders !== undefined ? { updateHeaders } : {}),
             ...(failureResp.no_answer_timeout_sec !== undefined ? { noAnswerTimeoutSec: failureResp.no_answer_timeout_sec } : {}),
+            ...(failureResp.new_ruri !== undefined ? { newRuri: failureResp.new_ruri } : {}),
+            ...(failureResp.callback_context !== undefined ? { callbackContext: failureResp.callback_context } : {}),
           })
           return { actions, state: undefined }
         }
@@ -158,6 +160,8 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
             fromInvite: "snapshot",
             ...(updateHeaders !== undefined ? { updateHeaders } : {}),
             ...(failureResp.no_answer_timeout_sec !== undefined ? { noAnswerTimeoutSec: failureResp.no_answer_timeout_sec } : {}),
+            ...(failureResp.new_ruri !== undefined ? { newRuri: failureResp.new_ruri } : {}),
+            ...(failureResp.callback_context !== undefined ? { callbackContext: failureResp.callback_context } : {}),
           })
           return { actions, state: undefined }
         }
