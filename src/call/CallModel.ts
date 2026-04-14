@@ -52,6 +52,13 @@ export const Dialog = Schema.Struct({
   toTag: Schema.String,
   contact: Schema.String,
   localCSeq: Schema.Int,
+  /**
+   * CSeq of the most recently sent INVITE on this dialog (initial or re-INVITE).
+   * Used by ACK-for-2xx, which echoes the INVITE's CSeq (RFC 3261 §13.2.2.4).
+   * Distinct from localCSeq because intermediate PRACK/UPDATE may bump localCSeq
+   * between the INVITE and its 2xx response.
+   */
+  lastInviteCSeq: Schema.optional(Schema.Int),
   /** Remote party's highest CSeq. Null until first message received from remote. */
   remoteCSeq: Schema.NullOr(Schema.Int),
   /** outbound CSeq → inbound CSeq mapping for response correlation */

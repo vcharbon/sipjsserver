@@ -83,6 +83,12 @@ export type RuleAction =
   | { readonly type: "send-request-to-leg"; readonly legId: string; readonly method: string;
       readonly headers?: Record<string, string | null>; readonly body?: Uint8Array | null }
 
+  // ── Synthesize a PRACK toward a leg in response to a reliable 1xx we
+  // received but are not relaying to the peer (RFC 3262 §3-4). Uses the
+  // leg's early dialog (toTag from the reliable 1xx) to build the PRACK. ──
+  | { readonly type: "send-prack-to-leg"; readonly legId: string;
+      readonly rseq: number; readonly inviteCSeq: number; readonly bTag: string }
+
   // ── Dialog lifecycle ──
   | {
       /**

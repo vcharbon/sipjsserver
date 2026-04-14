@@ -948,6 +948,43 @@ export function buildOptions(
 }
 
 // ---------------------------------------------------------------------------
+// PRACK synthesis (B2BUA-originated, no source PRACK)
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds a fresh PRACK from scratch — used when the B2BUA originates the
+ * PRACK itself (e.g. when a downstream UAS sends a reliable 1xx that must
+ * be absorbed locally rather than relayed; RFC 3262 §3-4).
+ *
+ * Via/Contact are placeholders. Body is empty.
+ */
+export function buildPrack(
+  callId: string,
+  fromTag: string,
+  toTag: string,
+  requestUri: string,
+  cseq: number,
+  rack: string,
+  fromUri?: string,
+  dialogToUri?: string,
+): SipRequest {
+  const from = fromUri ?? requestUri
+  const to = dialogToUri ?? requestUri
+  const headers: SipHeader[] = [
+    h("Via", "__PLACEHOLDER__"),
+    h("Max-Forwards", "70"),
+    h("From", `<${from}>;tag=${fromTag}`),
+    h("To", `<${to}>;tag=${toTag}`),
+    h("Call-ID", callId),
+    h("CSeq", `${cseq} PRACK`),
+    h("Contact", "__PLACEHOLDER__"),
+    h("RAck", rack),
+    h("Content-Length", "0"),
+  ]
+  return makeRequest("PRACK", requestUri, headers)
+}
+
+// ---------------------------------------------------------------------------
 // PRACK relay
 // ---------------------------------------------------------------------------
 

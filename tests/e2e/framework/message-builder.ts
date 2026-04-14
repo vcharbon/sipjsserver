@@ -65,6 +65,18 @@ export interface AgentDialogState {
   pendingRequests: PendingRequest[]
   /** Sent requests (for correlating received responses with what we sent). */
   sentRequests: SentRequestRecord[]
+  /**
+   * Sent reliable provisional 1xx (Require:100rel + RSeq) awaiting PRACK from peer.
+   * RFC 3262 §3–4: every reliable provisional MUST be acknowledged with a PRACK;
+   * entries are cleared when a PRACK arrives with matching RAck. Leftovers at
+   * scenario end indicate the peer (usually the B2BUA) failed to PRACK.
+   */
+  pendingReliableProvisionals: Array<{
+    rseq: number
+    inviteCSeq: number
+    statusCode: number
+    branch: string
+  }>
 }
 
 export function createAgentDialogState(localIp: string): AgentDialogState {
@@ -88,6 +100,7 @@ export function createAgentDialogState(localIp: string): AgentDialogState {
     receivedInviteBranch: "",
     pendingRequests: [],
     sentRequests: [],
+    pendingReliableProvisionals: [],
   }
 }
 

@@ -99,11 +99,12 @@ aggregated port-change case.
 - Hop: `bob → B2BUA` 200 OK (reINVITE) → relayed `B2BUA → alice`
 - **Tests:** `call-setup+alice-reinvite-fragment`
 
-### H5 · `reliable_1xx_not_pracked_by_b2bua` / `require_100rel_dropped` — RFC 3262 §3, §4
+### H5 · `reliable_1xx_not_pracked_by_b2bua` / `require_100rel_dropped` — RFC 3262 §3, §4  **(FIXED)**
 Bob sends a reliable 183 (`Require: 100rel`, `RSeq: 1`). B2BUA does not send PRACK toward bob, and at the same time strips `Require: 100rel` when relaying the 183 downgraded to 180 toward alice. Neither leg receives/produces a valid PRACK → bob retransmits until Timer exhausts.
 
 - Hops: `bob ↔ B2BUA` (missing PRACK); `B2BUA → alice` (downgrade without negotiation)
 - **Tests:** `suppress-18x-basic`
+- **Fix:** `relayFirst18xTo180` policy now emits `send-prack-to-leg` when it absorbs a reliable 1xx (alice never sees it, so B2BUA must ack locally, RFC 3262 §3-4). New `absorb-prack-200` rule (pri 920) absorbs bob's 200 OK for that synthesized PRACK before `relay-non-invite-200` would forward it. `Dialog.lastInviteCSeq` now tracks the most recent INVITE's CSeq so ACK-for-2xx echoes the correct value even after PRACK bumps `localCSeq` (RFC 3261 §13.2.2.4). Framework: `checkDanglingReliableProvisionals` at scenario end catches any reliable 1xx not PRACKed within the scenario.
 
 ### H6 · `sdp_answer_discarded_early_media` — RFC 3264 §5–6
 Reliable 183 carried an SDP answer (early media); relayed 180 has `Content-Length: 0`. Offerer never receives the answer.

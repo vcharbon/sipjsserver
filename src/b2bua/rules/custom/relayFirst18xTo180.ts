@@ -16,13 +16,31 @@ import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import { definePolicyModule } from "../framework/PolicyModule.js"
 import type { SipResponse } from "../../../sip/types.js"
-import { getHeader, newTag } from "../../../sip/MessageFactory.js"
+import { getHeader, getHeaders, newTag } from "../../../sip/MessageFactory.js"
 
-// ── Helper ────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────
 
 function cseqMethod(resp: SipResponse): string {
   const h = getHeader(resp.headers, "cseq") ?? ""
   return h.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
+}
+
+function cseqNumber(resp: SipResponse): number {
+  const h = getHeader(resp.headers, "cseq") ?? ""
+  return parseInt(h.trim().split(/\s+/)[0] ?? "0", 10)
+}
+
+/** RFC 3262: reliable 1xx carries Require:100rel and a numeric RSeq. */
+function reliableRseq(resp: SipResponse): number | undefined {
+  const require = getHeaders(resp.headers, "require")
+  const has100rel = require.some((v) =>
+    v.toLowerCase().split(",").some((t) => t.trim() === "100rel"),
+  )
+  if (!has100rel) return undefined
+  const rseq = getHeader(resp.headers, "rseq")
+  if (rseq === undefined) return undefined
+  const n = parseInt(rseq.trim(), 10)
+  return Number.isFinite(n) ? n : undefined
 }
 
 // ── Shared state (module-private) ─────────────────────────────────────────
@@ -65,21 +83,33 @@ const suppress18x: RuleDefinition<PolicyState, undefined> = {
 
   handle: (ctx, state) => {
     const resp = (ctx.event as Extract<typeof ctx.event, { type: "sip" }>).message as SipResponse
+    const bTag = resp.parsed?.to?.tag ?? ""
+    const rseq = reliableRseq(resp)
+    const inviteCSeq = cseqNumber(resp)
+
+    // Reliable 1xx → B2BUA must PRACK the b-leg itself (RFC 3262 §3-4).
+    // alice never sees the reliable provisional (downgraded to bare 180 with
+    // Require/RSeq stripped), so she will never send a PRACK to relay; the
+    // B2BUA acks locally to stop UAS retransmissions.
+    const prackAction: RuleAction | undefined =
+      rseq !== undefined && bTag
+        ? { type: "send-prack-to-leg", legId: ctx.sourceLeg.legId,
+            rseq, inviteCSeq, bTag }
+        : undefined
 
     if (state.firstRelayed) {
-      // Subsequent 18x — suppress relay, still record in CDR
-      return Effect.succeed({
-        actions: [
-          { type: "add-cdr-event" as const, eventType: "provisional" as const,
-            legId: ctx.sourceLeg.legId, statusCode: resp.status },
-        ],
-        state,
+      // Subsequent 18x — suppress relay, still PRACK if reliable
+      const actions: RuleAction[] = []
+      if (prackAction) actions.push(prackAction)
+      actions.push({
+        type: "add-cdr-event" as const, eventType: "provisional" as const,
+        legId: ctx.sourceLeg.legId, statusCode: resp.status,
       })
+      return Effect.succeed({ actions, state })
     }
 
     // First 18x — pre-generate a-facing tag, relay as bare 180
     const aFacingTag = newTag()
-    const bTag = resp.parsed?.to?.tag ?? ""
 
     const actions: RuleAction[] = [
       { type: "add-tag-mapping", aTag: aFacingTag,
@@ -91,6 +121,7 @@ const suppress18x: RuleDefinition<PolicyState, undefined> = {
       { type: "add-cdr-event", eventType: "provisional" as const,
         legId: ctx.sourceLeg.legId, statusCode: resp.status },
     ]
+    if (prackAction) actions.push(prackAction)
 
     return Effect.succeed({
       actions,
@@ -149,10 +180,47 @@ const forceTagConsistency: RuleDefinition<PolicyState, undefined> = {
   },
 }
 
+// ── absorb-prack-200 (module-private, priority 920) ──────────────────────
+//
+// Runs BEFORE relay-non-invite-200 (927). The B2BUA synthesizes PRACK toward
+// the b-leg when it absorbs a reliable 1xx (alice never saw it, so alice
+// won't generate the PRACK). Bob's 200 OK for that B2BUA-originated PRACK
+// must not be relayed to alice — absorb it here.
+
+const absorbPrack200: RuleDefinition<PolicyState, undefined> = {
+  id: "absorb-prack-200",
+  name: "Absorb 200 OK for B2BUA-synthesized PRACK",
+  alwaysActive: true,
+  defaultPriority: 920,
+  stateKey: STATE_KEY,
+  stateSchema: PolicyState,
+  paramsSchema: Schema.Undefined,
+
+  matches: (ctx) => {
+    if (ctx.event.type !== "sip") return false
+    const msg = ctx.event.message
+    if (msg.type !== "response") return false
+    if (msg.status < 200 || msg.status >= 300) return false
+    if (ctx.direction !== "from-b") return false
+    return cseqMethod(msg as SipResponse) === "PRACK"
+  },
+
+  init: () => ({ firstRelayed: false }),
+
+  handle: (ctx, state) =>
+    Effect.succeed({
+      actions: [
+        { type: "add-cdr-event" as const, eventType: "provisional" as const,
+          legId: ctx.sourceLeg.legId, statusCode: 200 },
+      ],
+      state,
+    }),
+}
+
 // ── Single export: the PolicyModule ───────────────────────────────────────
 
 export const relayFirst18xTo180 = definePolicyModule({
   id: "relayFirst18x_to_180",
   guard: (ctx) => ctx.call.policies?.relayFirst18xTo180 === true,
-  rules: [suppress18x, forceTagConsistency],
+  rules: [suppress18x, forceTagConsistency, absorbPrack200],
 })

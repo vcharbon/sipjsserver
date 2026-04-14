@@ -94,6 +94,17 @@ export const suppress18xBasic = scenario("suppress-18x-basic", (s) => {
     },
   })
 
+  // B2BUA must PRACK bob (RFC 3262 §3-4) since alice never sees the reliable
+  // provisional and will not generate her own PRACK.
+  const bobPrackTxn = bobDialog.expect("PRACK", {
+    predicate: (msg) => {
+      if (msg.type !== "request") return false
+      const rack = msg.headers.find((h) => h.name.toLowerCase() === "rack")?.value ?? ""
+      return /^1\s+\d+\s+INVITE$/i.test(rack.trim())
+    },
+  })
+  bobPrackTxn.reply(200)
+
   // Bob sends another 180 — this should be suppressed (Alice receives nothing)
   bobInviteTxn.reply(180)
 

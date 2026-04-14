@@ -196,6 +196,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     yield* transport.settle()
   }
   yield* checkUnexpectedMessages(state, transport)
+  yield* checkDanglingReliableProvisionals(state)
 
   // --- Verify internal state is clean (no leaked calls/timers) ---
   if (transport.verifyCleanState) {
@@ -398,6 +399,27 @@ function executeSend(
           pending.finalResponseSent = true
         }
       }
+
+      // Track reliable provisional 1xx (Require:100rel + RSeq) — RFC 3262 §3.
+      // Expect a PRACK from the peer; scenario-end check flags dangling entries.
+      if (step.statusCode !== undefined && step.statusCode > 100 && step.statusCode < 200) {
+        const requireVal = msg.headers.find((h) => h.name.toLowerCase() === "require")?.value ?? ""
+        const hasRel = requireVal.toLowerCase().split(",").some((t) => t.trim() === "100rel")
+        const rseqVal = msg.headers.find((h) => h.name.toLowerCase() === "rseq")?.value
+        const rseqNum = rseqVal !== undefined ? parseInt(rseqVal.trim(), 10) : NaN
+        if (hasRel && Number.isFinite(rseqNum)) {
+          const cseqRaw = msg.headers.find((h) => h.name.toLowerCase() === "cseq")?.value ?? ""
+          const cseqNum = parseInt(cseqRaw.trim().split(/\s+/)[0] ?? "0", 10)
+          const viaHdr = msg.headers.find((h) => h.name.toLowerCase() === "via")?.value ?? ""
+          const branchMatch = /;branch=([^\s;,>]+)/i.exec(viaHdr)
+          dialogState.pendingReliableProvisionals.push({
+            rseq: rseqNum,
+            inviteCSeq: cseqNum,
+            statusCode: step.statusCode,
+            branch: branchMatch?.[1] ?? "",
+          })
+        }
+      }
     }
 
     // Confirm Call-ID on first sent request (A-side agents use their own Call-ID)
@@ -508,6 +530,20 @@ function executeExpect(
         if (!isAllowedReemission(state, step.agent, msg)) {
           state.unexpectedMessages.push({ agent: step.agent, msg })
         }
+        // Regardless of whether the PRACK is "expected" by a step, RFC 3262 §3-4
+        // reliability tracking still credits the ack — clear the pending entry.
+        if (msg.type === "request" && msg.method === "PRACK") {
+          const rack = msg.headers.find((h) => h.name.toLowerCase() === "rack")?.value ?? ""
+          const parts = rack.trim().split(/\s+/)
+          const rseqAck = parseInt(parts[0] ?? "", 10)
+          const cseqAck = parseInt(parts[1] ?? "", 10)
+          if (Number.isFinite(rseqAck) && Number.isFinite(cseqAck)) {
+            const idx = dialogState.pendingReliableProvisionals.findIndex(
+              (p) => p.rseq === rseqAck && p.inviteCSeq === cseqAck,
+            )
+            if (idx >= 0) dialogState.pendingReliableProvisionals.splice(idx, 1)
+          }
+        }
         continue
       }
 
@@ -597,6 +633,23 @@ function executeExpect(
         cseqNumber: cseqNum,
         finalResponseSent: false,
       })
+    }
+
+    // Clear any pending reliable provisional whose RAck matches an incoming PRACK.
+    // RFC 3262 §7.2: PRACK's RAck is "<response-num> <cseq-num> <method>".
+    if (matched.type === "request" && matched.method === "PRACK") {
+      const rack = matched.headers.find((h) => h.name.toLowerCase() === "rack")?.value ?? ""
+      const parts = rack.trim().split(/\s+/)
+      const rseqAck = parseInt(parts[0] ?? "", 10)
+      const cseqAck = parseInt(parts[1] ?? "", 10)
+      if (Number.isFinite(rseqAck) && Number.isFinite(cseqAck)) {
+        const idx = dialogState.pendingReliableProvisionals.findIndex(
+          (p) => p.rseq === rseqAck && p.inviteCSeq === cseqAck
+        )
+        if (idx >= 0) {
+          dialogState.pendingReliableProvisionals.splice(idx, 1)
+        }
+      }
     }
 
     const status: StepStatus = assertionErrors.length > 0 ? "fail" : "pass"
@@ -793,6 +846,50 @@ function buildParticipantList(state: InterpreterState): string[] {
   }
 
   return ordered
+}
+
+/**
+ * RFC 3262 §3-4: every reliable provisional response MUST be acknowledged by
+ * a PRACK. If an agent has sent a reliable 1xx and no matching PRACK arrived
+ * by scenario end, the peer (typically the B2BUA) failed to ack — flag each
+ * dangling entry as a failure so regressions on H5 are caught automatically.
+ */
+function checkDanglingReliableProvisionals(state: InterpreterState): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const clockTs = yield* Clock.currentTimeMillis
+    for (const [agent, dialogState] of Object.entries(state.dialogStates)) {
+      for (const pending of dialogState.pendingReliableProvisionals) {
+        const stepIndex = state.results.length
+        state.results.push(makeStepResult({
+          stepIndex,
+          step: {
+            type: "expect",
+            agent,
+            match: { method: "PRACK" },
+            ref: { _tag: "StepRef", id: -3 },
+          },
+          status: "fail",
+          error: `Reliable 1xx sent by ${agent} (${pending.statusCode}, RSeq=${pending.rseq}, CSeq=${pending.inviteCSeq}) was never PRACKed — RFC 3262 §3-4`,
+        }))
+        state.trace.push({
+          timestamp: clockTs,
+          from: state.sutNames[agent] ?? "B2BUA",
+          to: agent,
+          direction: "receive",
+          stepIndex,
+          status: "unexpected",
+          message: {
+            type: "request",
+            method: "PRACK",
+            uri: "",
+            version: "SIP/2.0",
+            headers: [],
+            body: new Uint8Array(),
+          },
+        })
+      }
+    }
+  })
 }
 
 function checkUnexpectedMessages(

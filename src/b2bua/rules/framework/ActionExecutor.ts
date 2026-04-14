@@ -48,6 +48,7 @@ import {
   buildRelayedAck,
   buildRelayedBye,
   buildRelayedReInvite,
+  buildPrack,
   buildRelayedPrack,
   extractHostPort,
   getHeader,
@@ -208,6 +209,9 @@ function executeAction(
       break
     case "send-request-to-leg":
       executeSendRequestToLeg(action, ctx, state)
+      break
+    case "send-prack-to-leg":
+      executeSendPrackToLeg(action, ctx, state)
       break
     case "confirm-dialog":
       executeConfirmDialog(ctx, state)
@@ -415,6 +419,10 @@ function relayRequest(
       const reInvFromTag = targetLeg.legId === "a" ? (b2buaTag(state.call, "a") ?? "") : targetLeg.fromTag
       const reInvToTag = targetLeg.legId === "a" ? (remoteTag(state.call, "a") ?? "") : targetDialog.toTag
       relayed = buildRelayedReInvite(req, targetLeg.callId, reInvFromTag, reInvToTag, targetUri, outboundCSeq, targetLeg.localUri, targetLeg.remoteUri)
+      // Remember this INVITE's CSeq so the ACK-for-2xx can echo it.
+      state.call = updateDialog(state.call, targetLeg.legId, targetDialog.toTag, (d) => ({
+        ...d, lastInviteCSeq: outboundCSeq,
+      }))
       // Track pending re-INVITE for response correlation
       state.call = addPendingReInvite(state.call, targetLeg.legId, targetDialog.toTag, {
         outboundCSeq,
@@ -430,7 +438,12 @@ function relayRequest(
     case "ACK": {
       const ackFromTag = targetLeg.legId === "a" ? (b2buaTag(state.call, "a") ?? "") : targetLeg.fromTag
       const ackToTag = targetLeg.legId === "a" ? (remoteTag(state.call, "a") ?? "") : targetDialog.toTag
-      relayed = buildRelayedAck(req, targetLeg.callId, ackFromTag, ackToTag, targetUri, targetDialog.localCSeq, targetLeg.localUri, targetLeg.remoteUri)
+      // RFC 3261 §13.2.2.4: ACK for 2xx echoes the INVITE's CSeq, regardless
+      // of any intermediate in-dialog requests (PRACK, UPDATE) that bumped
+      // the dialog's localCSeq between the INVITE and the 2xx. lastInviteCSeq
+      // tracks the most recent INVITE's CSeq (initial or re-INVITE).
+      const ackCSeq = targetDialog.lastInviteCSeq ?? targetLeg.initialCSeq ?? targetDialog.localCSeq
+      relayed = buildRelayedAck(req, targetLeg.callId, ackFromTag, ackToTag, targetUri, ackCSeq, targetLeg.localUri, targetLeg.remoteUri)
       break
     }
     case "BYE": {
@@ -602,7 +615,10 @@ function relayResponseMsg(
         const maxCSeq = sourceLeg.dialogs.length > 0
           ? Math.max(...sourceLeg.dialogs.map((d) => d.localCSeq))
           : (sourceLeg.initialCSeq ?? randomInitialCSeq())
-        const dialog = { ...makeEmptyDialog(toTag), contact, localCSeq: maxCSeq }
+        const dialog = {
+          ...makeEmptyDialog(toTag), contact, localCSeq: maxCSeq,
+          lastInviteCSeq: sourceLeg.initialCSeq,
+        }
         state.call = updateLeg(state.call, sourceLeg.legId, (l) => ({
           ...l, state: "early" as const, dialogs: [...l.dialogs, dialog],
         }))
@@ -712,14 +728,20 @@ function executeConfirmDialog(
   const routeSet = recordRoutes.length > 0 ? [...recordRoutes].reverse() : []
 
   // Update b-leg dialog — confirm existing early dialog or create new one.
-  // On confirmation, localCSeq resets to initialCSeq: the confirmed dialog
-  // inherits the INVITE CSeq (ACK for 2xx must match the INVITE CSeq),
-  // and subsequent requests (BYE, re-INVITE) increment from there.
+  // On confirmation, localCSeq is the max of the INVITE CSeq and any bumps
+  // already applied during early dialog (e.g. B2BUA-originated PRACK on a
+  // reliable 1xx). ACK for 2xx echoes the INVITE CSeq explicitly, so the
+  // dialog's localCSeq only needs to track the floor for the next request.
   const baseCSeq = bLeg.initialCSeq ?? randomInitialCSeq()
   const existingDialog = bLeg.dialogs.find((d) => d.toTag === toTag)
+  const nextCSeq = existingDialog !== undefined
+    ? Math.max(baseCSeq, existingDialog.localCSeq)
+    : baseCSeq
   const dialog = existingDialog
-    ? { ...existingDialog, contact: bLegContact, localCSeq: baseCSeq, routeSet }
-    : { ...makeEmptyDialog(toTag), contact: bLegContact, localCSeq: baseCSeq, routeSet }
+    ? { ...existingDialog, contact: bLegContact, localCSeq: nextCSeq, routeSet,
+        lastInviteCSeq: existingDialog.lastInviteCSeq ?? baseCSeq }
+    : { ...makeEmptyDialog(toTag), contact: bLegContact, localCSeq: nextCSeq, routeSet,
+        lastInviteCSeq: baseCSeq }
 
   state.call = updateLeg(state.call, bLeg.legId, (l) => ({
     ...l,
@@ -852,6 +874,56 @@ function executeSendRequestToLeg(
       legId: action.legId,
     })
   }
+}
+
+// ── send-prack-to-leg ─────────────────────────────────────────────────────
+
+/**
+ * Synthesize a PRACK toward a b-leg that sent a reliable 1xx (Require:100rel,
+ * RSeq). Used when the B2BUA receives a reliable provisional it is not
+ * relaying to the a-leg (e.g. suppress-18x policy) and must ack locally to
+ * stop the UAS retransmitting.
+ *
+ * Requires an early dialog on the target leg with the `bTag` from the 1xx.
+ * The dialog is created by relayResponseMsg() when the reliable 1xx is
+ * processed — this action must therefore follow the relay action in the
+ * action sequence.
+ */
+function executeSendPrackToLeg(
+  action: Extract<RuleAction, { type: "send-prack-to-leg" }>,
+  _ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const leg = findLeg(state.call, action.legId)
+  if (leg === undefined || leg.state === "terminated") return
+  const dialog = leg.dialogs.find((d) => d.toTag === action.bTag) ?? leg.dialogs[0]
+  if (dialog === undefined) return
+
+  const target = legTarget(leg)
+  const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
+
+  state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
+  const cseq = dialog.localCSeq + 1
+  const rack = `${action.rseq} ${action.inviteCSeq} INVITE`
+
+  const prack = buildPrack(
+    leg.callId,
+    leg.fromTag,
+    action.bTag,
+    targetUri,
+    cseq,
+    rack,
+    leg.localUri,
+    leg.remoteUri,
+  )
+
+  const routed = applyRouteSet(prack, dialog, target)
+  state.outbound.push({
+    message: routed.msg,
+    destination: routed.target,
+    label: `PRACK to ${action.legId}`,
+    legId: action.legId,
+  })
 }
 
 // ── create-leg ─────────────────────────────────────────────────────────────
