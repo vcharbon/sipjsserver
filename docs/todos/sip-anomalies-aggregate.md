@@ -51,13 +51,11 @@ After receiving a non-2xx INVITE final response, the B2BUA does **not** emit a h
   - `failover-with-headers` (486 Busy Here)
 
 ### C4 · `delayed_offer_answer_broken` — RFC 3264 §5 / RFC 3261 §13.2.1
-Initial INVITE arrives with no SDP (delayed offer). The B2BUA:
-- Sends a 200 OK upstream **without** the SDP-offer it should carry (inverts offer/answer role), AND
-- Sends the b-leg ACK **without** the required SDP answer to bob's 2xx offer.
-
-- Hops: `B2BUA → alice` 200 OK; `B2BUA → bob` ACK
-- **Tests:**
-  - `delayed-offer-failure`
+**Status: FALSE POSITIVE — reclassified.** Re-reading the capture: the B2BUA
+transparently relays bob's 200 OK SDP offer to alice and transparently relays
+alice's empty ACK to bob. The missing SDP answer originates at alice, which the
+scenario (`delayed-offer-failure`) deliberately exercises as a misbehaving UAC
+so bob can tear down the call. No B2BUA bug; capture is correct.
 
 ---
 
