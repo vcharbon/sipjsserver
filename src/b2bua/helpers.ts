@@ -2,8 +2,8 @@
  * Shared B2BUA helpers — canonical cleanup effects, b-leg creation for failover.
  */
 
-import type { Call, Leg, TimerEntry } from "../call/CallModel.js"
-import { addBLeg, addCdrEvent, randomInitialCSeq } from "../call/CallModel.js"
+import type { Call, Dialog, Leg, TimerEntry } from "../call/CallModel.js"
+import { addBLeg, addCdrEvent, makeEmptyDialog, randomInitialCSeq } from "../call/CallModel.js"
 import type { SideEffect, OutboundEnvelope } from "../sip/SipRouter.js"
 import type { SipRequest } from "../sip/types.js"
 import type { AppConfigData } from "../config/AppConfig.js"
@@ -147,6 +147,16 @@ export function createBLegFromRoute(
 
   const initialCSeq = randomInitialCSeq()
 
+  // RFC 3261 §12.2.1.1: CSeq is dialog-scoped. Seed a placeholder dialog
+  // (toTag="") on the b-leg carrying the INVITE's CSeq — used for CANCEL
+  // (RFC 3261 §9.1: CANCEL CSeq must equal the INVITE's) and as the seed
+  // for any forked early dialog spawned later from a 1xx response.
+  const placeholderDialog: Dialog = {
+    ...makeEmptyDialog(""),
+    localCSeq: initialCSeq,
+    lastInviteCSeq: initialCSeq,
+  }
+
   // RFC 3261 §12.2.1.1: track local/remote URIs for in-dialog header construction
   // B2BUA is UAC on b-leg: localUri = From URI (Alice's identity), remoteUri = To URI (callee)
   const requestUri = route.new_ruri ?? baseInvite?.uri
@@ -157,9 +167,8 @@ export function createBLegFromRoute(
     source: { address: config.sipLocalIp, port: config.sipLocalPort },
     state: "trying",
     disposition: "pending",
-    dialogs: [],
+    dialogs: [placeholderDialog],
     noAnswerTimeoutSec: route.no_answer_timeout_sec ?? config.noAnswerTimeoutSec,
-    initialCSeq,
     localUri: extractNameAddrUri(stripTag(call.aLegFrom)),
     remoteUri: extractNameAddrUri(stripTag(call.aLegTo)),
     // RFC 3261 §9.1: CANCEL must copy Request-URI from original INVITE

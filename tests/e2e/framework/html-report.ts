@@ -53,6 +53,39 @@ export function writeScenarioReport(
     ? `<span class="badge fail">FAIL</span>`
     : `<span class="badge pass">PASS</span>`
 
+  // Collect failure details (step errors + assertion errors) for the root-cause panel
+  const failureItems: Array<{ stepIndex: number; label: string; reasons: string[] }> = []
+  for (const sr of result.stepResults) {
+    const reasons: string[] = []
+    if (sr.status === "fail" && sr.error) reasons.push(sr.error)
+    if (sr.assertionErrors && sr.assertionErrors.length > 0) {
+      for (const ae of sr.assertionErrors) reasons.push(ae)
+    }
+    if (reasons.length === 0) continue
+    const step = sr.step
+    let label = `step #${sr.stepIndex + 1}`
+    if (step.type === "expect") {
+      const what = step.match.method ?? `${step.match.statusCode}`
+      label += ` — ${step.agent} <- ${what}`
+    } else if (step.type === "send") {
+      const what = step.method ?? `${step.statusCode}`
+      label += ` — ${step.agent} -> ${what}`
+    }
+    failureItems.push({ stepIndex: sr.stepIndex, label, reasons })
+  }
+
+  const failuresHtml = failureItems.length > 0
+    ? `<div class="failures">
+        <div class="failures-header">Failure detail — ${failureItems.length} step${failureItems.length === 1 ? "" : "s"} with root cause</div>
+        <ul class="failures-list">
+          ${failureItems.map((f) => `<li>
+            <div class="failures-step">${escapeHtml(f.label)}</div>
+            ${f.reasons.map((r) => `<pre class="failures-reason">${escapeHtml(r)}</pre>`).join("")}
+          </li>`).join("")}
+        </ul>
+      </div>`
+    : ""
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -162,11 +195,59 @@ export function writeScenarioReport(
       color: #f9fafb;
       border-color: #60a5fa;
     }
+    .failures {
+      background: #fef2f2;
+      border-bottom: 2px solid #dc2626;
+      padding: 12px 20px;
+      max-height: 40vh;
+      overflow-y: auto;
+    }
+    .failures-header {
+      font-size: 13px;
+      font-weight: 700;
+      color: #991b1b;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .failures-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .failures-list li {
+      border-left: 3px solid #dc2626;
+      padding: 6px 10px;
+      background: #ffffff;
+      border-radius: 2px;
+    }
+    .failures-step {
+      font-size: 12px;
+      font-weight: 600;
+      color: #7f1d1d;
+      margin-bottom: 4px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+    .failures-reason {
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #374151;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 2px 0 0 0;
+      padding: 6px 8px;
+      background: #fef2f2;
+      border-radius: 2px;
+    }
   </style>
 </head>
 <body>
   <header>
-    <a href="index.html" class="index-link">&larr; Index</a>
+    <a href="./" class="index-link">&larr; Index</a>
     <h1>${escapeHtml(result.scenarioName)}</h1>
     ${statusBadge}
     <span class="summary">${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped</span>
@@ -175,6 +256,7 @@ export function writeScenarioReport(
       return `<a href="${escapeHtml(f)}" title="${escapeHtml(f)}">${escapeHtml(label)}.txt</a>`
     }).join("")}</div>` : ""}
   </header>
+  ${failuresHtml}
   <div class="main">
     <div class="diagram-panel">
       ${svg}

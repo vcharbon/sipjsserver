@@ -782,9 +782,33 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
 
   if (msg.type === "request") {
     const cseqRaw = msg.headers.find((h) => h.name.toLowerCase() === "cseq")?.value ?? ""
-    const cseqNum = parseInt(cseqRaw.split(/\s+/)[0] ?? "0", 10)
+    const cseqParts = cseqRaw.trim().split(/\s+/)
+    const cseqNum = parseInt(cseqParts[0] ?? "0", 10)
+    const cseqMethod = cseqParts[1] ?? ""
     if (ds.remoteCSeq === undefined || cseqNum > ds.remoteCSeq) {
       ds.remoteCSeq = cseqNum
+    }
+
+    // Capture INVITE baseline per Call-ID (RFC 3261 §12.2.1.1 baseline
+    // for all dialogs — forked early dialogs share this baseline).
+    if (msg.method === "INVITE" && callIdHeader) {
+      if (!ds.inviteCSeqByCallId.has(callIdHeader)) {
+        ds.inviteCSeqByCallId.set(callIdHeader, cseqNum)
+      }
+    }
+
+    // Per-dialog CSeq tracking — skip CANCEL/ACK (they reuse INVITE CSeq)
+    // and messages without a full tag pair (out-of-dialog).
+    if (msg.method !== "CANCEL" && cseqMethod !== "ACK") {
+      const fromTag = /;tag=([^\s;,>]+)/i.exec(fromHeader)?.[1]
+      const toTag = /;tag=([^\s;,>]+)/i.exec(toHeader)?.[1]
+      if (callIdHeader && fromTag && toTag) {
+        const key = `${callIdHeader}|${fromTag}|${toTag}`
+        const prev = ds.remoteCSeqByDialog.get(key)
+        if (prev === undefined || cseqNum > prev) {
+          ds.remoteCSeqByDialog.set(key, cseqNum)
+        }
+      }
     }
   }
 

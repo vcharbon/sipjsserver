@@ -60,6 +60,7 @@ function makeCall(aLeg: Leg, bLeg: Leg): Call {
     aLegVias: ["SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig"],
     aLegFrom: `<sip:alice@example.com>;tag=${aLeg.fromTag}`,
     aLegTo: "<sip:bob@example.com>",
+    aLegInviteCSeq: 1,
     tagMap: [{ aTag: "aFacing123", bLegId: bLeg.legId, bTag: bLeg.dialogs[0]?.toTag ?? "" }],
     limiterEntries: [],
     timers: [],
@@ -155,9 +156,7 @@ describe("ActionExecutor Content-Length correctness", () => {
     const bDialog = makeDialog("bob-remote-tag", 1000)
     const aLeg = makeLeg("a", "call-1", "tagA", aDialog)
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bDialog)
-    // Give aLeg an initialCSeq so response relay can build CSeq
-    const aLegWithCSeq = { ...aLeg, initialCSeq: 1 }
-    const call = makeCall(aLegWithCSeq, bLeg)
+    const call = makeCall(aLeg, bLeg)
 
     const resp183: SipResponse = {
       type: "response",

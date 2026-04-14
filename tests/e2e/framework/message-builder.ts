@@ -37,6 +37,20 @@ export interface AgentDialogState {
   localCSeq: number
   /** Highest CSeq received from the remote party. Undefined until first message received. */
   remoteCSeq: number | undefined
+  /**
+   * Baseline CSeq from the initial INVITE for each Call-ID the agent has
+   * received. All early/confirmed dialogs formed from that INVITE inherit
+   * this baseline — each dialog's first in-dialog UAC request must be
+   * `baseline + 1` (RFC 3261 §12.2.1.1).
+   */
+  inviteCSeqByCallId: Map<string, number>
+  /**
+   * Highest CSeq received per dialog, keyed by `${callId}|${fromTag}|${toTag}`
+   * (as present on the received request). Used to enforce per-dialog strictly
+   * monotonic CSeq across PRACK / re-INVITE / UPDATE / INFO / BYE — each
+   * forked early dialog has its own sequence independent of siblings.
+   */
+  remoteCSeqByDialog: Map<string, number>
   routeSet: string[]
   /** Messages indexed by StepRef id for inResponseTo lookups. */
   messagesByRef: Map<number, SipMessage>
@@ -88,6 +102,8 @@ export function createAgentDialogState(localIp: string): AgentDialogState {
     remoteTag: "",
     localCSeq: 0,
     remoteCSeq: undefined,
+    inviteCSeqByCallId: new Map(),
+    remoteCSeqByDialog: new Map(),
     routeSet: [],
     messagesByRef: new Map(),
     lastMessage: undefined,

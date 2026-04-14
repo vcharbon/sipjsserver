@@ -9,6 +9,9 @@
  *
  * Alice PRACKs each 183 immediately so ctx.last.to carries the correct
  * a-facing tag from the B2BUA (mapped from Bob's fork1/fork2 tags).
+ *
+ * Per-dialog CSeq monotonicity (RFC 3261 §12.2.1.1) is enforced by the
+ * framework's default CSeq validator — no per-test predicate needed.
  */
 
 import { scenario } from "../framework/dsl.js"
@@ -66,7 +69,9 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
     }),
   })
 
-  // Bob receives PRACK — verify it targets fork1 (B2BUA maps a-facing tag back to fork1)
+  // Bob receives PRACK for fork1 — targeting check only; per-dialog CSeq is
+  // enforced automatically by the framework (dialog key = callId|fromTag|fork1
+  // has no prior, so it uses INVITE baseline + 1).
   const rcvPrack1 = bob.expect("PRACK", {
     predicate: (msg: SipMessage) => {
       if (msg.type !== "request") return false
@@ -90,7 +95,7 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
         "Require": "100rel",
         "RSeq": "200",
       },
-      body: sdpAnswer(),
+      body: sdpOffer(),
     },
     build: (ctx) => ({
       to: `<${toUri(ctx.last.to)}>;tag=fork2`,
@@ -103,14 +108,19 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   // Alice sends PRACK for fork2 (uses the a-facing tag from the 183 she just received)
   alice.send("PRACK", {
     overrides: {
+      body: sdpAnswer() ,
       headers: { "RAck": "200 1 INVITE" },
+      cseq: 2
     },
     build: (ctx) => ({
       to: ctx.last.to,
     }),
   })
 
-  // Bob receives PRACK — verify it targets fork2
+  // Bob receives PRACK for fork2 — per-dialog CSeq monotonicity is enforced
+  // by the framework. fork2 is a distinct early dialog from fork1, so its
+  // CSeq sequence starts independently from the shared INVITE baseline; any
+  // leakage of fork1's counter into fork2 is flagged by validateCSeq.
   const rcvPrack2 = bob.expect("PRACK", {
     predicate: (msg: SipMessage) => {
       if (msg.type !== "request") return false
@@ -129,7 +139,6 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
 
   // Bob answers with 200 OK for INVITE (fork1 wins)
   rcvInvite.reply(200, {
-    overrides: { body: sdpAnswer() },
     build: (ctx) => ({
       to: `<${toUri(ctx.last.to)}>;tag=fork1`,
     }),

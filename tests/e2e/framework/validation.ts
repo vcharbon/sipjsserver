@@ -145,12 +145,36 @@ function validateTags(
 }
 
 /**
+ * Build a dialog identity key for the per-dialog CSeq counter.
+ *
+ * RFC 3261 §12.1 identifies a dialog by `(Call-ID, local-tag, remote-tag)`.
+ * For the receiving agent the "local" tag on a received request is the
+ * To-tag and the "remote" tag is the From-tag. Including both tags keeps
+ * forked early dialogs distinct (each fork has its own To-tag).
+ *
+ * Returns undefined when either tag is missing — i.e. out-of-dialog
+ * requests like the initial INVITE or CANCEL — so per-dialog validation
+ * is skipped for those.
+ */
+function dialogKey(msg: SipMessage): string | undefined {
+  const callId = getHeaderValue(msg.headers, "call-id")
+  if (!callId) return undefined
+  const fromTag = extractTag(getHeaderValue(msg.headers, "from") ?? "")
+  const toTag = extractTag(getHeaderValue(msg.headers, "to") ?? "")
+  if (!fromTag || !toTag) return undefined
+  return `${callId}|${fromTag}|${toTag}`
+}
+
+/**
  * CSeq validation.
  *
  * Received requests:
  *   - CANCEL/ACK: CSeq number must match the pending INVITE's CSeq
- *   - Other: CSeq must be remoteCSeq+1 (or any value if remoteCSeq uninitialized)
- *   - CSeq method field must match the request method
+ *   - In-dialog (has both tags): CSeq must be strictly monotonic per dialog
+ *     (first request in dialog = INVITE baseline + 1; subsequent = prev + 1).
+ *     Forked early dialogs each have their own sequence (RFC 3261 §12.2.1.1).
+ *   - Out-of-dialog (no tag pair, e.g. initial INVITE): any value accepted.
+ *   - CSeq method field must match the request method.
  *
  * Received responses:
  *   - CSeq number+method must match the correlated sent request
@@ -191,8 +215,29 @@ function validateCSeq(
         )
       }
     } else {
-      // New request: must be remoteCSeq + 1 (or any if uninitialized)
-      if (dialogState.remoteCSeq !== undefined && cseq.num !== dialogState.remoteCSeq + 1) {
+      const key = dialogKey(msg)
+      if (key !== undefined) {
+        const callId = getHeaderValue(msg.headers, "call-id") ?? ""
+        const prior = dialogState.remoteCSeqByDialog.get(key)
+        const baseline = dialogState.inviteCSeqByCallId.get(callId)
+        const expected = prior !== undefined
+          ? prior + 1
+          : baseline !== undefined
+            ? baseline + 1
+            : undefined
+        if (expected !== undefined && cseq.num !== expected) {
+          const anchor = prior !== undefined
+            ? `prior in-dialog CSeq ${prior}`
+            : `INVITE baseline ${baseline}`
+          errors.push(
+            `Per-dialog CSeq out of sequence for ${msg.method} (dialog ${key}): ` +
+            `expected ${expected} (${anchor} + 1) but got ${cseq.num} — ` +
+            `RFC 3261 §12.2.1.1 (CSeq is scoped to the dialog; forked early dialogs ` +
+            `each maintain an independent sequence).`
+          )
+        }
+      } else if (dialogState.remoteCSeq !== undefined && cseq.num !== dialogState.remoteCSeq + 1) {
+        // Out-of-dialog fallback (no tag pair): retain legacy single-counter check.
         errors.push(
           `CSeq out of sequence: expected ${dialogState.remoteCSeq + 1} but got ${cseq.num}`
         )

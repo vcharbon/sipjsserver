@@ -141,12 +141,16 @@ function buildCancelEnvelope(
   target: { host: string; port: number },
   labelSuffix: string,
 ): OutboundEnvelope {
+  // RFC 3261 §9.1: CANCEL CSeq number equals the INVITE's CSeq.
+  // Stored on the b-leg's placeholder/first dialog (seeded at leg creation
+  // with the INVITE's CSeq — see createBLegFromRoute).
+  const inviteCSeq = leg.dialogs[0]?.lastInviteCSeq ?? leg.dialogs[0]?.localCSeq ?? 1
   return {
     message: buildCancel(
       leg.callId,
       leg.fromTag,
       leg.inviteRequestUri ?? `sip:target@${target.host}:${target.port}`,
-      leg.initialCSeq ?? 1,
+      inviteCSeq,
       leg.localUri,
       leg.remoteUri,
     ),
@@ -441,8 +445,9 @@ function relayRequest(
       // RFC 3261 §13.2.2.4: ACK for 2xx echoes the INVITE's CSeq, regardless
       // of any intermediate in-dialog requests (PRACK, UPDATE) that bumped
       // the dialog's localCSeq between the INVITE and the 2xx. lastInviteCSeq
-      // tracks the most recent INVITE's CSeq (initial or re-INVITE).
-      const ackCSeq = targetDialog.lastInviteCSeq ?? targetLeg.initialCSeq ?? targetDialog.localCSeq
+      // tracks the most recent INVITE's CSeq (initial or re-INVITE) — always
+      // populated at dialog creation (placeholder or forked 1xx).
+      const ackCSeq = targetDialog.lastInviteCSeq ?? targetDialog.localCSeq
       relayed = buildRelayedAck(req, targetLeg.callId, ackFromTag, ackToTag, targetUri, ackCSeq, targetLeg.localUri, targetLeg.remoteUri)
       break
     }
@@ -459,14 +464,13 @@ function relayRequest(
     }
     case "PRACK": {
       // RFC 3262 §7.2: RAck's CSeq must reference the CSeq of the INVITE that
-      // produced the reliable 1xx on this leg (not the a-leg CSeq). Rewrite
-      // the middle token of "<RSeq> <CSeq> <Method>" to the target leg's
-      // initial INVITE CSeq. (targetDialog.localCSeq is unreliable under
-      // forking: bumpLocalCSeq syncs all dialogs to max, so after the first
-      // PRACK it no longer points at the INVITE CSeq.)
+      // produced the reliable 1xx on this leg. Rewrite the middle token of
+      // "<RSeq> <CSeq> <Method>" to the target dialog's INVITE CSeq, tracked
+      // as lastInviteCSeq (seeded at dialog creation from the 1xx's CSeq,
+      // which echoes the INVITE's CSeq).
       const rackIn = getHeader(req.headers, "rack") ?? ""
       const rackParts = rackIn.split(/\s+/)
-      const targetInviteCSeq = targetLeg.initialCSeq ?? targetDialog.localCSeq
+      const targetInviteCSeq = targetDialog.lastInviteCSeq ?? targetDialog.localCSeq
       const rack = rackParts.length >= 3
         ? `${rackParts[0]} ${targetInviteCSeq} ${rackParts.slice(2).join(" ")}`
         : rackIn
@@ -601,26 +605,33 @@ function relayResponseMsg(
     // when the request was relayed to b-leg.
     const aLegCSeq = targetLeg.legId === "a"
       ? cseqMethod === "INVITE"
-        ? `${state.call.aLeg.initialCSeq ?? 1} INVITE`
-        : `${state.call.aLegPendingCSeq ?? state.call.aLeg.initialCSeq ?? 1} ${cseqMethod}`
+        ? `${state.call.aLegInviteCSeq} INVITE`
+        : `${state.call.aLegPendingCSeq ?? state.call.aLegInviteCSeq} ${cseqMethod}`
       : undefined
 
     relayed = relayResponse(resp, targetLeg.callId, viasForRelay, state.call.aLegFrom, toWithTag, aLegCSeq)
 
-    // Track early dialog on source leg for provisional responses
+    // Track early dialog on source leg for provisional responses.
+    // RFC 3261 §12.2.1.1: each forked early dialog maintains its own CSeq
+    // sequence, all starting from the shared INVITE's CSeq (which the
+    // response echoes in its CSeq header).
     if (resp.status >= 100 && resp.status < 200 && toTag && ctx.sourceLeg.legId !== "a") {
       const sourceLeg = ctx.sourceLeg
       if (!sourceLeg.dialogs.some((d) => d.toTag === toTag)) {
         const contact = resp.parsed?.contact?.uri ?? ""
-        const maxCSeq = sourceLeg.dialogs.length > 0
-          ? Math.max(...sourceLeg.dialogs.map((d) => d.localCSeq))
-          : (sourceLeg.initialCSeq ?? randomInitialCSeq())
+        // The response's CSeq number equals the INVITE's CSeq (responses
+        // echo the request's CSeq — RFC 3261 §8.1.3.3). Seed this new
+        // forked dialog independently from any sibling fork's counter.
+        const inviteCSeq = Number.isFinite(cseqNum) ? cseqNum : randomInitialCSeq()
         const dialog = {
-          ...makeEmptyDialog(toTag), contact, localCSeq: maxCSeq,
-          lastInviteCSeq: sourceLeg.initialCSeq,
+          ...makeEmptyDialog(toTag), contact, localCSeq: inviteCSeq,
+          lastInviteCSeq: inviteCSeq,
         }
+        // Drop any empty-toTag placeholder once the first real early
+        // dialog exists so it doesn't shadow dialogs[0] in downstream lookups.
+        const withoutPlaceholder = sourceLeg.dialogs.filter((d) => d.toTag !== "")
         state.call = updateLeg(state.call, sourceLeg.legId, (l) => ({
-          ...l, state: "early" as const, dialogs: [...l.dialogs, dialog],
+          ...l, state: "early" as const, dialogs: [...withoutPlaceholder, dialog],
         }))
       }
     }
@@ -628,7 +639,7 @@ function relayResponseMsg(
     // Ensure a-leg has a dialog when relaying provisional/answer
     if (targetLeg.legId === "a" && state.call.aLeg.dialogs.length === 0 && aFacingToTag) {
       state.call = updateLeg(state.call, "a", (l) => ({
-        ...l, dialogs: [makeDialogFromIncoming(aFacingToTag!, state.call.aLeg.initialCSeq ?? 1)],
+        ...l, dialogs: [makeDialogFromIncoming(aFacingToTag!, state.call.aLegInviteCSeq)],
       }))
     }
 
@@ -728,11 +739,17 @@ function executeConfirmDialog(
   const routeSet = recordRoutes.length > 0 ? [...recordRoutes].reverse() : []
 
   // Update b-leg dialog — confirm existing early dialog or create new one.
-  // On confirmation, localCSeq is the max of the INVITE CSeq and any bumps
-  // already applied during early dialog (e.g. B2BUA-originated PRACK on a
-  // reliable 1xx). ACK for 2xx echoes the INVITE CSeq explicitly, so the
-  // dialog's localCSeq only needs to track the floor for the next request.
-  const baseCSeq = bLeg.initialCSeq ?? randomInitialCSeq()
+  // The placeholder dialog (toTag="") seeded at b-leg creation carries the
+  // INVITE CSeq; any existing fork dialog carries the INVITE CSeq echoed
+  // from its 1xx. ACK for 2xx echoes the INVITE CSeq explicitly via
+  // lastInviteCSeq, so dialog.localCSeq only needs to be a floor for the
+  // next request we originate on this dialog.
+  const placeholder = bLeg.dialogs.find((d) => d.toTag === "")
+  const respCSeqHeader = getHeader(resp.headers, "cseq") ?? ""
+  const respCSeqNum = parseInt(respCSeqHeader, 10)
+  const baseCSeq = Number.isFinite(respCSeqNum) && respCSeqNum > 0
+    ? respCSeqNum
+    : placeholder?.lastInviteCSeq ?? placeholder?.localCSeq ?? randomInitialCSeq()
   const existingDialog = bLeg.dialogs.find((d) => d.toTag === toTag)
   const nextCSeq = existingDialog !== undefined
     ? Math.max(baseCSeq, existingDialog.localCSeq)
@@ -763,7 +780,7 @@ function executeConfirmDialog(
     state.call = updateLeg(state.call, "a", (l) => ({
       ...l,
       state: "confirmed" as const,
-      dialogs: [makeDialogFromIncoming(aFacingTag, state.call.aLeg.initialCSeq ?? 1)],
+      dialogs: [makeDialogFromIncoming(aFacingTag, state.call.aLegInviteCSeq)],
     }))
   } else {
     const existing = state.call.aLeg.dialogs[0]!
@@ -792,7 +809,9 @@ function executeAckLeg(
 
   const target = legTarget(leg)
   const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
-  const ackCSeq = dialog.localCSeq || leg.initialCSeq || 1
+  // RFC 3261 §13.2.2.4: ACK for 2xx echoes the INVITE's CSeq (tracked on
+  // the dialog as lastInviteCSeq).
+  const ackCSeq = dialog.lastInviteCSeq ?? dialog.localCSeq ?? 1
 
   const ackMsg = buildAck(leg.callId, leg.fromTag, dialog.toTag, targetUri, ackCSeq, leg.localUri, leg.remoteUri)
   const routed = leg.legId !== "a" ? applyRouteSet(ackMsg, dialog, target) : { msg: ackMsg, target }

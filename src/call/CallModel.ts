@@ -141,9 +141,6 @@ export const Leg = Schema.Struct({
   /** Multiple during early state (forking); one survives after confirmed */
   dialogs: Schema.Array(Dialog),
   noAnswerTimeoutSec: Schema.optional(Schema.Number),
-  /** CSeq used in the initial outbound INVITE for this leg.
-   *  Dialogs inherit this value so ACK/BYE CSeq stays consistent. */
-  initialCSeq: Schema.optional(Schema.Int),
   /**
    * Tracks how this leg was (or will be) torn down during call termination.
    * Undefined while the call is active. Set when BYE is sent/received or
@@ -371,6 +368,12 @@ export const Call = Schema.Struct({
   aLegFrom: Schema.String,
   /** Original To header value from the a-leg INVITE (for relaying responses). */
   aLegTo: Schema.String,
+  /**
+   * CSeq number of the a-leg INVITE as received from Alice. Echoed on the
+   * final INVITE response back to her (RFC 3261 §8.1.3.3: response CSeq
+   * must equal request CSeq). A single per-call fact, not a dialog counter.
+   */
+  aLegInviteCSeq: Schema.Int,
   /** Maps B-leg remote To-tags to B2BUA-generated tags shown to Alice. */
   tagMap: Schema.Array(TagMapping),
   /** OpenTelemetry trace ID for this call (set at INVITE time). */
@@ -530,22 +533,14 @@ export function findBLegByCallId(call: Call, callId: string): Leg | undefined {
 }
 
 /**
- * Bump the local CSeq of a dialog by a given delta and sync across all dialogs on the same leg.
- * CSeq must be monotonically increasing per Call-ID (RFC 3261 §12.2.1.1),
- * so when multiple early dialogs exist (forking), all must share the same counter.
+ * Bump the local CSeq of a specific dialog by a given delta.
  *
- * When relaying requests, the delta should mirror the calling leg's CSeq increment
- * so both legs stay in sync (e.g. caller goes 1→3 → callee goes N→N+2).
+ * RFC 3261 §12.2.1.1: CSeq is scoped to the dialog, not the Call-ID/leg.
+ * Forked early dialogs each maintain an independent CSeq sequence from
+ * the shared INVITE baseline, so this MUST NOT sync across sibling dialogs.
  */
 export function bumpLocalCSeq(call: Call, legId: string, toTag: string, delta: number = 1): Call {
-  const bumped = updateDialog(call, legId, toTag, (d) => ({ ...d, localCSeq: d.localCSeq + delta }))
-  // Sync: set all dialogs on this leg to the max localCSeq
-  const leg = legId === "a" ? bumped.aLeg : bumped.bLegs.find((l) => l.legId === legId)
-  if (!leg || leg.dialogs.length <= 1) return bumped
-  const maxCSeq = Math.max(...leg.dialogs.map((d) => d.localCSeq))
-  return updateLeg(bumped, legId, (l) => ({
-    ...l, dialogs: l.dialogs.map((d) => d.localCSeq < maxCSeq ? { ...d, localCSeq: maxCSeq } : d)
-  }))
+  return updateDialog(call, legId, toTag, (d) => ({ ...d, localCSeq: d.localCSeq + delta }))
 }
 
 /**

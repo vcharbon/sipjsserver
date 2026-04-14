@@ -668,7 +668,6 @@ export class SipRouter extends ServiceMap.Service<
             disposition: "bridged",
             dialogs: [],
             noAnswerTimeoutSec: undefined,
-            initialCSeq: aLegCSeqNum,
             localUri: extractNameAddrUri(aLegTo),
             remoteUri: extractNameAddrUri(aLegFrom),
           }
@@ -690,6 +689,7 @@ export class SipRouter extends ServiceMap.Service<
             aLegVias,
             aLegFrom,
             aLegTo,
+            aLegInviteCSeq: aLegCSeqNum,
             tagMap: [],
             sampled,
             workerIndex: config.workerIndex >= 0 ? config.workerIndex : undefined,

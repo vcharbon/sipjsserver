@@ -44,6 +44,7 @@ const makeCall = (callId: string, fromTag: string): Call => ({
   aLegVias: [],
   aLegFrom: "",
   aLegTo: "",
+  aLegInviteCSeq: 1,
   tagMap: []
 })
 
