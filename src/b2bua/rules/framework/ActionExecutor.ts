@@ -414,9 +414,13 @@ function relayRequest(
         ? `${rackParts[0]} ${targetDialog.localCSeq} ${rackParts.slice(2).join(" ")}`
         : rackIn
       relayed = buildRelayedPrack(req, targetLeg.callId, targetLeg.fromTag, targetDialog.toTag, targetUri, outboundCSeq, rack, targetLeg.localUri, targetLeg.remoteUri)
-      // Save source leg's Vias for response relay
+      // Save source leg's Vias + CSeq for response relay (RFC 3261 §8.1.3.3: response CSeq must echo request CSeq).
       if (ctx.sourceLeg.legId === "a") {
-        state.call = { ...state.call, aLegPendingVias: getHeaders(req.headers, "via") }
+        state.call = {
+          ...state.call,
+          aLegPendingVias: getHeaders(req.headers, "via"),
+          aLegPendingCSeq: inboundCSeq,
+        }
       }
       break
     }
@@ -524,8 +528,13 @@ function relayResponseMsg(
       ? `${stripTag(state.call.aLegTo)};tag=${aFacingToTag}`
       : undefined
 
+    // Non-INVITE responses to a-leg must echo the inbound a-leg request's CSeq
+    // (RFC 3261 §8.1.3.3). For PRACK/UPDATE/INFO we tracked this as aLegPendingCSeq
+    // when the request was relayed to b-leg.
     const aLegCSeq = targetLeg.legId === "a"
-      ? `${state.call.aLeg.initialCSeq ?? 1} ${cseqMethod}`
+      ? cseqMethod === "INVITE"
+        ? `${state.call.aLeg.initialCSeq ?? 1} INVITE`
+        : `${state.call.aLegPendingCSeq ?? state.call.aLeg.initialCSeq ?? 1} ${cseqMethod}`
       : undefined
 
     relayed = relayResponse(resp, targetLeg.callId, viasForRelay, state.call.aLegFrom, toWithTag, aLegCSeq)
@@ -552,9 +561,9 @@ function relayResponseMsg(
       }))
     }
 
-    // Clear pending Vias after use (PRACK response relay)
-    if (state.call.aLegPendingVias !== undefined) {
-      state.call = { ...state.call, aLegPendingVias: undefined }
+    // Clear pending Vias + CSeq after use (PRACK response relay)
+    if (state.call.aLegPendingVias !== undefined || state.call.aLegPendingCSeq !== undefined) {
+      state.call = { ...state.call, aLegPendingVias: undefined, aLegPendingCSeq: undefined }
     }
   }
 

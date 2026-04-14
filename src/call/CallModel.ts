@@ -358,6 +358,8 @@ export const Call = Schema.Struct({
   aLegVias: Schema.Array(Schema.String),
   /** Via headers from the most recent non-INVITE a-leg request (PRACK, etc.) for response relay. */
   aLegPendingVias: Schema.optional(Schema.Array(Schema.String)),
+  /** CSeq number of the most recent non-INVITE a-leg request (PRACK, etc.) — echoed on the response toward alice (RFC 3261 §8.1.3.3). */
+  aLegPendingCSeq: Schema.optional(Schema.Int),
   /** Original From header value from the a-leg INVITE (for relaying responses). */
   aLegFrom: Schema.String,
   /** Original To header value from the a-leg INVITE (for relaying responses). */

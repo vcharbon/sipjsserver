@@ -28,6 +28,7 @@ export type ValidationCheckName =
   | "recordRoute"
   | "cancelRequestUri"
   | "cancelViaBranch"
+  | "responseCorrelation"
 
 export type ValidationFn = (
   msg: SipMessage,
@@ -50,6 +51,7 @@ export interface ValidationOverrides {
   readonly recordRoute?: ValidationFn
   readonly cancelRequestUri?: ValidationFn
   readonly cancelViaBranch?: ValidationFn
+  readonly responseCorrelation?: ValidationFn
 }
 
 export interface PendingRequest {
@@ -536,6 +538,40 @@ function validateCancelViaBranch(
   return []
 }
 
+/**
+ * Response correlation validation.
+ * RFC 3261 §8.1.3.3 / §17.1.3: A response's CSeq number and method MUST echo
+ * the request that generated it. If we sent at least one request of this method
+ * but no sent request matches this response's CSeq number, the peer is replying
+ * to a phantom request — the 200/PRACK CSeq-not-echoed anomaly.
+ *
+ * Orthogonal to validateCSeq: that check silently passes when correlation fails;
+ * this one errors explicitly so anomalies like C2 in the anomaly report are
+ * reported automatically rather than slipping through.
+ */
+function validateResponseCorrelation(
+  msg: SipMessage,
+  dialogState: AgentDialogState,
+  correlatedRequest: SipMessage | undefined
+): string[] {
+  if (msg.type !== "response") return []
+  if (correlatedRequest !== undefined) return []
+
+  const cseq = parseCSeq(msg.headers)
+  if (!cseq) return []
+
+  // Only flag when we have sent at least one request with the same method.
+  // Otherwise the response may be for a request we never tracked (rare; and
+  // if we never sent that method, the CSeq method mismatch is its own error).
+  const sentSameMethod = dialogState.sentRequests.filter((r) => r.method === cseq.method)
+  if (sentSameMethod.length === 0) return []
+
+  const sentNums = sentSameMethod.map((r) => r.cseqNumber).join(", ")
+  return [
+    `Response CSeq ${cseq.num} ${cseq.method} does not echo any sent ${cseq.method} CSeq [${sentNums}] — RFC 3261 §8.1.3.3`,
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // Default check registry
 // ---------------------------------------------------------------------------
@@ -555,6 +591,7 @@ const defaultChecks: Record<ValidationCheckName, ValidationFn> = {
   recordRoute: validateRecordRoute,
   cancelRequestUri: validateCancelRequestUri,
   cancelViaBranch: validateCancelViaBranch,
+  responseCorrelation: validateResponseCorrelation,
 }
 
 // ---------------------------------------------------------------------------
