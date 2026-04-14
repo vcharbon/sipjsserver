@@ -85,8 +85,16 @@ Downstream sends `Record-Route: <sip:fake-proxy@…;lr>` in 180/200; B2BUA never
 - Hop: `B2BUA → bob` ACK, BYE
 - **Tests:** `record-route-fake-rr`
 
-### H4 · `sdp_version_regression` — RFC 3264 §5, §8
+### H4 · `sdp_version_regression` — RFC 3264 §5, §8 — **FALSE POSITIVE**
 Session version in `o=` goes backward across successive answers (`2 2` → `1 1`) on the same dialog, breaking offer/answer state machine at the peer.
+
+**Reclassified:** the B2BUA relays SDP bodies transparently (it is not an
+SDP-aware media intermediary). The regressed `o=` field originates at
+bob — the test helpers `sdpOffer`/`sdpAnswer` hardcode `o=test 1 1` and
+`o=test 2 2` respectively, so bob's re-INVITE 200 OK (an offer in the
+delayed-offer flow) is sent with `o=test 1 1` after an earlier
+`o=test 2 2`. No B2BUA change required. See M2 for the parallel
+aggregated port-change case.
 
 - Hop: `bob → B2BUA` 200 OK (reINVITE) → relayed `B2BUA → alice`
 - **Tests:** `call-setup+alice-reinvite-fragment`
