@@ -404,14 +404,17 @@ function relayRequest(
       break
     }
     case "PRACK": {
-      // RFC 3262 §7.2: RAck's CSeq must reference the CSeq of the request that
+      // RFC 3262 §7.2: RAck's CSeq must reference the CSeq of the INVITE that
       // produced the reliable 1xx on this leg (not the a-leg CSeq). Rewrite
       // the middle token of "<RSeq> <CSeq> <Method>" to the target leg's
-      // outstanding INVITE CSeq (pre-PRACK-bump = targetDialog.localCSeq).
+      // initial INVITE CSeq. (targetDialog.localCSeq is unreliable under
+      // forking: bumpLocalCSeq syncs all dialogs to max, so after the first
+      // PRACK it no longer points at the INVITE CSeq.)
       const rackIn = getHeader(req.headers, "rack") ?? ""
       const rackParts = rackIn.split(/\s+/)
+      const targetInviteCSeq = targetLeg.initialCSeq ?? targetDialog.localCSeq
       const rack = rackParts.length >= 3
-        ? `${rackParts[0]} ${targetDialog.localCSeq} ${rackParts.slice(2).join(" ")}`
+        ? `${rackParts[0]} ${targetInviteCSeq} ${rackParts.slice(2).join(" ")}`
         : rackIn
       relayed = buildRelayedPrack(req, targetLeg.callId, targetLeg.fromTag, targetDialog.toTag, targetUri, outboundCSeq, rack, targetLeg.localUri, targetLeg.remoteUri)
       // Save source leg's Vias + CSeq for response relay (RFC 3261 §8.1.3.3: response CSeq must echo request CSeq).

@@ -29,6 +29,7 @@ export type ValidationCheckName =
   | "cancelRequestUri"
   | "cancelViaBranch"
   | "responseCorrelation"
+  | "rackCorrelation"
 
 export type ValidationFn = (
   msg: SipMessage,
@@ -52,6 +53,7 @@ export interface ValidationOverrides {
   readonly cancelRequestUri?: ValidationFn
   readonly cancelViaBranch?: ValidationFn
   readonly responseCorrelation?: ValidationFn
+  readonly rackCorrelation?: ValidationFn
 }
 
 export interface PendingRequest {
@@ -539,6 +541,48 @@ function validateCancelViaBranch(
 }
 
 /**
+ * RAck correlation validation (RFC 3262 §7.2).
+ * The CSeq component of an incoming PRACK's RAck header must reference the
+ * CSeq of the request (INVITE or re-INVITE) we sent that produced the
+ * outstanding reliable 1xx. If we never sent a request with that CSeq+method,
+ * the PRACK cannot be matched to any reliable-1xx transaction on our side.
+ */
+function validateRackCorrelation(
+  msg: SipMessage,
+  dialogState: AgentDialogState,
+  _correlatedRequest: SipMessage | undefined
+): string[] {
+  if (msg.type !== "request" || msg.method !== "PRACK") return []
+  const rack = getHeaderValue(msg.headers, "rack")
+  if (!rack) return []
+
+  const parts = rack.trim().split(/\s+/)
+  if (parts.length < 3) return [`Malformed RAck header: "${rack}"`]
+
+  const cseqNum = parseInt(parts[1]!, 10)
+  const method = parts[2]!.toUpperCase()
+  if (!Number.isFinite(cseqNum)) return [`Invalid RAck CSeq number: "${parts[1]}"`]
+
+  // We (the agent) should have received a request of that method with that CSeq
+  // (it's the request WE sent in our role as UAS receiving the INVITE). Check
+  // against our pendingRequests — the INVITE we received lives there.
+  const matched = dialogState.pendingRequests.find(
+    (p) => p.method === method && p.cseqNumber === cseqNum
+  )
+  if (!matched) {
+    const received = dialogState.pendingRequests
+      .filter((p) => p.method === method)
+      .map((p) => p.cseqNumber)
+      .join(", ") || "none"
+    return [
+      `RAck CSeq ${cseqNum} ${method} does not match any received ${method} CSeq [${received}] — RFC 3262 §7.2`,
+    ]
+  }
+
+  return []
+}
+
+/**
  * Response correlation validation.
  * RFC 3261 §8.1.3.3 / §17.1.3: A response's CSeq number and method MUST echo
  * the request that generated it. If we sent at least one request of this method
@@ -592,6 +636,7 @@ const defaultChecks: Record<ValidationCheckName, ValidationFn> = {
   cancelRequestUri: validateCancelRequestUri,
   cancelViaBranch: validateCancelViaBranch,
   responseCorrelation: validateResponseCorrelation,
+  rackCorrelation: validateRackCorrelation,
 }
 
 // ---------------------------------------------------------------------------
