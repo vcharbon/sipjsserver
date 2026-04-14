@@ -153,9 +153,11 @@ const crossingReInviteFragment = scenario("crossing-reinvite-fragment", (s) => {
   // Bob receives Alice's relayed re-INVITE
   const bobReInvUasTxn = bobDialog.expect("INVITE")
 
-  // Bob also sends his own re-INVITE (before responding to Alice's)
+  // Bob also sends his own re-INVITE (before responding to Alice's).
+  // This one loses the glare race and is rejected 491 — no answer expected.
   const bobReInvTxn = bobDialog.send("INVITE", {
     overrides: { body: sdpOffer(undefined, 40000) },
+    skipValidation: ["offerAnswer"],
   })
 
   // Bob receives 100 Trying for his re-INVITE (auto-generated), then 491 (glare)

@@ -31,6 +31,7 @@ export type ValidationCheckName =
   | "responseCorrelation"
   | "rackCorrelation"
   | "tagConsistency"
+  | "offerAnswer"
 
 export type ValidationFn = (
   msg: SipMessage,
@@ -735,6 +736,9 @@ const defaultChecks: Record<ValidationCheckName, ValidationFn> = {
   responseCorrelation: validateResponseCorrelation,
   rackCorrelation: validateRackCorrelation,
   tagConsistency: validateTagConsistency,
+  // offerAnswer is enforced by OfferAnswerTracker in the interpreter, not here;
+  // the entry exists only so skipValidation: ["offerAnswer"] typechecks.
+  offerAnswer: () => [],
 }
 
 // ---------------------------------------------------------------------------

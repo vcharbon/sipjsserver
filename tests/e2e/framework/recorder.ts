@@ -32,6 +32,7 @@ export interface SendOpts {
   readonly overrides?: HeaderOverrides
   readonly build?: (ctx: MessageContext) => HeaderOverrides
   readonly body?: Uint8Array
+  readonly skipValidation?: ValidationCheckName[]
 }
 
 export interface ExpectOpts {
@@ -48,6 +49,7 @@ export interface ReplyOpts {
   readonly overrides?: HeaderOverrides
   readonly build?: (ctx: MessageContext) => HeaderOverrides
   readonly body?: Uint8Array
+  readonly skipValidation?: ValidationCheckName[]
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +68,18 @@ export interface UacInviteTransaction {
 export interface UasInviteTransaction {
   /** Send a provisional or final response to the received INVITE. */
   reply(statusCode: number, opts?: ReplyOpts): StepRef
+  /**
+   * Expect a CANCEL for this INVITE (RFC 3261 §9). The CANCEL travels in a
+   * separate client transaction but is tied to this INVITE server transaction
+   * (same branch). Returns a UAS transaction so the callee can reply 200 OK.
+   */
+  expectCancel(opts?: ExpectOpts): UasTransaction
+  /**
+   * Expect the auto-ACK that the INVITE client (here the B2BUA) sends after
+   * a non-2xx final response on this INVITE's transaction (RFC 3261 §17.1.1.3).
+   * No reply is expected — the ACK completes the INVITE server transaction.
+   */
+  expectAck(opts?: ExpectOpts): ExpectRef
 }
 
 /** Generic UAC transaction (for BYE, PRACK, re-INVITE, CANCEL, etc.). */
@@ -120,6 +134,7 @@ export interface AgentProxy {
       headers?: Record<string, string>
       body?: Uint8Array
       build?: (ctx: MessageContext) => HeaderOverrides
+      skipValidation?: ValidationCheckName[]
     }
   ): InviteResult
 
@@ -129,29 +144,28 @@ export interface AgentProxy {
   /** Access the current dialog (for composed sequences via andThen). */
   readonly dialog: DialogRef
 
-  // --- Low-level escape hatch (for stranger, forking, out-of-dialog) ---
-
-  send(
-    methodOrStatusCode: string | number,
-    opts?: {
-      inResponseTo?: StepRef
-      uri?: string
-      reason?: string
-      delay?: number
-      overrides?: HeaderOverrides
-      build?: (ctx: MessageContext) => HeaderOverrides
-      body?: Uint8Array
-    }
-  ): StepRef
-  expect(
-    methodOrStatusCode: string | number,
-    opts?: ExpectOpts
-  ): ExpectRef
-
   /** Pre-register a message type as allowed without requiring a prior match.
    *  Messages matching this pattern are silently ignored during expect steps and drain. */
   allowExtra(methodOrStatusCode: string | number): void
 }
+
+// ---------------------------------------------------------------------------
+// Internal step-emitter signatures (used by dialog / transaction wrappers)
+// ---------------------------------------------------------------------------
+
+interface InternalSendOpts {
+  readonly inResponseTo?: StepRef
+  readonly uri?: string
+  readonly reason?: string
+  readonly delay?: number
+  readonly overrides?: HeaderOverrides
+  readonly build?: (ctx: MessageContext) => HeaderOverrides
+  readonly body?: Uint8Array
+  readonly skipValidation?: ValidationCheckName[]
+}
+
+type InternalSend = (methodOrStatusCode: string | number, opts?: InternalSendOpts) => StepRef
+type InternalExpect = (methodOrStatusCode: string | number, opts?: ExpectOpts) => ExpectRef
 
 // ---------------------------------------------------------------------------
 // Scenario context (the `s` parameter in scenario builders)
@@ -187,7 +201,7 @@ export function record(
   function makeAgentProxy(agentName: string): AgentProxy {
     // --- Core step emitters (low-level) ---
 
-    const send: AgentProxy["send"] = (methodOrStatusCode, opts) => {
+    const send: InternalSend = (methodOrStatusCode, opts) => {
       const ref = makeStepRef()
       const isResponse = typeof methodOrStatusCode === "number"
 
@@ -203,14 +217,19 @@ export function record(
         uri: opts?.uri,
         inResponseTo: opts?.inResponseTo,
         delay: opts?.delay,
-        overrides: opts?.overrides ?? (opts?.body ? { body: opts.body } : undefined),
+        overrides: opts?.overrides
+          ? (opts.body && opts.overrides.body === undefined
+              ? { ...opts.overrides, body: opts.body }
+              : opts.overrides)
+          : (opts?.body ? { body: opts.body } : undefined),
         build: opts?.build,
+        skipValidation: opts?.skipValidation,
       }) as SendStep
       steps.push(step)
       return ref
     }
 
-    const expect: AgentProxy["expect"] = (methodOrStatusCode, opts) => {
+    const expect: InternalExpect = (methodOrStatusCode, opts) => {
       const ref = makeStepRef()
       const isResponse = typeof methodOrStatusCode === "number"
 
@@ -233,13 +252,16 @@ export function record(
       const expectRef: ExpectRef = {
         ...ref,
         reply(statusCode, replyOpts) {
-          const sendOpts: Parameters<AgentProxy["send"]>[1] & { inResponseTo: StepRef } = { inResponseTo: ref }
+          const sendOpts: Record<string, unknown> = { inResponseTo: ref }
           if (replyOpts?.reason !== undefined) sendOpts.reason = replyOpts.reason
           if (replyOpts?.delay !== undefined) sendOpts.delay = replyOpts.delay
           if (replyOpts?.build !== undefined) sendOpts.build = replyOpts.build
           if (replyOpts?.overrides !== undefined) sendOpts.overrides = replyOpts.overrides
-          else if (replyOpts?.body !== undefined) sendOpts.body = replyOpts.body
-          return send(statusCode, sendOpts)
+          if (replyOpts?.body !== undefined) sendOpts.body = replyOpts.body
+          if ((replyOpts as ReplyOpts | undefined)?.skipValidation !== undefined) {
+            sendOpts.skipValidation = (replyOpts as ReplyOpts).skipValidation
+          }
+          return send(statusCode, sendOpts as InternalSendOpts)
         },
       }
       return expectRef
@@ -256,15 +278,16 @@ export function record(
 
     // --- Factory helpers for dialog/transaction wrappers ---
 
-    function sendMethodToOpts(method: string, opts?: SendOpts): Parameters<AgentProxy["send"]>[1] {
+    function sendMethodToOpts(_method: string, opts?: SendOpts): InternalSendOpts {
       if (!opts) return {}
       const sendOpts: Record<string, unknown> = {}
       if (opts.uri !== undefined) sendOpts.uri = opts.uri
       if (opts.delay !== undefined) sendOpts.delay = opts.delay
       if (opts.build !== undefined) sendOpts.build = opts.build
       if (opts.overrides !== undefined) sendOpts.overrides = opts.overrides
-      else if (opts.body !== undefined) sendOpts.body = opts.body
-      return sendOpts as Parameters<AgentProxy["send"]>[1]
+      if (opts.body !== undefined) sendOpts.body = opts.body
+      if (opts.skipValidation !== undefined) sendOpts.skipValidation = opts.skipValidation
+      return sendOpts as InternalSendOpts
     }
 
     function makeUacTransaction(): UacTransaction {
@@ -312,7 +335,8 @@ export function record(
       if (opts?.headers) sendOpts.overrides = { headers: opts.headers }
       if (opts?.body) sendOpts.body = opts.body
       if (opts?.build) sendOpts.build = opts.build
-      send("INVITE", sendOpts as Parameters<AgentProxy["send"]>[1])
+      if (opts?.skipValidation) sendOpts.skipValidation = opts.skipValidation
+      send("INVITE", sendOpts as InternalSendOpts)
       return {
         dialog: makeDialogRef(),
         transaction: makeUacInviteTransaction(),
@@ -325,6 +349,13 @@ export function record(
         dialog: makeDialogRef(),
         transaction: {
           reply: (statusCode, replyOpts) => expRef.reply(statusCode, replyOpts),
+          expectCancel: (cancelOpts) => {
+            const cancelExp = expect("CANCEL", cancelOpts)
+            return {
+              reply: (statusCode, replyOpts) => cancelExp.reply(statusCode, replyOpts),
+            }
+          },
+          expectAck: (ackOpts) => expect("ACK", ackOpts),
         },
       }
     }
@@ -334,8 +365,6 @@ export function record(
       invite,
       receiveInitialInvite,
       get dialog() { return makeDialogRef() },
-      send,
-      expect,
       allowExtra,
     }
   }

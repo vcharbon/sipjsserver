@@ -18,10 +18,11 @@ export const cancelCall = scenario("cancel", (s) => {
   // Bob will receive ACK for the 487 (RFC 3261 §17.1.1.3 — auto-ACK for non-2xx)
   bob.allowExtra("ACK")
 
-  // Alice sends INVITE
+  // Alice sends INVITE. The call is cancelled before any 2xx — no answer expected.
   const { transaction: aliceInviteTxn } = alice.invite("sip:+1234@127.0.0.1:15060", {
     // MockCallControlServer routes to 127.0.0.1:5666 (bob's port)
     body: sdpOffer(),
+    skipValidation: ["offerAnswer"],
   })
 
   // Alice receives 100 Trying
@@ -45,11 +46,11 @@ export const cancelCall = scenario("cancel", (s) => {
   // Alice receives 487 Request Terminated for the INVITE
   aliceInviteTxn.expect(487)
 
-  // Bob receives CANCEL from B2BUA
-  const rcvCancel = bob.expect("CANCEL")
+  // Bob receives CANCEL from B2BUA (tied to the INVITE server transaction)
+  const bobCancelTxn = bobInviteTxn.expectCancel()
 
   // Bob sends 200 OK for CANCEL
-  rcvCancel.reply(200)
+  bobCancelTxn.reply(200)
 
   // Bob sends 487 for the original INVITE
   bobInviteTxn.reply(487)

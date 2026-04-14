@@ -12,9 +12,11 @@ export const callReject = scenario("call-reject", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })
   // No bob agent needed — the call is rejected before reaching a B-leg
 
-  // Alice sends INVITE to a +403 number (triggers reject in MockCallControlServer)
+  // Alice sends INVITE to a +403 number (triggers reject in MockCallControlServer).
+  // Call is rejected with 403 before any answer — offer is never answered by design.
   const { transaction: aliceInviteTxn } = alice.invite("sip:+4031234@127.0.0.1:15060", {
     body: sdpOffer(),
+    skipValidation: ["offerAnswer"],
   })
 
   // Alice receives 100 Trying

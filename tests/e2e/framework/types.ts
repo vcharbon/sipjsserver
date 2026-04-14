@@ -127,6 +127,8 @@ export interface SendStep {
   readonly overrides?: HeaderOverrides
   readonly build?: (ctx: MessageContext) => HeaderOverrides
   readonly ref: StepRef
+  /** Skip specific validation checks for this send step. */
+  readonly skipValidation?: readonly ValidationCheckName[]
   /** Parallel group index (set by parallel() composition). */
   readonly group?: number
 }

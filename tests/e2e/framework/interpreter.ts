@@ -25,6 +25,7 @@ import type {
   TraceEntry,
   TraceStatus,
 } from "./types.js"
+import { setCurrentScenario } from "./rule-usage-collector.js"
 import {
   buildMessageContext,
   buildRequest,
@@ -40,6 +41,7 @@ import {
   autoResolveInResponseTo,
   type ValidationCheckName,
 } from "./validation.js"
+import { OfferAnswerTracker } from "./offer-answer-tracker.js"
 
 // ---------------------------------------------------------------------------
 // Interpreter state
@@ -63,6 +65,8 @@ interface InterpreterState {
   readonly unexpectedMessages: Array<{ agent: string; msg: SipMessage }>
   /** Patterns marked allowedReemission — matching messages are silently ignored in the unexpected check. */
   readonly allowedReemission: Array<{ agent: string; method?: string | undefined; statusCode?: number | undefined }>
+  /** RFC 3264 offer/answer correlation tracker shared across agents. */
+  readonly offerAnswer: OfferAnswerTracker
   callNumber: number
 }
 
@@ -105,6 +109,8 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
   targetFor?: (agent: string) => { host: string; port: number },
   clockSleep?: (ms: number) => Effect.Effect<void>
 ) {
+  // Attribute rule firings happening during this scenario to scenario.name.
+  yield* Effect.sync(() => setCurrentScenario(scenario.name))
   const resolveTarget = targetFor ?? (() => b2buaTarget)
   const sleepMs = clockSleep ?? ((ms: number) => Effect.sleep(`${ms} millis`))
   // --- Setup transport and get agent infos (Scoped: cleanup is automatic) ---
@@ -149,6 +155,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     sutNames,
     unexpectedMessages: [],
     allowedReemission: [...(scenario.allowedExtras ?? [])],
+    offerAnswer: new OfferAnswerTracker(),
     callNumber: 0,
   }
 
@@ -197,6 +204,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
   }
   yield* checkUnexpectedMessages(state, transport)
   yield* checkDanglingReliableProvisionals(state)
+  yield* checkDanglingOffers(state)
 
   // --- Verify internal state is clean (no leaked calls/timers) ---
   if (transport.verifyCleanState) {
@@ -377,6 +385,10 @@ function executeSend(
     // promote them to defects.
     yield* Effect.orDie(transport.send(step.agent, buf, tgt.port, tgt.host))
 
+    // Track SDP offer/answer on outbound messages (RFC 3264 §5).
+    const outboundOaSkip = (step.skipValidation ?? []).includes("offerAnswer")
+    const outboundOaErrors = state.offerAnswer.observe(msg, step.agent, index, outboundOaSkip)
+
     // Record the sent message
     state.resolvedMessages.set(step.ref.id, msg)
     dialogState.lastMessage = msg
@@ -453,6 +465,7 @@ function executeSend(
     }
 
     const durationMs = Date.now() - startTime
+    const sendStatus: StepStatus = outboundOaErrors.length > 0 ? "fail" : "pass"
 
     // Trace: agent → SUT
     state.trace.push(defined({
@@ -461,17 +474,27 @@ function executeSend(
       to: state.sutNames[step.agent] ?? "B2BUA",
       direction: "send" as const,
       stepIndex: index,
-      status: "pass" as TraceStatus,
+      status: sendStatus as TraceStatus,
       message: msg,
       durationMs,
     }) as TraceEntry)
 
-    state.results.push(makeStepResult({
-      stepIndex: index,
-      step,
-      status: "pass",
-      durationMs,
-    }))
+    if (sendStatus === "fail") {
+      state.results.push(makeStepResult({
+        stepIndex: index,
+        step,
+        status: "fail",
+        durationMs,
+        assertionErrors: outboundOaErrors,
+      }))
+    } else {
+      state.results.push(makeStepResult({
+        stepIndex: index,
+        step,
+        status: "pass",
+        durationMs,
+      }))
+    }
   })
 }
 
@@ -618,6 +641,22 @@ function executeExpect(
     // Run all enabled validation checks
     const skipSet = new Set<ValidationCheckName>(step.skipValidation ?? [])
     runValidationChecks(matched, dialogState, correlatedRequest, skipSet, step.validation, assertionErrors)
+
+    // Track the connected-dialog flag from incoming 2xx-to-INVITE even though
+    // we do not classify SDP on the inbound side — the flag gates the
+    // "early-dialog answer" exception. Offer/answer matching itself is driven
+    // off outbound observations only (see executeSend).
+    if (
+      matched.type === "response" &&
+      matched.status >= 200 && matched.status < 300
+    ) {
+      const cseqRaw = matched.headers.find((h) => h.name.toLowerCase() === "cseq")?.value ?? ""
+      const cseqMethod = (cseqRaw.trim().split(/\s+/)[1] ?? "").toUpperCase()
+      const callId = matched.headers.find((h) => h.name.toLowerCase() === "call-id")?.value ?? ""
+      if (cseqMethod === "INVITE" && callId) {
+        state.offerAnswer.markConnected(callId)
+      }
+    }
 
     // Update dialog state from received message
     updateDialogState(dialogState, matched)
@@ -878,6 +917,50 @@ function buildParticipantList(state: InterpreterState): string[] {
  * by scenario end, the peer (typically the B2BUA) failed to ack — flag each
  * dangling entry as a failure so regressions on H5 are caught automatically.
  */
+/**
+ * RFC 3264 §5: every SDP offer must be answered. If a scenario ends with open
+ * pending offers on any Call-ID, the exchange was never completed — flag each
+ * as a failure so regressions in offer/answer modeling are caught automatically.
+ */
+function checkDanglingOffers(state: InterpreterState): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const clockTs = yield* Clock.currentTimeMillis
+    for (const pending of state.offerAnswer.danglingOffers()) {
+      const stepIndex = state.results.length
+      state.results.push(makeStepResult({
+        stepIndex,
+        step: {
+          type: "expect",
+          agent: pending.party,
+          match: {},
+          ref: { _tag: "StepRef", id: -4 },
+        },
+        status: "fail",
+        error:
+          `SDP offer from ${pending.party} (callId=${pending.callId}, ` +
+          `CSeq=${pending.cseqNum} ${pending.cseqMethod}, port=${pending.port}, nonce="${pending.nonce}") ` +
+          `was never answered — RFC 3264 §5`,
+      }))
+      state.trace.push({
+        timestamp: clockTs,
+        from: state.sutNames[pending.party] ?? "B2BUA",
+        to: pending.party,
+        direction: "receive",
+        stepIndex,
+        status: "unexpected",
+        message: {
+          type: "request",
+          method: "SDP-ANSWER",
+          uri: "",
+          version: "SIP/2.0",
+          headers: [],
+          body: new Uint8Array(),
+        },
+      })
+    }
+  })
+}
+
 function checkDanglingReliableProvisionals(state: InterpreterState): Effect.Effect<void> {
   return Effect.gen(function* () {
     const clockTs = yield* Clock.currentTimeMillis

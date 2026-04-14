@@ -35,8 +35,10 @@ export const delayedOfferFailure = scenario("delayed-offer-failure", (s) => {
     predicate: (msg) => msg.type === "request" && msg.body.length === 0,
   })
 
-  // Bob sends 200 OK WITH SDP offer (offerer in delayed-offer model)
-  bobInviteTxn.reply(200, { body: sdpOffer() })
+  // Bob sends 200 OK WITH SDP offer (offerer in delayed-offer model).
+  // Alice will deliberately ACK without answer — the tracker must not flag
+  // this missing-answer on Bob's offer since that IS the scenario.
+  bobInviteTxn.reply(200, { body: sdpOffer(), skipValidation: ["offerAnswer"] })
 
   // Alice receives 200 OK with SDP
   aliceInviteTxn.expect(200)

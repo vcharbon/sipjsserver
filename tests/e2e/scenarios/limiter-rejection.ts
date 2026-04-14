@@ -34,10 +34,13 @@ const acceptedCall = scenario("accepted-call", (s) => {
   const alice1 = s.agent("alice1", { uri: "sip:alice1@test" })
   const bob1 = s.agent("bob1", { uri: "sip:bob1@test", port: 5666 })
 
-  // alice1 sends INVITE with limiter instruction
+  // alice1 sends INVITE with limiter instruction.
+  // Parallel scenarios share the offer-answer tracker; skip SDP correlation here
+  // since the test is about limiter slots, not SDP semantics.
   const { dialog: alice1Dialog, transaction: alice1InviteTxn } = alice1.invite("sip:+1234@127.0.0.1:15060", {
     body: sdpOffer(),
     headers: { "X-Api-Call": limiterInstruction },
+    skipValidation: ["offerAnswer"],
   })
 
   // 100 Trying
@@ -79,10 +82,12 @@ const rejectedCall = scenario("rejected-call", (s) => {
   // Wait for call A to establish
   s.pause(1000)
 
-  // alice2 sends INVITE with same limiter instruction
+  // alice2 sends INVITE with same limiter instruction.
+  // Rejected with 486 — offer never answered by design.
   const { dialog: alice2Dialog, transaction: alice2InviteTxn } = alice2.invite("sip:+1234@127.0.0.1:15060", {
     body: sdpOffer(),
     headers: { "X-Api-Call": limiterInstruction },
+    skipValidation: ["offerAnswer"],
   })
 
   // 100 Trying
@@ -112,10 +117,13 @@ const postHangupCall = scenario("post-hangup-call", (s) => {
   // Wait for alice1 to hang up (3s hold + BYE exchange + margin)
   s.pause(5000)
 
-  // alice3 sends INVITE with limiter instruction routing to bob3's port
+  // alice3 sends INVITE with limiter instruction routing to bob3's port.
+  // Parallel scenarios share the tracker; blind answer matching across parallel
+  // calls is ambiguous, so skip SDP correlation here.
   const { dialog: alice3Dialog, transaction: alice3InviteTxn } = alice3.invite("sip:+1234@127.0.0.1:15060", {
     body: sdpOffer(),
     headers: { "X-Api-Call": limiterInstruction3 },
+    skipValidation: ["offerAnswer"],
   })
 
   // 100 Trying

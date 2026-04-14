@@ -38,6 +38,7 @@ const earlyDialogCancel = scenario("early-dialog-cancel", (s) => {
   const { transaction: alice1InviteTxn } = alice1.invite("sip:+1234@127.0.0.1:15060", {
     body: sdpOffer(),
     headers: { "X-Api-Call": limiterInstruction },
+    skipValidation: ["offerAnswer"],
   })
 
   // 100 Trying
@@ -62,11 +63,11 @@ const earlyDialogCancel = scenario("early-dialog-cancel", (s) => {
   // alice1 receives 487 Request Terminated for INVITE
   alice1InviteTxn.expect(487)
 
-  // bob1 receives CANCEL from B2BUA
-  const rcvCancel = bob1.expect("CANCEL")
+  // bob1 receives CANCEL from B2BUA (tied to the INVITE server transaction)
+  const bob1CancelTxn = bob1InviteTxn.expectCancel()
 
   // bob1 sends 200 OK for CANCEL
-  rcvCancel.reply(200)
+  bob1CancelTxn.reply(200)
 
   // bob1 sends 487 for the original INVITE
   bob1InviteTxn.reply(487)
@@ -86,6 +87,7 @@ const rejectedCall = scenario("rejected-call-cancel", (s) => {
   const { dialog: alice2Dialog, transaction: alice2InviteTxn } = alice2.invite("sip:+1234@127.0.0.1:15060", {
     body: sdpOffer(),
     headers: { "X-Api-Call": limiterInstruction },
+    skipValidation: ["offerAnswer"],
   })
 
   // 100 Trying
