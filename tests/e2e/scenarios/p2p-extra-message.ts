@@ -25,8 +25,8 @@ export const p2pExtraMessage = scenario("p2p-extra-message", (s) => {
   aliceDialog.ack()
   bobDialog.expect("ACK")
 
-  // Bob now sends an extra, unsolicited INFO that alice never expects.
+  // Bob now sends an extra, unsolicited in-dialog INFO that alice never expects.
   // The interpreter's drain phase should pick this up at alice and flag
   // it as an unexpected message — causing the scenario to fail.
-  bob.send("INFO")
+  bobDialog.send("INFO")
 })

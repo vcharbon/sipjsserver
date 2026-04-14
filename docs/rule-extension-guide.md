@@ -2,6 +2,8 @@
 
 How to add new HTTP-piloted custom rules to the B2BUA rule framework.
 
+> **Before shipping a new rule**, confirm it is covered — or prove that it is meaningfully tested. See [rule-coverage-and-killing.md](./rule-coverage-and-killing.md): the e2e HTML index flags never-fired rules automatically, and `npm run test:rule-kill` verifies that removing the rule causes at least one scenario to fail.
+
 ## Architecture Overview
 
 The rule system has two categories:

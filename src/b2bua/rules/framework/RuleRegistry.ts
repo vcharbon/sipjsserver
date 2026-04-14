@@ -70,3 +70,60 @@ export function createRuleRegistry(
 
   return { definitions: map }
 }
+
+// ---------------------------------------------------------------------------
+// Registry transforms
+// ---------------------------------------------------------------------------
+
+/**
+ * Composable wrappers over a registry's rule definitions. Used by the e2e
+ * harness for coverage tracking (wrapHandle) and by the rule-kill script
+ * for mutation testing (wrapMatches). Production code does not transform
+ * the registry.
+ */
+export interface RegistryTransform {
+  readonly wrapMatches?: (
+    rule: AnyRuleDefinition,
+    original: AnyRuleDefinition["matches"],
+  ) => AnyRuleDefinition["matches"]
+  readonly wrapHandle?: (
+    rule: AnyRuleDefinition,
+    original: AnyRuleDefinition["handle"],
+  ) => AnyRuleDefinition["handle"]
+}
+
+/**
+ * Return a new registry with each rule's matches/handle optionally wrapped.
+ * The input registry is not mutated. Duplicate-id validation is not re-run
+ * (input was already validated by createRuleRegistry).
+ */
+export function transformRegistry(
+  registry: RuleRegistry,
+  transform: RegistryTransform,
+): RuleRegistry {
+  const map = new Map<string, AnyRuleDefinition>()
+  for (const [id, rule] of registry.definitions) {
+    let wrapped = rule
+    if (transform.wrapMatches !== undefined) {
+      wrapped = { ...wrapped, matches: transform.wrapMatches(rule, rule.matches) }
+    }
+    if (transform.wrapHandle !== undefined) {
+      wrapped = { ...wrapped, handle: transform.wrapHandle(rule, rule.handle) }
+    }
+    map.set(id, wrapped)
+  }
+  return { definitions: map }
+}
+
+/**
+ * Return a new registry where the named rule's `matches()` is forced to
+ * always return false — i.e. the rule is disabled for the whole run.
+ * Used by the rule-kill mutation harness. If the id is not registered,
+ * the registry is returned unchanged.
+ */
+export function disableRule(registry: RuleRegistry, ruleId: string): RuleRegistry {
+  if (!registry.definitions.has(ruleId)) return registry
+  return transformRegistry(registry, {
+    wrapMatches: (rule, original) => rule.id === ruleId ? () => false : original,
+  })
+}

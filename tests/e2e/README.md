@@ -24,7 +24,7 @@ The scenario function does not execute SIP. It runs in **record mode**, producin
 1. **Record** -- the DSL function appends `send`, `expect`, `pause` steps to a list
 2. **Prepare** -- the interpreter scans all `expect` steps and pre-registers listeners (so receives are ready before sends)
 3. **Execute** -- steps are walked in order; sends build and transmit SIP messages, expects poll the transport with a timeout
-4. **Report** -- results are aggregated per step (pass / fail / skip) with timing
+4. **Report** -- results are aggregated per step (pass / fail / skip) with timing. The simulated-backend run also emits a **rule coverage** section in `test-results/fake-clock/index.html`; see [../../docs/rule-coverage-and-killing.md](../../docs/rule-coverage-and-killing.md) for coverage + opt-in rule-kill (mutation) workflow.
 
 > **Agent ordering**: Because expects are pre-registered in the Prepare phase,
 > the relative ordering of a `send` on one agent and an `expect` on another
@@ -108,17 +108,22 @@ export const myScenario = scenario("my-scenario", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })
   const bob   = s.agent("bob",   { uri: "sip:bob@test", port: 5666 })
 
-  alice.invite("sip:+1234@127.0.0.1:15060", { body: sdpOffer() })
-  alice.expect(100)
+  // Alice sends INVITE — returns a dialog handle and a UAC INVITE transaction.
+  const { dialog: aliceDialog, transaction: aliceInviteTxn } =
+    alice.invite("sip:+1234@127.0.0.1:15060", { body: sdpOffer() })
+  aliceInviteTxn.expect(100)
 
-  const rcvInvite = bob.expect("INVITE")
-  bob.send(180, { inResponseTo: rcvInvite })
-  alice.expect(180)
+  // Bob receives INVITE — returns a dialog handle and a UAS INVITE transaction.
+  const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite()
 
-  bob.send(200, { inResponseTo: rcvInvite, overrides: { body: sdpAnswer() } })
-  alice.expect(200)
-  alice.ack()
-  bob.expect("ACK")
+  bobInviteTxn.reply(180)
+  aliceInviteTxn.expect(180)
+
+  bobInviteTxn.reply(200, { body: sdpAnswer() })
+  aliceInviteTxn.expect(200)
+
+  aliceDialog.ack()
+  bobDialog.expect("ACK")
 })
 ```
 
@@ -146,16 +151,16 @@ Three layers of overrides, applied in order:
 3. **`build(ctx)` callback** -- dynamic computation from dialog state
 
 ```typescript
-// Declarative: set a custom CSeq
-bob.send(200, { inResponseTo: rcvInvite, overrides: { cseq: 55 } })
+// Declarative: set a custom CSeq on a reply
+bobInviteTxn.reply(200, { overrides: { cseq: 55 } })
 
-// Declarative: add custom headers
-alice.invite("sip:+1234@b2bua", {
+// Declarative: add custom headers on the initial INVITE
+const { transaction: aliceInviteTxn } = alice.invite("sip:+1234@b2bua", {
   headers: { "X-Custom": "value", "Supported": "100rel" },
 })
 
 // Dynamic: compute from context (marks scenario as non-SIPp-exportable)
-alice.send("BYE", {
+aliceDialog.bye({
   build: (ctx) => ({
     to: `sip:${ctx.agent("bob").uri}@${ctx.remote.ip}:${ctx.remote.port}`,
     cseq: ctx.dialog.localCSeq + 10,
@@ -184,29 +189,48 @@ alice.send("BYE", {
 | `ctx.call.branch()` | `[branch]` | Generate a fresh branch |
 | `ctx.agent("bob")` | -- | Resolve another agent's info (rename-aware) |
 
-### Agent shorthand methods
+### Dialog & transaction methods
 
-| Method | Equivalent |
-|--------|-----------|
-| `alice.invite(uri, opts)` | `alice.send("INVITE", { uri, ...opts })` |
-| `alice.ack(opts)` | `alice.send("ACK", opts)` |
-| `alice.bye(opts)` | `alice.send("BYE", opts)` |
-| `alice.cancel(opts)` | `alice.send("CANCEL", opts)` |
+Initial INVITE returns both a dialog handle and a UAC INVITE transaction:
+
+```typescript
+const { dialog, transaction } = alice.invite(uri, opts)
+```
+
+Incoming INVITE returns both a dialog handle and a UAS INVITE transaction:
+
+```typescript
+const { dialog, transaction } = bob.receiveInitialInvite(opts)
+```
+
+| Call | What it does |
+|------|-------------|
+| `transaction.expect(statusCode, opts)` | Expect a provisional / final response on the UAC INVITE transaction |
+| `transaction.cancel(opts)` | Send CANCEL, returns its own UAC transaction |
+| `transaction.reply(statusCode, opts)` | Send a provisional / final response from the UAS side |
+| `transaction.expectCancel(opts)` | UAS side: expect CANCEL for this INVITE (RFC 3261 §9); returns a UAS transaction for the 200 OK reply |
+| `transaction.expectAck(opts)` | UAS side: expect the auto-ACK for a non-2xx final (RFC 3261 §17.1.1.3) — completes the INVITE transaction, no reply |
+| `dialog.ack(opts)` | Send ACK for 2xx |
+| `dialog.bye(opts)` | Send BYE, returns its UAC transaction |
+| `dialog.send(method, opts)` | Send any in-dialog request (re-INVITE, PRACK, INFO, OPTIONS…). For a stranger/out-of-dialog agent this also works: fresh Call-ID and From-tag are generated, and an override `to: "<...>;tag=bogus"` forges the dialog identifier |
+| `dialog.expect(method, opts)` | Expect an in-dialog request; returns a UAS transaction for the reply |
+
+The dialog and transaction handles are the only way to emit or receive SIP traffic for an agent. `agent.allowExtra(...)` is the one agent-level method that remains, for pre-registering tolerated stray messages (e.g., auto-ACK for non-2xx under TestClock) without requiring a matching expect.
 
 ### Expecting messages
 
 ```typescript
-// Expect by method
-const rcvInvite = bob.expect("INVITE")
+// Expect a response on a UAC transaction
+aliceInviteTxn.expect(200)
 
-// Expect by status code
-alice.expect(200)
+// Expect an in-dialog request via the dialog
+const bobByeTxn = bobDialog.expect("BYE")
 
 // With custom timeout
-alice.expect(180, { timeout: 10_000 })
+aliceInviteTxn.expect(180, { timeout: 10_000 })
 
 // With assertion predicate (collected, not thrown)
-alice.expect(183, {
+aliceInviteTxn.expect(183, {
   predicate: (msg) => {
     const require = msg.headers.find(h => h.name.toLowerCase() === "require")
     return require?.value === "100rel"
@@ -221,10 +245,10 @@ alice.expect(183, {
 s.pause(2000)
 
 // Delay before sending
-alice.bye({ delay: 2000 })
+aliceDialog.bye({ delay: 2000 })
 
-// Timeout on expect (default: 5000ms)
-bob.expect("INVITE", { timeout: 10_000 })
+// Timeout on receiveInitialInvite / transaction expect (default: 5000ms)
+const { transaction: bobInviteTxn } = bob.receiveInitialInvite({ timeout: 10_000 })
 ```
 
 ## Composing scenarios
@@ -243,10 +267,10 @@ const callSetup = sequence("setup", (s) => {
 const callerBye = sequence("caller-bye", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })
   const bob   = s.agent("bob",   { uri: "sip:bob@test", port: 5666 })
-  alice.bye()
-  const rcvBye = bob.expect("BYE")
-  bob.send(200, { inResponseTo: rcvBye })
-  alice.expect(200)
+  const aliceByeTxn = alice.dialog.bye()
+  const bobByeTxn = bob.dialog.expect("BYE")
+  bobByeTxn.reply(200)
+  aliceByeTxn.expect(200)
 })
 
 // Compose

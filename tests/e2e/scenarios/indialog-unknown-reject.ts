@@ -45,33 +45,35 @@ export const unknownDialogReject = scenario("indialog-unknown-reject", (s) => {
   s.pause(500)
 
   // ── Stranger sends BYE with unknown dialog ───────────────────────
-  stranger.send("BYE", {
+  // Forge a dialog on the stranger agent via raw overrides: unknown Call-ID
+  // is generated automatically, bogus To-tag is set explicitly.
+  const strangerByeTxn = stranger.dialog.send("BYE", {
     uri: "sip:someone@127.0.0.1:15060",
     overrides: {
       to: "<sip:someone@test>;tag=bogus-tag-xyz",
     },
   })
-  stranger.expect(481)
+  strangerByeTxn.expect(481)
 
   // ── Stranger sends INVITE (re-INVITE) with unknown dialog ────────
   // An INVITE with a To-tag is a re-INVITE per RFC 3261 §12.2.2.
   // The B2BUA must NOT treat it as a new initial INVITE.
-  stranger.send("INVITE", {
+  const strangerReInvTxn = stranger.dialog.send("INVITE", {
     uri: "sip:someone@127.0.0.1:15060",
     overrides: {
       to: "<sip:someone@test>;tag=bogus-tag-reinvite",
     },
   })
-  stranger.expect(481)
+  strangerReInvTxn.expect(481)
 
   // ── Stranger sends OPTIONS with unknown dialog ───────────────────
-  stranger.send("OPTIONS", {
+  const strangerOptionsTxn = stranger.dialog.send("OPTIONS", {
     uri: "sip:someone@127.0.0.1:15060",
     overrides: {
       to: "<sip:someone@test>;tag=bogus-tag-options",
     },
   })
-  stranger.expect(481)
+  strangerOptionsTxn.expect(481)
 
   s.pause(500)
 

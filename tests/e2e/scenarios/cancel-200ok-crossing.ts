@@ -29,7 +29,7 @@ export const cancelCrossing200Ok = scenario("cancel-200ok-crossing", (s) => {
   aliceInviteTxn.expect(100)
 
   // Bob receives INVITE from B2BUA
-  const { transaction: bobInviteTxn } = bob.receiveInitialInvite()
+  const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite()
 
   // Bob sends 180 Ringing
   bobInviteTxn.reply(180)
@@ -52,17 +52,17 @@ export const cancelCrossing200Ok = scenario("cancel-200ok-crossing", (s) => {
   aliceInviteTxn.expect(487)
 
   // Bob receives CANCEL from B2BUA (sent during CANCEL processing)
-  const rcvCancel = bob.expect("CANCEL")
+  const bobCancelTxn = bobInviteTxn.expectCancel()
 
-  // Bob receives ACK from B2BUA (acknowledges the crossed 200 OK)
-  bob.expect("ACK")
+  // Bob receives ACK from B2BUA (end-to-end ACK for the crossed 2xx, in-dialog)
+  bobDialog.expect("ACK")
 
   // Bob receives BYE from B2BUA (tears down the answered-but-cancelled leg)
-  const rcvBye = bob.expect("BYE")
+  const bobByeTxn = bobDialog.expect("BYE")
 
   // Bob sends 200 OK for the CANCEL
-  rcvCancel.reply(200)
+  bobCancelTxn.reply(200)
 
   // Bob sends 200 OK for the BYE
-  rcvBye.reply(200)
+  bobByeTxn.reply(200)
 })

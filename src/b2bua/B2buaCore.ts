@@ -36,7 +36,7 @@ import { CallState } from "../call/CallState.js"
 import { TimerService } from "../call/TimerService.js"
 import { SipParser } from "../sip/Parser.js"
 import { handleInitialInvite } from "./InitialInviteHandler.js"
-import { createRuleRegistry } from "./rules/framework/RuleRegistry.js"
+import { createRuleRegistry, type RuleRegistry } from "./rules/framework/RuleRegistry.js"
 import { executeRules } from "./rules/framework/RuleExecutor.js"
 import { defaultRules } from "./rules/defaults/index.js"
 import { relayFirst18xTo180 } from "./rules/custom/relayFirst18xTo180.js"
@@ -45,7 +45,10 @@ import { relayFirst18xTo180 } from "./rules/custom/relayFirst18xTo180.js"
 // Handler registry (single source of truth)
 // ---------------------------------------------------------------------------
 
-const ruleRegistry = createRuleRegistry(defaultRules, [relayFirst18xTo180])
+/** Canonical production rule registry. Exported so the e2e harness (coverage
+ *  tracking) and the rule-kill mutation script can build wrapped variants.
+ *  Production code paths MUST use {@link handlers} — not this directly. */
+export const ruleRegistry: RuleRegistry = createRuleRegistry(defaultRules, [relayFirst18xTo180])
 
 /** Noop fallback — if the rule chain doesn't handle an event, return the call unchanged. */
 const noopFallback: HandlerRegistry["inDialog"] = (ctx) =>
@@ -55,10 +58,17 @@ const noopFallback: HandlerRegistry["inDialog"] = (ctx) =>
     Effect.as({ call: ctx.call, outbound: [], effects: [] }),
   )
 
-export const handlers: HandlerRegistry = {
-  initialInvite: handleInitialInvite,
-  inDialog: executeRules(ruleRegistry, noopFallback),
+/** Build a HandlerRegistry from any rule registry. Tests wrap the production
+ *  registry with tracking / mutation transforms and call this to get their
+ *  own handlers. */
+export function buildHandlers(registry: RuleRegistry): HandlerRegistry {
+  return {
+    initialInvite: handleInitialInvite,
+    inDialog: executeRules(registry, noopFallback),
+  }
 }
+
+export const handlers: HandlerRegistry = buildHandlers(ruleRegistry)
 
 // ---------------------------------------------------------------------------
 // Core B2BUA layer

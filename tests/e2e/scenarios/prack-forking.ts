@@ -1,11 +1,18 @@
 /**
- * PRACK forking scenario: Bob sends two 183s with different To-tags,
- * simulating a forking proxy. Alice PRACKs each distinct early dialog.
+ * PRACK forking scenario (delayed offer): Bob sends two 183s with different
+ * To-tags, simulating a forking proxy. Alice sends INVITE without SDP, so
+ * each 183 carries an SDP offer and Alice answers on each PRACK (RFC 3264
+ * §4 — one offer/answer per early dialog).
+ *
+ * When Bob's 200 OK INVITE also carries SDP, RFC 3261 §14 / RFC 3264 §8
+ * treats it as a new offer within the confirmed dialog, so Alice's ACK
+ * must carry the corresponding SDP answer.
  *
  * Flow:
- *   INVITE → 100 → 183(fork1) → PRACK(fork1) → 200(PRACK)
- *   → 183(fork2) → PRACK(fork2) → 200(PRACK)
- *   → 200(INVITE, fork1 answers) → ACK → ACK(relayed)
+ *   INVITE(no SDP) → 100 → 183(fork1, offer) → PRACK(fork1, answer) → 200(PRACK)
+ *   → 183(fork2, offer) → PRACK(fork2, answer) → 200(PRACK)
+ *   → 200(INVITE, fork1 answers, new offer) → ACK(answer)
+ *   → BYE → 200(BYE)
  *
  * Alice PRACKs each 183 immediately so ctx.last.to carries the correct
  * a-facing tag from the B2BUA (mapped from Bob's fork1/fork2 tags).
@@ -28,28 +35,27 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })
   const bob = s.agent("bob", { uri: "sip:bob@test", port: 5666 })
 
-  // Alice sends INVITE
-  alice.invite("sip:+1234@127.0.0.1:15060", {
+  // Alice sends INVITE without SDP (delayed-offer model)
+  const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite("sip:+1234@127.0.0.1:15060", {
     headers: { "Supported": "100rel" },
-    body: sdpOffer(),
   })
 
   // Alice receives 100 Trying
-  alice.expect(100)
+  aliceInviteTxn.expect(100)
 
   // Bob receives INVITE
-  const rcvInvite = bob.expect("INVITE")
+  const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite()
 
   // ── Fork 1 ──────────────────────────────────────────────────────────────
 
-  // Bob sends 183 with first fork tag
-  rcvInvite.reply(183, {
+  // Bob sends 183 with first fork tag — carries SDP offer (delayed-offer: 18x offers)
+  bobInviteTxn.reply(183, {
     overrides: {
       headers: {
         "Require": "100rel",
         "RSeq": "1",
       },
-      body: sdpAnswer(),
+      body: sdpOffer(),
     },
     build: (ctx) => ({
       to: `<${toUri(ctx.last.to)}>;tag=fork1`,
@@ -57,11 +63,13 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   })
 
   // Alice receives first 183 — To-tag is B2BUA's a-facing tag for fork1
-  alice.expect(183)
+  aliceInviteTxn.expect(183)
 
-  // Alice sends PRACK for fork1 (uses the a-facing tag from the 183 she just received)
-  alice.send("PRACK", {
+  // Alice sends PRACK for fork1 — carries SDP answer for the 183's offer
+  // (uses the a-facing tag from the 183 she just received)
+  const alicePrack1Txn = aliceDialog.send("PRACK", {
     overrides: {
+      body: sdpAnswer(),
       headers: { "RAck": "1 1 INVITE" },
     },
     build: (ctx) => ({
@@ -72,7 +80,7 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   // Bob receives PRACK for fork1 — targeting check only; per-dialog CSeq is
   // enforced automatically by the framework (dialog key = callId|fromTag|fork1
   // has no prior, so it uses INVITE baseline + 1).
-  const rcvPrack1 = bob.expect("PRACK", {
+  const bobPrack1Txn = bobDialog.expect("PRACK", {
     predicate: (msg: SipMessage) => {
       if (msg.type !== "request") return false
       const to = msg.headers.find((h) => h.name.toLowerCase() === "to")?.value ?? ""
@@ -81,15 +89,15 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   })
 
   // Bob sends 200 OK for PRACK (fork1)
-  rcvPrack1.reply(200)
+  bobPrack1Txn.reply(200)
 
   // Alice receives 200 OK for PRACK
-  alice.expect(200)
+  alicePrack1Txn.expect(200)
 
   // ── Fork 2 ──────────────────────────────────────────────────────────────
 
   // Bob sends 183 with second fork tag
-  rcvInvite.reply(183, {
+  bobInviteTxn.reply(183, {
     overrides: {
       headers: {
         "Require": "100rel",
@@ -103,14 +111,14 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   })
 
   // Alice receives second 183 — To-tag is B2BUA's a-facing tag for fork2
-  alice.expect(183)
+  aliceInviteTxn.expect(183)
 
   // Alice sends PRACK for fork2 (uses the a-facing tag from the 183 she just received)
-  alice.send("PRACK", {
+  const alicePrack2Txn = aliceDialog.send("PRACK", {
     overrides: {
-      body: sdpAnswer() ,
+      body: sdpAnswer(),
       headers: { "RAck": "200 1 INVITE" },
-      cseq: 2
+      cseq: 2,
     },
     build: (ctx) => ({
       to: ctx.last.to,
@@ -121,7 +129,7 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   // by the framework. fork2 is a distinct early dialog from fork1, so its
   // CSeq sequence starts independently from the shared INVITE baseline; any
   // leakage of fork1's counter into fork2 is flagged by validateCSeq.
-  const rcvPrack2 = bob.expect("PRACK", {
+  const bobPrack2Txn = bobDialog.expect("PRACK", {
     predicate: (msg: SipMessage) => {
       if (msg.type !== "request") return false
       const to = msg.headers.find((h) => h.name.toLowerCase() === "to")?.value ?? ""
@@ -130,26 +138,45 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   })
 
   // Bob sends 200 OK for PRACK (fork2)
-  rcvPrack2.reply(200)
+  bobPrack2Txn.reply(200)
 
   // Alice receives 200 OK for PRACK
-  alice.expect(200)
+  alicePrack2Txn.expect(200)
 
   // ── Call answered ───────────────────────────────────────────────────────
 
-  // Bob answers with 200 OK for INVITE (fork1 wins)
-  rcvInvite.reply(200, {
+  // Bob answers with 200 OK for INVITE (fork1 wins) and repeats SDP.
+  // Per RFC 3261 §14 / RFC 3264 §8, SDP in the 2xx after a completed 18x/PRACK
+  // offer-answer is treated as a new offer within the confirmed dialog.
+  bobInviteTxn.reply(200, {
+    overrides: {
+      body: sdpOffer(),
+    },
     build: (ctx) => ({
       to: `<${toUri(ctx.last.to)}>;tag=fork1`,
     }),
   })
 
   // Alice receives 200 OK for INVITE
-  alice.expect(200)
+  aliceInviteTxn.expect(200)
 
-  // Alice sends ACK (relayed end-to-end, may carry SDP)
-  alice.send("ACK")
+  // Alice sends ACK with SDP answer for the new offer in the 200 OK
+  aliceDialog.ack({ body: sdpAnswer() })
 
-  // Bob receives relayed ACK
-  bob.expect("ACK")
+  // Bob receives relayed ACK (carries Alice's answer)
+  bobDialog.expect("ACK")
+
+  // ── Hangup ──────────────────────────────────────────────────────────────
+
+  // Alice hangs up
+  const aliceByeTxn = aliceDialog.bye()
+
+  // Bob receives BYE
+  const bobByeTxn = bobDialog.expect("BYE")
+
+  // Bob sends 200 OK for BYE
+  bobByeTxn.reply(200)
+
+  // Alice receives 200 OK for BYE
+  aliceByeTxn.expect(200)
 })

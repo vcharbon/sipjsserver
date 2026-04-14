@@ -21,9 +21,44 @@ import { CdrWriter } from "../../../src/cdr/CdrWriter.js"
 import { RedisClient } from "../../../src/redis/RedisClient.js"
 import { TracingService } from "../../../src/tracing/TracingService.js"
 import { MockCallControlLayer } from "./MockCallControlLayer.js"
-import { handlers, B2buaCoreLayer } from "../../../src/b2bua/B2buaCore.js"
+import { buildHandlers, ruleRegistry, B2buaCoreLayer } from "../../../src/b2bua/B2buaCore.js"
+import {
+  disableRule,
+  transformRegistry,
+  type RuleRegistry,
+} from "../../../src/b2bua/rules/framework/RuleRegistry.js"
 import { customParser } from "../../../src/sip/parsers/custom/index.js"
 import { getHeader } from "../../../src/sip/MessageFactory.js"
+import { recordFiring } from "./rule-usage-collector.js"
+
+// ---------------------------------------------------------------------------
+// Test rule registry: disable-on-env + handle-firing tracker
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a HandlerRegistry for tests. Wraps the production rule registry so:
+ *   1. If `KILL_RULE` is set, that rule's matches() is forced to false.
+ *   2. Every non-undefined handle() result records a firing on the
+ *      rule-usage collector, attributed to the current scenario.
+ * Production B2buaCore.handlers is untouched.
+ */
+function buildTestHandlers() {
+  let registry: RuleRegistry = ruleRegistry
+  const killId = process.env.KILL_RULE
+  if (killId !== undefined && killId.length > 0) {
+    registry = disableRule(registry, killId)
+  }
+  registry = transformRegistry(registry, {
+    wrapHandle: (rule, original) => (ctx, state, params) =>
+      Effect.map(original(ctx, state, params), (outcome) => {
+        if (outcome !== undefined && outcome !== null) {
+          recordFiring(rule.id)
+        }
+        return outcome
+      }),
+  })
+  return buildHandlers(registry)
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -342,10 +377,12 @@ export function createSimulatedTransport(opts?: {
         }).pipe(Effect.provide(TimerService.layer))
 
         // Fork SipRouter inside the surrounding scope so it's cancelled
-        // automatically when the test scope closes.
+        // automatically when the test scope closes. Use test handlers
+        // (tracks rule firings, optionally disables one rule per KILL_RULE).
+        const testHandlers = buildTestHandlers()
         const routerProgram = Effect.gen(function* () {
           const router = yield* SipRouter
-          return yield* router.start(handlers)
+          return yield* router.start(testHandlers)
         }).pipe(Effect.provide(SipLayer))
         yield* Effect.forkScoped(routerProgram)
 

@@ -176,11 +176,11 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
   // Default no-answer timeout is 30s
   s.pause(31_000)
 
-  // Bob1 receives CANCEL from B2BUA
-  const rcvCancel1 = bob1.expect("CANCEL")
+  // Bob1 receives CANCEL from B2BUA (tied to the INVITE server transaction)
+  const bob1CancelTxn = bob1InviteTxn.expectCancel()
 
   // Bob1 replies 200 OK for CANCEL, then 487 for the original INVITE
-  rcvCancel1.reply(200)
+  bob1CancelTxn.reply(200)
   bob1InviteTxn.reply(487)
 
   // B2BUA must send ACK for the 487 (RFC 3261 §17.1.1.3)

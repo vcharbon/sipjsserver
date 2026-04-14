@@ -26,3 +26,11 @@ Usage:
 
 
 SIP_LOCAL_IP=192.168.1.100 docker compose up -d
+
+
+## good prompts
+
+
+apply the sip anomaly expert to each of alice*.txt and bob*.txt file in test-report and generate a full ip anomaly report including all errors, the list of associated tests aggregated by error. Generate te report in new .md  file under docs/todos.
+consider the following call, in the capture dont consider alice, bob, the B2BUA as a real B2BUA or endpoints, we mostly should consider if it is correct from RFC point of view for A to B call with other elements downstream and unstream that are hidden. 
+

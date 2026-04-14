@@ -7,6 +7,8 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { ScenarioResult } from "./types.js"
 import { renderSequenceDiagram, serializeMessage } from "./svg-sequence-diagram.js"
+import { ruleRegistry } from "../../../src/b2bua/B2buaCore.js"
+import { snapshot as ruleSnapshot } from "./rule-usage-collector.js"
 
 // ---------------------------------------------------------------------------
 // Escape helpers
@@ -330,6 +332,8 @@ export function writeIndexReport(
   const totalFailed = results.reduce((s, r) => s + r.failed, 0)
   const totalSkipped = results.reduce((s, r) => s + r.skipped, 0)
 
+  const coverageHtml = renderRuleCoverage()
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -358,6 +362,13 @@ export function writeIndexReport(
     }
     .badge.pass { background: #059669; color: white; }
     .badge.fail { background: #dc2626; color: white; }
+    .badge.warn { background: #b45309; color: white; }
+    h2 { font-size: 16px; margin: 32px 0 8px; }
+    .coverage-summary { font-size: 13px; color: #6b7280; margin-bottom: 12px; }
+    .coverage-table { max-width: 900px; }
+    .coverage-table .uncovered td { background: #fef3c7; }
+    .scenario-list { font-size: 12px; color: #4b5563; }
+    .priority-band { font-size: 11px; color: #6b7280; }
   </style>
 </head>
 <body>
@@ -371,10 +382,83 @@ export function writeIndexReport(
       ${rows.join("\n      ")}
     </tbody>
   </table>
+  ${coverageHtml}
 </body>
 </html>`
 
   const filepath = join(outputDir, "index.html")
   writeFileSync(filepath, html, "utf-8")
   return filepath
+}
+
+// ---------------------------------------------------------------------------
+// Rule coverage section
+// ---------------------------------------------------------------------------
+
+interface RuleCoverageRow {
+  readonly id: string
+  readonly name: string
+  readonly priority: number
+  readonly scenarios: string[]
+}
+
+function renderRuleCoverage(): string {
+  const firings = ruleSnapshot()
+  const rows: RuleCoverageRow[] = []
+  for (const [id, rule] of ruleRegistry.definitions) {
+    const scenarios = firings.get(id)
+    rows.push({
+      id,
+      name: rule.name,
+      priority: rule.defaultPriority ?? 900,
+      scenarios: scenarios ? [...scenarios].sort() : [],
+    })
+  }
+  // Never-fired rules first; then by priority ascending; then by id.
+  rows.sort((a, b) => {
+    const aFired = a.scenarios.length === 0 ? 0 : 1
+    const bFired = b.scenarios.length === 0 ? 0 : 1
+    if (aFired !== bFired) return aFired - bFired
+    if (a.priority !== b.priority) return a.priority - b.priority
+    return a.id.localeCompare(b.id)
+  })
+
+  const total = rows.length
+  const fired = rows.filter((r) => r.scenarios.length > 0).length
+  const uncovered = total - fired
+  const killRule = process.env.KILL_RULE
+
+  const killNotice = killRule !== undefined && killRule.length > 0
+    ? `<div class="coverage-summary"><span class="badge warn">KILL MODE</span> rule <code>${escapeHtml(killRule)}</code> was disabled for this run — coverage numbers reflect the mutated run, not baseline.</div>`
+    : ""
+
+  const rowHtml = rows.map((r) => {
+    const cls = r.scenarios.length === 0 ? ' class="uncovered"' : ""
+    const badge = r.scenarios.length === 0
+      ? `<span class="badge warn">NEVER FIRED</span>`
+      : `${r.scenarios.length}`
+    const scenarioList = r.scenarios.length === 0
+      ? `<span class="scenario-list">—</span>`
+      : `<span class="scenario-list">${r.scenarios.map(escapeHtml).join(", ")}</span>`
+    return `<tr${cls}>
+      <td><code>${escapeHtml(r.id)}</code></td>
+      <td>${escapeHtml(r.name)}</td>
+      <td class="priority-band">${r.priority}</td>
+      <td>${badge}</td>
+      <td>${scenarioList}</td>
+    </tr>`
+  })
+
+  return `
+  <h2>Rule coverage</h2>
+  ${killNotice}
+  <div class="coverage-summary">${fired}/${total} rules fired \u2014 ${uncovered} never fired in any scenario</div>
+  <table class="coverage-table">
+    <thead>
+      <tr><th>Rule id</th><th>Name</th><th>Priority</th><th>Scenarios</th><th>Exercised by</th></tr>
+    </thead>
+    <tbody>
+      ${rowHtml.join("\n      ")}
+    </tbody>
+  </table>`
 }
