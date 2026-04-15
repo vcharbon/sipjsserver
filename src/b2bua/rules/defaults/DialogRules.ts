@@ -187,7 +187,7 @@ export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
     const legId = ctx.sourceLeg.legId
     return Effect.succeed({
       actions: [
-        { type: "cancel-timer", timerId: `keepalive-timeout-${ctx.callRef}-${legId}` },
+        { type: "cancel-timer", timerId: `keepalive_timeout-${ctx.callRef}-${legId}` },
       ],
       state: undefined,
     })

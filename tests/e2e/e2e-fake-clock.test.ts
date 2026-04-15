@@ -25,6 +25,9 @@ import { recordRouteBasic, recordRouteFakeRR } from "./scenarios/record-route.js
 import { suppress18xBasic, suppress18xFailoverNoAnswer, suppress18xFailoverReject, suppress18xDisabled } from "./scenarios/suppress-18x.js"
 import { unknownDialogReject } from "./scenarios/indialog-unknown-reject.js"
 import { delayedOfferFailure } from "./scenarios/delayed-offer-failure.js"
+import { retransmit200 } from "./scenarios/retransmit-200.js"
+import { keepaliveHappy } from "./scenarios/keepalive-happy.js"
+import { keepalive481 } from "./scenarios/keepalive-481.js"
 import { createSimulatedRunner, flushIndexReport } from "./helpers/harness.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
@@ -59,6 +62,12 @@ describe("E2E (fake clock) — simulated backend", () => {
   it.effect("suppress-18x: disabled (normal 180 relay)", () => run(suppress18xDisabled.toScenario()), { timeout: 30_000 })
   it.effect("in-dialog unknown dialog → 481 reject", () => run(unknownDialogReject.toScenario()), { timeout: 30_000 })
   it.effect("delayed-offer-failure: missing SDP answer in ACK", () => run(delayedOfferFailure.toScenario()), { timeout: 30_000 })
+
+  // Coverage-driven scenarios for rules that were previously never fired
+  // under the fake-clock harness: retransmit-200, keepalive, handle-481.
+  it.effect("retransmit-200: duplicate 200 OK on confirmed leg → re-ACK only", () => run(retransmit200.toScenario()), { timeout: 30_000 })
+  it.effect("keepalive: OPTIONS to both legs, two cycles (TestClock 15 min)", () => run(keepaliveHappy.toScenario()), { timeout: 30_000 })
+  it.effect("keepalive + 481: bob rejects OPTIONS → begin-termination BYEs alice", () => run(keepalive481.toScenario()), { timeout: 30_000 })
 })
 
 // ---------------------------------------------------------------------------
