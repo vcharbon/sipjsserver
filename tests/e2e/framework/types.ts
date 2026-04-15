@@ -285,7 +285,7 @@ export interface TestTransport {
   readonly receive: (
     agentName: string,
     timeoutMs: number
-  ) => Effect.Effect<{ raw: Buffer; rinfo: { address: string; port: number } } | null, TransportError>
+  ) => Effect.Effect<{ raw: Buffer; rinfo: { address: string; port: number }; arrivalMs: number } | null, TransportError>
   /**
    * Optional post-scenario verification: asserts that all internal state
    * (callsMap, limiter counters, timer fibers) is fully empty after the

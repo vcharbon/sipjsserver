@@ -21,7 +21,7 @@ interface LiveAgent {
   readonly socket: dgram.Socket
   readonly ip: string
   readonly port: number
-  readonly queue: Queue.Queue<{ raw: Buffer; rinfo: { address: string; port: number } }>
+  readonly queue: Queue.Queue<{ raw: Buffer; rinfo: { address: string; port: number }; arrivalMs: number }>
 }
 
 const createLiveAgent = (
@@ -32,6 +32,7 @@ const createLiveAgent = (
     const queue = yield* Queue.unbounded<{
       raw: Buffer
       rinfo: { address: string; port: number }
+      arrivalMs: number
     }>()
 
     const socket = yield* Effect.acquireRelease(
@@ -53,6 +54,7 @@ const createLiveAgent = (
       Queue.offerUnsafe(queue, {
         raw: msg,
         rinfo: { address: rinfo.address, port: rinfo.port },
+        arrivalMs: Date.now(),
       })
     })
 

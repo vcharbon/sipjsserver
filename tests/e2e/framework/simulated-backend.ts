@@ -5,7 +5,7 @@
  * No real UDP sockets. Suitable for fast, deterministic tests.
  */
 
-import { Cause, Effect, Layer, Option, Queue, Stream } from "effect"
+import { Cause, Clock, Effect, Layer, Option, Queue, Stream } from "effect"
 import type { AgentInfo, TestTransport } from "./types.js"
 import { TransportError } from "./types.js"
 import { UdpTransport, type UdpPacket } from "../../../src/sip/UdpTransport.js"
@@ -93,6 +93,7 @@ function indexCallIdForAgent(
 interface ReceivedPacket {
   readonly raw: Buffer
   readonly rinfo: { address: string; port: number }
+  readonly arrivalMs: number
 }
 
 interface MockTransportState {
@@ -264,7 +265,7 @@ export function createSimulatedTransport(opts?: {
 
         const mockTransportLayer = Layer.succeed(UdpTransport, {
           send: (msg: Buffer, port: number, address: string) =>
-            Effect.sync(() => {
+            Clock.currentTimeMillis.pipe(Effect.flatMap((arrivalMs) => Effect.sync(() => {
               // Demux outbound packets by Call-ID → agent mapping
               let callId: string | undefined
               let testAgent: string | undefined
@@ -318,8 +319,9 @@ export function createSimulatedTransport(opts?: {
               Queue.offerUnsafe(queue, {
                 raw: msg,
                 rinfo: { address: "127.0.0.1", port: sipPort },
+                arrivalMs,
               })
-            }),
+            }))),
           messages: Stream.fromQueue(toB2bua),
           metrics: {
             queueDepth: 0,

@@ -1060,7 +1060,7 @@ function checkUnexpectedMessages(
         // via allowExtra("ACK")), but they do NOT fail the test.
         if (parseResult._tag === "Success" && isAllowedReemission(state, agentName, parseResult.success)) {
           state.trace.push({
-            timestamp: clockTs,
+            timestamp: packet.arrivalMs,
             from: state.sutNames[agentName] ?? "B2BUA",
             to: agentName,
             direction: "receive",
@@ -1091,7 +1091,7 @@ function checkUnexpectedMessages(
         // Trace: unexpected drained message
         if (parseResult._tag === "Success") {
           state.trace.push({
-            timestamp: clockTs,
+            timestamp: packet.arrivalMs,
             from: state.sutNames[agentName] ?? "B2BUA",
             to: agentName,
             direction: "receive",
