@@ -1017,10 +1017,19 @@ function executeDestroyLeg(
       })
     }
     state.call = setByeDisposition(state.call, action.legId, "bye_sent")
+  } else if (leg.disposition === "cancelling") {
+    // CANCEL already in flight via executeCancelLeg — do not re-emit
+    // (RFC 3261 §9.1 / §17.1.3: each CANCEL is a separate transaction with
+    // a distinct branch, but the UAS key is CallId+branch of the target
+    // INVITE, so a second CANCEL with the reused INVITE branch would either
+    // be absorbed as a retransmit or rejected). Just record disposition and
+    // let resolveCancelResponseRule/cancel200CrossingRule finish cleanup.
+    state.call = setByeDisposition(state.call, action.legId, "cancelled")
   } else {
     // CANCEL an early/trying leg
     state.outbound.push(buildCancelEnvelope(leg, target, ""))
     state.call = setByeDisposition(state.call, action.legId, "cancelled")
+    state.call = setLegDisposition(state.call, action.legId, "cancelling")
   }
 
   state.call = setLegState(state.call, action.legId, "terminated")
