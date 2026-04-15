@@ -38,6 +38,7 @@ import {
   type TimerType,
   deriveCallRef,
   makeEmptyDialog,
+  updateDialog,
   updateLeg,
 } from "../call/CallModel.js"
 
@@ -298,6 +299,15 @@ export class SipRouter extends ServiceMap.Service<
               forceBranch = bLeg?.inviteBranch
             }
 
+            // RFC 3261 §13.2.2.4 / §17.1.1.2: replay the cached ACK branch on
+            // retransmit so the UAS can correlate the re-ACK with the original
+            // and stop retransmitting the 2xx.
+            if (env.message.type === "request" && env.message.method === "ACK") {
+              const leg = outLeg === "a" ? workingCall.aLeg : workingCall.bLegs.find((l) => l.legId === outLeg)
+              const cachedAckBranch = leg?.dialogs[0]?.ackBranch
+              if (cachedAckBranch !== undefined) forceBranch = cachedAckBranch
+            }
+
             const { message: stampedMsg, branch } = stampHeaders(
               env.message, config.sipLocalIp, config.sipLocalPort, callRef, outLeg,
               workingCall.emergency === true, forceBranch,
@@ -307,6 +317,18 @@ export class SipRouter extends ServiceMap.Service<
             if (branch !== undefined && stampedMsg.type === "request"
                 && stampedMsg.method === "INVITE" && outLeg !== "a") {
               workingCall = updateLeg(workingCall, outLeg, (l) => ({ ...l, inviteBranch: branch }))
+            }
+
+            // Cache ACK branch on the dialog so retransmitted 2xx triggers a
+            // byte-identical re-ACK (RFC 3261 §13.2.2.4). Only capture when no
+            // forceBranch was applied (first emission).
+            if (branch !== undefined && stampedMsg.type === "request"
+                && stampedMsg.method === "ACK" && forceBranch === undefined) {
+              const leg = outLeg === "a" ? workingCall.aLeg : workingCall.bLegs.find((l) => l.legId === outLeg)
+              const toTag = leg?.dialogs[0]?.toTag
+              if (leg !== undefined && toTag !== undefined) {
+                workingCall = updateDialog(workingCall, outLeg, toTag, (d) => ({ ...d, ackBranch: branch }))
+              }
             }
 
             stamped.push({ env, message: stampedMsg, outLeg })

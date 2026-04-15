@@ -69,7 +69,15 @@ export const Dialog = Schema.Struct({
    * Glare detection checks the SOURCE dialog (where a new re-INVITE arrives FROM).
    */
   inboundPendingReInvites: Schema.Array(PendingReInvite),
-  routeSet: Schema.Array(Schema.String)
+  routeSet: Schema.Array(Schema.String),
+  /**
+   * Via branch of the first ACK sent for this dialog's 2xx INVITE response.
+   * RFC 3261 §13.2.2.4 / §17.1.1.2: ACK for 2xx is a one-shot. When a UAS
+   * retransmits the 2xx (lost ACK), the UAC must re-ACK. Reusing the same
+   * Via branch keeps the re-ACK byte-identical so the UAS can correlate it
+   * with the original and suppress further 2xx retransmissions.
+   */
+  ackBranch: Schema.optional(Schema.String)
 })
 
 export type Dialog = typeof Dialog.Type
