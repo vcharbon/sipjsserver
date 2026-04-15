@@ -241,9 +241,11 @@ function executeAction(
       break
     case "cancel-timer":
       state.effects.push({ type: "cancel-timer", id: action.timerId })
+      state.call = { ...state.call, timers: state.call.timers.filter((t) => t.id !== action.timerId) }
       break
     case "cancel-all-timers":
       state.effects.push({ type: "cancel-all-timers" })
+      state.call = { ...state.call, timers: [] }
       break
     case "terminate-call":
       executeTerminateCall(ctx, state)

@@ -61,9 +61,25 @@ export const keepaliveRule: RuleDefinition<undefined, undefined> = {
   handle: (ctx) => {
     const actions: RuleAction[] = []
 
-    // Send OPTIONS to all peered legs and schedule timeout for each
+    // Send OPTIONS to all peered legs and schedule timeout for each.
+    // Skip a leg that already has a pending keepalive_timeout — the previous
+    // OPTIONS is still in flight (Timer E retransmits it). Emitting a second
+    // OPTIONS with a bumped CSeq while the first is unresolved would cause
+    // two overlapping OPTIONS transactions to the same leg.
     const peered = allPeeredLegs(ctx.call)
+    // Filter to entries that haven't fired yet (fireAt > now). Fired-but-not-
+    // removed entries are a historical quirk of the timer list; ignore them.
+    const pendingKeepaliveLegs = new Set(
+      ctx.call.timers
+        .filter((t) =>
+          t.type === "keepalive_timeout" &&
+          t.legId !== undefined &&
+          t.fireAt > ctx.nowMs,
+        )
+        .map((t) => t.legId as string),
+    )
     for (const legId of peered) {
+      if (pendingKeepaliveLegs.has(legId)) continue
       actions.push({ type: "send-request-to-leg", legId, method: "OPTIONS" })
       actions.push({
         type: "schedule-timer",
