@@ -52,7 +52,7 @@ const aliceReInviteFragment = scenario("alice-reinvite-fragment", (s) => {
 
   // Alice sends ACK with SDP answer
   aliceDialog.ack({
-    build: () => ({ body: sdpAnswer(undefined, 30000) }),
+    build: () => ({ body: sdpAnswer(undefined, undefined, 30000) }),
   })
 
   // Bob receives ACK with SDP answer
@@ -98,7 +98,7 @@ const bobReInviteFragment = scenario("bob-reinvite-fragment", (s) => {
 
   // Alice responds 200 OK with SDP answer
   aliceReInvTxn.reply(200, {
-    overrides: { body: sdpAnswer(undefined, 30000) },
+    overrides: { body: sdpAnswer(undefined, undefined, 30000) },
   })
 
   // Bob receives 200 OK with SDP answer
@@ -166,7 +166,7 @@ const crossingReInviteFragment = scenario("crossing-reinvite-fragment", (s) => {
 
   // Bob responds 200 OK to Alice's re-INVITE
   bobReInvUasTxn.reply(200, {
-    overrides: { body: sdpAnswer(undefined, 30000) },
+    overrides: { body: sdpAnswer(undefined, undefined, 30000) },
   })
 
   // Alice receives 200 OK
