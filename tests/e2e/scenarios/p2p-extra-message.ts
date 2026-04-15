@@ -28,5 +28,11 @@ export const p2pExtraMessage = scenario("p2p-extra-message", (s) => {
   // Bob now sends an extra, unsolicited in-dialog INFO that alice never expects.
   // The interpreter's drain phase should pick this up at alice and flag
   // it as an unexpected message — causing the scenario to fail.
+  //
+  // Note to RFC 6086 reviewers: the INFO remains unanswered by design. This
+  // scenario is a *negative* harness self-test — its sole purpose is to
+  // produce the "INFO without 200 OK" anomaly so the drain phase / call-flow
+  // review can demonstrate detection. Do not treat the missing 200 as a
+  // B2BUA or peer bug.
   bobDialog.send("INFO")
 })
