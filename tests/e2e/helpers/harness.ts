@@ -31,8 +31,11 @@ import { writeTextReports } from "../framework/text-report.js"
 
 const resultsByDir = new Map<string, ScenarioResult[]>()
 
-function recordResult(result: ScenarioResult, outputDir: string): void {
-  const textFilenames = writeTextReports(result, outputDir)
+function recordResult(result: ScenarioResult, outputDir: string, expectFailure = false): void {
+  // For negative-harness scenarios that failed as expected, skip the verbose
+  // text files — they are noisy and expected to be wrong. Only write the HTML.
+  const textFilenames =
+    expectFailure && result.failed > 0 ? [] : writeTextReports(result, outputDir)
   writeScenarioReport(result, outputDir, textFilenames)
   let arr = resultsByDir.get(outputDir)
   if (!arr) {
@@ -173,7 +176,7 @@ export function createPeerToPeerRunner(opts: {
           targetFor
         )
         console.log(formatReport(result))
-        recordResult(result, outputDir)
+        recordResult(result, outputDir, opts.expectFailure)
         if (opts.expectFailure) {
           assertScenarioFailed(result)
         } else {
