@@ -7,6 +7,17 @@
  * This test verifies that when Alice sends ACK without SDP answer after
  * receiving a 200 OK with SDP offer, Bob detects the violation and tears
  * down the call with BYE.
+ *
+ * Design note (RFC 3264 §5): the B2BUA deliberately stays transparent on
+ * the offer/answer anomaly — it relays Alice's empty ACK to Bob verbatim
+ * rather than rejecting the dialog locally. Two reasons:
+ *   1. The B2BUA does not participate in media negotiation; forcing a
+ *      synthetic answer would fabricate endpoint state the B2BUA cannot
+ *      honor.
+ *   2. The UAS (Bob) is the authoritative party for detecting its own
+ *      offer going unanswered and is free to respond with BYE + Reason.
+ * The call-flow reviewer should treat "ACK without SDP answer after
+ * delayed-offer 200" as Alice's violation, not a B2BUA bug.
  */
 
 import { scenario } from "../framework/dsl.js"
