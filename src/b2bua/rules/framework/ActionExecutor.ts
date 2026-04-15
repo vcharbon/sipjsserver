@@ -150,7 +150,7 @@ function buildCancelEnvelope(
     message: buildCancel(
       leg.callId,
       leg.fromTag,
-      leg.inviteRequestUri ?? `sip:target@${target.host}:${target.port}`,
+      leg.inviteRequestUri ?? `sip:${target.host}:${target.port}`,
       inviteCSeq,
       leg.localUri,
       leg.remoteUri,
@@ -418,7 +418,7 @@ function relayRequest(
     state.call = bumpLocalCSeq(state.call, targetLeg.legId, targetDialog.toTag, delta)
   }
 
-  const targetUri = targetDialog.contact || `sip:target@${target.host}:${target.port}`
+  const targetUri = targetDialog.contact || `sip:${target.host}:${target.port}`
 
   let relayed: SipRequest | SipResponse
   switch (req.method) {
@@ -812,7 +812,7 @@ function executeAckLeg(
   if (dialog === undefined) return
 
   const target = legTarget(leg)
-  const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
+  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
   // RFC 3261 §13.2.2.4: ACK for 2xx echoes the INVITE's CSeq (tracked on
   // the dialog as lastInviteCSeq).
   const ackCSeq = dialog.lastInviteCSeq ?? dialog.localCSeq ?? 1
@@ -846,7 +846,7 @@ function executeSendRequestToLeg(
   if (dialog === undefined) return
 
   const target = legTarget(leg)
-  const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
+  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
 
   // Bump CSeq for the new request
   state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
@@ -923,7 +923,7 @@ function executeSendPrackToLeg(
   if (dialog === undefined) return
 
   const target = legTarget(leg)
-  const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
+  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
 
   state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
   const cseq = dialog.localCSeq + 1
@@ -1006,7 +1006,7 @@ function executeDestroyLeg(
     // BYE a confirmed leg
     const dialog = leg.dialogs[0]
     if (dialog !== undefined) {
-      const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
+      const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
       const byeMsg = buildBye(leg.callId, leg.fromTag, dialog.toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri)
       const routed = leg.legId !== "a" ? applyRouteSet(byeMsg, dialog, target) : { msg: byeMsg, target }
       state.outbound.push({
@@ -1090,7 +1090,7 @@ function executeTerminateCall(
       const dialog = leg.dialogs[0]
       if (dialog !== undefined) {
         const target = legTarget(leg)
-        const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
+        const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
         const fromTag = leg.legId === "a"
           ? (b2buaTag(state.call, "a") ?? "")
           : leg.fromTag
@@ -1163,7 +1163,7 @@ function executeBeginTermination(
       const dialog = leg.dialogs[0]
       if (dialog !== undefined) {
         const target = legTarget(leg)
-        const targetUri = dialog.contact || `sip:target@${target.host}:${target.port}`
+        const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
         const fromTag = leg.legId === "a"
           ? (b2buaTag(state.call, "a") ?? "")
           : leg.fromTag
