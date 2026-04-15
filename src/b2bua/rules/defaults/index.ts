@@ -11,7 +11,7 @@ import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 import { relayOptionsRule, relayByeRule, relayAckRule, relayReinviteRule, relayPrackRule } from "./RelayRules.js"
 
 // Lifecycle rules
-import { handleTimeoutRule, handleCancelRule, handle481Rule } from "./LifecycleRules.js"
+import { handleTimeoutRule, handleCancelRule, handle481Rule, resolveCancelResponseRule } from "./LifecycleRules.js"
 
 // Terminating-state rules
 import {
@@ -54,6 +54,7 @@ export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
   resolveByeResponseRule,
   resolveCrossByeRule,
   terminatingSafetyTimeoutRule,
+  resolveCancelResponseRule,
 
   // Corner cases (830-860 band) — must match before default rules
   cancel200CrossingRule,

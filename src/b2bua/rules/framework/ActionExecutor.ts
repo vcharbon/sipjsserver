@@ -24,6 +24,7 @@ import {
   mergeLeg,
   relayCSeqDelta,
   setByeDisposition,
+  setLegDisposition,
   setLegState,
   splitLeg,
   updateRemoteCSeq,
@@ -225,6 +226,9 @@ function executeAction(
       break
     case "destroy-leg":
       executeDestroyLeg(action, ctx, state)
+      break
+    case "cancel-leg":
+      executeCancelLeg(action, ctx, state)
       break
     case "merge":
       state.call = mergeLeg(state.call, action.legA, action.legB)
@@ -1024,6 +1028,32 @@ function executeDestroyLeg(
   state.call = splitLeg(state.call, action.legId)
 }
 
+// ── cancel-leg ─────────────────────────────────────────────────────────────
+
+/**
+ * Send CANCEL for an outstanding early/trying b-leg INVITE but KEEP the leg
+ * alive. Sets leg.disposition = "cancelling" so subsequent rules can resolve
+ * the leg when bob responds:
+ *   - Final non-2xx (e.g. 487) → resolve-cancel-response terminates the leg.
+ *   - Crossing 2xx → cancel-200-crossing ACKs and BYEs (RFC 3261 §9.1).
+ *
+ * Called only by handle-cancel. For confirmed legs, use destroy-leg (BYE).
+ */
+function executeCancelLeg(
+  action: Extract<RuleAction, { type: "cancel-leg" }>,
+  _ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const leg = findLeg(state.call, action.legId)
+  if (leg === undefined) return
+  if (leg.state === "terminated") return
+  if (leg.state === "confirmed") return // caller should have used destroy-leg
+
+  const target = legTarget(leg)
+  state.outbound.push(buildCancelEnvelope(leg, target, ""))
+  state.call = setLegDisposition(state.call, action.legId, "cancelling")
+}
+
 // ── schedule-timer ─────────────────────────────────────────────────────────
 
 function executeScheduleTimer(
@@ -1123,6 +1153,10 @@ function executeBeginTermination(
     // Skip legs already handled by the rule or already resolved
     if (leg.state === "terminated") continue
     if (leg.byeDisposition !== undefined) continue
+    // Skip legs currently being cancelled — cancel-leg already sent CANCEL
+    // and keeps the leg alive so we can resolve the CANCEL/2xx crossing
+    // race when bob's final response arrives.
+    if (leg.disposition === "cancelling") continue
 
     if (leg.state === "confirmed") {
       // Send BYE to confirmed leg — await 200 OK or timeout

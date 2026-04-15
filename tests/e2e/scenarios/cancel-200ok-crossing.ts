@@ -10,7 +10,7 @@
  *   1. ACK the 200 OK (to stop Bob's retransmissions)
  *   2. BYE Bob (to tear down the answered-but-cancelled leg)
  *
- * This exercises the handle200OkInvite "cancelling" disposition path.
+ * This exercises the cancel-200-crossing rule in CornerCaseRules.ts.
  */
 
 import { scenario } from "../framework/dsl.js"

@@ -9,6 +9,13 @@ import type { RuleDefinition, RuleHandleResult, RuleAction } from "../framework/
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader } from "../../../sip/MessageFactory.js"
 
+// ── Helper ────────────────────────────────────────────────────────────────
+
+function cseqMethod(resp: SipResponse): string {
+  const h = getHeader(resp.headers, "cseq") ?? ""
+  return h.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
+}
+
 // ── handle-timeout (priority 930) ─────────────────────────────────────────
 
 /** Terminate call on transaction timeout. */
@@ -49,10 +56,17 @@ export const handleCancelRule: RuleDefinition<undefined, undefined> = {
   handle: (ctx) => {
     const actions: RuleAction[] = []
 
-    // Destroy all non-terminated b-legs
+    // Teardown all non-terminated b-legs.
+    //   - confirmed b-leg: BYE (destroy-leg)
+    //   - early/trying b-leg: CANCEL but keep the leg alive (cancel-leg)
+    //     so the CANCEL/200 crossing race (RFC 3261 §9.1) can be resolved
+    //     when bob's final response arrives.
     for (const bLeg of ctx.call.bLegs) {
-      if (bLeg.state !== "terminated") {
+      if (bLeg.state === "terminated") continue
+      if (bLeg.state === "confirmed") {
         actions.push({ type: "destroy-leg", legId: bLeg.legId })
+      } else {
+        actions.push({ type: "cancel-leg", legId: bLeg.legId })
       }
     }
 
@@ -60,6 +74,48 @@ export const handleCancelRule: RuleDefinition<undefined, undefined> = {
     actions.push({ type: "begin-termination" })
 
     return Effect.succeed({ actions, state: undefined })
+  },
+}
+
+// ── resolve-cancel-response (priority 820) ───────────────────────────────
+
+/**
+ * Resolve a non-2xx final response (typically 487 Request Terminated) for a
+ * b-leg INVITE that was CANCELed by handle-cancel. Marks the leg terminated
+ * with byeDisposition="cancelled" so the call's isFullyResolved check can
+ * complete and the call can transition to "terminated".
+ *
+ * We do NOT relay the response to a-leg — the a-leg INVITE transaction has
+ * already completed via the 487 sent by TransactionLayer when CANCEL arrived.
+ */
+export const resolveCancelResponseRule: RuleDefinition<undefined, undefined> = {
+  id: "resolve-cancel-response",
+  name: "Resolve CANCEL Response",
+  alwaysActive: true,
+  defaultPriority: 820,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  matches: (ctx) => {
+    if (ctx.sourceLeg.disposition !== "cancelling") return false
+    if (ctx.event.type !== "sip") return false
+    const msg = ctx.event.message
+    if (msg.type !== "response") return false
+    if (msg.status < 300) return false
+    if (ctx.direction !== "from-b") return false
+    return cseqMethod(msg as SipResponse) === "INVITE"
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) => {
+    const legId = ctx.sourceLeg.legId
+    return Effect.succeed({
+      actions: [
+        { type: "terminate-leg" as const, legId, byeDisposition: "cancelled" as const },
+      ],
+      state: undefined,
+    })
   },
 }
 

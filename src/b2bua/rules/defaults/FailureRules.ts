@@ -45,6 +45,9 @@ export const routeFailureRule: RuleDefinition<undefined, undefined> = {
     // Skip already-terminated legs — e.g. a 487 arriving after destroy-leg
     // already sent CANCEL and marked the leg terminated.
     if (ctx.sourceLeg.state === "terminated") return false
+    // Skip legs being CANCELed (handle-cancel path) — resolve-cancel-response
+    // handles the non-2xx reply; cancel-200-crossing handles the 2xx race.
+    if (ctx.sourceLeg.disposition === "cancelling") return false
     return cseqMethod(msg) === "INVITE"
   },
 

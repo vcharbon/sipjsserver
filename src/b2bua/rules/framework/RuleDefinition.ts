@@ -115,6 +115,17 @@ export type RuleAction =
       readonly callbackContext?: string }
   | { readonly type: "destroy-leg"; readonly legId: string }
 
+  // ── Cancel an early/trying b-leg (CANCEL, but keep the leg alive) ──
+  // Unlike destroy-leg which marks the leg terminated immediately, cancel-leg
+  // sends CANCEL but leaves leg.state unchanged and sets leg.disposition to
+  // "cancelling". The leg is resolved later when bob responds:
+  //   - 3xx-6xx (e.g. 487): resolve-cancel-response fires → terminate-leg
+  //   - 2xx (crossing): cancel-200-crossing fires → confirm-dialog + ack + BYE
+  //
+  // This is the correct way to handle CANCEL because it keeps the call in
+  // memory long enough to handle the CANCEL/200 race (RFC 3261 §9.1).
+  | { readonly type: "cancel-leg"; readonly legId: string }
+
   // ── Peering (INAP split/merge) ──
   | { readonly type: "merge"; readonly legA: string; readonly legB: string }
   | { readonly type: "split"; readonly legId: string }

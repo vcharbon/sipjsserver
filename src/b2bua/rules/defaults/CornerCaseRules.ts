@@ -22,8 +22,17 @@ function cseqMethod(resp: SipResponse): string {
 
 /**
  * CANCEL/200 OK crossing: 200 OK INVITE arrives on a b-leg that is
- * being cancelled (disposition === "cancelling"). ACK the 200, then BYE.
- * Do NOT relay to a-leg (already got 487).
+ * being cancelled (disposition === "cancelling"). RFC 3261 §9.1: once
+ * the UAS has committed a final response, CANCEL has no effect — we
+ * must ACK the 2xx (to stop retransmissions) and then BYE the dialog.
+ * Do NOT relay to a-leg (already got 487 Request Terminated).
+ *
+ * Action sequence:
+ *   confirm-dialog → updates b-leg state to "confirmed", seeds dialog
+ *                    from the 2xx toTag/contact so ack-leg/destroy-leg
+ *                    have the right dialog state.
+ *   ack-leg        → ACK the 2xx end-to-end.
+ *   destroy-leg    → BYE (state is now "confirmed", so destroy-leg BYEs).
  */
 export const cancel200CrossingRule: RuleDefinition<undefined, undefined> = {
   id: "cancel-200-crossing",
@@ -48,6 +57,7 @@ export const cancel200CrossingRule: RuleDefinition<undefined, undefined> = {
   handle: (ctx) =>
     Effect.succeed({
       actions: [
+        { type: "confirm-dialog" },
         { type: "ack-leg", legId: ctx.sourceLeg.legId },
         { type: "destroy-leg", legId: ctx.sourceLeg.legId },
       ],
