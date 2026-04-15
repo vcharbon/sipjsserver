@@ -163,7 +163,7 @@ const { transaction: aliceInviteTxn } = alice.invite("sip:+1234@b2bua", {
 aliceDialog.bye({
   build: (ctx) => ({
     to: `sip:${ctx.agent("bob").uri}@${ctx.remote.ip}:${ctx.remote.port}`,
-    cseq: ctx.dialog.localCSeq + 10,
+    cseq: ctx.last.cseq + 10,
   })
 })
 ```
@@ -184,7 +184,6 @@ aliceDialog.bye({
 | `ctx.last.via` | `[last_Via:]` | Last message's Via headers |
 | `ctx.last.cseq` | `[last_CSeq:]` | Last message's CSeq number |
 | `ctx.last.callId` | `[last_Call-ID:]` | Last message's Call-ID |
-| `ctx.dialog.localCSeq` | -- | Current local CSeq counter |
 | `ctx.dialog.remoteTag` | `[peer_tag_param]` | Remote party's tag |
 | `ctx.call.branch()` | `[branch]` | Generate a fresh branch |
 | `ctx.agent("bob")` | -- | Resolve another agent's info (rename-aware) |

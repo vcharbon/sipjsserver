@@ -1,6 +1,7 @@
 # CLAUDE.md
 
 This project provides a SIP B2BUA (Back-to-Back User Agent) that listens on incoming UDP SIP packets, calls a backend HTTP server to decide how to process the incoming call, then forwards accordingly.
+ALWAYS reply and write in english even when user speaks french!!!
 
 ## Language & Stack
 

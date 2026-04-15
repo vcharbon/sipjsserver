@@ -34,16 +34,29 @@ export interface AgentDialogState {
   /** All tags this agent has used (including localTag and custom To-tags from forking). */
   localTags: Set<string>
   remoteTag: string
-  localCSeq: number
   /** Highest CSeq received from the remote party. Undefined until first message received. */
   remoteCSeq: number | undefined
   /**
-   * Baseline CSeq from the initial INVITE for each Call-ID the agent has
-   * received. All early/confirmed dialogs formed from that INVITE inherit
-   * this baseline — each dialog's first in-dialog UAC request must be
-   * `baseline + 1` (RFC 3261 §12.2.1.1).
+   * Baseline CSeq of the INVITE this agent *received* on a given Call-ID.
+   * Populated only on receive (see interpreter.ts) and used by the CSeq
+   * validator to check that peer in-dialog requests start at baseline + 1.
+   * Not used for outbound CSeq generation — see sentInviteCSeqByCallId.
    */
   inviteCSeqByCallId: Map<string, number>
+  /**
+   * Baseline CSeq of the INVITE this agent *sent* on a given Call-ID. Set
+   * once when the initial INVITE is built and never rewritten. Seeds the
+   * per-dialog UAC counters so forked early dialogs all start from the same
+   * baseline (RFC 3261 §12.2.1.1).
+   */
+  sentInviteCSeqByCallId: Map<string, number>
+  /**
+   * High-water CSeq for out-of-dialog requests per Call-ID (INVITE, OPTIONS,
+   * REGISTER, etc.). Kept separate from the INVITE baselines so out-of-dialog
+   * traffic on the same Call-ID can't corrupt the per-dialog baseline that
+   * forked early dialogs rely on.
+   */
+  outOfDialogCSeq: Map<string, number>
   /**
    * Highest CSeq received per dialog, keyed by `${callId}|${fromTag}|${toTag}`
    * (as present on the received request). Used to enforce per-dialog strictly
@@ -51,6 +64,13 @@ export interface AgentDialogState {
    * forked early dialog has its own sequence independent of siblings.
    */
   remoteCSeqByDialog: Map<string, number>
+  /**
+   * Highest CSeq sent per dialog, keyed by `${callId}|${localTag}|${remoteTag}`
+   * (as stamped on outgoing requests). RFC 3261 §12.2.1.1: each dialog
+   * maintains its own UAC sequence-number namespace. Forked early dialogs
+   * share the INVITE baseline but advance independently.
+   */
+  localCSeqByDialog: Map<string, number>
   routeSet: string[]
   /** Messages indexed by StepRef id for inResponseTo lookups. */
   messagesByRef: Map<number, SipMessage>
@@ -100,10 +120,12 @@ export function createAgentDialogState(localIp: string): AgentDialogState {
     localTag: tag,
     localTags: new Set([tag]),
     remoteTag: "",
-    localCSeq: 0,
     remoteCSeq: undefined,
     inviteCSeqByCallId: new Map(),
+    sentInviteCSeqByCallId: new Map(),
+    outOfDialogCSeq: new Map(),
     remoteCSeqByDialog: new Map(),
+    localCSeqByDialog: new Map(),
     routeSet: [],
     messagesByRef: new Map(),
     lastMessage: undefined,
@@ -145,7 +167,6 @@ export function buildMessageContext(
       localTag: dialogState.localTag,
       remoteTag: dialogState.remoteTag,
       routeSet: dialogState.routeSet,
-      localCSeq: dialogState.localCSeq,
       remoteCSeq: dialogState.remoteCSeq,
       remoteUri: dialogState.dialogRemoteUri,
     },
@@ -222,6 +243,54 @@ export function buildRequest(
     ? dialogState.lastInviteBranch
     : ctx.call.branch()
 
+  // Evaluate the build(ctx) callback up front so we can peek at user-supplied
+  // To/CSeq overrides before we pick the CSeq. This is the only way to know
+  // which early dialog an in-dialog request targets (the To-tag selects the
+  // dialog). The merged overrides are reused below; build() runs only once.
+  const merged = mergeOverrides(step.overrides, step.build ? step.build(ctx) : undefined)
+
+  // Determine the target remote tag for this request. For in-dialog requests
+  // the agent usually passes `to: ctx.last.to` which carries the remote tag
+  // that identifies the dialog (e.g. each forked early dialog has its own).
+  const targetRemoteTag = extractTag(merged?.to) ?? dialogState.remoteTag
+
+  // RFC 3261 §12.2.1.1: CSeq is scoped to the dialog. Forked early dialogs
+  // share the INVITE baseline but each advances its own counter. Track
+  // per-dialog local CSeq keyed by `callId|localTag|remoteTag`.
+  const dialogKey = targetRemoteTag
+    ? `${ctx.local.callId}|${ctx.local.tag}|${targetRemoteTag}`
+    : undefined
+
+  const sentBaseline = dialogState.sentInviteCSeqByCallId.get(ctx.local.callId) ?? 0
+
+  let cseqNumber: number
+  if (method === "CANCEL") {
+    // CANCEL reuses the original INVITE's CSeq — does not bump any counter.
+    cseqNumber = ctx.last.cseq || sentBaseline
+  } else if (method === "ACK") {
+    // ACK for 2xx reuses the INVITE's CSeq — does not bump any counter.
+    cseqNumber = ctx.last.cseq || sentBaseline
+  } else if (dialogKey !== undefined) {
+    // In-dialog request: use the per-dialog counter, seeded from the agent's
+    // own sent-INVITE baseline. Forked early dialogs advance independently.
+    const prior = dialogState.localCSeqByDialog.get(dialogKey) ?? sentBaseline
+    cseqNumber = prior + 1
+    dialogState.localCSeqByDialog.set(dialogKey, cseqNumber)
+  } else {
+    // Out-of-dialog request (initial INVITE, OPTIONS, etc.): advance the
+    // out-of-dialog high-water mark per Call-ID. Start from the sent-INVITE
+    // baseline if one exists so the first non-INVITE out-of-dialog request
+    // lands at baseline + 1.
+    const priorOutOfDialog = dialogState.outOfDialogCSeq.get(ctx.local.callId) ?? sentBaseline
+    cseqNumber = priorOutOfDialog + 1
+    dialogState.outOfDialogCSeq.set(ctx.local.callId, cseqNumber)
+    // The first INVITE on a Call-ID establishes the baseline that all
+    // forked early dialogs inherit (RFC 3261 §12.2.1.1).
+    if (method === "INVITE" && !dialogState.sentInviteCSeqByCallId.has(ctx.local.callId)) {
+      dialogState.sentInviteCSeqByCallId.set(ctx.local.callId, cseqNumber)
+    }
+  }
+
   // Compute defaults
   const defaultHeaders: SipHeader[] = [
     h("Via", `SIP/2.0/UDP ${ctx.local.ip}:${ctx.local.port};branch=${branch}`),
@@ -229,22 +298,9 @@ export function buildRequest(
     h("From", `<${ctx.local.uri}>;tag=${ctx.local.tag}`),
     h("To", buildToHeader(method, step.uri, ctx, dialogState)),
     h("Call-ID", ctx.local.callId),
-    h("CSeq", `${dialogState.localCSeq + 1} ${method}`),
+    h("CSeq", `${cseqNumber} ${method}`),
     h("Contact", `<sip:${ctx.local.ip}:${ctx.local.port};transport=udp>`),
   ]
-
-  // For CANCEL, reuse the original INVITE's CSeq number
-  if (method === "CANCEL") {
-    const cancelCSeq = ctx.last.cseq || dialogState.localCSeq
-    defaultHeaders[5] = h("CSeq", `${cancelCSeq} CANCEL`)
-  } else if (method === "ACK") {
-    // ACK for 2xx uses the INVITE's CSeq number
-    const ackCSeq = ctx.last.cseq || dialogState.localCSeq
-    defaultHeaders[5] = h("CSeq", `${ackCSeq} ACK`)
-  } else {
-    // Increment CSeq for new requests
-    dialogState.localCSeq++
-  }
 
   // For in-dialog requests (BYE, ACK, re-INVITE), use the remote Contact as Request-URI
   const uri = step.uri
@@ -259,11 +315,18 @@ export function buildRequest(
   let headers = [...defaultHeaders, ...routeHeaders]
   let body: Uint8Array = new Uint8Array(0)
 
-  // Apply overrides
-  const merged = mergeOverrides(step.overrides, step.build ? step.build(ctx) : undefined)
+  // Apply the overrides we already merged above (build() ran once).
   if (merged) {
     headers = applyOverrides(headers, merged)
     if (merged.body) body = merged.body
+    // If the caller forced an explicit CSeq, keep the per-dialog counter in
+    // sync so the next in-dialog request doesn't regress below what was sent.
+    if (merged.cseq !== undefined && dialogKey !== undefined && method !== "CANCEL" && method !== "ACK") {
+      const prior = dialogState.localCSeqByDialog.get(dialogKey) ?? 0
+      if (merged.cseq > prior) {
+        dialogState.localCSeqByDialog.set(dialogKey, merged.cseq)
+      }
+    }
   }
 
   // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
@@ -380,6 +443,11 @@ function buildToHeader(
 function addToTag(toHeader: string, localTag: string): string {
   if (/;tag=/i.test(toHeader)) return toHeader
   return `${toHeader};tag=${localTag}`
+}
+
+function extractTag(header: string | undefined): string | undefined {
+  if (!header) return undefined
+  return /;tag=([^\s;,>]+)/i.exec(header)?.[1]
 }
 
 function mergeOverrides(

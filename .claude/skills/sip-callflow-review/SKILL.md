@@ -10,4 +10,5 @@ RFC SIP 3261
 SDP Offer/Answer Model (RFC 3264) 
 PRACK and UPDATE related RC if used.
 
-The capture is taken in the middle of the call, don't make any assumption on the nature of the 2 equipments.
+The B2B2UA is not simulating a real user agent. It is allowed to do forking toward upstream.
+Ack is end to end by design.
