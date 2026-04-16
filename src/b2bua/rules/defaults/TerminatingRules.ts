@@ -13,15 +13,6 @@
 
 import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
-import type { SipResponse } from "../../../sip/types.js"
-import { getHeader } from "../../../sip/MessageFactory.js"
-
-// ── Helper ────────────────────────────────────────────────────────────────
-
-function cseqMethod(resp: SipResponse): string {
-  const h = getHeader(resp.headers, "cseq") ?? ""
-  return h.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
-}
 
 // ── resolve-bye-response (priority 800) ──────────────────────────────────
 
@@ -43,15 +34,6 @@ export const resolveByeResponseRule: RuleDefinition<undefined, undefined> = {
     cseqMethod: "BYE",
     statusClass: ["2xx", "3xx", "4xx", "5xx", "6xx"],
     callState: "terminating",
-  },
-
-  matches: (ctx) => {
-    if (ctx.call.state !== "terminating") return false
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 200) return false
-    return cseqMethod(msg) === "BYE"
   },
 
   init: () => undefined,
@@ -85,13 +67,6 @@ export const resolveCrossByeRule: RuleDefinition<undefined, undefined> = {
     kind: "request",
     method: "BYE",
     callState: "terminating",
-  },
-
-  matches: (ctx) => {
-    if (ctx.call.state !== "terminating") return false
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    return msg.type === "request" && msg.method === "BYE"
   },
 
   init: () => undefined,
@@ -129,11 +104,6 @@ export const terminatingSafetyTimeoutRule: RuleDefinition<undefined, undefined> 
     callState: "terminating",
   },
 
-  matches: (ctx) => {
-    if (ctx.call.state !== "terminating") return false
-    return ctx.event.type === "timer" && ctx.event.timerType === "terminating_timeout"
-  },
-
   init: () => undefined,
 
   handle: (ctx) => {
@@ -155,25 +125,72 @@ export const terminatingSafetyTimeoutRule: RuleDefinition<undefined, undefined> 
 // ── terminating-drop (priority 999) ──────────────────────────────────────
 
 /**
- * Catch-all for any event during terminating state that no other rule
- * handles. Absorbs silently — during teardown, only BYE responses, cross-BYE,
- * and the safety timeout matter. Everything else is noise.
+ * Catch-all absorbers for events during `terminating` state that no other
+ * rule handles. Split per event kind so each carries a concrete Match
+ * descriptor; all five share the same id stem and drop silently.
  *
- * Runs at priority 999 (lowest) so all other terminating-state rules
- * and even default rules get a chance first.
+ * During teardown only BYE responses, cross-BYE, and the safety timeout
+ * matter — everything else is noise. Priority 999 (lowest) keeps these
+ * below all active-state rules.
  */
-export const terminatingDropRule: RuleDefinition<undefined, undefined> = {
-  id: "terminating-drop",
-  name: "Terminating Drop",
+const dropHandle = () => Effect.succeed({ actions: [], state: undefined })
+
+export const terminatingDropRequestRule: RuleDefinition<undefined, undefined> = {
+  id: "terminating-drop-request",
+  name: "Terminating Drop (request)",
   alwaysActive: true,
   defaultPriority: 999,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
-
-  matches: (ctx) => ctx.call.state === "terminating",
-
+  match: { kind: "request", callState: "terminating" },
   init: () => undefined,
+  handle: dropHandle,
+}
 
-  handle: () =>
-    Effect.succeed({ actions: [], state: undefined }),
+export const terminatingDropResponseRule: RuleDefinition<undefined, undefined> = {
+  id: "terminating-drop-response",
+  name: "Terminating Drop (response)",
+  alwaysActive: true,
+  defaultPriority: 999,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+  match: { kind: "response", callState: "terminating" },
+  init: () => undefined,
+  handle: dropHandle,
+}
+
+export const terminatingDropTimerRule: RuleDefinition<undefined, undefined> = {
+  id: "terminating-drop-timer",
+  name: "Terminating Drop (timer)",
+  alwaysActive: true,
+  defaultPriority: 999,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+  match: { kind: "timer", callState: "terminating" },
+  init: () => undefined,
+  handle: dropHandle,
+}
+
+export const terminatingDropTimeoutRule: RuleDefinition<undefined, undefined> = {
+  id: "terminating-drop-timeout",
+  name: "Terminating Drop (timeout)",
+  alwaysActive: true,
+  defaultPriority: 999,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+  match: { kind: "timeout", callState: "terminating" },
+  init: () => undefined,
+  handle: dropHandle,
+}
+
+export const terminatingDropCancelledRule: RuleDefinition<undefined, undefined> = {
+  id: "terminating-drop-cancelled",
+  name: "Terminating Drop (cancelled)",
+  alwaysActive: true,
+  defaultPriority: 999,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+  match: { kind: "cancelled", callState: "terminating" },
+  init: () => undefined,
+  handle: dropHandle,
 }

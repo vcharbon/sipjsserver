@@ -35,16 +35,6 @@ export const relayProvisionalRule: RuleDefinition<undefined, undefined> = {
     direction: "from-b",
   },
 
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 100 || msg.status >= 200) return false
-    if (ctx.direction !== "from-b") return false
-    // Only match INVITE provisionals — non-INVITE provisionals are rare and not relayed
-    return cseqMethod(msg as SipResponse) === "INVITE"
-  },
-
   init: () => undefined,
 
   handle: (ctx) => {
@@ -83,19 +73,6 @@ export const confirmDialogRule: RuleDefinition<undefined, undefined> = {
     statusClass: "2xx",
     legState: ["trying", "early"],
     direction: "from-b",
-  },
-
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 200 || msg.status >= 300) return false
-    if (ctx.direction !== "from-b") return false
-    if (cseqMethod(msg as SipResponse) !== "INVITE") return false
-    // Skip if higher-priority rules should have handled (cancel-200-crossing, retransmit-200)
-    if (ctx.sourceLeg.state === "confirmed") return false
-    if (ctx.sourceLeg.disposition === "cancelling") return false
-    return true
   },
 
   init: () => undefined,
@@ -172,15 +149,6 @@ export const absorbBye200Rule: RuleDefinition<undefined, undefined> = {
     statusClass: "2xx",
   },
 
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 200 || msg.status >= 300) return false
-    const method = cseqMethod(msg)
-    return method === "BYE" || method === "CANCEL"
-  },
-
   init: () => undefined,
 
   handle: () =>
@@ -223,22 +191,6 @@ export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
     },
   },
 
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 200 || msg.status >= 300) return false
-    if (cseqMethod(msg) !== "OPTIONS") return false
-    // If a pending transparent relay matches this response's CSeq, the OPTIONS
-    // was relayed end-to-end — leave it for relay-non-invite-200.
-    const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "", 10)
-    if (ctx.sourceDialog && Number.isFinite(cseqNum) &&
-        findPendingRequest(ctx.sourceDialog, cseqNum) !== undefined) {
-      return false
-    }
-    return true
-  },
-
   init: () => undefined,
 
   handle: (ctx) => {
@@ -269,18 +221,6 @@ export const relayNonInvite200Rule: RuleDefinition<undefined, undefined> = {
     kind: "response",
     cseqMethod: ["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "NOTIFY", "SUBSCRIBE"],
     statusClass: "2xx",
-  },
-
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 200 || msg.status >= 300) return false
-    const method = cseqMethod(msg)
-    // BYE, CANCEL, INVITE are handled by other rules. OPTIONS with a
-    // pending relay snapshot reaches here (keepalive OPTIONS is absorbed
-    // earlier by absorb-options-200 at priority 830).
-    return method !== "BYE" && method !== "CANCEL" && method !== "INVITE"
   },
 
   init: () => undefined,

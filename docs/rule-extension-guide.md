@@ -98,11 +98,15 @@ const myRule: RuleDefinition<PolicyState, undefined> = {
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
 
-  matches: (ctx) => {
-    // Fast synchronous filter — does this rule care about this event?
-    // The PolicyModule guard has ALREADY been checked by the framework.
-    // Only match on SIP-level criteria here.
-    return false
+  // Declarative match descriptor — discriminated union on event kind.
+  // The PolicyModule guard is composed into `match.filter` by createRuleRegistry,
+  // so the Matcher only picks this rule on events where both the guard and
+  // the SIP-level columns accept the event.
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "1xx",
+    direction: "from-b",
   },
 
   init: () => ({ /* initial state */ }),
@@ -186,7 +190,7 @@ const myPreProcessor: RuleDefinition<...> = {
 3. Appends base rule's actions after this rule's actions
 4. The combined result claims the event
 
-**When the guard fails:** composition only activates when the composing rule's guard passes AND `matches()` returns true. When the guard fails, the base rule runs normally in its original position — it is NOT consumed.
+**When the guard fails:** composition only activates when the composing rule's guard passes AND its `match` descriptor accepts the event. When the guard fails, the base rule runs normally in its original position — it is NOT consumed.
 
 **When `handle()` returns undefined:** the base rule runs alone, as if the composing rule didn't exist.
 

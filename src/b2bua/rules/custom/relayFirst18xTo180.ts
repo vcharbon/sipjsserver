@@ -80,15 +80,6 @@ const suppress18x: RuleDefinition<PolicyState, undefined> = {
     direction: "from-b",
   },
 
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 100 || msg.status >= 200) return false
-    if (ctx.direction !== "from-b") return false
-    return cseqMethod(msg as SipResponse) === "INVITE"
-  },
-
   init: () => ({ firstRelayed: false }),
 
   handle: (ctx, state) => {
@@ -167,19 +158,6 @@ const forceTagConsistency: RuleDefinition<PolicyState, undefined> = {
     direction: "from-b",
   },
 
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 200 || msg.status >= 300) return false
-    if (ctx.direction !== "from-b") return false
-    if (cseqMethod(msg as SipResponse) !== "INVITE") return false
-    // Same guards as confirm-dialog — don't compose if confirm-dialog wouldn't match
-    if (ctx.sourceLeg.state === "confirmed") return false
-    if (ctx.sourceLeg.disposition === "cancelling") return false
-    return true
-  },
-
   init: () => ({ firstRelayed: false }),
 
   handle: (ctx, state) => {
@@ -222,15 +200,6 @@ const absorbPrack200: RuleDefinition<PolicyState, undefined> = {
     cseqMethod: "PRACK",
     statusClass: "2xx",
     direction: "from-b",
-  },
-
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 200 || msg.status >= 300) return false
-    if (ctx.direction !== "from-b") return false
-    return cseqMethod(msg as SipResponse) === "PRACK"
   },
 
   init: () => ({ firstRelayed: false }),

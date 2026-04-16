@@ -31,11 +31,6 @@ export function makeTransparentRelayRule(
 
     match: { kind: "request", method },
 
-    matches: (ctx) =>
-      ctx.event.type === "sip" &&
-      ctx.event.message.type === "request" &&
-      ctx.event.message.method === method,
-
     init: () => undefined,
 
     handle: () =>
@@ -79,11 +74,6 @@ export const relayByeRule: RuleDefinition<undefined, undefined> = {
 
   match: { kind: "request", method: "BYE" },
 
-  matches: (ctx) =>
-    ctx.event.type === "sip" &&
-    ctx.event.message.type === "request" &&
-    ctx.event.message.method === "BYE",
-
   init: () => undefined,
 
   handle: (ctx) =>
@@ -110,11 +100,6 @@ export const relayAckRule: RuleDefinition<undefined, undefined> = {
   paramsSchema: Schema.Undefined,
 
   match: { kind: "request", method: "ACK" },
-
-  matches: (ctx) =>
-    ctx.event.type === "sip" &&
-    ctx.event.message.type === "request" &&
-    ctx.event.message.method === "ACK",
 
   init: () => undefined,
 

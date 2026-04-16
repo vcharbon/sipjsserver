@@ -50,16 +50,6 @@ export const cancel200CrossingRule: RuleDefinition<undefined, undefined> = {
     direction: "from-b",
   },
 
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 200 || msg.status >= 300) return false
-    if (ctx.direction !== "from-b") return false
-    if (cseqMethod(msg) !== "INVITE") return false
-    return ctx.sourceLeg.disposition === "cancelling"
-  },
-
   init: () => undefined,
 
   handle: (ctx) =>
@@ -106,22 +96,6 @@ export const retransmit200Rule: RuleDefinition<undefined, undefined> = {
     },
   },
 
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 200 || msg.status >= 300) return false
-    if (ctx.direction !== "from-b") return false
-    if (cseqMethod(msg) !== "INVITE") return false
-    if (ctx.sourceLeg.state !== "confirmed") return false
-    // Exclude re-INVITE responses — those are handled by relayReinviteResponseRule
-    if (ctx.sourceDialog !== undefined) {
-      const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "0", 10)
-      if (findPendingRequest(ctx.sourceDialog, cseqNum) !== undefined) return false
-    }
-    return true
-  },
-
   init: () => undefined,
 
   handle: (ctx) =>
@@ -154,18 +128,6 @@ export const reinviteGlareRule: RuleDefinition<undefined, undefined> = {
     filter: (ctx) =>
       ctx.sourceDialog !== undefined &&
       ctx.sourceDialog.inboundPendingRequests.some((p) => p.method === "INVITE"),
-  },
-
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "request") return false
-    if (msg.method !== "INVITE") return false
-    // Glare: there's already a pending inbound re-INVITE on this dialog
-    if (ctx.sourceDialog === undefined) return false
-    // Glare applies only to re-INVITE (RFC 3261 §14.1) — ignore pending
-    // non-INVITE transparent relays (OPTIONS/INFO/UPDATE/…) on the same dialog.
-    return ctx.sourceDialog.inboundPendingRequests.some((p) => p.method === "INVITE")
   },
 
   init: () => undefined,
@@ -212,18 +174,6 @@ export const relayReinviteResponseRule: RuleDefinition<undefined, undefined> = {
       const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "0", 10)
       return findPendingRequest(ctx.sourceDialog, cseqNum) !== undefined
     },
-  },
-
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (cseqMethod(msg) !== "INVITE") return false
-    // Check if this is a response to a pending re-INVITE
-    const dialog = ctx.sourceDialog
-    if (dialog === undefined) return false
-    const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "0", 10)
-    return findPendingRequest(dialog, cseqNum) !== undefined
   },
 
   init: () => undefined,

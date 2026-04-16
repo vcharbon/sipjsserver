@@ -16,10 +16,10 @@ import type { CallLimiter } from "../../../call/CallLimiter.js"
 
 // ── Declarative match schema (reified predicates) ─────────────────────────
 //
-// Every rule declares a `match` object instead of an imperative `matches()`
-// function. Columns are discriminated by event kind; the Matcher picks the
-// strictly-most-specific rule at runtime, and the RuleRegistry validates
-// shadowing/reachability at startup. See docs (plan spicy-dancing-harbor.md).
+// Every rule declares a `match` object. Columns are discriminated by event
+// kind; the Matcher picks the strictly-most-specific rule at runtime, and
+// the RuleRegistry validates shadowing at startup. See
+// docs/AdvancedCallModel.md for the full design and column semantics.
 
 /** SIP methods the B2BUA discriminates on in rule matching. */
 export type SipMethod =
@@ -41,7 +41,8 @@ export type MatchFilter = (ctx: RuleContext) => boolean
 /** Match descriptor for an inbound SIP request. */
 export interface RequestMatch {
   readonly kind: "request"
-  readonly method: OneOrMany<SipMethod>
+  /** Omitted = match any method. */
+  readonly method?: OneOrMany<SipMethod>
   readonly callState?: OneOrMany<CallModelState>
   readonly legState?: OneOrMany<LegState>
   readonly legDisposition?: OneOrMany<LegDisposition>
@@ -52,7 +53,8 @@ export interface RequestMatch {
 /** Match descriptor for an inbound SIP response. */
 export interface ResponseMatch {
   readonly kind: "response"
-  readonly cseqMethod: OneOrMany<SipMethod>
+  /** Omitted = match any CSeq method. */
+  readonly cseqMethod?: OneOrMany<SipMethod>
   /** Exact SIP status code. Mutually exclusive with statusClass. */
   readonly status?: number
   /** One or more status classes. Mutually exclusive with status. */
@@ -67,7 +69,8 @@ export interface ResponseMatch {
 /** Match descriptor for a background timer firing. */
 export interface TimerMatch {
   readonly kind: "timer"
-  readonly timerType: OneOrMany<TimerType>
+  /** Omitted = match any timer type. */
+  readonly timerType?: OneOrMany<TimerType>
   readonly callState?: OneOrMany<CallModelState>
   readonly filter?: MatchFilter
 }
@@ -76,12 +79,14 @@ export interface TimerMatch {
 export interface TimeoutMatch {
   readonly kind: "timeout"
   readonly method?: OneOrMany<SipMethod>
+  readonly callState?: OneOrMany<CallModelState>
   readonly filter?: MatchFilter
 }
 
 /** Match descriptor for CANCEL-of-initial-INVITE signal (from a-leg). */
 export interface CancelledMatch {
   readonly kind: "cancelled"
+  readonly callState?: OneOrMany<CallModelState>
   readonly filter?: MatchFilter
 }
 
@@ -337,24 +342,16 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
   readonly overrides?: string
 
   /**
-   * Declarative match descriptor. When present, the Matcher uses this to
-   * pick the winning rule by strict specificity. Phase A keeps the old
-   * imperative `matches()` alongside for a shadow-mode transition; both
-   * are filled. In Phase D the old `matches()` is removed.
+   * Declarative match descriptor. The Matcher uses this to pick the winning
+   * rule by strict specificity. Required for every rule.
    */
-  readonly match?: Match
+  readonly match: Match
 
   /** Schema for validating/decoding rule-specific state. */
   readonly stateSchema: Schema.Schema<TState>
 
   /** Schema for validating/decoding rule params from HTTP response. */
   readonly paramsSchema: Schema.Schema<TParams>
-
-  /**
-   * Fast synchronous filter — does this rule care about this event at all?
-   * Returning false avoids the cost of state decoding and Effect execution.
-   */
-  readonly matches: (ctx: RuleContext) => boolean
 
   /**
    * Create initial state when the rule is first activated on a call.

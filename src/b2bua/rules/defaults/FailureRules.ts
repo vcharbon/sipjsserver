@@ -45,21 +45,6 @@ export const routeFailureRule: RuleDefinition<undefined, undefined> = {
     direction: "from-b",
   },
 
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 300) return false
-    if (ctx.direction !== "from-b") return false
-    // Skip already-terminated legs — e.g. a 487 arriving after destroy-leg
-    // already sent CANCEL and marked the leg terminated.
-    if (ctx.sourceLeg.state === "terminated") return false
-    // Skip legs being CANCELed (handle-cancel path) — resolve-cancel-response
-    // handles the non-2xx reply; cancel-200-crossing handles the 2xx race.
-    if (ctx.sourceLeg.disposition === "cancelling") return false
-    return cseqMethod(msg) === "INVITE"
-  },
-
   init: () => undefined,
 
   handle: (ctx) =>
@@ -133,9 +118,6 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
 
   match: { kind: "timer", timerType: "no_answer" },
 
-  matches: (ctx) =>
-    ctx.event.type === "timer" && ctx.event.timerType === "no_answer",
-
   init: () => undefined,
 
   handle: (ctx) =>
@@ -196,7 +178,7 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
  * retransmissions.
  *
  * Replaces the imperative `legState !== "terminated"` negation that lived
- * inside route-failure.matches() — same semantics, positively expressed.
+ * inside route-failure's legacy matches() body — same semantics, positively expressed.
  */
 export const absorbStaleFailureRule: RuleDefinition<undefined, undefined> = {
   id: "absorb-stale-failure",
@@ -212,16 +194,6 @@ export const absorbStaleFailureRule: RuleDefinition<undefined, undefined> = {
     statusClass: ["3xx", "4xx", "5xx", "6xx"],
     legState: "terminated",
     direction: "from-b",
-  },
-
-  matches: (ctx) => {
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 300) return false
-    if (ctx.direction !== "from-b") return false
-    if (ctx.sourceLeg.state !== "terminated") return false
-    return cseqMethod(msg) === "INVITE"
   },
 
   init: () => undefined,

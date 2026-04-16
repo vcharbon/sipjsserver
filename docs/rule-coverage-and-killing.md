@@ -37,7 +37,7 @@ Rules that never fired are listed first and highlighted. The summary line shows 
 
 ### What "fired" means
 
-A rule is counted as fired if its `handle()` returned a non-`undefined` `RuleHandleResult` — i.e. it actually claimed an event. Rules whose `matches()` returns true but whose `handle()` returns undefined are **not** counted. See the collector in [tests/e2e/framework/rule-usage-collector.ts](../tests/e2e/framework/rule-usage-collector.ts).
+A rule is counted as fired if its `handle()` returned a non-`undefined` `RuleHandleResult` — i.e. it actually claimed an event. Rules whose declarative `match` accepts an event but whose `handle()` returns undefined (passthrough) are **not** counted. See the collector in [tests/e2e/framework/rule-usage-collector.ts](../tests/e2e/framework/rule-usage-collector.ts).
 
 ### Scope
 
@@ -66,7 +66,7 @@ npm run test:rule-kill
 What happens:
 1. The script ([scripts/rule-kill.ts](../scripts/rule-kill.ts)) reads every rule id from `ruleRegistry.definitions`.
 2. For each rule id, it spawns `vitest run tests/e2e/e2e-fake-clock.test.ts` with `KILL_RULE=<id>` in the environment.
-3. The simulated backend reads `KILL_RULE` and wraps the registry with `disableRule(id)` — the named rule's `matches()` is forced to always return `false`, so the rule is functionally absent for that run.
+3. The simulated backend reads `KILL_RULE` and wraps the registry with `disableRule(id)` — the named rule's `match.filter` is replaced with an always-false predicate, so the Matcher never picks it and the rule is functionally absent for that run.
 4. The suite's exit code is collected:
    - **Non-zero** → the rule is KILLED (at least one test depends on it).
    - **Zero** → the rule SURVIVED (no test fails without it — it is not meaningfully tested).

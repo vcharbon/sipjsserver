@@ -31,32 +31,11 @@ import { retransmit200 } from "./scenarios/retransmit-200.js"
 import { keepaliveHappy } from "./scenarios/keepalive-happy.js"
 import { keepalive481 } from "./scenarios/keepalive-481.js"
 import { createSimulatedRunner, flushIndexReport } from "./helpers/harness.js"
-import {
-  getRuleMatcherDivergenceCount,
-  getRuleMatcherDivergenceSamples,
-  resetRuleMatcherDivergenceCount,
-} from "../../src/b2bua/rules/framework/ShadowMatcher.js"
-import { beforeAll, expect } from "vitest"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 
-beforeAll(() => resetRuleMatcherDivergenceCount())
-
 afterAll(() => {
   flushIndexReport(OUTPUT_DIR)
-  // Phase B gate: the new Matcher must pick the same rule as the old
-  // matches() iteration for every event in the e2e run.
-  const count = getRuleMatcherDivergenceCount()
-  if (count !== 0) {
-    const samples = getRuleMatcherDivergenceSamples()
-    // eslint-disable-next-line no-console
-    console.error(`[ShadowMatcher] ${count} divergences. First samples:`)
-    for (const s of samples) {
-      // eslint-disable-next-line no-console
-      console.error(`  old=${s.oldWinnerId ?? "(default)"} new=${s.newWinnerId ?? "(none)"} event=${s.eventSummary} callRef=${s.callRef}`)
-    }
-  }
-  expect(count).toBe(0)
 })
 
 // ---------------------------------------------------------------------------

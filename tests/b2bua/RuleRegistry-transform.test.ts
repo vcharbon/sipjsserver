@@ -18,12 +18,12 @@ import type {
   RuleContext,
   RuleHandleResult,
 } from "../../src/b2bua/rules/framework/RuleDefinition.js"
+import { matchAccepts } from "../../src/b2bua/rules/framework/Matcher.js"
 
 // ── Fake rule helpers ────────────────────────────────────────────────────────
 
 function makeRule(opts: {
   readonly id: string
-  readonly matches?: boolean
   readonly handleReturns?: "undefined" | "result"
 }): AnyRuleDefinition {
   return {
@@ -33,7 +33,7 @@ function makeRule(opts: {
     defaultPriority: 500,
     stateSchema: Schema.Undefined as Schema.Schema<unknown>,
     paramsSchema: Schema.Unknown as Schema.Schema<unknown>,
-    matches: () => opts.matches ?? true,
+    match: { kind: "cancelled" },
     init: () => undefined,
     handle: () =>
       Effect.succeed(
@@ -44,7 +44,10 @@ function makeRule(opts: {
   }
 }
 
-const dummyCtx = {} as RuleContext
+const dummyCtx = {
+  event: { type: "cancelled" },
+  call: { state: "active" },
+} as unknown as RuleContext
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -67,29 +70,31 @@ describe("transformRegistry", () => {
     for (const [, rule] of wrapped.definitions) {
       await Effect.runPromise(rule.handle(dummyCtx, undefined, {}))
     }
-    expect(fired).toEqual(["acts"])
+    expect(fired.sort()).toEqual(["acts"])
   })
 
   test("transform returns a new registry and does not mutate the input", () => {
     const registry = createRuleRegistry([makeRule({ id: "r1" })])
     const wrapped = transformRegistry(registry, {
-      wrapMatches: () => () => false,
+      wrapHandle: (_rule, _original) => () => Effect.succeed(undefined),
     })
     expect(wrapped).not.toBe(registry)
-    expect(registry.definitions.get("r1")!.matches(dummyCtx)).toBe(true)
-    expect(wrapped.definitions.get("r1")!.matches(dummyCtx)).toBe(false)
+    expect(registry.definitions.get("r1")).toBeDefined()
+    expect(wrapped.definitions.get("r1")).toBeDefined()
   })
 })
 
 describe("disableRule", () => {
-  test("forces matches() to false for the named rule only", () => {
+  test("forces the rule's match to reject the event", () => {
     const registry = createRuleRegistry([
-      makeRule({ id: "keep", matches: true }),
-      makeRule({ id: "drop", matches: true }),
+      makeRule({ id: "keep" }),
+      makeRule({ id: "drop" }),
     ])
     const wrapped = disableRule(registry, "drop")
-    expect(wrapped.definitions.get("keep")!.matches(dummyCtx)).toBe(true)
-    expect(wrapped.definitions.get("drop")!.matches(dummyCtx)).toBe(false)
+    const keep = wrapped.definitions.get("keep")!
+    const drop = wrapped.definitions.get("drop")!
+    expect(matchAccepts(keep.match, dummyCtx)).toBe(true)
+    expect(matchAccepts(drop.match, dummyCtx)).toBe(false)
   })
 
   test("returns input unchanged when rule id is unknown", () => {

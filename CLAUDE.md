@@ -63,8 +63,9 @@ src/
     rules/
       framework/               Rule engine infrastructure
         ActionExecutor.ts      Translates RuleAction[] → HandlerResult (CSeq, tags, SIP wire)
-        RuleExecutor.ts        Core rule chain runner — priority-sorted match + execute
-        RuleDefinition.ts      Rule system type definitions (RuleContext, RuleAction, etc.)
+        Matcher.ts             Declarative Match → specificity-ranked candidate picker
+        RuleExecutor.ts        Walks Matcher.pickRanked, runs handle(), composes base rules
+        RuleDefinition.ts      Rule system types (Match discriminated union, RuleContext, RuleAction)
         RuleRegistry.ts        Immutable registry of rule definitions, built at startup
         PolicyModule.ts        Type-safe module-level rule grouping with guard
         InvariantEnforcer.ts   Post-processing safety net (limiter/timer/CDR cleanup)
@@ -72,13 +73,13 @@ src/
       defaults/                Built-in B2BUA rules (always-active):
         CornerCaseRules.ts       cancel-200-crossing, retransmit-200, reinvite-glare, relay-reinvite-response
         DialogRules.ts           relay-provisional, confirm-dialog, absorb-bye-200, absorb-options-200, relay-non-invite-200
-        FailureRules.ts          route-failure, no-answer-failover
-        LifecycleRules.ts        handle-timeout, handle-cancel, handle-481
-        RelayRules.ts            relay-options, relay-bye, relay-ack, relay-reinvite, relay-prack
+        FailureRules.ts          route-failure, no-answer-failover, absorb-stale-failure
+        LifecycleRules.ts        handle-timeout, handle-cancel, handle-481, resolve-cancel-response
+        RelayRules.ts            relay-options, relay-info, relay-bye, relay-ack, relay-reinvite, relay-prack
         TimerRules.ts            max-duration, keepalive, keepalive-timeout
-        TerminatingRules.ts      resolve-bye-response, resolve-cross-bye, terminating-safety-timeout, terminating-drop
+        TerminatingRules.ts      resolve-bye-response, resolve-cross-bye, terminating-safety-timeout, terminating-drop-{request,response,timer,timeout,cancelled}
       custom/                  Policy-module rules (HTTP-piloted):
-        relayFirst18xTo180.ts    Suppress 18x / force tag consistency policy
+        relayFirst18xTo180.ts    suppress-18x / force-tag-consistency / absorb-prack-200
   call/
     CallModel.ts               Call/Leg/Dialog Schema types + lens helpers
     CallState.ts               Redis-backed call state with per-call semaphore
@@ -133,6 +134,7 @@ UDP packets (UdpTransport)
 - **Call model**: Three-level hierarchy (Call → Leg → Dialog) with lens helpers for immutable updates.
 - **UDP transport**: `Layer.scoped` ensures socket cleanup. Incoming packets → unbounded Queue → Stream.
 - **Rule-based in-dialog processing**: All in-dialog call processing is handled by rules under `src/b2bua/rules/defaults/`. The rule chain is the sole in-dialog handler — there is no fallback dispatcher. See [docs/AdvancedCallModel.md](docs/AdvancedCallModel.md) for the full rule framework design, action types, priority bands, and framework guarantees.
+- **Declarative match + specificity ranking**: Every rule carries a `match: Match` descriptor (discriminated on `kind: "request" | "response" | "timer" | "timeout" | "cancelled"`). The Matcher ranks candidates by strict specificity (singleton > array, exact `status` > `statusClass`, `filter` adds one point) and runs them in order until one `handle()` returns non-undefined. `defaultPriority` is a tiebreaker only. Policy modules gate their rules via `match.filter` composition with the module guard; `overrides:` replaces a base rule, `composesWith:` layers additively. There is no imperative `matches()` — adding a rule means declaring its `match`.
 - **B2buaCore — single wiring point**: `src/b2bua/B2buaCore.ts` exports `handlers` (the HandlerRegistry) and `B2buaCoreLayer` (the composed layer). All three entry points (`main.ts`, `WorkerEntry.ts`, `simulated-backend.ts`) import from B2buaCore. Adding a new rule or policy module requires changing **only B2buaCore** — never the entry points.
 - **Test infrastructure uses the same core**: `tests/e2e/framework/simulated-backend.ts` provides B2buaCoreLayer with mock transport, mock call control, noop tracing, and noop CDR — but the rule registry, handler wiring, and service composition are identical to production. Changes to production wiring automatically apply to tests.
 - **Rule coverage + kill testing**: `npm test` writes a rule-coverage section into `test-results/fake-clock/index.html` flagging never-fired rules. `npm run test:rule-kill` runs the opt-in mutation pass (disables each rule in turn, re-runs the simulated e2e suite, reports surviving mutants). See [docs/rule-coverage-and-killing.md](docs/rule-coverage-and-killing.md) before adding a new rule.

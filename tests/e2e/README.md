@@ -76,6 +76,8 @@ npx vitest run tests/e2e/e2e.test.ts
 
 # Run a specific scenario
 npx vitest run tests/e2e/e2e.test.ts -t "basic call"
+
+npx vitest run tests/e2e/e2e-fake-clock.test.ts 
 ```
 
 ### Live UDP backend

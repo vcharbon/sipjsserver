@@ -3,7 +3,7 @@
  * Built at startup; immutable after construction.
  */
 
-import type { AnyRuleDefinition, Match } from "./RuleDefinition.js"
+import type { AnyRuleDefinition, Match, RuleContext } from "./RuleDefinition.js"
 import type { PolicyModule } from "./PolicyModule.js"
 import { specificityScore } from "./Matcher.js"
 
@@ -15,8 +15,9 @@ export interface RuleRegistry {
  * Create a rule registry from built-in rules and optional policy modules.
  *
  * Built-in rules are registered as-is (they are alwaysActive by definition).
- * Policy module rules have their module's guard applied to matches() and are
- * set to alwaysActive — the guard is the activation mechanism.
+ * Policy module rules have their module's guard composed into each rule's
+ * match.filter and are set to alwaysActive — the guard is the activation
+ * mechanism.
  */
 export function createRuleRegistry(
   builtinRules: ReadonlyArray<AnyRuleDefinition>,
@@ -24,31 +25,19 @@ export function createRuleRegistry(
 ): RuleRegistry {
   const allRules: AnyRuleDefinition[] = [...builtinRules]
 
-  // Flatten policy modules — apply guard to each rule's matches() AND to
-  // its declarative match descriptor's filter, so the new specificity-based
-  // Matcher respects policy activation the same way the imperative path does.
+  // Flatten policy modules — compose the module's guard into each rule's
+  // match.filter so the Matcher respects policy activation.
   for (const mod of (policyModules ?? [])) {
     for (const rule of mod.rules) {
-      const originalMatches = rule.matches
-      const originalMatch = rule.match
-      const wrappedMatches = (ctx: Parameters<typeof mod.guard>[0]): boolean =>
-        mod.guard(ctx) && originalMatches(ctx)
-
-      if (originalMatch === undefined) {
-        allRules.push({ ...rule, alwaysActive: true, matches: wrappedMatches })
-      } else {
-        const originalFilter = originalMatch.filter
-        const guardedFilter = originalFilter !== undefined
-          ? (ctx: Parameters<typeof mod.guard>[0]) =>
-              mod.guard(ctx) && originalFilter(ctx)
-          : mod.guard
-        allRules.push({
-          ...rule,
-          alwaysActive: true,
-          matches: wrappedMatches,
-          match: { ...originalMatch, filter: guardedFilter },
-        })
-      }
+      const originalFilter = rule.match.filter
+      const guardedFilter: (ctx: RuleContext) => boolean = originalFilter !== undefined
+        ? (ctx) => mod.guard(ctx) && originalFilter(ctx)
+        : mod.guard
+      allRules.push({
+        ...rule,
+        alwaysActive: true,
+        match: { ...rule.match, filter: guardedFilter },
+      })
     }
   }
 
@@ -85,8 +74,6 @@ export function createRuleRegistry(
     }
   }
 
-  // Validate the new declarative match schemas (Phase A: warnings, not errors).
-  // In Phase C (cutover) these become fatal.
   validateMatchSchemas(allRules)
 
   return { definitions: map }
@@ -117,9 +104,9 @@ function matchSignature(m: Match): string {
     case "timer":
       return `tmr|${cols([m.timerType, m.callState])}|${filter}`
     case "timeout":
-      return `to|${cols([m.method])}|${filter}`
+      return `to|${cols([m.method, m.callState])}|${filter}`
     case "cancelled":
-      return `canc|${filter}`
+      return `canc|${cols([m.callState])}|${filter}`
   }
 }
 
@@ -179,27 +166,22 @@ function matchesOverlap(a: Match, b: Match): boolean {
     }
     case "timeout": {
       const bb = b as typeof a
-      return valuesOverlap(a.method, bb.method)
+      return valuesOverlap(a.method, bb.method) && valuesOverlap(a.callState, bb.callState)
     }
-    case "cancelled":
-      return true
+    case "cancelled": {
+      const bb = b as typeof a
+      return valuesOverlap(a.callState, bb.callState)
+    }
   }
 }
 
 /**
  * Warn if two rules have overlapping match sets + equal specificity score +
  * no explicit ordering (priority differs OR overrides/composesWith declared).
- * Phase A: warning. Phase C: fatal.
  */
 function validateMatchSchemas(rules: ReadonlyArray<AnyRuleDefinition>): void {
-  const withMatch = rules.filter((r) => r.match !== undefined) as ReadonlyArray<
-    AnyRuleDefinition & { match: Match }
-  >
-
-  // Group by signature for quick pair-up. Rules with different signatures but
-  // overlapping sets still get checked via the cross-pair loop below.
-  const bySignature = new Map<string, typeof withMatch[number][]>()
-  for (const r of withMatch) {
+  const bySignature = new Map<string, AnyRuleDefinition[]>()
+  for (const r of rules) {
     const sig = matchSignature(r.match)
     const bucket = bySignature.get(sig)
     if (bucket) bucket.push(r)
@@ -213,7 +195,7 @@ function validateMatchSchemas(rules: ReadonlyArray<AnyRuleDefinition>): void {
         if (!matchesOverlap(a.match, b.match)) continue
         const aScore = specificityScore(a.match)
         const bScore = specificityScore(b.match)
-        if (aScore !== bScore) continue // deterministic winner by specificity
+        if (aScore !== bScore) continue
         const aPrio = a.defaultPriority
         const bPrio = b.defaultPriority
         const overrideDeclared =
@@ -238,14 +220,10 @@ function validateMatchSchemas(rules: ReadonlyArray<AnyRuleDefinition>): void {
 /**
  * Composable wrappers over a registry's rule definitions. Used by the e2e
  * harness for coverage tracking (wrapHandle) and by the rule-kill script
- * for mutation testing (wrapMatches). Production code does not transform
+ * for mutation testing (disableRule). Production code does not transform
  * the registry.
  */
 export interface RegistryTransform {
-  readonly wrapMatches?: (
-    rule: AnyRuleDefinition,
-    original: AnyRuleDefinition["matches"],
-  ) => AnyRuleDefinition["matches"]
   readonly wrapHandle?: (
     rule: AnyRuleDefinition,
     original: AnyRuleDefinition["handle"],
@@ -253,7 +231,7 @@ export interface RegistryTransform {
 }
 
 /**
- * Return a new registry with each rule's matches/handle optionally wrapped.
+ * Return a new registry with each rule's handle optionally wrapped.
  * The input registry is not mutated. Duplicate-id validation is not re-run
  * (input was already validated by createRuleRegistry).
  */
@@ -264,9 +242,6 @@ export function transformRegistry(
   const map = new Map<string, AnyRuleDefinition>()
   for (const [id, rule] of registry.definitions) {
     let wrapped = rule
-    if (transform.wrapMatches !== undefined) {
-      wrapped = { ...wrapped, matches: transform.wrapMatches(rule, rule.matches) }
-    }
     if (transform.wrapHandle !== undefined) {
       wrapped = { ...wrapped, handle: transform.wrapHandle(rule, rule.handle) }
     }
@@ -276,14 +251,19 @@ export function transformRegistry(
 }
 
 /**
- * Return a new registry where the named rule's `matches()` is forced to
- * always return false — i.e. the rule is disabled for the whole run.
+ * Return a new registry where the named rule is disabled — its match filter
+ * is replaced with an always-false predicate so the Matcher never picks it.
  * Used by the rule-kill mutation harness. If the id is not registered,
  * the registry is returned unchanged.
  */
 export function disableRule(registry: RuleRegistry, ruleId: string): RuleRegistry {
-  if (!registry.definitions.has(ruleId)) return registry
-  return transformRegistry(registry, {
-    wrapMatches: (rule, original) => rule.id === ruleId ? () => false : original,
-  })
+  const rule = registry.definitions.get(ruleId)
+  if (rule === undefined) return registry
+  const disabled: AnyRuleDefinition = {
+    ...rule,
+    match: { ...rule.match, filter: () => false },
+  }
+  const map = new Map<string, AnyRuleDefinition>(registry.definitions)
+  map.set(ruleId, disabled)
+  return { definitions: map }
 }

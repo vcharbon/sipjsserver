@@ -29,8 +29,6 @@ export const handleTimeoutRule: RuleDefinition<undefined, undefined> = {
 
   match: { kind: "timeout" },
 
-  matches: (ctx) => ctx.event.type === "timeout",
-
   init: () => undefined,
 
   handle: (_ctx) =>
@@ -52,8 +50,6 @@ export const handleCancelRule: RuleDefinition<undefined, undefined> = {
   paramsSchema: Schema.Undefined,
 
   match: { kind: "cancelled" },
-
-  matches: (ctx) => ctx.event.type === "cancelled",
 
   init: () => undefined,
 
@@ -108,16 +104,6 @@ export const resolveCancelResponseRule: RuleDefinition<undefined, undefined> = {
     direction: "from-b",
   },
 
-  matches: (ctx) => {
-    if (ctx.sourceLeg.disposition !== "cancelling") return false
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    if (msg.type !== "response") return false
-    if (msg.status < 300) return false
-    if (ctx.direction !== "from-b") return false
-    return cseqMethod(msg as SipResponse) === "INVITE"
-  },
-
   init: () => undefined,
 
   handle: (ctx) => {
@@ -158,13 +144,6 @@ export const handle481Rule: RuleDefinition<undefined, undefined> = {
     cseqMethod: ["INVITE", "BYE", "CANCEL", "OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "NOTIFY", "SUBSCRIBE"],
     status: 481,
     callState: "active",
-  },
-
-  matches: (ctx) => {
-    if (ctx.call.state === "terminating") return false
-    if (ctx.event.type !== "sip") return false
-    const msg = ctx.event.message
-    return msg.type === "response" && msg.status === 481
   },
 
   init: () => undefined,

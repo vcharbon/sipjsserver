@@ -22,9 +22,6 @@ export const maxDurationRule: RuleDefinition<undefined, undefined> = {
 
   match: { kind: "timer", timerType: "global_duration" },
 
-  matches: (ctx) =>
-    ctx.event.type === "timer" && ctx.event.timerType === "global_duration",
-
   init: () => undefined,
 
   handle: (ctx) =>
@@ -59,10 +56,6 @@ export const keepaliveRule: RuleDefinition<undefined, undefined> = {
     timerType: "keepalive",
     callState: ["active", "terminating"],
   },
-
-  matches: (ctx) =>
-    ctx.event.type === "timer" && ctx.event.timerType === "keepalive" &&
-    ctx.call.state !== "terminated",
 
   init: () => undefined,
 
@@ -124,10 +117,6 @@ export const keepaliveTimeoutRule: RuleDefinition<undefined, undefined> = {
     timerType: "keepalive_timeout",
     callState: ["active", "terminating"],
   },
-
-  matches: (ctx) =>
-    ctx.event.type === "timer" && ctx.event.timerType === "keepalive_timeout" &&
-    ctx.call.state !== "terminated",
 
   init: () => undefined,
 

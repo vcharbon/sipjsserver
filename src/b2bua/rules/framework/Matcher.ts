@@ -1,8 +1,7 @@
 /**
  * Matcher — pure, declarative rule selection over the `Match` discriminated
  * union. Picks the strictly-most-specific rule whose match descriptor accepts
- * the event. Replaces imperative `matches()` iteration (see
- * plan spicy-dancing-harbor.md §2 and §5).
+ * the event.
  *
  * The Matcher is deliberately plain — no Effect. It is invoked from inside
  * RuleExecutor (which handles state, effects, action execution) and from
@@ -11,6 +10,7 @@
 
 import type {
   AnyRuleDefinition,
+  CancelledMatch,
   Match,
   MatchFilter,
   RequestMatch,
@@ -94,6 +94,13 @@ function timeoutColumns(m: TimeoutMatch, ctx: RuleContext): boolean {
     if (ctx.event.method === undefined) return false
     if (!enumColMatch(m.method, ctx.event.method as SipMethod)) return false
   }
+  if (!enumColMatch(m.callState, ctx.call.state)) return false
+  return true
+}
+
+function cancelledColumns(m: CancelledMatch, ctx: RuleContext): boolean {
+  if (ctx.event.type !== "cancelled") return false
+  if (!enumColMatch(m.callState, ctx.call.state)) return false
   return true
 }
 
@@ -103,7 +110,7 @@ function columnMatches(match: Match, ctx: RuleContext): boolean {
     case "response":  return responseColumns(match, ctx)
     case "timer":     return timerColumns(match, ctx)
     case "timeout":   return timeoutColumns(match, ctx)
-    case "cancelled": return ctx.event.type === "cancelled"
+    case "cancelled": return cancelledColumns(match, ctx)
   }
 }
 
@@ -156,8 +163,10 @@ export function specificityScore(m: Match): number {
       break
     case "timeout":
       score += colScore(m.method)
+      score += colScore(m.callState)
       break
     case "cancelled":
+      score += colScore(m.callState)
       break
   }
   if (m.filter !== undefined) score += 1
@@ -185,34 +194,44 @@ export function pick(
   rules: ReadonlyArray<AnyRuleDefinition>,
   ctx: RuleContext,
 ): AnyRuleDefinition | undefined {
-  if (rules.length === 0) return undefined
+  const ranked = pickRanked(rules, ctx)
+  return ranked.length > 0 ? ranked[0] : undefined
+}
+
+/**
+ * Return all candidate rules for an event, ordered by [specificity desc,
+ * priority asc]. Consumers iterate this list to implement handle()
+ * passthrough semantics — when a winning rule's `handle` returns undefined
+ * the executor moves on to the next candidate.
+ */
+export function pickRanked(
+  rules: ReadonlyArray<AnyRuleDefinition>,
+  ctx: RuleContext,
+  priorityOf: (rule: AnyRuleDefinition) => number = (r) => r.defaultPriority ?? 900,
+): AnyRuleDefinition[] {
+  if (rules.length === 0) return []
 
   // Apply `overrides`: drop any rule whose id is overridden by a still-active rule.
   const overriddenIds = new Set<string>()
   for (const r of rules) {
-    if (r.overrides !== undefined && r.match !== undefined && matchAccepts(r.match, ctx)) {
+    if (r.overrides !== undefined && matchAccepts(r.match, ctx)) {
       overriddenIds.add(r.overrides)
     }
   }
 
-  let best: AnyRuleDefinition | undefined = undefined
-  let bestScore = -1
-  let bestPriority = Infinity
-
+  const accepted: AnyRuleDefinition[] = []
   for (const rule of rules) {
     if (overriddenIds.has(rule.id)) continue
-    if (rule.match === undefined) continue
     if (!matchAccepts(rule.match, ctx)) continue
-
-    const score = specificityScore(rule.match)
-    const priority = rule.defaultPriority ?? 900
-
-    if (score > bestScore || (score === bestScore && priority < bestPriority)) {
-      best = rule
-      bestScore = score
-      bestPriority = priority
-    }
+    accepted.push(rule)
   }
 
-  return best
+  accepted.sort((a, b) => {
+    const sa = specificityScore(a.match)
+    const sb = specificityScore(b.match)
+    if (sa !== sb) return sb - sa
+    return priorityOf(a) - priorityOf(b)
+  })
+
+  return accepted
 }

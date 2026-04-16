@@ -1,14 +1,18 @@
 /**
  * RuleExecutor — the core rule chain runner.
  *
- * For each event, builds a merged priority-sorted list of:
- * - Per-call rules (from call.activeRules — activated via HTTP API)
- * - Always-active rules (from registry — built-in B2BUA rules)
+ * For each event, builds a merged list of rules active for the call
+ * (per-call activated + always-active built-ins), then lets the Matcher
+ * pick the candidates ordered by [specificity desc, priority asc].
  *
- * Then iterates in priority order (ascending):
- * 1. First rule whose matches() returns true AND handle() returns non-undefined wins
+ * Iteration contract:
+ * 1. First candidate whose handle() returns non-undefined wins
  * 2. Actions are translated via ActionExecutor → InvariantEnforcer → HandlerResult
- * 3. If no rule handles → default handler (fallback)
+ * 3. If no candidate handles → default handler (fallback)
+ *
+ * Composition: a rule declaring `composesWith: baseId` runs before the base;
+ * the base rule is skipped from the iteration for this event and its actions
+ * are appended after the composing rule's actions.
  */
 
 import { Effect } from "effect"
@@ -19,7 +23,7 @@ import type { RuleContext, RuleHandleResult, AnyRuleDefinition } from "./RuleDef
 import { executeActions } from "./ActionExecutor.js"
 import { enforceInvariants } from "./InvariantEnforcer.js"
 import { handleLimiterRefresh } from "./FrameworkLimiterRefresh.js"
-import { shadowCompare } from "./ShadowMatcher.js"
+import { pickRanked } from "./Matcher.js"
 import { getRuleState, setRuleState, isFullyResolved } from "../../../call/CallModel.js"
 import type { Call } from "../../../call/CallModel.js"
 
@@ -41,44 +45,47 @@ function toRuleContext(ctx: ResolvedContext): RuleContext {
   }
 }
 
-// ── Unified rule entry ────────────────────────────────────────────────────
+// ── Per-call entry bookkeeping ────────────────────────────────────────────
 
-/** A merged entry representing either a per-call activated rule or an always-active built-in rule. */
-interface RuleEntry {
-  readonly id: string
+interface RuleActivation {
   readonly priority: number
   readonly params: unknown
-  readonly definition: AnyRuleDefinition
 }
 
 /**
- * Build a priority-sorted list merging per-call rules and always-active rules.
- * Per-call rules take priority over always-active rules with the same ID.
+ * Collect activations for this call: per-call rules (from HTTP activation)
+ * take priority & params from ActiveRule; always-active rules use their
+ * defaultPriority and empty params.
+ *
+ * Returns:
+ *   - `defs`: every active rule definition (for the Matcher input list)
+ *   - `activations`: id → { priority, params } override map
  */
-function buildRuleList(call: Call, registry: RuleRegistry): RuleEntry[] {
-  const entries: RuleEntry[] = []
-  const seenIds = new Set<string>()
+function collectActivations(
+  call: Call,
+  registry: RuleRegistry,
+): { defs: AnyRuleDefinition[]; activations: Map<string, RuleActivation> } {
+  const defs: AnyRuleDefinition[] = []
+  const activations = new Map<string, RuleActivation>()
 
-  // Per-call rules (from HTTP API response)
   if (call.activeRules !== undefined) {
     for (const ar of call.activeRules) {
       if (!ar.active) continue
       const def = registry.definitions.get(ar.id)
       if (def === undefined) continue
-      entries.push({ id: ar.id, priority: ar.priority, params: ar.params ?? {}, definition: def })
-      seenIds.add(ar.id)
+      defs.push(def)
+      activations.set(ar.id, { priority: ar.priority, params: ar.params ?? {} })
     }
   }
 
-  // Always-active rules (built-in, from registry)
   for (const [id, def] of registry.definitions) {
-    if (seenIds.has(id)) continue // per-call rule overrides
+    if (activations.has(id)) continue
     if (!def.alwaysActive) continue
-    entries.push({ id, priority: def.defaultPriority ?? 900, params: {}, definition: def })
+    defs.push(def)
+    activations.set(id, { priority: def.defaultPriority ?? 900, params: {} })
   }
 
-  entries.sort((a, b) => a.priority - b.priority)
-  return entries
+  return { defs, activations }
 }
 
 // ── Rule attribution ──────────────────────────────────────────────────────
@@ -123,40 +130,35 @@ export function executeRules(
       const { call } = ctx
       const callBefore = call
 
-      // ── Build merged, sorted rule list ──
-      const ruleList = buildRuleList(call, registry)
-
-      // ── Fast path: no rules at all → default handler ──
-      if (ruleList.length === 0) {
+      const { defs, activations } = collectActivations(call, registry)
+      if (defs.length === 0) {
         return yield* defaultHandler(ctx)
       }
 
-      // ── Convert to RuleContext ──
       const ruleCtx = toRuleContext(ctx)
 
-      // ── Compute which base rules are consumed for THIS event ──
-      // A base rule is consumed only when its composing rule matches this event.
-      // This MUST be per-event (not startup) — when the policy guard fails,
-      // the composed rule doesn't match and the base rule runs normally.
-      const composedBaseIds = new Set<string>()
-      for (const entry of ruleList) {
-        if (entry.definition.composesWith && entry.definition.matches(ruleCtx)) {
-          composedBaseIds.add(entry.definition.composesWith)
-        }
+      const candidates = pickRanked(
+        defs,
+        ruleCtx,
+        (rule) => activations.get(rule.id)?.priority ?? rule.defaultPriority ?? 900,
+      )
+
+      if (candidates.length === 0) {
+        return yield* defaultHandler(ctx)
       }
 
-      // Definitions view for ShadowMatcher comparison (Phase B).
-      const ruleDefs = ruleList.map((e) => e.definition)
+      // ── Composition: skip any base rule whose composing rule is also a candidate ──
+      const composedBaseIds = new Set<string>()
+      for (const def of candidates) {
+        if (def.composesWith !== undefined) composedBaseIds.add(def.composesWith)
+      }
 
-      // ── Iterate rules in priority order ──
-      for (const entry of ruleList) {
-        const { definition, id, params } = entry
-
-        // Skip base rules consumed by a composing rule for this event
+      // ── Iterate candidates: first one whose handle() returns non-undefined wins ──
+      for (const definition of candidates) {
+        const id = definition.id
         if (composedBaseIds.has(id)) continue
 
-        // Fast filter
-        if (!definition.matches(ruleCtx)) continue
+        const params = activations.get(id)?.params ?? {}
 
         // State key — rules with the same stateKey share persisted state
         const stKey = definition.stateKey ?? id
@@ -215,7 +217,7 @@ export function executeRules(
             const baseOutcome = yield* baseDef.handle(baseCtx, baseState, {})
             if (baseOutcome != null) {
               const mergedCall = setRuleState(preResult.call, baseStKey, baseOutcome.state)
-              let baseResult = executeActions(baseOutcome.actions, { ...ruleCtx, call: mergedCall }, definition.composesWith)
+              const baseResult = executeActions(baseOutcome.actions, { ...ruleCtx, call: mergedCall }, definition.composesWith)
               // Merge: pre-actions first, then base actions
               let result: HandlerResult = {
                 call: baseResult.call,
@@ -227,7 +229,6 @@ export function executeRules(
               if (result.call.state === "terminating" && isFullyResolved(result.call)) {
                 result = { ...result, call: { ...result.call, state: "terminated" } }
               }
-              yield* shadowCompare(ruleDefs, composedBaseIds, id, ruleCtx)
               return enforceInvariants(callBefore, result)
             }
           }
@@ -237,7 +238,6 @@ export function executeRules(
           if (result.call.state === "terminating" && isFullyResolved(result.call)) {
             result = { ...result, call: { ...result.call, state: "terminated" } }
           }
-          yield* shadowCompare(ruleDefs, composedBaseIds, id, ruleCtx)
           return enforceInvariants(callBefore, result)
         }
 
@@ -256,12 +256,10 @@ export function executeRules(
         }
 
         // Enforce invariants (limiter, timer, CDR, removal guarantees)
-        yield* shadowCompare(ruleDefs, composedBaseIds, id, ruleCtx)
         return enforceInvariants(callBefore, result)
       }
 
       // ── No rule handled — fall back to default handler ──
-      yield* shadowCompare(ruleDefs, composedBaseIds, undefined, ruleCtx)
       return yield* defaultHandler(ctx)
     })
 }

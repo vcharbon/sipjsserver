@@ -1,6 +1,6 @@
 # Advanced Call Model: INAP-Inspired Rule Framework
 
-> **Last verified against code:** 2026-04-12
+> **Last verified against code:** 2026-04-16
 
 ## Overview
 
@@ -13,17 +13,25 @@ Rules never construct SIP messages, never manipulate CSeq, never modify Call sta
 ```
 TransactionLayer events
   -> RuleExecutor
-       builds merged priority-sorted list:
-         - per-call rules (from call.activeRules, via HTTP API)
-         - always-active rules (from registry, built-in B2BUA behavior)
-       iterates in priority order (ascending):
-         first rule where matches() && handle() returns non-undefined wins
+       collects active rule definitions (per-call + always-active) and asks
+       the Matcher for the ranked candidate list:
+         1. drop any rule whose id is overridden by an active override rule
+         2. keep rules whose declarative `match` descriptor accepts the event
+         3. sort by [specificity score desc, priority asc]
+       walks the ranked candidates:
+         first one whose handle() returns non-undefined wins
            -> ActionExecutor (CSeq, tags, dialog, message construction)
               -> InvariantEnforcer (safety net: limiter/timer/CDR/removal)
                  -> HandlerResult
        if no rule handles -> noop fallback (log warning)
   -> SipRouter.processResult (stamp Via/Contact, serialize, send, execute effects)
 ```
+
+### Specificity-based selection
+
+Every rule carries a declarative `match: Match` descriptor — a discriminated union on event `kind` (`request` / `response` / `timer` / `timeout` / `cancelled`). The Matcher scores each candidate: a singleton column (e.g. `method: "INVITE"`) scores higher than an array column (e.g. `statusClass: ["3xx","4xx"]`), exact `status` beats `statusClass`, and a `filter` adds one more point. The highest-scoring rule whose `match` accepts the event wins.
+
+Priority is only a tiebreaker when two rules have identical specificity scores. Overrides are explicit: a rule declaring `overrides: "some-other-id"` removes the named base from the candidate set whenever the overriding rule's `match` accepts the event (used by policy modules — see `suppress-18x`). `composesWith: "base-id"` layers a rule additively before the base (see `force-tag-consistency`).
 
 ## INAP Mapping
 
@@ -85,17 +93,36 @@ interface RuleDefinition<TState, TParams> {
   id: string                    // unique identifier
   name: string                  // display name for logging
   alwaysActive?: boolean        // true = runs on every call (built-in rules)
-  defaultPriority?: number      // priority for always-active rules
+  defaultPriority?: number      // tiebreaker when two rules have identical specificity
+  stateKey?: string             // rules sharing a stateKey share persisted state
+  composesWith?: string         // run additively BEFORE this base rule's id
+  overrides?: string            // replace this base rule's id in the candidate set
   stateSchema: Schema<TState>   // validates rule-specific state
   paramsSchema: Schema<TParams> // validates params from HTTP response
-  matches: (ctx: RuleContext) => boolean     // fast sync filter
+  match: Match                  // declarative match descriptor (discriminated by kind)
   init: (params, call) => TState             // initial state on activation
   onError?: "passthrough" | "terminate"      // error policy
   handle: (ctx, state, params) => Effect<RuleHandleResult | undefined | void>
 }
 ```
 
-Rules return `undefined`/`void` to pass (event flows to next rule), or `{ actions, state }` to consume the event.
+Rules return `undefined`/`void` to pass (next ranked candidate gets a turn), or `{ actions, state }` to consume the event.
+
+### Match descriptor
+
+```typescript
+type Match =
+  | { kind: "request";   method?: OneOrMany<SipMethod>; callState?: ...; legState?: ...;
+                          legDisposition?: ...; direction?: "from-a"|"from-b"; filter?: MatchFilter }
+  | { kind: "response";  cseqMethod?: OneOrMany<SipMethod>; status?: number;
+                          statusClass?: OneOrMany<StatusClass>; callState?: ...; legState?: ...;
+                          legDisposition?: ...; direction?: ...; filter?: MatchFilter }
+  | { kind: "timer";     timerType?: OneOrMany<TimerType>; callState?: ...; filter?: MatchFilter }
+  | { kind: "timeout";   method?: OneOrMany<SipMethod>; callState?: ...; filter?: MatchFilter }
+  | { kind: "cancelled"; callState?: ...; filter?: MatchFilter }
+```
+
+Omitting a column means "accept any value". `OneOrMany<T>` accepts either a single value or a `ReadonlyArray<T>`. Filters are synchronous, pure, and only used for relational checks that can't be expressed as columns (CSeq-number correlation with `findPendingRequest`, etc.).
 
 ## Action Types
 
@@ -141,6 +168,8 @@ interface MessageTransform {
 ```
 
 ## Priority Bands
+
+Priority only decides ties when two rules have identical specificity scores. Day-to-day rules rarely need to set it; the `match` descriptor already disambiguates most pairs. Registered bands remain useful as readable hints of intent:
 
 | Range | Purpose | Examples |
 |---|---|---|
@@ -195,7 +224,7 @@ interface MessageTransform {
 | `resolve-bye-response` | Final response (>=200) with CSeq=BYE, `call.state === "terminating"` | terminate-leg (framework auto-checks isFullyResolved) |
 | `resolve-cross-bye` | BYE request, `call.state === "terminating"` | respond 200, terminate-leg |
 | `terminating-safety-timeout` | Timer `terminating_timeout` | Force all unresolved legs to `byeDisposition: "bye_timeout"` |
-| `terminating-drop` | Any event, `call.state === "terminating"` (catch-all) | noop (absorb silently) |
+| `terminating-drop-{request,response,timer,timeout,cancelled}` | Any event of the given kind, `call.state === "terminating"` (catch-all, one per kind) | noop (absorb silently) |
 
 ## Framework vs Rule Boundary
 

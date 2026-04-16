@@ -18,7 +18,11 @@ import {
   resolveByeResponseRule,
   resolveCrossByeRule,
   terminatingSafetyTimeoutRule,
-  terminatingDropRule,
+  terminatingDropRequestRule,
+  terminatingDropResponseRule,
+  terminatingDropTimerRule,
+  terminatingDropTimeoutRule,
+  terminatingDropCancelledRule,
 } from "./TerminatingRules.js"
 
 // Dialog rules
@@ -86,6 +90,10 @@ export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
   routeFailureRule,
   noAnswerFailoverRule,
 
-  // Terminating catch-all (priority 999) — absorb anything else during teardown
-  terminatingDropRule,
+  // Terminating catch-alls (priority 999) — absorb anything else during teardown
+  terminatingDropRequestRule,
+  terminatingDropResponseRule,
+  terminatingDropTimerRule,
+  terminatingDropTimeoutRule,
+  terminatingDropCancelledRule,
 ]
