@@ -38,6 +38,13 @@ export const resolveByeResponseRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: {
+    kind: "response",
+    cseqMethod: "BYE",
+    statusClass: ["2xx", "3xx", "4xx", "5xx", "6xx"],
+    callState: "terminating",
+  },
+
   matches: (ctx) => {
     if (ctx.call.state !== "terminating") return false
     if (ctx.event.type !== "sip") return false
@@ -74,6 +81,12 @@ export const resolveCrossByeRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: {
+    kind: "request",
+    method: "BYE",
+    callState: "terminating",
+  },
+
   matches: (ctx) => {
     if (ctx.call.state !== "terminating") return false
     if (ctx.event.type !== "sip") return false
@@ -109,6 +122,12 @@ export const terminatingSafetyTimeoutRule: RuleDefinition<undefined, undefined> 
   defaultPriority: 810,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "timer",
+    timerType: "terminating_timeout",
+    callState: "terminating",
+  },
 
   matches: (ctx) => {
     if (ctx.call.state !== "terminating") return false

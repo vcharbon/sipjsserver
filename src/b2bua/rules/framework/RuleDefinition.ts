@@ -8,11 +8,90 @@
 
 import type { Effect, Schema } from "effect"
 import type { SipRequest, SipResponse, RemoteInfo } from "../../../sip/types.js"
-import type { Call, Leg, Dialog, CdrEventType, TimerType } from "../../../call/CallModel.js"
+import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType } from "../../../call/CallModel.js"
 import type { AppConfigData } from "../../../config/AppConfig.js"
 import type { CallEvent } from "../../../sip/SipRouter.js"
 import type { CallControlClient } from "../../../http/CallControlClient.js"
 import type { CallLimiter } from "../../../call/CallLimiter.js"
+
+// ── Declarative match schema (reified predicates) ─────────────────────────
+//
+// Every rule declares a `match` object instead of an imperative `matches()`
+// function. Columns are discriminated by event kind; the Matcher picks the
+// strictly-most-specific rule at runtime, and the RuleRegistry validates
+// shadowing/reachability at startup. See docs (plan spicy-dancing-harbor.md).
+
+/** SIP methods the B2BUA discriminates on in rule matching. */
+export type SipMethod =
+  | "INVITE" | "ACK" | "BYE" | "CANCEL" | "OPTIONS"
+  | "INFO" | "PRACK" | "UPDATE" | "REFER" | "MESSAGE" | "NOTIFY" | "SUBSCRIBE"
+
+/** SIP status-class buckets. */
+export type StatusClass = "1xx" | "2xx" | "3xx" | "4xx" | "5xx" | "6xx"
+
+/** Direction an event arrived from. */
+export type Direction = "from-a" | "from-b"
+
+/** Singleton or array form for enum columns. */
+type OneOrMany<T> = T | ReadonlyArray<T>
+
+/** Post-match corner-case predicate. Pure, sync, reads only RuleContext state. */
+export type MatchFilter = (ctx: RuleContext) => boolean
+
+/** Match descriptor for an inbound SIP request. */
+export interface RequestMatch {
+  readonly kind: "request"
+  readonly method: OneOrMany<SipMethod>
+  readonly callState?: OneOrMany<CallModelState>
+  readonly legState?: OneOrMany<LegState>
+  readonly legDisposition?: OneOrMany<LegDisposition>
+  readonly direction?: Direction
+  readonly filter?: MatchFilter
+}
+
+/** Match descriptor for an inbound SIP response. */
+export interface ResponseMatch {
+  readonly kind: "response"
+  readonly cseqMethod: OneOrMany<SipMethod>
+  /** Exact SIP status code. Mutually exclusive with statusClass. */
+  readonly status?: number
+  /** One or more status classes. Mutually exclusive with status. */
+  readonly statusClass?: OneOrMany<StatusClass>
+  readonly callState?: OneOrMany<CallModelState>
+  readonly legState?: OneOrMany<LegState>
+  readonly legDisposition?: OneOrMany<LegDisposition>
+  readonly direction?: Direction
+  readonly filter?: MatchFilter
+}
+
+/** Match descriptor for a background timer firing. */
+export interface TimerMatch {
+  readonly kind: "timer"
+  readonly timerType: OneOrMany<TimerType>
+  readonly callState?: OneOrMany<CallModelState>
+  readonly filter?: MatchFilter
+}
+
+/** Match descriptor for transaction timeouts (Timer B/F expiry). */
+export interface TimeoutMatch {
+  readonly kind: "timeout"
+  readonly method?: OneOrMany<SipMethod>
+  readonly filter?: MatchFilter
+}
+
+/** Match descriptor for CANCEL-of-initial-INVITE signal (from a-leg). */
+export interface CancelledMatch {
+  readonly kind: "cancelled"
+  readonly filter?: MatchFilter
+}
+
+/** Declarative match descriptor. Replaces imperative matches(). */
+export type Match =
+  | RequestMatch
+  | ResponseMatch
+  | TimerMatch
+  | TimeoutMatch
+  | CancelledMatch
 
 // ── Rule context (what rules see) ──────────────────────────────────────────
 
@@ -245,6 +324,25 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
    * Future: compositionMode "after" / "around" — only "before" implemented now.
    */
   readonly composesWith?: string
+
+  /**
+   * Declarative override — this rule replaces the named base rule in the
+   * matcher's candidate set whenever its own match descriptor is satisfied
+   * AND its policy-module guard (if any) is active. Used when a custom rule
+   * has the identical match signature as a default rule (would otherwise
+   * collide at registry build time) and needs to fully take over the slot.
+   *
+   * Example: suppress-18x overrides relay-provisional.
+   */
+  readonly overrides?: string
+
+  /**
+   * Declarative match descriptor. When present, the Matcher uses this to
+   * pick the winning rule by strict specificity. Phase A keeps the old
+   * imperative `matches()` alongside for a shadow-mode transition; both
+   * are filled. In Phase D the old `matches()` is removed.
+   */
+  readonly match?: Match
 
   /** Schema for validating/decoding rule-specific state. */
   readonly stateSchema: Schema.Schema<TState>

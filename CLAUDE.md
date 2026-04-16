@@ -10,7 +10,7 @@ ALWAYS reply and write in english even when user speaks french!!!
 - mock and test implementation of services are implemented in the service as test layers 
 - When adding dependencies, verify they are installed in the correct workspace package
 
-**When writing or modifying TypeScript code in this project, always activate the `effect` skill first.**
+**When writing designing complex architecture or modifying TypeScript code in this project, always activate the `effect` skill first.**
 
 **Before modifying any SIP message-building, relay, or header logic, read [docs/b2bua-sip-headers.md](docs/b2bua-sip-headers.md) first.** It documents exactly how each header (Via, Contact, From, To, Call-ID) is rewritten at each hop, the placeholder stamping pipeline, tag ownership per leg, and known architectural gaps.
 

@@ -19,6 +19,7 @@ import type { RuleContext, RuleHandleResult, AnyRuleDefinition } from "./RuleDef
 import { executeActions } from "./ActionExecutor.js"
 import { enforceInvariants } from "./InvariantEnforcer.js"
 import { handleLimiterRefresh } from "./FrameworkLimiterRefresh.js"
+import { shadowCompare } from "./ShadowMatcher.js"
 import { getRuleState, setRuleState, isFullyResolved } from "../../../call/CallModel.js"
 import type { Call } from "../../../call/CallModel.js"
 
@@ -144,6 +145,9 @@ export function executeRules(
         }
       }
 
+      // Definitions view for ShadowMatcher comparison (Phase B).
+      const ruleDefs = ruleList.map((e) => e.definition)
+
       // ── Iterate rules in priority order ──
       for (const entry of ruleList) {
         const { definition, id, params } = entry
@@ -223,6 +227,7 @@ export function executeRules(
               if (result.call.state === "terminating" && isFullyResolved(result.call)) {
                 result = { ...result, call: { ...result.call, state: "terminated" } }
               }
+              yield* shadowCompare(ruleDefs, composedBaseIds, id, ruleCtx)
               return enforceInvariants(callBefore, result)
             }
           }
@@ -232,6 +237,7 @@ export function executeRules(
           if (result.call.state === "terminating" && isFullyResolved(result.call)) {
             result = { ...result, call: { ...result.call, state: "terminated" } }
           }
+          yield* shadowCompare(ruleDefs, composedBaseIds, id, ruleCtx)
           return enforceInvariants(callBefore, result)
         }
 
@@ -250,10 +256,12 @@ export function executeRules(
         }
 
         // Enforce invariants (limiter, timer, CDR, removal guarantees)
+        yield* shadowCompare(ruleDefs, composedBaseIds, id, ruleCtx)
         return enforceInvariants(callBefore, result)
       }
 
       // ── No rule handled — fall back to default handler ──
+      yield* shadowCompare(ruleDefs, composedBaseIds, undefined, ruleCtx)
       return yield* defaultHandler(ctx)
     })
 }

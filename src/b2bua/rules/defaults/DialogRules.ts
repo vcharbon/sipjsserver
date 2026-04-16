@@ -28,6 +28,13 @@ export const relayProvisionalRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "1xx",
+    direction: "from-b",
+  },
+
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
     const msg = ctx.event.message
@@ -65,6 +72,18 @@ export const confirmDialogRule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 903,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  // Initial-INVITE 200 OK only — legState is trying/early here. On a re-INVITE
+  // the source leg is already "confirmed", which steers the event to
+  // retransmit-200 (no pending) or relay-reinvite-response (has pending).
+  // cancel-200-crossing (legDisposition=cancelling) wins by specificity.
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "2xx",
+    legState: ["trying", "early"],
+    direction: "from-b",
+  },
 
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
@@ -147,6 +166,12 @@ export const absorbBye200Rule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: {
+    kind: "response",
+    cseqMethod: ["BYE", "CANCEL"],
+    statusClass: "2xx",
+  },
+
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
     const msg = ctx.event.message
@@ -179,6 +204,24 @@ export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 830,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  // Filter distinguishes a B2BUA-originated keepalive OPTIONS (no pending
+  // relay snapshot) from a relayed OPTIONS (snapshot present → falls through
+  // to relay-non-invite-200).
+  match: {
+    kind: "response",
+    cseqMethod: "OPTIONS",
+    statusClass: "2xx",
+    filter: (ctx) => {
+      if (ctx.event.type !== "sip") return false
+      const msg = ctx.event.message
+      if (msg.type !== "response") return false
+      const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "", 10)
+      if (!Number.isFinite(cseqNum)) return false
+      return ctx.sourceDialog !== undefined &&
+        findPendingRequest(ctx.sourceDialog, cseqNum) === undefined
+    },
+  },
 
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
@@ -219,6 +262,14 @@ export const relayNonInvite200Rule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 927,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  // OPTIONS with pending relay snapshot lands here; keepalive OPTIONS is
+  // taken by absorb-options-200 (same columns + filter → more specific).
+  match: {
+    kind: "response",
+    cseqMethod: ["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "NOTIFY", "SUBSCRIBE"],
+    statusClass: "2xx",
+  },
 
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false

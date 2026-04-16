@@ -7,7 +7,7 @@
  */
 
 import { Effect, Schema } from "effect"
-import type { RuleDefinition } from "../framework/RuleDefinition.js"
+import type { RuleDefinition, SipMethod } from "../framework/RuleDefinition.js"
 
 // ── Transparent in-dialog relay factory ───────────────────────────────────
 //
@@ -18,7 +18,7 @@ import type { RuleDefinition } from "../framework/RuleDefinition.js"
 // declare the match + emit `relay-to-peer`.
 
 export function makeTransparentRelayRule(
-  method: string,
+  method: SipMethod,
   opts: { id: string; name: string; priority: number },
 ): RuleDefinition<undefined, undefined> {
   return {
@@ -28,6 +28,8 @@ export function makeTransparentRelayRule(
     defaultPriority: opts.priority,
     stateSchema: Schema.Undefined,
     paramsSchema: Schema.Undefined,
+
+    match: { kind: "request", method },
 
     matches: (ctx) =>
       ctx.event.type === "sip" &&
@@ -75,6 +77,8 @@ export const relayByeRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: { kind: "request", method: "BYE" },
+
   matches: (ctx) =>
     ctx.event.type === "sip" &&
     ctx.event.message.type === "request" &&
@@ -104,6 +108,8 @@ export const relayAckRule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 915,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  match: { kind: "request", method: "ACK" },
 
   matches: (ctx) =>
     ctx.event.type === "sip" &&

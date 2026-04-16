@@ -42,6 +42,14 @@ export const cancel200CrossingRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "2xx",
+    legDisposition: "cancelling",
+    direction: "from-b",
+  },
+
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
     const msg = ctx.event.message
@@ -78,6 +86,25 @@ export const retransmit200Rule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 855,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  // Distinguish retransmitted initial 200 OK (no pending request snapshot)
+  // from re-INVITE response (pending snapshot) — the latter is handled by
+  // relay-reinvite-response which has the inverse filter at the same columns.
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "2xx",
+    legState: "confirmed",
+    direction: "from-b",
+    filter: (ctx) => {
+      if (ctx.sourceDialog === undefined) return false
+      if (ctx.event.type !== "sip") return false
+      const msg = ctx.event.message
+      if (msg.type !== "response") return false
+      const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "0", 10)
+      return findPendingRequest(ctx.sourceDialog, cseqNum) === undefined
+    },
+  },
 
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
@@ -120,6 +147,15 @@ export const reinviteGlareRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  // More specific than relay-reinvite (which has no filter) — wins on glare.
+  match: {
+    kind: "request",
+    method: "INVITE",
+    filter: (ctx) =>
+      ctx.sourceDialog !== undefined &&
+      ctx.sourceDialog.inboundPendingRequests.some((p) => p.method === "INVITE"),
+  },
+
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
     const msg = ctx.event.message
@@ -160,6 +196,23 @@ export const relayReinviteResponseRule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 845,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  // Covers all status classes of a re-INVITE response (1xx/2xx/3xx+). Filter
+  // matches presence of a pending relay snapshot — the re-INVITE originated
+  // from the peer side. Without this column, relay-provisional (1xx) and
+  // confirm-dialog/route-failure would claim these.
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    filter: (ctx) => {
+      if (ctx.sourceDialog === undefined) return false
+      if (ctx.event.type !== "sip") return false
+      const msg = ctx.event.message
+      if (msg.type !== "response") return false
+      const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "0", 10)
+      return findPendingRequest(ctx.sourceDialog, cseqNum) !== undefined
+    },
+  },
 
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false

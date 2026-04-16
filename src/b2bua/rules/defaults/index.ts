@@ -46,7 +46,7 @@ import {
 } from "./TimerRules.js"
 
 // Failure rules
-import { routeFailureRule, noAnswerFailoverRule } from "./FailureRules.js"
+import { routeFailureRule, noAnswerFailoverRule, absorbStaleFailureRule } from "./FailureRules.js"
 
 /** All default rules in registration order. Priority is set on each rule definition. */
 export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
@@ -82,6 +82,7 @@ export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
   maxDurationRule,
   keepaliveRule,
   keepaliveTimeoutRule,
+  absorbStaleFailureRule,
   routeFailureRule,
   noAnswerFailoverRule,
 

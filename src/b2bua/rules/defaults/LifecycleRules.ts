@@ -27,6 +27,8 @@ export const handleTimeoutRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: { kind: "timeout" },
+
   matches: (ctx) => ctx.event.type === "timeout",
 
   init: () => undefined,
@@ -48,6 +50,8 @@ export const handleCancelRule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 933,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  match: { kind: "cancelled" },
 
   matches: (ctx) => ctx.event.type === "cancelled",
 
@@ -96,6 +100,14 @@ export const resolveCancelResponseRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: ["3xx", "4xx", "5xx", "6xx"],
+    legDisposition: "cancelling",
+    direction: "from-b",
+  },
+
   matches: (ctx) => {
     if (ctx.sourceLeg.disposition !== "cancelling") return false
     if (ctx.event.type !== "sip") return false
@@ -136,6 +148,17 @@ export const handle481Rule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 840,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  // cseqMethod left unconstrained — 481 on any method tears the call down.
+  // terminating-state override happens via resolve-bye-response (which is
+  // more specific: callState + cseqMethod) when cseqMethod is BYE; for other
+  // methods during terminating, terminating-drop catches the noise.
+  match: {
+    kind: "response",
+    cseqMethod: ["INVITE", "BYE", "CANCEL", "OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "NOTIFY", "SUBSCRIBE"],
+    status: 481,
+    callState: "active",
+  },
 
   matches: (ctx) => {
     if (ctx.call.state === "terminating") return false

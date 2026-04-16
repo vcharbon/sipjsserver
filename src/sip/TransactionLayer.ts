@@ -37,7 +37,14 @@ import { parseVia, parseNameAddr } from "./parsers/custom/structured-headers.js"
 export type TransactionEvent =
   | { readonly type: "message"; readonly message: SipMessage; readonly rinfo: RemoteInfo }
   | { readonly type: "cancelled"; readonly callId: string; readonly fromTag: string }
-  | { readonly type: "timeout"; readonly branch: string; readonly callRef: string | undefined; readonly legId: string | undefined }
+  | {
+      readonly type: "timeout"
+      readonly branch: string
+      readonly callRef: string | undefined
+      readonly legId: string | undefined
+      /** SIP method of the transaction that timed out (INVITE / BYE / OPTIONS / …). */
+      readonly method: string | undefined
+    }
 
 // ---------------------------------------------------------------------------
 // Internal transaction state
@@ -299,7 +306,8 @@ export class TransactionLayer extends ServiceMap.Service<
             if (txn === undefined || txn.state === "completed" || txn.state === "terminated") return
             yield* Effect.logWarning(`Transaction timeout: ${kind} branch=${branch}`)
             yield* deleteTxn(branch)
-            yield* emit({ type: "timeout", branch, callRef: txn.callRef, legId: txn.legId })
+            const method = txn.originalRequest?.method ?? (txn.kind === "invite" ? "INVITE" : undefined)
+            yield* emit({ type: "timeout", branch, callRef: txn.callRef, legId: txn.legId, method })
           })
 
           const rFiber = yield* Effect.forkDetach(retransmitEffect)

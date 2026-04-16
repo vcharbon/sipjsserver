@@ -36,6 +36,15 @@ export const routeFailureRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  // resolve-cancel-response (legDisposition=cancelling) and
+  // absorb-stale-failure (legState=terminated) carve out by specificity.
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: ["3xx", "4xx", "5xx", "6xx"],
+    direction: "from-b",
+  },
+
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
     const msg = ctx.event.message
@@ -122,6 +131,8 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: { kind: "timer", timerType: "no_answer" },
+
   matches: (ctx) =>
     ctx.event.type === "timer" && ctx.event.timerType === "no_answer",
 
@@ -174,4 +185,47 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
       actions.push({ type: "begin-termination" })
       return { actions, state: undefined }
     }),
+}
+
+// ── absorb-stale-failure (priority 905) ──────────────────────────────────
+
+/**
+ * Absorb a late 3xx-6xx INVITE response arriving on an already-terminated
+ * b-leg. Under strict specificity this wins over route-failure (extra
+ * legState column) so the failover/CDR path isn't re-triggered by stale
+ * retransmissions.
+ *
+ * Replaces the imperative `legState !== "terminated"` negation that lived
+ * inside route-failure.matches() — same semantics, positively expressed.
+ */
+export const absorbStaleFailureRule: RuleDefinition<undefined, undefined> = {
+  id: "absorb-stale-failure",
+  name: "Absorb Stale Failure",
+  alwaysActive: true,
+  defaultPriority: 905,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: ["3xx", "4xx", "5xx", "6xx"],
+    legState: "terminated",
+    direction: "from-b",
+  },
+
+  matches: (ctx) => {
+    if (ctx.event.type !== "sip") return false
+    const msg = ctx.event.message
+    if (msg.type !== "response") return false
+    if (msg.status < 300) return false
+    if (ctx.direction !== "from-b") return false
+    if (ctx.sourceLeg.state !== "terminated") return false
+    return cseqMethod(msg) === "INVITE"
+  },
+
+  init: () => undefined,
+
+  handle: () =>
+    Effect.succeed({ actions: [], state: undefined }),
 }

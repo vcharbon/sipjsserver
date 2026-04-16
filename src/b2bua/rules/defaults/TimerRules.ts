@@ -20,6 +20,8 @@ export const maxDurationRule: RuleDefinition<undefined, undefined> = {
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
+  match: { kind: "timer", timerType: "global_duration" },
+
   matches: (ctx) =>
     ctx.event.type === "timer" && ctx.event.timerType === "global_duration",
 
@@ -51,6 +53,12 @@ export const keepaliveRule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 939,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "timer",
+    timerType: "keepalive",
+    callState: ["active", "terminating"],
+  },
 
   matches: (ctx) =>
     ctx.event.type === "timer" && ctx.event.timerType === "keepalive" &&
@@ -110,6 +118,12 @@ export const keepaliveTimeoutRule: RuleDefinition<undefined, undefined> = {
   defaultPriority: 942,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "timer",
+    timerType: "keepalive_timeout",
+    callState: ["active", "terminating"],
+  },
 
   matches: (ctx) =>
     ctx.event.type === "timer" && ctx.event.timerType === "keepalive_timeout" &&

@@ -51,7 +51,15 @@ export type CallEvent =
   | { readonly type: "sip"; readonly message: SipMessage; readonly rinfo: RemoteInfo }
   | { readonly type: "timer"; readonly timerType: TimerType; readonly callRef: string; readonly legId: string | undefined }
   | { readonly type: "cancelled"; readonly callId: string; readonly fromTag: string }
-  | { readonly type: "timeout"; readonly branch: string; readonly callRef: string | undefined; readonly legId: string | undefined }
+  | {
+      readonly type: "timeout"
+      readonly branch: string
+      readonly callRef: string | undefined
+      readonly legId: string | undefined
+      /** SIP method of the transaction that timed out. Used by rules to discriminate
+       *  INVITE timeouts (failover path) from non-INVITE timeouts (BYE/OPTIONS/PRACK). */
+      readonly method: string | undefined
+    }
 
 /** Human-readable summary of a CallEvent for logging. */
 export function describeEvent(event: CallEvent): string {
@@ -777,7 +785,7 @@ export class SipRouter extends ServiceMap.Service<
               event = { type: "cancelled", callId: txnEvent.callId, fromTag: txnEvent.fromTag }
               break
             case "timeout":
-              event = { type: "timeout", branch: txnEvent.branch, callRef: txnEvent.callRef, legId: txnEvent.legId }
+              event = { type: "timeout", branch: txnEvent.branch, callRef: txnEvent.callRef, legId: txnEvent.legId, method: txnEvent.method }
               break
           }
 

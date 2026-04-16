@@ -70,6 +70,16 @@ const suppress18x: RuleDefinition<PolicyState, undefined> = {
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
 
+  // Identical match signature to relay-provisional; overrides: claims its slot
+  // whenever this policy module is active on the call.
+  overrides: "relay-provisional",
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "1xx",
+    direction: "from-b",
+  },
+
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
     const msg = ctx.event.message
@@ -148,6 +158,15 @@ const forceTagConsistency: RuleDefinition<PolicyState, undefined> = {
 
   composesWith: "confirm-dialog",
 
+  // Same match signature as confirm-dialog — composition layers this rule
+  // before the base rule rather than overriding it.
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "2xx",
+    direction: "from-b",
+  },
+
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
     const msg = ctx.event.message
@@ -195,6 +214,15 @@ const absorbPrack200: RuleDefinition<PolicyState, undefined> = {
   stateKey: STATE_KEY,
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
+
+  // PRACK 2xx from b-leg — cseqMethod: "PRACK" beats relay-non-invite-200's
+  // array by specificity, so this wins automatically when the policy is active.
+  match: {
+    kind: "response",
+    cseqMethod: "PRACK",
+    statusClass: "2xx",
+    direction: "from-b",
+  },
 
   matches: (ctx) => {
     if (ctx.event.type !== "sip") return false
