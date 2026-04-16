@@ -9,7 +9,7 @@ import { Effect, Schema } from "effect"
 import type { RuleDefinition } from "../framework/RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader } from "../../../sip/MessageFactory.js"
-import { findPendingReInvite } from "../../../call/CallModel.js"
+import { findPendingRequest } from "../../../call/CallModel.js"
 
 // ── Helper ────────────────────────────────────────────────────────────────
 
@@ -90,7 +90,7 @@ export const retransmit200Rule: RuleDefinition<undefined, undefined> = {
     // Exclude re-INVITE responses — those are handled by relayReinviteResponseRule
     if (ctx.sourceDialog !== undefined) {
       const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "0", 10)
-      if (findPendingReInvite(ctx.sourceDialog, cseqNum) !== undefined) return false
+      if (findPendingRequest(ctx.sourceDialog, cseqNum) !== undefined) return false
     }
     return true
   },
@@ -127,7 +127,9 @@ export const reinviteGlareRule: RuleDefinition<undefined, undefined> = {
     if (msg.method !== "INVITE") return false
     // Glare: there's already a pending inbound re-INVITE on this dialog
     if (ctx.sourceDialog === undefined) return false
-    return ctx.sourceDialog.inboundPendingReInvites.length > 0
+    // Glare applies only to re-INVITE (RFC 3261 §14.1) — ignore pending
+    // non-INVITE transparent relays (OPTIONS/INFO/UPDATE/…) on the same dialog.
+    return ctx.sourceDialog.inboundPendingRequests.some((p) => p.method === "INVITE")
   },
 
   init: () => undefined,
@@ -168,7 +170,7 @@ export const relayReinviteResponseRule: RuleDefinition<undefined, undefined> = {
     const dialog = ctx.sourceDialog
     if (dialog === undefined) return false
     const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "0", 10)
-    return findPendingReInvite(dialog, cseqNum) !== undefined
+    return findPendingRequest(dialog, cseqNum) !== undefined
   },
 
   init: () => undefined,

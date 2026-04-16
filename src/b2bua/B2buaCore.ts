@@ -35,6 +35,7 @@ import { TransactionLayer } from "../sip/TransactionLayer.js"
 import { CallState } from "../call/CallState.js"
 import { TimerService } from "../call/TimerService.js"
 import { SipParser } from "../sip/Parser.js"
+import { buildRejectResponse } from "../sip/MessageFactory.js"
 import { handleInitialInvite } from "./InitialInviteHandler.js"
 import { createRuleRegistry, type RuleRegistry } from "./rules/framework/RuleRegistry.js"
 import { executeRules } from "./rules/framework/RuleExecutor.js"
@@ -50,13 +51,46 @@ import { relayFirst18xTo180 } from "./rules/custom/relayFirst18xTo180.js"
  *  Production code paths MUST use {@link handlers} — not this directly. */
 export const ruleRegistry: RuleRegistry = createRuleRegistry(defaultRules, [relayFirst18xTo180])
 
-/** Noop fallback — if the rule chain doesn't handle an event, return the call unchanged. */
-const noopFallback: HandlerRegistry["inDialog"] = (ctx) =>
-  Effect.logWarning(
+/**
+ * Default-deny fallback — runs when no rule matches.
+ *
+ * For an in-dialog SIP request, silently dropping is the worst possible
+ * default (the sender's transaction times out instead of getting a clear
+ * answer). Instead we respond 501 Not Implemented (RFC 3261 §21.5.2)
+ * so the UAC knows the method is not supported on this dialog.
+ *
+ * Exceptions:
+ *   - ACK: no response allowed (RFC 3261 §17.1, end-to-end, stateless).
+ *   - Responses: responses without a matching transaction are dropped
+ *     (RFC 3261 §17.2); we just log.
+ *   - Non-SIP events (timer/cancelled/timeout): log only.
+ */
+const noopFallback: HandlerRegistry["inDialog"] = (ctx) => Effect.gen(function* () {
+  yield* Effect.logWarning(
     `[rule-fallback] Unhandled ${describeEvent(ctx.event)} callRef=${ctx.callRef} state=${ctx.call.state}`
-  ).pipe(
-    Effect.as({ call: ctx.call, outbound: [], effects: [] }),
   )
+
+  if (ctx.event.type !== "sip") {
+    return { call: ctx.call, outbound: [], effects: [] }
+  }
+
+  const msg = ctx.event.message
+  if (msg.type !== "request" || msg.method === "ACK") {
+    return { call: ctx.call, outbound: [], effects: [] }
+  }
+
+  const response = buildRejectResponse(msg, 501, "Not Implemented")
+  return {
+    call: ctx.call,
+    outbound: [{
+      message: response,
+      destination: { host: ctx.event.rinfo.address, port: ctx.event.rinfo.port },
+      label: `respond 501 (unhandled ${msg.method})`,
+      legId: ctx.leg.legId,
+    }],
+    effects: [],
+  }
+})
 
 /** Build a HandlerRegistry from any rule registry. Tests wrap the production
  *  registry with tracking / mutation transforms and call this to get their

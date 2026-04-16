@@ -85,7 +85,7 @@ Only added to the initial b-leg INVITE (`buildBLegInvite`). Stamped with `callRe
 - `bumpLocalCSeq()` increments when sending in-dialog requests (OPTIONS, PRACK, re-INVITE).
 - Responses echo the CSeq from the request they answer.
 - CANCEL reuses the original INVITE's CSeq number.
-- **re-INVITE CSeq rewriting:** When relaying a re-INVITE response, the B2BUA rewrites the CSeq number to match what the originator sent (stored in `PendingReInvite.inboundCSeq`), since each leg uses independent CSeq sequences.
+- **re-INVITE CSeq rewriting:** When relaying a re-INVITE response, the B2BUA rewrites the CSeq number to match what the originator sent (stored in `PendingRequest.inboundCSeq`), since each leg uses independent CSeq sequences.
 
 ### CANCEL (RFC 3261 §9.1)
 
@@ -154,11 +154,11 @@ The leg identifier used for stamping is determined by `determineOutboundLeg()`:
 
 ## In-dialog re-INVITE relay
 
-Re-INVITEs are relayed transparently in both directions (a→b and b→a) using `buildRelayedReInvite()`. Header rewriting follows the same pattern as PRACK relay (tag resolution via `findByATag()`, passthrough headers, Via/Contact placeholders).
+Re-INVITEs are relayed transparently in both directions (a→b and b→a) using `buildRelayedRequest("INVITE", ...)`. Header rewriting follows the same pattern as PRACK relay (tag resolution via `findByATag()`, passthrough headers, Via/Contact placeholders).
 
 **Differences from other in-dialog relays (PRACK, BYE, etc.):**
 
-1. **CSeq correlation via `PendingReInvite`:** Each leg uses independent CSeq sequences. When a re-INVITE is relayed, a `PendingReInvite` entry is stored on the target leg's dialog recording the outbound/inbound CSeq and the original request's Via/From/To/Call-ID headers. Responses are matched by `outboundCSeq`, relayed with the stored source-leg headers, and their CSeq is rewritten to the original `inboundCSeq`. The entry is removed on any final response.
+1. **CSeq correlation via `PendingRequest`:** Each leg uses independent CSeq sequences. When a re-INVITE (or any transparently-relayed in-dialog request — OPTIONS, INFO, UPDATE, MESSAGE, PRACK) is relayed, a `PendingRequest` entry is stored on the target leg's dialog recording the outbound/inbound CSeq, the method, and the original request's Via/From/To/Call-ID headers. Responses are matched by `outboundCSeq`, relayed with the stored source-leg headers, and their CSeq is rewritten to the original `inboundCSeq`. The entry is removed on any final response.
 
 2. **Direction-aware ACK:** `handleAck` checks `ctx.direction` — from-a relays to b-leg (same as initial INVITE), from-b relays to a-leg (only for b→a re-INVITE).
 
@@ -170,7 +170,7 @@ Re-INVITEs are relayed transparently in both directions (a→b and b→a) using 
 
 ### 1. From/To URI separation in message builders
 
-All message builder functions (`buildBye`, `buildOptions`, `buildAck`, `buildRelayedAck`, `buildRelayedPrack`, `buildRelayedReInvite`, `buildRelayedBye`, `buildCancel`) accept:
+All message builder functions (`buildBye`, `buildOptions`, `buildAck`, `buildRelayedAck`, `buildRelayedPrack`, `buildRelayedRequest`, `buildRelayedBye`, `buildCancel`) accept:
 - `toUri` — used for the To header and Request-URI
 - `fromUri?` (optional) — used for the From header URI; defaults to `toUri` if not provided
 

@@ -25,14 +25,22 @@ export const RemoteInfo = Schema.Struct({
 
 export type RemoteInfo = typeof RemoteInfo.Type
 
-// ── Pending re-INVITE (stored on target-leg dialog for response correlation) ─
+// ── Pending transparent-relay request (stored on target-leg dialog for response correlation) ─
+//
+// Captures a snapshot of the original inbound request so its response can be
+// rebuilt with the correct Vias, From, To, Call-ID, and CSeq (RFC 3261
+// §8.1.3.3). Used for every method the B2BUA relays transparently: INVITE
+// (re-INVITE), OPTIONS, INFO, UPDATE, MESSAGE, PRACK, and any future custom
+// method that flows through ActionExecutor.relayRequest.
 
-export const PendingReInvite = Schema.Struct({
-  /** CSeq number on the outbound relayed re-INVITE */
+export const PendingRequest = Schema.Struct({
+  /** SIP method of the relayed request (e.g. INVITE, OPTIONS, INFO, UPDATE, MESSAGE, PRACK) */
+  method: Schema.String,
+  /** CSeq number on the outbound relayed request */
   outboundCSeq: Schema.Int,
-  /** CSeq number on the original inbound re-INVITE (for response CSeq rewrite) */
+  /** CSeq number on the original inbound request (for response CSeq rewrite) */
   inboundCSeq: Schema.Int,
-  /** Via headers from the original inbound re-INVITE (for response routing) */
+  /** Via headers from the original inbound request (for response routing) */
   sourceVias: Schema.Array(Schema.String),
   /** Call-ID of the source leg (for response Call-ID) */
   sourceCallId: Schema.String,
@@ -40,11 +48,11 @@ export const PendingReInvite = Schema.Struct({
   sourceFrom: Schema.String,
   /** To header with proper tag (for response To) */
   sourceTo: Schema.String,
-  /** Direction of the original re-INVITE */
+  /** Direction of the original request */
   direction: Schema.Literals(["from-a", "from-b"]),
 })
 
-export type PendingReInvite = typeof PendingReInvite.Type
+export type PendingRequest = typeof PendingRequest.Type
 
 // ── Dialog ──────────────────────────────────────────────────────────────────
 
@@ -61,14 +69,15 @@ export const Dialog = Schema.Struct({
   lastInviteCSeq: Schema.optional(Schema.Int),
   /** Remote party's highest CSeq. Null until first message received from remote. */
   remoteCSeq: Schema.NullOr(Schema.Int),
-  /** outbound CSeq → inbound CSeq mapping for response correlation */
-  pendingCSeqMap: Schema.Record(Schema.String, Schema.Int),
   /**
-   * Pending inbound re-INVITE entries awaiting response on this dialog.
-   * Stored on the dialog the re-INVITE was sent TO (the target leg).
-   * Glare detection checks the SOURCE dialog (where a new re-INVITE arrives FROM).
+   * Pending transparently-relayed inbound requests awaiting response on this dialog.
+   * Stored on the dialog the request was sent TO (the target leg).
+   * Covers every method that flows through ActionExecutor.relayRequest —
+   * re-INVITE, OPTIONS, INFO, UPDATE, MESSAGE, PRACK, and custom transparent
+   * methods. Glare detection (for re-INVITE specifically) checks the SOURCE
+   * dialog where a new re-INVITE arrives FROM.
    */
-  inboundPendingReInvites: Schema.Array(PendingReInvite),
+  inboundPendingRequests: Schema.Array(PendingRequest),
   routeSet: Schema.Array(Schema.String),
   /**
    * Via branch of the first ACK sent for this dialog's 2xx INVITE response.
@@ -439,8 +448,7 @@ export function makeEmptyDialog(toTag: string): Dialog {
     contact: "",
     localCSeq: randomInitialCSeq(),
     remoteCSeq: null,
-    pendingCSeqMap: {},
-    inboundPendingReInvites: [],
+    inboundPendingRequests: [],
     routeSet: []
   }
 }
@@ -455,8 +463,7 @@ export function makeDialogFromIncoming(toTag: string, remoteCSeq: number): Dialo
     contact: "",
     localCSeq: randomInitialCSeq(),
     remoteCSeq,
-    pendingCSeqMap: {},
-    inboundPendingReInvites: [],
+    inboundPendingRequests: [],
     routeSet: []
   }
 }
@@ -568,24 +575,24 @@ export function relayCSeqDelta(inboundCSeq: number, sourceRemoteCSeq: number | n
   return Math.max(1, inboundCSeq - sourceRemoteCSeq)
 }
 
-// ── Pending re-INVITE helpers ────────────────────────────────────────────
+// ── Pending transparent-relay request helpers ────────────────────────────
 
-/** Add a pending re-INVITE entry to a dialog. */
-export function addPendingReInvite(call: Call, legId: string, toTag: string, entry: PendingReInvite): Call {
+/** Add a pending transparent-relay entry to a dialog. */
+export function addPendingRequest(call: Call, legId: string, toTag: string, entry: PendingRequest): Call {
   return updateDialog(call, legId, toTag, (d) => ({
-    ...d, inboundPendingReInvites: [...d.inboundPendingReInvites, entry]
+    ...d, inboundPendingRequests: [...d.inboundPendingRequests, entry]
   }))
 }
 
-/** Find a pending re-INVITE by outbound CSeq. */
-export function findPendingReInvite(dialog: Dialog, outboundCSeq: number): PendingReInvite | undefined {
-  return dialog.inboundPendingReInvites.find((p) => p.outboundCSeq === outboundCSeq)
+/** Find a pending transparent-relay entry by outbound CSeq. */
+export function findPendingRequest(dialog: Dialog, outboundCSeq: number): PendingRequest | undefined {
+  return dialog.inboundPendingRequests.find((p) => p.outboundCSeq === outboundCSeq)
 }
 
-/** Remove a pending re-INVITE entry after response is handled. */
-export function removePendingReInvite(call: Call, legId: string, toTag: string, outboundCSeq: number): Call {
+/** Remove a pending transparent-relay entry after its response is handled. */
+export function removePendingRequest(call: Call, legId: string, toTag: string, outboundCSeq: number): Call {
   return updateDialog(call, legId, toTag, (d) => ({
-    ...d, inboundPendingReInvites: d.inboundPendingReInvites.filter((p) => p.outboundCSeq !== outboundCSeq)
+    ...d, inboundPendingRequests: d.inboundPendingRequests.filter((p) => p.outboundCSeq !== outboundCSeq)
   }))
 }
 

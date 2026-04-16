@@ -8,7 +8,7 @@ import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader } from "../../../sip/MessageFactory.js"
-import { findPendingReInvite } from "../../../call/CallModel.js"
+import { findPendingRequest } from "../../../call/CallModel.js"
 
 // ── Helper: extract CSeq method from a SIP response ──────────────────────
 
@@ -169,7 +169,7 @@ export const absorbBye200Rule: RuleDefinition<undefined, undefined> = {
  * Absorb 200 OK for a B2BUA-originated keepalive OPTIONS and cancel the
  * paired keepalive-timeout timer. Distinguished from an end-to-end relayed
  * OPTIONS by the absence of a pending-relay snapshot on the source dialog:
- * relayed OPTIONS leave an `inboundPendingReInvites` entry that matches the
+ * relayed OPTIONS leave an `inboundPendingRequests` entry that matches the
  * response's CSeq, keepalive OPTIONS originated by the B2BUA do not.
  */
 export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
@@ -190,7 +190,7 @@ export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
     // was relayed end-to-end — leave it for relay-non-invite-200.
     const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "", 10)
     if (ctx.sourceDialog && Number.isFinite(cseqNum) &&
-        findPendingReInvite(ctx.sourceDialog, cseqNum) !== undefined) {
+        findPendingRequest(ctx.sourceDialog, cseqNum) !== undefined) {
       return false
     }
     return true

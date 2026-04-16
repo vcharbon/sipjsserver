@@ -33,8 +33,7 @@ function makeDialog(toTag: string, localCSeq = 1000): Dialog {
     contact: "<sip:peer@192.168.1.200:5060>",
     localCSeq,
     remoteCSeq: 1,
-    pendingCSeqMap: {},
-    inboundPendingReInvites: [],
+    inboundPendingRequests: [],
     routeSet: [],
   }
 }

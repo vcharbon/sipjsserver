@@ -481,7 +481,36 @@ function mergeOverrides(
   return result as HeaderOverrides
 }
 
+// Runtime safety net: detect misspelled top-level keys that the TypeScript
+// structural-typing doesn't catch (excess properties pass through spreads).
+// Every key that isn't one of the documented override fields is reported so
+// the author can fix the call site instead of silently losing the intent.
+const VALID_OVERRIDE_KEYS: ReadonlySet<string> = new Set([
+  "cseq",
+  "from",
+  "to",
+  "contact",
+  "headers",
+  "extraHeaders",
+  "body",
+])
+
+function warnUnknownOverrideKeys(overrides: HeaderOverrides): void {
+  for (const key of Object.keys(overrides)) {
+    if (!VALID_OVERRIDE_KEYS.has(key)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[e2e] HeaderOverrides: unknown top-level key "${key}" — ignored. ` +
+        `Did you mean to put it under \`headers\`? ` +
+        `Valid top-level keys: ${Array.from(VALID_OVERRIDE_KEYS).join(", ")}.`
+      )
+    }
+  }
+}
+
 function applyOverrides(headers: SipHeader[], overrides: HeaderOverrides): SipHeader[] {
+  warnUnknownOverrideKeys(overrides)
+
   const result = [...headers]
 
   if (overrides.cseq !== undefined) {

@@ -1031,28 +1031,8 @@ export function buildRelayedPrack(
 }
 
 // ---------------------------------------------------------------------------
-// re-INVITE relay
+// Transparent in-dialog request relay
 // ---------------------------------------------------------------------------
-
-/**
- * Builds a relayed re-INVITE. Via and Contact are placeholders. Preserves body (SDP) and passthrough headers.
- *
- * @param requestUri - Contact URI for the Request-URI line
- * @param fromUri - B2BUA's local URI for the From header (falls back to requestUri)
- * @param dialogToUri - Remote party's URI for the To header (falls back to requestUri)
- */
-export function buildRelayedReInvite(
-  origInvite: SipRequest,
-  callId: string,
-  fromTag: string,
-  toTag: string,
-  requestUri: string,
-  cseq: number,
-  fromUri?: string,
-  dialogToUri?: string
-): SipRequest {
-  return buildRelayedRequest("INVITE", origInvite, callId, fromTag, toTag, requestUri, cseq, fromUri, dialogToUri)
-}
 
 /**
  * Generic transparent in-dialog request relay builder.

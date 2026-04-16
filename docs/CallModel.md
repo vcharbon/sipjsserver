@@ -99,12 +99,14 @@ Dialog {
   contact: string               // remote Contact URI
   localCSeq: number             // next CSeq we send on this leg
   remoteCSeq: number            // last CSeq received on this leg
-  pendingCSeqMap: Record<string, number>  // outbound CSeq → inbound CSeq
+  lastInviteCSeq?: number       // CSeq of most recent INVITE (for ACK-for-2xx)
+  inboundPendingRequests: PendingRequest[]  // snapshots for transparent-relay response correlation
   routeSet: string[]            // Record-Route set
+  ackBranch?: string            // Via branch of first ACK for the 2xx (re-ACK reuse)
 }
 ```
 
-**CSeq rewriting**: the B2BUA owns the CSeq space on each leg. When relaying a request, CSeq is replaced with the next value from the outbound leg's `localCSeq`. The `pendingCSeqMap` correlates responses back to the original sender's CSeq. Required for injecting mid-dialog requests (keepalive OPTIONS, timeout BYE) and for REFER scenarios where legs are not originated by the B2BUA.
+**CSeq rewriting**: the B2BUA owns the CSeq space on each leg. When relaying a request, CSeq is replaced with the next value from the outbound leg's `localCSeq`. The `inboundPendingRequests` list correlates responses back to the original sender's CSeq and headers — one entry per in-flight transparently-relayed request (re-INVITE, OPTIONS, INFO, UPDATE, MESSAGE, PRACK). Required for correct response rebuilding (original Vias/From/To/Call-ID/CSeq per RFC 3261 §8.1.3.3) and for REFER scenarios where legs are not originated by the B2BUA.
 
 ### TimerEntry (serializable)
 
