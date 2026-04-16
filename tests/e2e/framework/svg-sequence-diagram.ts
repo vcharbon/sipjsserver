@@ -49,6 +49,23 @@ function getCallIdColor(callId: string, colorMap: Map<string, string>): string {
   return color
 }
 
+/**
+ * Format a virtual-clock offset (in ms, relative to the first trace
+ * entry) as `T+SEC.mmms` — e.g. `T+0.015s`, `T+1.230s`, `T+1m02.345s`.
+ * Matches the text-report format so the two views agree on time.
+ */
+function formatRelativeTimestamp(ms: number): string {
+  if (ms < 0) ms = 0
+  const totalSec = Math.floor(ms / 1000)
+  const millis = ms % 1000
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  const body = min > 0
+    ? `${min}m${sec.toString().padStart(2, "0")}.${millis.toString().padStart(3, "0")}s`
+    : `${sec}.${millis.toString().padStart(3, "0")}s`
+  return `T+${body}`
+}
+
 // ---------------------------------------------------------------------------
 // Message description helpers
 // ---------------------------------------------------------------------------
@@ -152,6 +169,11 @@ export function renderSequenceDiagram(
   const callIdColorMap = new Map<string, string>()
   const participantX = new Map<string, number>()
 
+  // Base timestamp for T+ annotations — the first trace entry's
+  // virtual-clock time. Everything downstream is rendered as an offset
+  // from this so the sequence diagram matches the text report.
+  const baseTs = trace[0]!.timestamp
+
   // Compute participant X positions
   for (let i = 0; i < participants.length; i++) {
     participantX.set(participants[i]!, MARGIN_LEFT + i * PARTICIPANT_SPACING + PARTICIPANT_BOX_WIDTH / 2)
@@ -246,11 +268,22 @@ export function renderSequenceDiagram(
       svgParts.push(`<text x="${midX}" y="${y - 3}" text-anchor="middle" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" fill="#9ca3af">${escapeXml(tagLabel)}</text>`)
     }
 
-    // Timing annotation for expect steps
-    if (entry.direction === "receive" && entry.durationMs !== undefined) {
-      const timingX = isLeftToRight ? toX + 8 : toX - 8
-      const anchor = isLeftToRight ? "start" : "end"
-      svgParts.push(`<text x="${timingX}" y="${y + 4}" text-anchor="${anchor}" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" fill="#6b7280">${entry.durationMs}ms</text>`)
+    // Timing annotations: show the virtual-clock moment the packet left
+    // the sender (next to the sender lifeline) and the moment the receiver
+    // observed it (next to the receiver lifeline). When the two are equal
+    // (e.g. framework-synthesised entries for dangling offers/PRACKs) a
+    // single annotation is rendered on the receiver side.
+    const sentLabel = formatRelativeTimestamp(entry.sentMs - baseTs)
+    const rcvdLabel = formatRelativeTimestamp(entry.receivedMs - baseTs)
+    const senderAnchor = isLeftToRight ? "end" : "start"
+    const senderX = isLeftToRight ? fromX - 8 : fromX + 8
+    const receiverAnchor = isLeftToRight ? "start" : "end"
+    const receiverX = isLeftToRight ? toX + 8 : toX - 8
+    if (entry.sentMs === entry.receivedMs) {
+      svgParts.push(`<text x="${receiverX}" y="${y + 4}" text-anchor="${receiverAnchor}" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" fill="#6b7280">${rcvdLabel}</text>`)
+    } else {
+      svgParts.push(`<text x="${senderX}" y="${y + 4}" text-anchor="${senderAnchor}" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" fill="#9ca3af">${sentLabel}</text>`)
+      svgParts.push(`<text x="${receiverX}" y="${y + 4}" text-anchor="${receiverAnchor}" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" fill="#6b7280">${rcvdLabel}</text>`)
     }
 
     // Unexpected badge

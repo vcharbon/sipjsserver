@@ -14,14 +14,14 @@
 import type { Scope } from "effect"
 import { Effect, Option, Queue } from "effect"
 import * as dgram from "node:dgram"
-import type { AgentInfo, TestTransport } from "./types.js"
+import type { AgentInfo, ReceivedPacket, TestTransport } from "./types.js"
 import { TransportError } from "./types.js"
 
 interface LiveAgent {
   readonly socket: dgram.Socket
   readonly ip: string
   readonly port: number
-  readonly queue: Queue.Queue<{ raw: Buffer; rinfo: { address: string; port: number }; arrivalMs: number }>
+  readonly queue: Queue.Queue<ReceivedPacket>
 }
 
 const createLiveAgent = (
@@ -29,11 +29,7 @@ const createLiveAgent = (
   bindPort: number
 ): Effect.Effect<LiveAgent, TransportError, Scope.Scope> =>
   Effect.gen(function* () {
-    const queue = yield* Queue.unbounded<{
-      raw: Buffer
-      rinfo: { address: string; port: number }
-      arrivalMs: number
-    }>()
+    const queue = yield* Queue.unbounded<ReceivedPacket>()
 
     const socket = yield* Effect.acquireRelease(
       Effect.callback<dgram.Socket, TransportError>((resume) => {

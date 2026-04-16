@@ -56,15 +56,20 @@ function renderTraceEntries(
   baseTimestamp: number
 ): string {
   const lines: string[] = []
-  for (const entry of entries) {
-    const relMs = entry.timestamp - baseTimestamp
-    const ts = formatTimestamp(relMs)
+  const sorted = [...entries].sort((a, b) => a.timestamp - b.timestamp)
+  for (const entry of sorted) {
+    const sentRel = entry.sentMs - baseTimestamp
+    const rcvdRel = entry.receivedMs - baseTimestamp
+    const tsBlock =
+      entry.sentMs === entry.receivedMs
+        ? `T+${formatTimestamp(sentRel)}`
+        : `sent T+${formatTimestamp(sentRel)} → rcvd T+${formatTimestamp(rcvdRel)}`
     const label = getArrowLabel(entry)
     const statusTag =
       entry.status === "unexpected" ? " [UNEXPECTED]"
       : entry.status === "fail" ? " [FAIL]"
       : ""
-    const prefix = `── [T+${ts}] ${entry.from} → ${entry.to} ── ${label}${statusTag} `
+    const prefix = `── [${tsBlock}] ${entry.from} → ${entry.to} ── ${label}${statusTag} `
     lines.push(prefix.padEnd(SEPARATOR_WIDTH, "─"))
     lines.push("")
     lines.push(serializeMessage(entry.message))

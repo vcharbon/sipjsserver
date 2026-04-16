@@ -8,7 +8,7 @@
 import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 
 // Relay rules
-import { relayOptionsRule, relayByeRule, relayAckRule, relayReinviteRule, relayPrackRule } from "./RelayRules.js"
+import { relayOptionsRule, relayByeRule, relayAckRule, relayReinviteRule, relayPrackRule, relayInfoRule } from "./RelayRules.js"
 
 // Lifecycle rules
 import { handleTimeoutRule, handleCancelRule, handle481Rule, resolveCancelResponseRule } from "./LifecycleRules.js"
@@ -69,6 +69,7 @@ export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
 
   // Default relay and lifecycle rules (900 band)
   relayOptionsRule,
+  relayInfoRule,
   relayByeRule,
   relayAckRule,
   relayReinviteRule,

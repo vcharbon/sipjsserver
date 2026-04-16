@@ -5,8 +5,8 @@
  * No real UDP sockets. Suitable for fast, deterministic tests.
  */
 
-import { Cause, Clock, Effect, Layer, Option, Queue, Stream } from "effect"
-import type { AgentInfo, TestTransport } from "./types.js"
+import { Cause, Clock, Data, Effect, Layer, Option, Queue, Stream } from "effect"
+import type { AgentInfo, ReceivedPacket, TestTransport } from "./types.js"
 import { TransportError } from "./types.js"
 import { UdpTransport, type UdpPacket } from "../../../src/sip/UdpTransport.js"
 import { OverloadController } from "../../../src/b2bua/OverloadController.js"
@@ -61,6 +61,18 @@ function buildTestHandlers() {
 }
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Simulated network propagation delay applied to every SIP message in
+ * both directions (test agent ↔ B2BUA). Forked so the sender is not
+ * blocked; the receiver observes the packet `NETWORK_DELAY_MS` after
+ * the sender's send call.
+ */
+const NETWORK_DELAY_MS = 15
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -86,15 +98,41 @@ function indexCallIdForAgent(
   }
 }
 
+/**
+ * Tagged defect raised when a B2BUA-emitted message fails to parse.
+ * orDie'd at the call site so it surfaces as an unhandled defect, matching
+ * the pre-refactor behavior where `throw new Error(...)` from inside
+ * `Effect.sync` produced a Cause.Die.
+ */
+class DemuxParseError extends Data.TaggedError("DemuxParseError")<{
+  readonly message: string
+  readonly cause: unknown
+}> {}
+
+/**
+ * Parse an outbound B2BUA message for demux. Uses `Effect.try` (not a bare
+ * `try/catch` inside `Effect.sync`) to avoid the `effect(tryCatchInEffectGen)`
+ * lint hint. `orDie` preserves the original "defect on malformed SIP"
+ * semantics — the B2BUA must never emit unparseable messages.
+ */
+const parseOutboundForDemux = (msg: Buffer) =>
+  Effect.try({
+    try: () => customParser.parse(msg),
+    catch: (err) => {
+      const cr = msg.indexOf(0x0d)
+      const summary = msg
+        .subarray(0, cr > 0 ? Math.min(cr, 200) : Math.min(msg.length, 200))
+        .toString("utf-8")
+      return new DemuxParseError({
+        message: `Simulated transport: outbound B2BUA message failed to parse: ${String(err)}. First line: ${summary}`,
+        cause: err,
+      })
+    },
+  }).pipe(Effect.orDie)
+
 // ---------------------------------------------------------------------------
 // Mock transport state
 // ---------------------------------------------------------------------------
-
-interface ReceivedPacket {
-  readonly raw: Buffer
-  readonly rinfo: { address: string; port: number }
-  readonly arrivalMs: number
-}
 
 interface MockTransportState {
   /** Queue of packets destined for the B2BUA (from test agents). */
@@ -207,9 +245,18 @@ export function createSimulatedTransport(opts?: {
   sipPort?: number
   httpPort?: number
   configOverrides?: Partial<AppConfigData>
+  /**
+   * How to advance time inside `receive` while polling for a queued
+   * packet. Under TestClock-driven tests (the default) this must call
+   * `TestClock.adjust` so the forked {@link NETWORK_DELAY_MS}-delayed
+   * delivery fibers can wake up and offer their packets. Under real-
+   * clock mode the harness passes a `Effect.sleep`-based variant.
+   */
+  clockSleep?: (ms: number) => Effect.Effect<void>
 }): TestTransport {
   const sipPort = opts?.sipPort ?? 15060
   const httpPort = opts?.httpPort ?? 13002
+  const clockSleep = opts?.clockSleep ?? ((ms: number) => Effect.sleep(`${ms} millis`))
 
   const mockState: MockTransportState = {
     toB2bua: undefined,
@@ -265,63 +312,77 @@ export function createSimulatedTransport(opts?: {
 
         const mockTransportLayer = Layer.succeed(UdpTransport, {
           send: (msg: Buffer, port: number, address: string) =>
-            Clock.currentTimeMillis.pipe(Effect.flatMap((arrivalMs) => Effect.sync(() => {
-              // Demux outbound packets by Call-ID → agent mapping
-              let callId: string | undefined
-              let testAgent: string | undefined
-              try {
-                const parsed = customParser.parse(msg)
-                callId = getHeader(parsed.headers, "Call-ID")
-                testAgent = getHeader(parsed.headers, "X-Test-Agent")
-              } catch (err) {
-                const cr = msg.indexOf(0x0d)
-                const summary = msg.subarray(0, cr > 0 ? Math.min(cr, 200) : Math.min(msg.length, 200)).toString("utf-8")
-                throw new Error(
-                  `Simulated transport: outbound B2BUA message failed to parse: ${String(err)}. First line: ${summary}`
-                )
-              }
-              if (callId === undefined) return
+            parseOutboundForDemux(msg).pipe(
+              Effect.flatMap((parsed) =>
+                Effect.sync(() => {
+                  // Demux outbound packets by Call-ID → agent mapping
+                  const callId = getHeader(parsed.headers, "Call-ID")
+                  const testAgent = getHeader(parsed.headers, "X-Test-Agent")
+                  if (callId === undefined) return undefined
 
-              let agentName = mockState.callIdToAgent.get(callId)
-              if (agentName === undefined && testAgent !== undefined) {
-                // First message for this Call-ID — learn mapping from X-Test-Agent header
-                mockState.callIdToAgent.set(callId, testAgent)
-                agentName = testAgent
-              }
-              if (agentName === undefined) {
-                // Fallback: address-based routing for tests without X-Test-Agent
-                const key = `${address}:${port}`
-                const candidates: string[] = []
-                for (const [name, addr] of mockState.agentAddrs) {
-                  if (`${addr.ip}:${addr.port}` === key) candidates.push(name)
-                }
-                if (candidates.length === 1) {
-                  agentName = candidates[0]!
-                  mockState.callIdToAgent.set(callId, agentName)
-                } else if (candidates.length > 1) {
-                  throw new Error(
-                    `Demux error: multiple agents at ${key} (${candidates.join(", ")}) ` +
-                    `for Call-ID "${callId}" — add X-Test-Agent header to disambiguate`
-                  )
-                } else {
-                  throw new Error(
-                    `Demux error: no agent at ${key} for Call-ID "${callId}"`
-                  )
-                }
-              }
-              // agentName is guaranteed defined here: either from callIdToAgent, X-Test-Agent, or address fallback (which throws on failure)
-              const queue = mockState.fromB2bua.get(agentName!)
-              if (queue === undefined) {
-                throw new Error(
-                  `Demux error: agent "${agentName}" not registered (Call-ID "${callId}")`
-                )
-              }
-              Queue.offerUnsafe(queue, {
-                raw: msg,
-                rinfo: { address: "127.0.0.1", port: sipPort },
-                arrivalMs,
-              })
-            }))),
+                  let agentName = mockState.callIdToAgent.get(callId)
+                  if (agentName === undefined && testAgent !== undefined) {
+                    // First message for this Call-ID — learn mapping from X-Test-Agent header
+                    mockState.callIdToAgent.set(callId, testAgent)
+                    agentName = testAgent
+                  }
+                  if (agentName === undefined) {
+                    // Fallback: address-based routing for tests without X-Test-Agent
+                    const key = `${address}:${port}`
+                    const candidates: string[] = []
+                    for (const [name, addr] of mockState.agentAddrs) {
+                      if (`${addr.ip}:${addr.port}` === key) candidates.push(name)
+                    }
+                    if (candidates.length === 1) {
+                      agentName = candidates[0]!
+                      mockState.callIdToAgent.set(callId, agentName)
+                    } else if (candidates.length > 1) {
+                      throw new Error(
+                        `Demux error: multiple agents at ${key} (${candidates.join(", ")}) ` +
+                        `for Call-ID "${callId}" — add X-Test-Agent header to disambiguate`
+                      )
+                    } else {
+                      throw new Error(
+                        `Demux error: no agent at ${key} for Call-ID "${callId}"`
+                      )
+                    }
+                  }
+                  // agentName is guaranteed defined here: either from callIdToAgent, X-Test-Agent, or address fallback (which throws on failure)
+                  const queue = mockState.fromB2bua.get(agentName!)
+                  if (queue === undefined) {
+                    throw new Error(
+                      `Demux error: agent "${agentName}" not registered (Call-ID "${callId}")`
+                    )
+                  }
+                  return queue
+                })
+              ),
+              // Simulate 15ms network propagation before the test agent
+              // observes the packet. Fork so the B2BUA's send-side fiber
+              // is not blocked — under TestClock, a blocking sleep would
+              // stall subsequent sends until the next clock adjust.
+              // `arrivalMs` is stamped inside the forked fiber, after the
+              // delay, so the receiver's trace reflects the enqueue time
+              // rather than the send time.
+              Effect.flatMap((queue) =>
+                queue === undefined
+                  ? Effect.void
+                  : Effect.forkDetach(
+                      Effect.sleep(`${NETWORK_DELAY_MS} millis`).pipe(
+                        Effect.andThen(Clock.currentTimeMillis),
+                        Effect.flatMap((arrivalMs) =>
+                          Effect.sync(() =>
+                            Queue.offerUnsafe(queue, {
+                              raw: msg,
+                              rinfo: { address: "127.0.0.1", port: sipPort },
+                              arrivalMs,
+                            })
+                          )
+                        )
+                      )
+                    ).pipe(Effect.asVoid)
+              )
+            ),
           messages: Stream.fromQueue(toB2bua),
           metrics: {
             queueDepth: 0,
@@ -427,7 +488,15 @@ export function createSimulatedTransport(opts?: {
           raw: buf,
           rinfo: { address: agentAddr.ip, port: agentAddr.port },
         }
-        Queue.offerUnsafe(toB2bua, packet)
+        // Simulate 15ms network propagation before the B2BUA observes
+        // the packet (see NETWORK_DELAY_MS). Forked so the test agent's
+        // send returns immediately — under TestClock a blocking sleep
+        // would stall the scenario interpreter.
+        yield* Effect.forkDetach(
+          Effect.sleep(`${NETWORK_DELAY_MS} millis`).pipe(
+            Effect.andThen(Effect.sync(() => Queue.offerUnsafe(toB2bua, packet)))
+          )
+        )
       }),
 
     receive: (agentName, timeoutMs) =>
@@ -445,11 +514,22 @@ export function createSimulatedTransport(opts?: {
           return Option.getOrNull(polled)
         }
 
-        // Blocking take, racing the test/real clock.
-        return yield* Effect.race(
-          Queue.take(queue),
-          Effect.sleep(`${timeoutMs} millis`).pipe(Effect.as(null))
-        )
+        // Poll in small clock-advancing steps. Under TestClock, the
+        // forked NETWORK_DELAY_MS-delayed offer needs the virtual clock
+        // to advance before it can deliver — a plain Effect.race with
+        // Effect.sleep would stall because nothing else advances time
+        // during an expect step. The `clockSleep` knob is TestClock-
+        // aware under simulated runs and wall-clock-based under live.
+        let remaining = timeoutMs
+        while (remaining > 0) {
+          const polled = yield* Queue.poll(queue)
+          if (Option.isSome(polled)) return polled.value
+          const step = remaining < 1 ? remaining : 1
+          yield* clockSleep(step)
+          remaining -= step
+        }
+        const last = yield* Queue.poll(queue)
+        return Option.getOrNull(last)
       }),
 
     settle: () =>
@@ -490,5 +570,7 @@ export function createSimulatedTransport(opts?: {
         }
         return errors
       }),
+
+    networkDelayMs: NETWORK_DELAY_MS,
   }
 }

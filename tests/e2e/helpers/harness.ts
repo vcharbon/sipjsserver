@@ -82,20 +82,36 @@ export function createSimulatedRunner(opts?: {
   const sipPort = opts?.sipPort ?? 15060
   const httpPort = opts?.httpPort ?? 13002
   const outputDir = opts?.outputDir ?? "test-results"
-  const transportOpts: Parameters<typeof createSimulatedTransport>[0] =
-    opts?.configOverrides !== undefined
-      ? { sipPort, httpPort, configOverrides: opts.configOverrides }
-      : { sipPort, httpPort }
-  const transport = createSimulatedTransport(transportOpts)
-  const target = { host: "127.0.0.1", port: sipPort }
 
   // Use TestClock.adjust so scenario pauses are virtual — the B2BUA's
   // own timer fibers run inside the same Effect runtime and share this
   // TestClock, so adjusting it fires every pending Timer A/B/E/F/no-
   // answer/keepalive that should have elapsed.
-  const clockSleep = opts?.realClock
+  //
+  // Step in 10ms chunks rather than one large adjust so that forked
+  // fibers (notably the 15ms simulated-network delivery delay) observe
+  // intermediate time values and get interleaved wakeups — a single
+  // large adjust would fire all due timers atomically at the target
+  // time, masking ordering issues that occur when messages arrive
+  // spaced out in virtual time.
+  const clockSleep: (ms: number) => Effect.Effect<void> = opts?.realClock
     ? (ms: number) => Effect.sleep(`${ms} millis`)
-    : (ms: number) => TestClock.adjust(`${ms} millis`)
+    : (ms: number) =>
+        Effect.gen(function* () {
+          let remaining = ms
+          while (remaining > 0) {
+            const step = remaining < 10 ? remaining : 10
+            yield* TestClock.adjust(`${step} millis`)
+            remaining -= step
+          }
+        })
+
+  const transportOpts: Parameters<typeof createSimulatedTransport>[0] =
+    opts?.configOverrides !== undefined
+      ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep }
+      : { sipPort, httpPort, clockSleep }
+  const transport = createSimulatedTransport(transportOpts)
+  const target = { host: "127.0.0.1", port: sipPort }
 
   return (scenario: Scenario): Effect.Effect<void> =>
     runScoped(

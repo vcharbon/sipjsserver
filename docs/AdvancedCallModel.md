@@ -159,7 +159,7 @@ interface MessageTransform {
 | `retransmit-200` | 200 OK INVITE from confirmed b-leg (excludes re-INVITE responses) | ACK only (no relay) |
 | `relay-reinvite-response` | INVITE response matching pendingReInvite | relay-to-peer |
 | `absorb-bye-200` | 200 OK for BYE/CANCEL | noop (absorb) |
-| `absorb-options-200` | 200 OK for OPTIONS | cancel keepalive-timeout |
+| `absorb-options-200` | 200 OK for keepalive OPTIONS (no pending relay snapshot) | cancel keepalive-timeout |
 
 ### Glare Detection (priority 890)
 
@@ -171,14 +171,15 @@ interface MessageTransform {
 
 | Rule | Matches | Actions |
 |---|---|---|
-| `relay-options` | OPTIONS request | respond 200 |
+| `relay-options` | in-dialog OPTIONS request | relay-to-peer (transparent, payload preserved) |
+| `relay-info` | in-dialog INFO request | relay-to-peer (transparent, payload preserved) |
 | `relay-bye` | BYE request | respond 200, terminate-leg, add-cdr-event, begin-termination |
 | `relay-ack` | ACK request | relay-to-peer |
 | `relay-reinvite` | INVITE request (in-dialog) | relay-to-peer |
 | `relay-prack` | PRACK request | relay-to-peer |
 | `relay-provisional` | 1xx INVITE from b-leg | relay-to-peer, CDR |
 | `confirm-dialog` | 200 OK INVITE from b-leg (new, not retransmit) | confirm-dialog action (merge, relay, destroy losers, timers, CDR) |
-| `relay-non-invite-200` | 200 OK for PRACK/UPDATE/INFO | relay-to-peer |
+| `relay-non-invite-200` | 200 OK for PRACK/UPDATE/INFO/OPTIONS (relayed) | relay-to-peer |
 | `handle-timeout` | Transaction timeout | begin-termination |
 | `handle-cancel` | CANCEL from a-leg | destroy all b-legs, CDR, begin-termination |
 | `max-duration` | global_duration timer | CDR, begin-termination |

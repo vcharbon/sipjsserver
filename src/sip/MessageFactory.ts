@@ -1051,7 +1051,29 @@ export function buildRelayedReInvite(
   fromUri?: string,
   dialogToUri?: string
 ): SipRequest {
-  const body = origInvite.body
+  return buildRelayedRequest("INVITE", origInvite, callId, fromTag, toTag, requestUri, cseq, fromUri, dialogToUri)
+}
+
+/**
+ * Generic transparent in-dialog request relay builder.
+ *
+ * Used for methods the B2BUA forwards end-to-end without interpretation
+ * (INVITE/re-INVITE, OPTIONS, INFO, UPDATE, MESSAGE, …). Preserves the
+ * original body and payload-carrying headers (Content-Type, Accept, etc.)
+ * via copyTransparentHeaders; rewrites only dialog identifiers and Via.
+ */
+export function buildRelayedRequest(
+  method: string,
+  origRequest: SipRequest,
+  callId: string,
+  fromTag: string,
+  toTag: string,
+  requestUri: string,
+  cseq: number,
+  fromUri?: string,
+  dialogToUri?: string
+): SipRequest {
+  const body = origRequest.body
   const from = fromUri ?? requestUri
   const to = dialogToUri ?? requestUri
 
@@ -1061,15 +1083,16 @@ export function buildRelayedReInvite(
     h("From", `<${from}>;tag=${fromTag}`),
     h("To", `<${to}>;tag=${toTag}`),
     h("Call-ID", callId),
-    h("CSeq", `${cseq} INVITE`),
+    h("CSeq", `${cseq} ${method}`),
     h("Contact", "__PLACEHOLDER__"),
   ]
-  copyTransparentHeaders(origInvite.headers, headers)
+  copyTransparentHeaders(origRequest.headers, headers)
   // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
   if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
-    headers.push(h("Content-Type", "application/sdp"))
+    const ct = getHeader(origRequest.headers, "content-type")
+    headers.push(h("Content-Type", ct ?? "application/sdp"))
   }
   headers.push(h("Content-Length", String(body.byteLength)))
 
-  return makeRequest("INVITE", requestUri, headers, body)
+  return makeRequest(method, requestUri, headers, body)
 }

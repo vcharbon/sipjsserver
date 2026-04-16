@@ -24,6 +24,8 @@ import { explicitRouteCall, failoverWithHeaders } from "./scenarios/shared-port.
 import { recordRouteBasic, recordRouteFakeRR } from "./scenarios/record-route.js"
 import { suppress18xBasic, suppress18xFailoverNoAnswer, suppress18xFailoverReject, suppress18xDisabled } from "./scenarios/suppress-18x.js"
 import { unknownDialogReject } from "./scenarios/indialog-unknown-reject.js"
+import { indialogOptions } from "./scenarios/indialog-options.js"
+import { indialogInfo } from "./scenarios/indialog-info.js"
 import { delayedOfferFailure } from "./scenarios/delayed-offer-failure.js"
 import { retransmit200 } from "./scenarios/retransmit-200.js"
 import { keepaliveHappy } from "./scenarios/keepalive-happy.js"
@@ -61,6 +63,8 @@ describe("E2E (fake clock) — simulated backend", () => {
   it.effect("suppress-18x: failover reject (tag consistency)", () => run(suppress18xFailoverReject.toScenario()), { timeout: 30_000 })
   it.effect("suppress-18x: disabled (normal 180 relay)", () => run(suppress18xDisabled.toScenario()), { timeout: 30_000 })
   it.effect("in-dialog unknown dialog → 481 reject", () => run(unknownDialogReject.toScenario()), { timeout: 30_000 })
+  it.effect("in-dialog OPTIONS relayed end-to-end (payload preserved, both directions)", () => run(indialogOptions.toScenario()), { timeout: 30_000 })
+  it.effect("in-dialog INFO relayed end-to-end (DTMF payload, both directions)", () => run(indialogInfo.toScenario()), { timeout: 30_000 })
   it.effect("delayed-offer-failure: missing SDP answer in ACK", () => run(delayedOfferFailure.toScenario()), { timeout: 30_000 })
 
   // Coverage-driven scenarios for rules that were previously never fired

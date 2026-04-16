@@ -41,10 +41,11 @@ export function writeScenarioReport(
 ): string {
   mkdirSync(outputDir, { recursive: true })
 
-  const svg = renderSequenceDiagram(result.trace, result.participants)
+  const sortedTrace = [...result.trace].sort((a, b) => a.timestamp - b.timestamp)
+  const svg = renderSequenceDiagram(sortedTrace, result.participants)
 
   // Build message data for the click handler
-  const messageData: Array<{ stepIndex: number; raw: string }> = result.trace.map(
+  const messageData: Array<{ stepIndex: number; raw: string }> = sortedTrace.map(
     (entry) => ({
       stepIndex: entry.stepIndex,
       raw: serializeMessage(entry.message),

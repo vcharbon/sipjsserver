@@ -8,6 +8,7 @@ import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader } from "../../../sip/MessageFactory.js"
+import { findPendingReInvite } from "../../../call/CallModel.js"
 
 // ── Helper: extract CSeq method from a SIP response ──────────────────────
 
@@ -162,12 +163,18 @@ export const absorbBye200Rule: RuleDefinition<undefined, undefined> = {
     Effect.succeed({ actions: [], state: undefined }),
 }
 
-// ── absorb-options-200 (priority 850) ─────────────────────────────────────
+// ── absorb-options-200 (priority 830) ─────────────────────────────────────
 
-/** Absorb 200 OK for OPTIONS (keepalive response) — cancel keepalive timeout. */
+/**
+ * Absorb 200 OK for a B2BUA-originated keepalive OPTIONS and cancel the
+ * paired keepalive-timeout timer. Distinguished from an end-to-end relayed
+ * OPTIONS by the absence of a pending-relay snapshot on the source dialog:
+ * relayed OPTIONS leave an `inboundPendingReInvites` entry that matches the
+ * response's CSeq, keepalive OPTIONS originated by the B2BUA do not.
+ */
 export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
   id: "absorb-options-200",
-  name: "Absorb OPTIONS 200 OK",
+  name: "Absorb OPTIONS 200 OK (keepalive)",
   alwaysActive: true,
   defaultPriority: 830,
   stateSchema: Schema.Undefined,
@@ -178,7 +185,15 @@ export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
     const msg = ctx.event.message
     if (msg.type !== "response") return false
     if (msg.status < 200 || msg.status >= 300) return false
-    return cseqMethod(msg) === "OPTIONS"
+    if (cseqMethod(msg) !== "OPTIONS") return false
+    // If a pending transparent relay matches this response's CSeq, the OPTIONS
+    // was relayed end-to-end — leave it for relay-non-invite-200.
+    const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "", 10)
+    if (ctx.sourceDialog && Number.isFinite(cseqNum) &&
+        findPendingReInvite(ctx.sourceDialog, cseqNum) !== undefined) {
+      return false
+    }
+    return true
   },
 
   init: () => undefined,
@@ -211,8 +226,10 @@ export const relayNonInvite200Rule: RuleDefinition<undefined, undefined> = {
     if (msg.type !== "response") return false
     if (msg.status < 200 || msg.status >= 300) return false
     const method = cseqMethod(msg)
-    // BYE, CANCEL, OPTIONS, and INVITE are handled by other rules
-    return method !== "BYE" && method !== "CANCEL" && method !== "OPTIONS" && method !== "INVITE"
+    // BYE, CANCEL, INVITE are handled by other rules. OPTIONS with a
+    // pending relay snapshot reaches here (keepalive OPTIONS is absorbed
+    // earlier by absorb-options-200 at priority 830).
+    return method !== "BYE" && method !== "CANCEL" && method !== "INVITE"
   },
 
   init: () => undefined,

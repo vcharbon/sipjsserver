@@ -364,8 +364,14 @@ export class SipRouter extends ServiceMap.Service<
               yield* tracing.emitSendSpan({ call: workingCall, name: sendName, attributes: sendAttrs })
             }
 
-            // ACK for 2xx is a one-shot — no transaction management (RFC 3261 §17.1.1.2)
-            if (stampedMsg.type === "request" && stampedMsg.method === "ACK") {
+            // ACK for 2xx is a one-shot — no transaction management (RFC 3261 §17.1.1.2).
+            // CANCEL is fire-and-forget: it reuses the INVITE's Via branch (RFC 3261 §9.1),
+            // and creating a CANCEL client transaction would overwrite the INVITE client
+            // transaction in the branch-keyed txn map. Retransmission is unnecessary —
+            // the peer's INVITE server transaction (or our no-answer timer) will time out
+            // if the CANCEL is lost. The 200 OK / 487 responses are routed by CSeq method
+            // in TransactionLayer.handleInboundResponse.
+            if (stampedMsg.type === "request" && (stampedMsg.method === "ACK" || stampedMsg.method === "CANCEL")) {
               yield* txnLayer.sendRaw(serialize(stampedMsg), env.destination.port, env.destination.host)
             } else {
               const txnType = isRequest

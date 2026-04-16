@@ -19,6 +19,18 @@ export class TransportError extends Data.TaggedError("TransportError")<{
   readonly cause?: unknown
 }> {}
 
+/**
+ * A packet received by a test agent from the B2BUA (simulated or live backend).
+ *
+ * `arrivalMs` is stamped at enqueue time — i.e. the wall-clock instant the
+ * packet arrived from the socket / mock transport — not at drain time.
+ */
+export interface ReceivedPacket {
+  readonly raw: Buffer
+  readonly rinfo: { readonly address: string; readonly port: number }
+  readonly arrivalMs: number
+}
+
 // ---------------------------------------------------------------------------
 // Step references
 // ---------------------------------------------------------------------------
@@ -236,7 +248,17 @@ export interface StepResult {
 }
 
 export interface TraceEntry {
+  /**
+   * Primary timestamp used for ordering/display. For send entries this is
+   * the sender's clock when the agent queued the packet; for receive entries
+   * this is the arrival time stamped at the receiver's queue. Preserved for
+   * callers that want a single scalar clock.
+   */
   readonly timestamp: number
+  /** Virtual-clock instant the sender placed the packet on the wire. */
+  readonly sentMs: number
+  /** Virtual-clock instant the receiver observed the packet. */
+  readonly receivedMs: number
   readonly from: string
   readonly to: string
   readonly direction: "send" | "receive"
@@ -285,7 +307,7 @@ export interface TestTransport {
   readonly receive: (
     agentName: string,
     timeoutMs: number
-  ) => Effect.Effect<{ raw: Buffer; rinfo: { address: string; port: number }; arrivalMs: number } | null, TransportError>
+  ) => Effect.Effect<ReceivedPacket | null, TransportError>
   /**
    * Optional post-scenario verification: asserts that all internal state
    * (callsMap, limiter counters, timer fibers) is fully empty after the
@@ -303,4 +325,12 @@ export interface TestTransport {
    * would silently pass.
    */
   readonly settle?: () => Effect.Effect<void>
+  /**
+   * Simulated propagation delay between an agent's wire-send and the peer's
+   * observation of the packet. Used by the trace renderer to compute the
+   * receiver-side timestamp for send events (and the sender-side timestamp
+   * for receive events) from a single captured clock reading. Undefined on
+   * the live backend, where each side's clock is stamped directly.
+   */
+  readonly networkDelayMs?: number
 }

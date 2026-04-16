@@ -168,8 +168,9 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
     },
   })
 
-  // Timer A/E retransmissions may leak under TestClock during the final pause
-  bob1.allowExtra("CANCEL")
+  // Timer A retransmissions for the INVITE to bob2 may leak during the final
+  // pause under TestClock. CANCEL to bob1 is fire-and-forget in the B2BUA
+  // (no Timer E) so no allowance is needed there.
   bob2.allowExtra("INVITE")
 
   // No-answer timeout triggers — B2BUA sends CANCEL to Bob1 and failover to Bob2
@@ -223,7 +224,7 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
     },
   })
 
-  s.pause(1000)
+  s.pause(15_000)
 
   const aliceByeTxn = aliceDialog.bye()
   const bob2ByeTxn = bob2Dialog.expect("BYE")

@@ -518,9 +518,21 @@ export class TransactionLayer extends ServiceMap.Service<
       const handleInboundResponse = Effect.fn("TransactionLayer.handleInboundResponse")(
         function* (resp: SipResponse, rinfo: RemoteInfo) {
           const branch = resp.parsed?.via?.branch ?? ""
+          const respCSeqMethod = resp.parsed?.cseq?.method?.toUpperCase()
 
           if (branch) {
             const existing = yield* findTxn(branch)
+            // RFC 3261 §9.1: CANCEL reuses the INVITE's Via branch. Responses to
+            // CANCEL (identified by their CSeq method) MUST NOT be matched to the
+            // INVITE client transaction — doing so would tear down the INVITE txn
+            // on the CANCEL's 200 OK and miss the subsequent 487 (no auto-ACK).
+            // B2BUA-originated CANCELs are fire-and-forget (see SipRouter), so
+            // no CANCEL client txn is tracked; we simply bypass client-txn
+            // handling when the CSeq method is CANCEL and emit the message.
+            if (respCSeqMethod === "CANCEL") {
+              yield* emit({ type: "message", message: resp, rinfo })
+              return
+            }
             if (existing !== undefined && existing.role === "client") {
               if (resp.status >= 100 && resp.status < 200) {
                 // Provisional — move to proceeding, stop retransmit (but keep timeout)

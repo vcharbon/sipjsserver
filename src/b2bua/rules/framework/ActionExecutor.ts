@@ -51,6 +51,7 @@ import {
   buildRelayedReInvite,
   buildPrack,
   buildRelayedPrack,
+  buildRelayedRequest,
   extractHostPort,
   getHeader,
   getHeaders,
@@ -491,10 +492,30 @@ function relayRequest(
       }
       break
     }
-    default:
-      // Generic request relay — use re-INVITE builder as it preserves body/headers
-      relayed = buildRelayedReInvite(req, targetLeg.callId, targetLeg.fromTag, targetDialog.toTag, targetUri, outboundCSeq, targetLeg.localUri, targetLeg.remoteUri)
+    default: {
+      // ── Transparent in-dialog request relay (OPTIONS, INFO, UPDATE, MESSAGE…) ──
+      // The B2BUA must forward these end-to-end with payload intact, rewriting
+      // only dialog identifiers and Via. Tag selection mirrors INVITE's logic
+      // (B2BUA owns the tag shown to the a-leg). A pending entry is recorded
+      // so relayResponseMsg can rebuild the response using the original
+      // inbound Vias/From/To/Call-ID/CSeq snapshot (RFC 3261 §8.1.3.3).
+      const tpFromTag = targetLeg.legId === "a" ? (b2buaTag(state.call, "a") ?? "") : targetLeg.fromTag
+      const tpToTag = targetLeg.legId === "a" ? (remoteTag(state.call, "a") ?? "") : targetDialog.toTag
+      relayed = buildRelayedRequest(
+        req.method, req, targetLeg.callId, tpFromTag, tpToTag, targetUri,
+        outboundCSeq, targetLeg.localUri, targetLeg.remoteUri,
+      )
+      state.call = addPendingReInvite(state.call, targetLeg.legId, targetDialog.toTag, {
+        outboundCSeq,
+        inboundCSeq,
+        sourceVias: getHeaders(req.headers, "via"),
+        sourceCallId: ctx.sourceLeg.callId,
+        sourceFrom: getHeader(req.headers, "from") ?? "",
+        sourceTo: getHeader(req.headers, "to") ?? "",
+        direction: ctx.direction,
+      })
       break
+    }
   }
 
   // Apply transform if provided
@@ -567,22 +588,25 @@ function relayResponseMsg(
   const cseqHeader = getHeader(resp.headers, "cseq") ?? ""
   const cseqMethod = cseqHeader.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
   const cseqNum = parseInt(cseqHeader, 10)
-  const pending = ctx.sourceDialog !== undefined && cseqMethod === "INVITE"
+  const pending = ctx.sourceDialog !== undefined
     ? findPendingReInvite(ctx.sourceDialog, cseqNum)
     : undefined
 
   let relayed: SipResponse
 
   if (pending !== undefined) {
-    // ── Pending re-INVITE response path ──
+    // ── Pending transparent-relay response path ──
     // Rebuild headers from the snapshot captured when the request was relayed.
+    // Covers re-INVITE as well as OPTIONS, INFO, UPDATE, MESSAGE, and any
+    // other in-dialog transparent method (RFC 3261 §8.1.3.3 — CSeq must echo
+    // the request's CSeq/method).
     relayed = relayResponse(
       resp,
       pending.sourceCallId,
       pending.sourceVias,
       pending.sourceFrom,
       pending.sourceTo,
-      `${pending.inboundCSeq} INVITE`,
+      `${pending.inboundCSeq} ${cseqMethod}`,
     )
   } else {
     // ── Default response relay path (initial INVITE, PRACK/UPDATE, INFO, etc.) ──

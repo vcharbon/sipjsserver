@@ -1,5 +1,6 @@
 /**
- * Default relay rules — relay-bye, relay-ack, relay-options, relay-reinvite, relay-prack.
+ * Default relay rules — relay-bye, relay-ack, relay-options, relay-reinvite,
+ * relay-prack, relay-info.
  *
  * These are always-active rules that implement the standard B2BUA relay behavior.
  * They match SIP requests and relay them to the peer leg via the ActionExecutor.
@@ -8,30 +9,60 @@
 import { Effect, Schema } from "effect"
 import type { RuleDefinition } from "../framework/RuleDefinition.js"
 
+// ── Transparent in-dialog relay factory ───────────────────────────────────
+//
+// Shared builder for rules that forward a single in-dialog request method
+// end-to-end (OPTIONS, INFO, UPDATE, MESSAGE, re-INVITE, PRACK). All payload
+// transparency (body, Content-Type, header passthrough) and CSeq/tag
+// rewriting is handled by ActionExecutor.relayRequest — these rules only
+// declare the match + emit `relay-to-peer`.
+
+export function makeTransparentRelayRule(
+  method: string,
+  opts: { id: string; name: string; priority: number },
+): RuleDefinition<undefined, undefined> {
+  return {
+    id: opts.id,
+    name: opts.name,
+    alwaysActive: true,
+    defaultPriority: opts.priority,
+    stateSchema: Schema.Undefined,
+    paramsSchema: Schema.Undefined,
+
+    matches: (ctx) =>
+      ctx.event.type === "sip" &&
+      ctx.event.message.type === "request" &&
+      ctx.event.message.method === method,
+
+    init: () => undefined,
+
+    handle: () =>
+      Effect.succeed({
+        actions: [{ type: "relay-to-peer" as const }],
+        state: undefined,
+      }),
+  }
+}
+
 // ── relay-options (priority 924) ──────────────────────────────────────────
 
-/** Respond 200 OK to in-dialog OPTIONS. */
-export const relayOptionsRule: RuleDefinition<undefined, undefined> = {
-  id: "relay-options",
-  name: "Relay OPTIONS",
-  alwaysActive: true,
-  defaultPriority: 924,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
+/** Relay in-dialog OPTIONS end-to-end (payload-transparent). */
+export const relayOptionsRule: RuleDefinition<undefined, undefined> =
+  makeTransparentRelayRule("OPTIONS", {
+    id: "relay-options",
+    name: "Relay OPTIONS",
+    priority: 924,
+  })
 
-  matches: (ctx) =>
-    ctx.event.type === "sip" &&
-    ctx.event.message.type === "request" &&
-    ctx.event.message.method === "OPTIONS",
+// ── relay-info (priority 925) ─────────────────────────────────────────────
 
-  init: () => undefined,
-
-  handle: () =>
-    Effect.succeed({
-      actions: [{ type: "respond", status: 200, reason: "OK" }],
-      state: undefined,
-    }),
-}
+/** Relay in-dialog INFO end-to-end (payload-transparent). */
+export const relayInfoRule: RuleDefinition<undefined, undefined> =
+  makeTransparentRelayRule("INFO", {
+    id: "relay-info",
+    name: "Relay INFO",
+    priority: 925,
+  })
 
 // ── relay-bye (priority 912) ──────────────────────────────────────────────
 
@@ -92,49 +123,19 @@ export const relayAckRule: RuleDefinition<undefined, undefined> = {
 // ── relay-reinvite (priority 918) ─────────────────────────────────────────
 
 /** Relay re-INVITE to peer leg. */
-export const relayReinviteRule: RuleDefinition<undefined, undefined> = {
-  id: "relay-reinvite",
-  name: "Relay re-INVITE",
-  alwaysActive: true,
-  defaultPriority: 918,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
-
-  matches: (ctx) =>
-    ctx.event.type === "sip" &&
-    ctx.event.message.type === "request" &&
-    ctx.event.message.method === "INVITE",
-
-  init: () => undefined,
-
-  handle: () =>
-    Effect.succeed({
-      actions: [{ type: "relay-to-peer" as const }],
-      state: undefined,
-    }),
-}
+export const relayReinviteRule: RuleDefinition<undefined, undefined> =
+  makeTransparentRelayRule("INVITE", {
+    id: "relay-reinvite",
+    name: "Relay re-INVITE",
+    priority: 918,
+  })
 
 // ── relay-prack (priority 921) ────────────────────────────────────────────
 
 /** Relay PRACK to peer leg. */
-export const relayPrackRule: RuleDefinition<undefined, undefined> = {
-  id: "relay-prack",
-  name: "Relay PRACK",
-  alwaysActive: true,
-  defaultPriority: 921,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
-
-  matches: (ctx) =>
-    ctx.event.type === "sip" &&
-    ctx.event.message.type === "request" &&
-    ctx.event.message.method === "PRACK",
-
-  init: () => undefined,
-
-  handle: () =>
-    Effect.succeed({
-      actions: [{ type: "relay-to-peer" as const }],
-      state: undefined,
-    }),
-}
+export const relayPrackRule: RuleDefinition<undefined, undefined> =
+  makeTransparentRelayRule("PRACK", {
+    id: "relay-prack",
+    name: "Relay PRACK",
+    priority: 921,
+  })

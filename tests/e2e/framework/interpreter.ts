@@ -468,8 +468,11 @@ function executeSend(
     const sendStatus: StepStatus = outboundOaErrors.length > 0 ? "fail" : "pass"
 
     // Trace: agent → SUT
+    const netDelay = transport.networkDelayMs ?? 0
     state.trace.push(defined({
       timestamp: clockTs,
+      sentMs: clockTs,
+      receivedMs: clockTs + netDelay,
       from: step.agent,
       to: state.sutNames[step.agent] ?? "B2BUA",
       direction: "send" as const,
@@ -525,6 +528,7 @@ function executeExpect(
     // Poll for matching message from transport
     const deadline = Date.now() + timeout
     let matched: SipMessage | undefined
+    let matchedArrivalMs: number | undefined
     const assertionErrors: string[] = []
 
     while (Date.now() < deadline) {
@@ -572,6 +576,7 @@ function executeExpect(
 
       // Message matches the expect step
       matched = msg
+      matchedArrivalMs = packet.arrivalMs
 
       // Run predicate if provided
       if (step.match.predicate) {
@@ -693,9 +698,16 @@ function executeExpect(
 
     const status: StepStatus = assertionErrors.length > 0 ? "fail" : "pass"
 
-    // Trace: SUT → agent
+    // Trace: SUT → agent. Stamp with the packet's arrival time (set by
+    // the transport when the receiver's queue was offered the packet) so
+    // the call-flow report shows the virtual clock moment the UAS/UAC
+    // saw the message — not the moment executeExpect started polling.
+    const netDelayR = transport.networkDelayMs ?? 0
+    const arrivalTs = matchedArrivalMs ?? clockTs
     state.trace.push(defined({
-      timestamp: clockTs,
+      timestamp: arrivalTs,
+      sentMs: arrivalTs - netDelayR,
+      receivedMs: arrivalTs,
       from: sutName,
       to: step.agent,
       direction: "receive" as const,
@@ -943,6 +955,8 @@ function checkDanglingOffers(state: InterpreterState): Effect.Effect<void> {
       }))
       state.trace.push({
         timestamp: clockTs,
+        sentMs: clockTs,
+        receivedMs: clockTs,
         from: state.sutNames[pending.party] ?? "B2BUA",
         to: pending.party,
         direction: "receive",
@@ -980,6 +994,8 @@ function checkDanglingReliableProvisionals(state: InterpreterState): Effect.Effe
         }))
         state.trace.push({
           timestamp: clockTs,
+          sentMs: clockTs,
+          receivedMs: clockTs,
           from: state.sutNames[agent] ?? "B2BUA",
           to: agent,
           direction: "receive",
@@ -1025,6 +1041,8 @@ function checkUnexpectedMessages(
       // Trace: unexpected message
       state.trace.push({
         timestamp: clockTs,
+        sentMs: clockTs,
+        receivedMs: clockTs,
         from: state.sutNames[agent] ?? "B2BUA",
         to: agent,
         direction: "receive",
@@ -1059,8 +1077,11 @@ function checkUnexpectedMessages(
         // complete for downstream review (e.g. hop-by-hop ACK for non-2xx
         // via allowExtra("ACK")), but they do NOT fail the test.
         if (parseResult._tag === "Success" && isAllowedReemission(state, agentName, parseResult.success)) {
+          const dD = transport.networkDelayMs ?? 0
           state.trace.push({
             timestamp: packet.arrivalMs,
+            sentMs: packet.arrivalMs - dD,
+            receivedMs: packet.arrivalMs,
             from: state.sutNames[agentName] ?? "B2BUA",
             to: agentName,
             direction: "receive",
@@ -1090,8 +1111,11 @@ function checkUnexpectedMessages(
 
         // Trace: unexpected drained message
         if (parseResult._tag === "Success") {
+          const dD2 = transport.networkDelayMs ?? 0
           state.trace.push({
             timestamp: packet.arrivalMs,
+            sentMs: packet.arrivalMs - dD2,
+            receivedMs: packet.arrivalMs,
             from: state.sutNames[agentName] ?? "B2BUA",
             to: agentName,
             direction: "receive",

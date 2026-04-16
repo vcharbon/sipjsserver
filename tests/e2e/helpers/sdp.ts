@@ -55,6 +55,11 @@ export function sdpOffer(ip: string = "127.0.0.1", port?: number): Uint8Array {
   return new TextEncoder().encode(sdp)
 }
 
+export interface SdpAnswerOptions {
+  readonly ip?: string
+  readonly port?: number
+}
+
 /**
  * Build an SDP answer.
  *
@@ -65,13 +70,16 @@ export function sdpOffer(ip: string = "127.0.0.1", port?: number): Uint8Array {
  * default port). Blind answers still pass "some pending offer exists" checks
  * but skip the strict nonce/port equality check — use only in negative tests
  * or when paired with `skipValidation: ["offerAnswer"]`.
+ *
+ * `opts` overrides are an options bag (not positional) so `sdpAnswer(undefined, 30000)`
+ * cannot silently pass a number into the `ip` slot.
  */
 export function sdpAnswer(
   offer?: Uint8Array,
-  ip?: string,
-  port?: number
+  opts?: SdpAnswerOptions
 ): Uint8Array {
-  const finalIp = ip ?? "127.0.0.1"
+  const finalIp = opts?.ip ?? "127.0.0.1"
+  const port = opts?.port
   let derivedPort: number
   let derivedNonce = ""
   if (offer) {
