@@ -8,7 +8,7 @@
 
 import type { Effect, Schema } from "effect"
 import type { SipRequest, SipResponse, RemoteInfo } from "../../../sip/types.js"
-import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType } from "../../../call/CallModel.js"
+import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType, TransferPhase } from "../../../call/CallModel.js"
 import type { AppConfigData } from "../../../config/AppConfig.js"
 import type { CallEvent } from "../../../sip/SipRouter.js"
 import type { CallControlClient } from "../../../http/CallControlClient.js"
@@ -38,6 +38,24 @@ type OneOrMany<T> = T | ReadonlyArray<T>
 /** Post-match corner-case predicate. Pure, sync, reads only RuleContext state. */
 export type MatchFilter = (ctx: RuleContext) => boolean
 
+/**
+ * Transfer-phase gate.
+ *
+ * Rules opt into a TransferPhase to express that they should only match while
+ * the call's `transfer.phase` is in a particular state (or set of states).
+ *
+ * - `undefined` (omitted): rule runs regardless of transfer state — the
+ *   normal case for default rules that know nothing about REFER.
+ * - `null` (or array containing `null`): rule requires `call.transfer` to be
+ *   absent/cleared. Use this to assert "non-transfer" when necessary.
+ * - phase literal(s): rule only fires when `call.transfer?.phase` is one of
+ *   the listed phases.
+ */
+export type TransferPhaseGate =
+  | TransferPhase
+  | ReadonlyArray<TransferPhase | null>
+  | null
+
 /** Match descriptor for an inbound SIP request. */
 export interface RequestMatch {
   readonly kind: "request"
@@ -47,6 +65,7 @@ export interface RequestMatch {
   readonly legState?: OneOrMany<LegState>
   readonly legDisposition?: OneOrMany<LegDisposition>
   readonly direction?: Direction
+  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter
 }
 
@@ -63,6 +82,7 @@ export interface ResponseMatch {
   readonly legState?: OneOrMany<LegState>
   readonly legDisposition?: OneOrMany<LegDisposition>
   readonly direction?: Direction
+  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter
 }
 
@@ -72,6 +92,7 @@ export interface TimerMatch {
   /** Omitted = match any timer type. */
   readonly timerType?: OneOrMany<TimerType>
   readonly callState?: OneOrMany<CallModelState>
+  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter
 }
 
@@ -80,6 +101,7 @@ export interface TimeoutMatch {
   readonly kind: "timeout"
   readonly method?: OneOrMany<SipMethod>
   readonly callState?: OneOrMany<CallModelState>
+  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter
 }
 
@@ -87,6 +109,7 @@ export interface TimeoutMatch {
 export interface CancelledMatch {
   readonly kind: "cancelled"
   readonly callState?: OneOrMany<CallModelState>
+  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter
 }
 

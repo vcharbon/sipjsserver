@@ -20,8 +20,10 @@ import type {
   StatusClass,
   TimerMatch,
   TimeoutMatch,
+  TransferPhaseGate,
 } from "./RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
+import type { TransferPhase } from "../../../call/CallModel.js"
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -30,6 +32,25 @@ function enumColMatch<T>(col: T | ReadonlyArray<T> | undefined, value: T): boole
   if (col === undefined) return true
   if (Array.isArray(col)) return (col as ReadonlyArray<T>).includes(value)
   return col === value
+}
+
+/**
+ * Transfer-phase column match.
+ *
+ * - gate === undefined: accept anything (rule is transfer-agnostic).
+ * - gate === null: require absence of transfer (call.transfer is null/undefined).
+ * - gate is a phase literal: require exact phase match.
+ * - gate is an array: accept if any member matches the current phase, where
+ *   `null` in the array matches the transfer-absent case.
+ */
+function transferPhaseMatch(gate: TransferPhaseGate | undefined, ctx: RuleContext): boolean {
+  if (gate === undefined) return true
+  const actual: TransferPhase | null = ctx.call.transfer?.phase ?? null
+  if (gate === null) return actual === null
+  if (Array.isArray(gate)) {
+    return (gate as ReadonlyArray<TransferPhase | null>).includes(actual)
+  }
+  return gate === actual
 }
 
 /** Map a numeric SIP status to its class bucket. */
@@ -60,6 +81,7 @@ function requestColumns(m: RequestMatch, ctx: RuleContext): boolean {
   if (!enumColMatch(m.callState, ctx.call.state)) return false
   if (!enumColMatch(m.legState, ctx.sourceLeg.state)) return false
   if (!enumColMatch(m.legDisposition, ctx.sourceLeg.disposition)) return false
+  if (!transferPhaseMatch(m.transferPhase, ctx)) return false
   return true
 }
 
@@ -78,6 +100,7 @@ function responseColumns(m: ResponseMatch, ctx: RuleContext): boolean {
   if (!enumColMatch(m.callState, ctx.call.state)) return false
   if (!enumColMatch(m.legState, ctx.sourceLeg.state)) return false
   if (!enumColMatch(m.legDisposition, ctx.sourceLeg.disposition)) return false
+  if (!transferPhaseMatch(m.transferPhase, ctx)) return false
   return true
 }
 
@@ -85,6 +108,7 @@ function timerColumns(m: TimerMatch, ctx: RuleContext): boolean {
   if (ctx.event.type !== "timer") return false
   if (!enumColMatch(m.timerType, ctx.event.timerType)) return false
   if (!enumColMatch(m.callState, ctx.call.state)) return false
+  if (!transferPhaseMatch(m.transferPhase, ctx)) return false
   return true
 }
 
@@ -95,12 +119,14 @@ function timeoutColumns(m: TimeoutMatch, ctx: RuleContext): boolean {
     if (!enumColMatch(m.method, ctx.event.method as SipMethod)) return false
   }
   if (!enumColMatch(m.callState, ctx.call.state)) return false
+  if (!transferPhaseMatch(m.transferPhase, ctx)) return false
   return true
 }
 
 function cancelledColumns(m: CancelledMatch, ctx: RuleContext): boolean {
   if (ctx.event.type !== "cancelled") return false
   if (!enumColMatch(m.callState, ctx.call.state)) return false
+  if (!transferPhaseMatch(m.transferPhase, ctx)) return false
   return true
 }
 
@@ -134,6 +160,17 @@ function colScore(v: unknown): number {
   return 2
 }
 
+/**
+ * Transfer-phase gate scoring — singleton phase or `null` beats an array;
+ * undefined contributes nothing. Mirrors colScore so `transferPhase:"c-ringing"`
+ * outranks `transferPhase:["c-ringing","a-realigning"]`.
+ */
+function transferPhaseScore(gate: TransferPhaseGate | undefined): number {
+  if (gate === undefined) return 0
+  if (Array.isArray(gate)) return 1
+  return 2
+}
+
 export function specificityScore(m: Match): number {
   let score = 0
   switch (m.kind) {
@@ -143,6 +180,7 @@ export function specificityScore(m: Match): number {
       score += colScore(m.legState)
       score += colScore(m.legDisposition)
       score += colScore(m.direction)
+      score += transferPhaseScore(m.transferPhase)
       break
     case "response":
       score += colScore(m.cseqMethod)
@@ -156,17 +194,21 @@ export function specificityScore(m: Match): number {
       score += colScore(m.legState)
       score += colScore(m.legDisposition)
       score += colScore(m.direction)
+      score += transferPhaseScore(m.transferPhase)
       break
     case "timer":
       score += colScore(m.timerType)
       score += colScore(m.callState)
+      score += transferPhaseScore(m.transferPhase)
       break
     case "timeout":
       score += colScore(m.method)
       score += colScore(m.callState)
+      score += transferPhaseScore(m.transferPhase)
       break
     case "cancelled":
       score += colScore(m.callState)
+      score += transferPhaseScore(m.transferPhase)
       break
   }
   if (m.filter !== undefined) score += 1

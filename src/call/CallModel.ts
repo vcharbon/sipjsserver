@@ -221,7 +221,22 @@ export const TimerType = Schema.Literals([
    * If all legs haven't resolved within 64s (2× Timer B/F), force-remove
    * the call to prevent permanent memory leaks from lost BYE responses.
    */
-  "terminating_timeout"
+  "terminating_timeout",
+  /**
+   * REFER subscription expiry (RFC 3515): bound on how long we keep the
+   * implicit REFER subscription open before emitting the final NOTIFY.
+   */
+  "refer_subscription_expiry",
+  /**
+   * Per re-INVITE answer watchdog during REFER-driven blind transfer.
+   * Fires if C or A do not answer our realigning re-INVITE in time.
+   */
+  "refer_reinvite_answer",
+  /**
+   * Overall REFER safety timer: covers the full transfer state machine
+   * end-to-end (authorize → ring → realign C → realign A → merge).
+   */
+  "refer_overall_safety"
 ])
 export type TimerType = typeof TimerType.Type
 
@@ -294,6 +309,46 @@ export const CallPolicies = Schema.Struct({
   relayFirst18xTo180: Schema.optional(Schema.Boolean),
 })
 export type CallPolicies = typeof CallPolicies.Type
+
+// ── Transfer state (REFER-driven blind transfer) ──────────────────────────
+//
+// Populated by TransferRules when the B-leg issues a REFER. Drives the
+// transfer phase state machine (declared via Match.transferPhase on rules)
+// and anchors the realigning re-INVITE exchanges. Pointer + payload data
+// only — no inline fiber/handle state.
+
+/** Phase marker for the REFER-driven transfer state machine. */
+export const TransferPhase = Schema.Literals([
+  /** REFER received, awaiting HTTP authorization decision. */
+  "refer-authorizing",
+  /** C-leg INVITE sent, awaiting final response. */
+  "c-ringing",
+  /** Re-INVITE toward C with A's SDP in flight. */
+  "c-realigning",
+  /** Re-INVITE toward A with C's endpoint in flight. */
+  "a-realigning",
+])
+export type TransferPhase = typeof TransferPhase.Type
+
+export const TransferState = Schema.Struct({
+  /** Current transfer phase — gates which TransferRules can match. */
+  phase: TransferPhase,
+  /** B-leg that issued the REFER (origin of the implicit subscription). */
+  referrerLegId: Schema.String,
+  /** Raw Refer-To URI as received from the referrer. */
+  referToUri: Schema.String,
+  /** Refer-To URI after any HTTP-driven rewrite (`new_refer_to`). */
+  effectiveReferToUri: Schema.optional(Schema.String),
+  /** Callback context propagated from the /call/refer response. */
+  callbackContext: Schema.optional(Schema.String),
+  /** Newly-created C-leg identifier (set when create-leg fires). */
+  cLegId: Schema.optional(Schema.String),
+  /** CSeq of the REFER request on the referrer's dialog (for NOTIFY correlation). */
+  referCSeq: Schema.optional(Schema.Int),
+  /** Wall-clock ms when the REFER was received — drives the overall safety timer. */
+  startedAtMs: Schema.Number,
+})
+export type TransferState = typeof TransferState.Type
 
 // ── Rule system (active rules + per-rule state on Call) ────────────────────
 
@@ -430,6 +485,12 @@ export const Call = Schema.Struct({
    * persists it here before action execution. Serialized through Redis.
    */
   ruleState: Schema.optional(Schema.Array(RuleStateEntry)),
+  /**
+   * REFER-driven blind transfer state. Populated on REFER receipt, cleared
+   * once the transfer completes (success or failure). The `phase` field
+   * gates which TransferRules can match via Match.transferPhase.
+   */
+  transfer: Schema.optional(Schema.NullOr(TransferState)),
 })
 
 export type Call = typeof Call.Type
