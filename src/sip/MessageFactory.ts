@@ -1031,6 +1031,117 @@ export function buildRelayedPrack(
 }
 
 // ---------------------------------------------------------------------------
+// NOTIFY (RFC 3265 / RFC 3515 — REFER subscription)
+// ---------------------------------------------------------------------------
+
+/** Options for {@link buildNotify}. */
+export interface BuildNotifyOptions {
+  readonly callId: string
+  readonly fromTag: string
+  readonly toTag: string
+  readonly requestUri: string
+  readonly cseq: number
+  readonly fromUri?: string
+  readonly dialogToUri?: string
+  /** Event header value (e.g. "refer" or "refer;id=1"). */
+  readonly event: string
+  /**
+   * Subscription-State header value (RFC 3265 §3.2.4). Examples:
+   *   - "active;expires=60"
+   *   - "terminated;reason=noresource"
+   */
+  readonly subscriptionState: string
+  /** Default "message/sipfrag;version=2.0" when body present, omitted when body empty. */
+  readonly contentType?: string
+  readonly body?: Uint8Array
+}
+
+/**
+ * Build a NOTIFY request inside an established dialog. Via and Contact are
+ * placeholders stamped by SipRouter. Body defaults to empty.
+ *
+ * For REFER-subscription NOTIFYs the caller passes `event: "refer"` and a
+ * sipfrag body (see SipFragUtils).
+ */
+export function buildNotify(opts: BuildNotifyOptions): SipRequest {
+  const body = opts.body ?? EMPTY_BODY
+  const from = opts.fromUri ?? opts.requestUri
+  const to = opts.dialogToUri ?? opts.requestUri
+  const headers: SipHeader[] = [
+    h("Via", "__PLACEHOLDER__"),
+    h("Max-Forwards", "70"),
+    h("From", `<${from}>;tag=${opts.fromTag}`),
+    h("To", `<${to}>;tag=${opts.toTag}`),
+    h("Call-ID", opts.callId),
+    h("CSeq", `${opts.cseq} NOTIFY`),
+    h("Contact", "__PLACEHOLDER__"),
+    h("Event", opts.event),
+    h("Subscription-State", opts.subscriptionState),
+  ]
+  if (body.byteLength > 0) {
+    const ct = opts.contentType ?? "message/sipfrag;version=2.0"
+    headers.push(h("Content-Type", ct))
+  }
+  headers.push(h("Content-Length", String(body.byteLength)))
+
+  return makeRequest("NOTIFY", opts.requestUri, headers, body)
+}
+
+// ---------------------------------------------------------------------------
+// B2BUA-originated re-INVITE (not relayed)
+// ---------------------------------------------------------------------------
+
+/** Options for {@link buildOriginatedInvite}. */
+export interface BuildOriginatedInviteOptions {
+  readonly callId: string
+  readonly fromTag: string
+  readonly toTag: string
+  readonly requestUri: string
+  readonly cseq: number
+  readonly fromUri?: string
+  readonly dialogToUri?: string
+  readonly body: Uint8Array
+  /** Defaults to "application/sdp" when body is non-empty. */
+  readonly contentType?: string
+  /** Extra headers appended after structural headers. */
+  readonly extraHeaders?: ReadonlyArray<SipHeader>
+}
+
+/**
+ * Build a B2BUA-originated re-INVITE inside an established dialog — used by
+ * the transfer flow to swap SDP on an already-confirmed leg. Via and Contact
+ * are placeholders stamped by SipRouter.
+ *
+ * Caller computes `cseq` (typically `dialog.localCSeq + 1`). This builder
+ * does NOT mutate dialog state — state updates are the caller's
+ * responsibility (via RuleAction / ActionExecutor).
+ */
+export function buildOriginatedInvite(opts: BuildOriginatedInviteOptions): SipRequest {
+  const body = opts.body
+  const from = opts.fromUri ?? opts.requestUri
+  const to = opts.dialogToUri ?? opts.requestUri
+  const headers: SipHeader[] = [
+    h("Via", "__PLACEHOLDER__"),
+    h("Max-Forwards", "70"),
+    h("From", `<${from}>;tag=${opts.fromTag}`),
+    h("To", `<${to}>;tag=${opts.toTag}`),
+    h("Call-ID", opts.callId),
+    h("CSeq", `${opts.cseq} INVITE`),
+    h("Contact", "__PLACEHOLDER__"),
+  ]
+  if (opts.extraHeaders) {
+    for (const hdr of opts.extraHeaders) headers.push(hdr)
+  }
+  // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included.
+  if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
+    headers.push(h("Content-Type", opts.contentType ?? "application/sdp"))
+  }
+  headers.push(h("Content-Length", String(body.byteLength)))
+
+  return makeRequest("INVITE", opts.requestUri, headers, body)
+}
+
+// ---------------------------------------------------------------------------
 // Transparent in-dialog request relay
 // ---------------------------------------------------------------------------
 
