@@ -16,10 +16,13 @@ import { OverloadController } from "../b2bua/OverloadController.js"
 import {
   NewCallResponse,
   CallFailureResponse,
+  CallReferResponse,
   type NewCallRequest as NewCallRequestType,
   type NewCallResponse as NewCallResponseType,
   type CallFailureRequest as CallFailureRequestType,
-  type CallFailureResponse as CallFailureResponseType
+  type CallFailureResponse as CallFailureResponseType,
+  type CallReferRequest as CallReferRequestType,
+  type CallReferResponse as CallReferResponseType
 } from "./CallControlSchemas.js"
 
 // ---------------------------------------------------------------------------
@@ -40,6 +43,7 @@ export class CallControlClient extends ServiceMap.Service<
   {
     readonly newCall: (req: NewCallRequestType) => Effect.Effect<NewCallResponseType, CallControlError>
     readonly callFailure: (req: CallFailureRequestType) => Effect.Effect<CallFailureResponseType, CallControlError>
+    readonly callRefer: (req: CallReferRequestType) => Effect.Effect<CallReferResponseType, CallControlError>
   }
 >()("@sipjsserver/CallControlClient") {
   static readonly layer = Layer.effect(
@@ -125,7 +129,50 @@ export class CallControlClient extends ServiceMap.Service<
         return response
       })
 
-      return { newCall, callFailure }
+      const callRefer = Effect.fn("CallControlClient.callRefer")(function* (req: CallReferRequestType) {
+        const startedAt = yield* Clock.currentTimeMillis
+        const request = HttpClientRequest.post(`${baseUrl}/call/refer`).pipe(
+          HttpClientRequest.bodyJsonUnsafe(req)
+        )
+        const response = yield* client.execute(request).pipe(
+          Effect.flatMap(HttpClientResponse.schemaBodyJson(CallReferResponse)),
+          Effect.tap((resp) =>
+            Effect.currentSpan.pipe(
+              Effect.tap((span) =>
+                Effect.sync(() => {
+                  span.attribute("http.response.action", resp.action)
+                  if ("callback_context" in resp && typeof resp.callback_context === "string") {
+                    span.attribute("http.response.callback_context", resp.callback_context.slice(0, 8))
+                  }
+                  if ("destination" in resp && resp.destination) {
+                    const dest = resp.destination as { host: string; port?: number }
+                    span.attribute("http.response.destination", `${dest.host}:${dest.port ?? 5060}`)
+                  }
+                })
+              ),
+              Effect.ignore
+            )
+          ),
+          Effect.mapError((err) =>
+            new CallControlError({ reason: `POST /call/refer failed: ${err}` })
+          ),
+          Effect.withSpan("http.call_control.refer", {
+            kind: "client",
+            attributes: {
+              "http.method": "POST",
+              "http.url": `${baseUrl}/call/refer`,
+              "http.request.call_id": req.call_id,
+              "http.request.dialog_id": req.dialog_id,
+              "http.request.refer_to": req.refer_to
+            }
+          })
+        )
+        const endedAt = yield* Clock.currentTimeMillis
+        overload.observeRoutingApiLatency("in_dialog", endedAt - startedAt)
+        return response
+      })
+
+      return { newCall, callFailure, callRefer }
     })
   )
 }

@@ -113,6 +113,14 @@ export const CallFailureResponse = Schema.Union([
 
 // ── /call/refer ───────────────────────────────────────────────────────────────
 
+/**
+ * POST /call/refer — REFER authorisation request.
+ *
+ * `call_id` is the **A-leg Call-ID** (the call the REFER targets, identified
+ * from the B2BUA's bridge perspective). The B-leg Call-ID is derived from the
+ * dialog on which the REFER arrived. `dialog_id` uniquely identifies that
+ * dialog (Call-ID;to-tag=...;from-tag=...).
+ */
 export const CallReferRequest = Schema.Struct({
   call_id: Schema.String,
   dialog_id: Schema.String,
@@ -122,10 +130,23 @@ export const CallReferRequest = Schema.Struct({
   sip_headers: Schema.optional(SipHeaderUpdates)
 })
 
+/**
+ * Allow response — superset of NewCallRouteResponse. The C leg is placed
+ * reusing the same routing/policy levers as a fresh inbound call.
+ *
+ * `new_refer_to` overrides the original Refer-To URI when set; the resulting
+ * URI is what the B2BUA dials.
+ */
 export const CallReferAllowResponse = Schema.Struct({
   action: Schema.Literal("allow"),
+  destination: SipDestination,
   new_refer_to: Schema.optional(Schema.String),
-  callback_context: Schema.optional(Schema.String)
+  update_headers: Schema.optional(SipHeaderUpdates),
+  no_answer_timeout_sec: Schema.optional(Schema.Int),
+  call_limiter: Schema.optional(Schema.Array(CallLimiterEntry)),
+  callback_context: Schema.optional(Schema.String),
+  /** When true, transform first 18x to bare 180, suppress subsequent, force tag consistency. */
+  relay_first_18x_to_180: Schema.optional(Schema.Boolean),
 })
 
 export const CallReferRejectResponse = Schema.Struct({

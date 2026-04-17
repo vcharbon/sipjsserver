@@ -166,8 +166,13 @@ paths:
       summary: In-dialog REFER received
       description: |
         Called by the SIP proxy when an in-dialog REFER is received on an
-        established call. The application may authorise the transfer
-        (optionally modifying the Refer-To target) or reject it.
+        established call. The application may authorise the B2BUA-mediated
+        blind transfer by returning an **allow** response that describes the
+        C-leg destination (superset of the /call/new route response so the
+        same routing/policy levers apply), or reject it.
+
+        The B2BUA places the call to C itself — REFER/NOTIFY traffic never
+        reaches the A side. `call_id` in the request is the **A-leg Call-ID**.
       requestBody:
         required: true
         content:
@@ -178,7 +183,7 @@ paths:
               call_id: "abc123@proxy.example.com"
               dialog_id: "abc123@proxy.example.com;to-tag=5ecbc9"
               callback_context: '{"crm_ticket":"TKT-42"}'
-              refer_to: "sip:bob@192.0.2.20?Replaces=def456%40proxy%3Bto-tag%3D1234%3Bfrom-tag%3D5678"
+              refer_to: "sip:bob@192.0.2.20"
               referred_by: "<sip:alice@example.com>"
               sip_headers:
                 Contact: "<sip:alice@192.0.2.10:5060>"
@@ -191,10 +196,20 @@ paths:
                 $ref: '#/components/schemas/CallReferResponse'
               examples:
                 allow:
-                  summary: Allow the transfer
+                  summary: Allow the transfer (B2BUA dials C)
                   value:
                     action: allow
+                    destination:
+                      host: "10.0.1.20"
+                      port: 5060
+                      transport: udp
                     new_refer_to: "sip:bob@10.0.1.20"
+                    update_headers:
+                      X-Transfer: "blind"
+                    no_answer_timeout_sec: 30
+                    call_limiter:
+                      - id: "trunk:carrier-A"
+                        limit: 100
                     callback_context: '{"transfer_to":"bob","crm_ticket":"TKT-42"}'
                 reject:
                   summary: Reject the transfer
@@ -519,11 +534,15 @@ components:
       properties:
         call_id:
           type: string
+          description: |
+            **A-leg Call-ID.** Identifies the bridged call the REFER targets,
+            independent of which B-leg the REFER actually arrived on.
           example: "abc123@proxy.example.com"
         dialog_id:
           type: string
           description: |
-            Fully-qualified dialog identifier (Call-ID;to-tag=...;from-tag=...).
+            Fully-qualified dialog identifier of the dialog that carried the
+            REFER (Call-ID;to-tag=...;from-tag=...).
           example: "abc123@proxy.example.com;to-tag=5ecbc9"
         callback_context:
           type: string
@@ -532,7 +551,7 @@ components:
           type: string
           description: |
             Value of the Refer-To header from the REFER request (may include
-            a Replaces parameter for attended transfer).
+            a Replaces parameter for attended transfer — currently rejected).
           example: "sip:bob@192.0.2.20"
         referred_by:
           type: string
@@ -546,28 +565,63 @@ components:
     # /call/refer – response
     # ──────────────────────────────────────────────
     CallReferResponse:
+      oneOf:
+        - $ref: '#/components/schemas/CallReferAllow'
+        - $ref: '#/components/schemas/CallReferReject'
+      discriminator:
+        propertyName: action
+
+    CallReferAllow:
+      type: object
+      required: [action, destination]
+      description: |
+        Authorise the B2BUA-mediated blind transfer. The response is a
+        **superset of NewCallResponse(route)** so the C leg is placed with
+        the same routing/policy levers as a fresh inbound call.
+      properties:
+        action:
+          type: string
+          enum: [allow]
+        destination:
+          $ref: '#/components/schemas/SipDestination'
+          description: Next-hop SIP server for the outbound INVITE to C.
+        new_refer_to:
+          type: string
+          description: |
+            Overrides the Refer-To target URI. If omitted, the original
+            refer_to value is used to build the C-leg Request-URI.
+          example: "sip:bob@10.0.1.20"
+        update_headers:
+          $ref: '#/components/schemas/SipHeaderUpdates'
+          description: Headers to add/overwrite/remove in the INVITE to C.
+        no_answer_timeout_sec:
+          type: integer
+          minimum: 1
+          maximum: 300
+          description: Seconds to wait for a 200 OK from C before failing.
+          example: 30
+        call_limiter:
+          type: array
+          items:
+            $ref: '#/components/schemas/CallLimiterEntry'
+          description: Limiter IDs to associate with the C-leg.
+        callback_context:
+          type: string
+          description: New opaque context to carry on the transferred leg.
+          example: '{"transfer_to":"bob","crm_ticket":"TKT-42"}'
+        relay_first_18x_to_180:
+          type: boolean
+          description: |
+            Propagate the 18x-normalisation policy to the C-leg's NOTIFY
+            sipfrag sequence.
+
+    CallReferReject:
       type: object
       required: [action]
       properties:
         action:
           type: string
-          enum: [allow, reject]
-          description: |
-            - `allow`: Proxy proceeds with the transfer.
-            - `reject`: Proxy sends a non-2xx final response to the REFER.
-
-        # ── allow fields ──
-        new_refer_to:
-          type: string
-          description: |
-            Overrides the Refer-To target. If omitted, the original
-            refer_to value is used.
-          example: "sip:bob@10.0.1.20"
-        callback_context:
-          type: string
-          description: Updated context to carry on the transferred leg.
-
-        # ── reject fields ──
+          enum: [reject]
         reject_code:
           type: integer
           minimum: 400

@@ -8,7 +8,11 @@
 
 import { Effect, Layer } from "effect"
 import { CallControlClient, CallControlError } from "../../../src/http/CallControlClient.js"
-import { mockNewCallResponse, mockCallFailureResponse } from "../../../src/http/MockCallControlServer.js"
+import {
+  mockNewCallResponse,
+  mockCallFailureResponse,
+  mockCallReferBehavior,
+} from "../../../src/http/MockCallControlServer.js"
 
 export const MockCallControlLayer = Layer.succeed(CallControlClient, {
   newCall: (req) =>
@@ -20,5 +24,22 @@ export const MockCallControlLayer = Layer.succeed(CallControlClient, {
     Effect.try({
       try: () => mockCallFailureResponse(req),
       catch: (err) => new CallControlError({ reason: `Mock callFailure failed: ${err}` })
+    }),
+  callRefer: (req) =>
+    Effect.suspend(() => {
+      let behavior
+      try {
+        behavior = mockCallReferBehavior(req)
+      } catch (err) {
+        return Effect.fail(new CallControlError({ reason: `Mock callRefer failed: ${err}` }))
+      }
+      switch (behavior.type) {
+        case "respond":
+          return Effect.succeed(behavior.body)
+        case "http500":
+          return Effect.fail(new CallControlError({ reason: "POST /call/refer failed: HTTP 500" }))
+        case "hang":
+          return Effect.never
+      }
     }),
 })

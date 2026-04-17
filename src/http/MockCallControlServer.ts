@@ -34,7 +34,9 @@ import {
   type NewCallRequest as NewCallRequestType,
   type NewCallResponse as NewCallResponseType,
   type CallFailureRequest as CallFailureRequestType,
-  type CallFailureResponse as CallFailureResponseType
+  type CallFailureResponse as CallFailureResponseType,
+  type CallReferRequest as CallReferRequestType,
+  type CallReferResponse as CallReferResponseType
 } from "./CallControlSchemas.js"
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -151,6 +153,60 @@ function buildApiCallResponse(body: NewCallRequestType, instruction: Record<stri
   return response as NewCallResponseType
 }
 
+/**
+ * Mock /call/refer behaviour — either respond, fail with 500, or hang.
+ * Both the HTTP handler and the in-process mock layer branch on this result.
+ */
+export type MockReferBehavior =
+  | { readonly type: "respond"; readonly body: CallReferResponseType }
+  | { readonly type: "http500" }
+  | { readonly type: "hang" }
+
+/**
+ * Decide how to respond to a /call/refer request based on X-Api-Call in
+ * `sip_headers`. Pure — no Effect, no HTTP. Throws on invalid X-Api-Call JSON.
+ *
+ * Recognised keys (v1 slice 1 subset):
+ *   - `refer-reject-403`     → { action: "reject", reject_code: 403 }
+ *   - `refer-http-500`       → mock HTTP 500 (transport-level error)
+ *   - `refer-http-timeout`   → mock hangs indefinitely (transport-level stall)
+ *
+ * Default (no X-Api-Call) → reject 603 (Declined).
+ */
+export function mockCallReferBehavior(body: CallReferRequestType): MockReferBehavior {
+  const apiCallRaw = body.sip_headers?.["X-Api-Call"]
+  if (apiCallRaw === undefined || apiCallRaw === null) {
+    return {
+      type: "respond",
+      body: { action: "reject", reject_code: 603, reject_reason: "Declined" }
+    }
+  }
+
+  const instruction = JSON.parse(apiCallRaw) as Record<string, unknown>
+  const key = instruction.refer_key as string | undefined
+
+  switch (key) {
+    case "refer-reject-403":
+      return {
+        type: "respond",
+        body: {
+          action: "reject",
+          reject_code: (instruction.reject_code as number) ?? 403,
+          reject_reason: (instruction.reject_reason as string) ?? "Forbidden"
+        }
+      }
+    case "refer-http-500":
+      return { type: "http500" }
+    case "refer-http-timeout":
+      return { type: "hang" }
+    default:
+      return {
+        type: "respond",
+        body: { action: "reject", reject_code: 603, reject_reason: "Declined" }
+      }
+  }
+}
+
 // ── POST /call/new ────────────────────────────────────────────────────────────
 
 const newCallHandler = HttpServerRequest.schemaBodyJson(NewCallRequest).pipe(
@@ -180,12 +236,23 @@ const callFailureHandler = HttpServerRequest.schemaBodyJson(CallFailureRequest).
 const callReferHandler = HttpServerRequest.schemaBodyJson(CallReferRequest).pipe(
   Effect.matchEffect({
     onFailure: () => badRequest("Invalid request body"),
-    onSuccess: (_body) =>
-      jsonResponse({
-        action: "reject",
-        reject_code: 603,
-        reject_reason: "Declined"
-      })
+    onSuccess: (body) => {
+      let behavior: MockReferBehavior
+      try {
+        behavior = mockCallReferBehavior(body)
+      } catch {
+        return badRequest("Invalid X-Api-Call JSON")
+      }
+      switch (behavior.type) {
+        case "respond":
+          return jsonResponse(behavior.body)
+        case "http500":
+          return jsonResponse({ error: "Simulated upstream failure" }, { status: 500 })
+        case "hang":
+          // Never resolves — exercises HTTP client timeout / refer_subscription_expiry.
+          return Effect.never
+      }
+    }
   })
 )
 
