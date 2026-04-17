@@ -25,6 +25,7 @@ import {
 import { AppConfig, type AppConfigData } from "../config/AppConfig.js"
 import { CallState } from "../call/CallState.js"
 import { CallControlClient } from "../http/CallControlClient.js"
+import type { CallReferRequest as CallReferRequestType } from "../http/CallControlSchemas.js"
 import { CallLimiter } from "../call/CallLimiter.js"
 import { TimerService } from "../call/TimerService.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
@@ -60,6 +61,22 @@ export type CallEvent =
        *  INVITE timeouts (failover path) from non-INVITE timeouts (BYE/OPTIONS/PRACK). */
       readonly method: string | undefined
     }
+  | {
+      /**
+       * Synthetic in-process event carrying the result of an async side-effect
+       * (e.g. /call/refer HTTP response). Re-enters the rule chain on an
+       * explicit callRef so that response-handling rules can match the outcome
+       * without a dedicated top-level dispatcher.
+       */
+      readonly type: "internal-event"
+      readonly callRef: string
+      /** Event family — rules match on this via InternalEventMatch.topic. */
+      readonly topic: string
+      /** Coarse result classification — e.g. "allow" / "reject" / "error". */
+      readonly outcome: string
+      /** Full payload for the consuming rule to interpret. */
+      readonly payload: unknown
+    }
 
 /** Human-readable summary of a CallEvent for logging. */
 export function describeEvent(event: CallEvent): string {
@@ -76,6 +93,8 @@ export function describeEvent(event: CallEvent): string {
       return `cancelled`
     case "timeout":
       return `timeout${event.legId ? ` leg=${event.legId}` : ""}`
+    case "internal-event":
+      return `internal:${event.topic}/${event.outcome}`
   }
 }
 
@@ -114,6 +133,12 @@ export type SideEffect =
   | { readonly type: "write-cdr" }
   | { readonly type: "remove-call" }
   | { readonly type: "flush-redis" }
+  /**
+   * Fork /call/refer, then re-enter withCall with an internal-event carrying
+   * the HTTP outcome. State is persisted before effects run, so the resulting
+   * internal-event sees the up-to-date transfer state.
+   */
+  | { readonly type: "refer-async-http"; readonly callRef: string; readonly request: CallReferRequestType }
 
 /** Result returned by handlers — pure data, no side effects. */
 export interface HandlerResult {
@@ -440,6 +465,35 @@ export class SipRouter extends ServiceMap.Service<
                   )
                 )
                 break
+              case "refer-async-http": {
+                // Fork /call/refer, then re-enter withCall with an internal-event
+                // carrying the HTTP outcome. State has already been persisted by
+                // Phase A (callState.update above), so the consuming rule sees
+                // the up-to-date transfer state when the result arrives.
+                const referReq = effect.request
+                const asyncCallRef = effect.callRef
+                yield* Effect.forkDetach(
+                  Effect.gen(function* () {
+                    const resp = yield* callControl.callRefer(referReq).pipe(
+                      Effect.map((r) => ({ ok: true as const, resp: r })),
+                      Effect.catchTag("CallControlError", (e) =>
+                        Effect.succeed({ ok: false as const, reason: e.reason })
+                      )
+                    )
+                    const outcome = resp.ok ? resp.resp.action : "error"
+                    const payload = resp.ok ? resp.resp : { error: resp.reason }
+                    const internalEvent: CallEvent = {
+                      type: "internal-event",
+                      callRef: asyncCallRef,
+                      topic: "refer-http-result",
+                      outcome,
+                      payload,
+                    }
+                    yield* withCall(handlers, internalEvent)
+                  })
+                )
+                break
+              }
             }
           }
         }
@@ -498,6 +552,8 @@ export class SipRouter extends ServiceMap.Service<
           } else if (event.type === "timeout") {
             callRef = event.callRef
             legHint = event.legId
+          } else if (event.type === "internal-event") {
+            callRef = event.callRef
           } else if (event.type === "sip") {
             let resolveMethod: string = "none"
             if (event.message.type === "request") {
@@ -623,6 +679,7 @@ export class SipRouter extends ServiceMap.Service<
                   ? `sip.recv.${event.message.method}`
                   : `sip.recv.${(event.message as SipResponse).status}`)
               : event.type === "timer" ? `timer.${event.timerType}`
+              : event.type === "internal-event" ? `internal.${event.topic}.${event.outcome}`
               : `sip.${event.type}`
 
             const attrs: Record<string, unknown> = {
@@ -631,6 +688,10 @@ export class SipRouter extends ServiceMap.Service<
             }
             if (call.bLegs.length > 0) {
               attrs["sip.call_id.b_leg"] = call.bLegs[0]!.callId
+            }
+            if (event.type === "internal-event") {
+              attrs["internal.topic"] = event.topic
+              attrs["internal.outcome"] = event.outcome
             }
             if (event.type === "sip") {
               attrs["net.peer.addr"] = `${event.rinfo.address}:${event.rinfo.port}`

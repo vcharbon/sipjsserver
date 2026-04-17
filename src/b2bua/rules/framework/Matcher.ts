@@ -11,6 +11,7 @@
 import type {
   AnyRuleDefinition,
   CancelledMatch,
+  InternalEventMatch,
   Match,
   MatchFilter,
   RequestMatch,
@@ -130,13 +131,23 @@ function cancelledColumns(m: CancelledMatch, ctx: RuleContext): boolean {
   return true
 }
 
+function internalEventColumns(m: InternalEventMatch, ctx: RuleContext): boolean {
+  if (ctx.event.type !== "internal-event") return false
+  if (!enumColMatch(m.topic, ctx.event.topic)) return false
+  if (!enumColMatch(m.outcome, ctx.event.outcome)) return false
+  if (!enumColMatch(m.callState, ctx.call.state)) return false
+  if (!transferPhaseMatch(m.transferPhase, ctx)) return false
+  return true
+}
+
 function columnMatches(match: Match, ctx: RuleContext): boolean {
   switch (match.kind) {
-    case "request":   return requestColumns(match, ctx)
-    case "response":  return responseColumns(match, ctx)
-    case "timer":     return timerColumns(match, ctx)
-    case "timeout":   return timeoutColumns(match, ctx)
-    case "cancelled": return cancelledColumns(match, ctx)
+    case "request":        return requestColumns(match, ctx)
+    case "response":       return responseColumns(match, ctx)
+    case "timer":          return timerColumns(match, ctx)
+    case "timeout":        return timeoutColumns(match, ctx)
+    case "cancelled":      return cancelledColumns(match, ctx)
+    case "internal-event": return internalEventColumns(match, ctx)
   }
 }
 
@@ -207,6 +218,12 @@ export function specificityScore(m: Match): number {
       score += transferPhaseScore(m.transferPhase)
       break
     case "cancelled":
+      score += colScore(m.callState)
+      score += transferPhaseScore(m.transferPhase)
+      break
+    case "internal-event":
+      score += colScore(m.topic)
+      score += colScore(m.outcome)
       score += colScore(m.callState)
       score += transferPhaseScore(m.transferPhase)
       break

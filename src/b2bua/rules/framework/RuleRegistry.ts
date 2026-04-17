@@ -107,6 +107,8 @@ function matchSignature(m: Match): string {
       return `to|${cols([m.method, m.callState])}|${filter}`
     case "cancelled":
       return `canc|${cols([m.callState])}|${filter}`
+    case "internal-event":
+      return `internal|${cols([m.topic, m.outcome, m.callState])}|${filter}`
   }
 }
 
@@ -171,6 +173,14 @@ function matchesOverlap(a: Match, b: Match): boolean {
     case "cancelled": {
       const bb = b as typeof a
       return valuesOverlap(a.callState, bb.callState)
+    }
+    case "internal-event": {
+      const bb = b as typeof a
+      return (
+        valuesOverlap(a.topic, bb.topic) &&
+        valuesOverlap(a.outcome, bb.outcome) &&
+        valuesOverlap(a.callState, bb.callState)
+      )
     }
   }
 }

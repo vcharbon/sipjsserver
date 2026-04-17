@@ -12,7 +12,7 @@
 import type { RuleAction, RuleContext, MessageTransform } from "./RuleDefinition.js"
 import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
-import type { TimerEntry, Leg, Dialog } from "../../../call/CallModel.js"
+import type { TimerEntry, Leg, Dialog, TransferState } from "../../../call/CallModel.js"
 import {
   type Call,
   addCdrEvent,
@@ -45,6 +45,7 @@ import {
   buildAck,
   buildBye,
   buildCancel,
+  buildNotify,
   buildRejectResponse,
   buildRelayedAck,
   buildRelayedBye,
@@ -309,6 +310,22 @@ function executeAction(
         message: action.message,
         destination: { host: action.destination.address, port: action.destination.port },
         label: action.label,
+      })
+      break
+    case "send-notify":
+      executeSendNotify(action, ctx, state)
+      break
+    case "update-transfer":
+      executeUpdateTransfer(action, ctx, state)
+      break
+    case "clear-transfer":
+      state.call = { ...state.call, transfer: null }
+      break
+    case "refer-async-http":
+      state.effects.push({
+        type: "refer-async-http",
+        callRef: ctx.callRef,
+        request: action.request,
       })
       break
   }
@@ -1257,4 +1274,76 @@ function executeBeginTermination(
   // Write CDR and flush to Redis for crash recovery
   state.effects.push({ type: "write-cdr" })
   state.effects.push({ type: "flush-redis" })
+}
+
+// ── send-notify ───────────────────────────────────────────────────────────
+
+/**
+ * Emit a NOTIFY within an established dialog on the given leg.
+ *
+ * Used by REFER-driven transfer to report subscription progress (100 Trying,
+ * 200 OK, 503 Service Unavailable, etc.) back to the referrer via a sipfrag
+ * body. Framework handles CSeq bump, tag direction, route-set application.
+ */
+function executeSendNotify(
+  action: Extract<RuleAction, { type: "send-notify" }>,
+  _ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const leg = findLeg(state.call, action.legId)
+  if (leg === undefined || leg.state === "terminated") return
+  const dialog = leg.dialogs[0]
+  if (dialog === undefined) return
+
+  const target = legTarget(leg)
+  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
+
+  state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
+  const cseq = dialog.localCSeq + 1
+
+  const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
+
+  const notifyMsg = buildNotify({
+    callId: leg.callId,
+    fromTag,
+    toTag,
+    requestUri: targetUri,
+    cseq,
+    ...(leg.localUri !== undefined ? { fromUri: leg.localUri } : {}),
+    ...(leg.remoteUri !== undefined ? { dialogToUri: leg.remoteUri } : {}),
+    event: action.event,
+    subscriptionState: action.subscriptionState,
+    ...(action.contentType !== undefined ? { contentType: action.contentType } : {}),
+    ...(action.body !== undefined ? { body: action.body } : {}),
+  })
+
+  const routed = leg.legId !== "a" ? applyRouteSet(notifyMsg, dialog, target) : { msg: notifyMsg, target }
+  state.outbound.push({
+    message: routed.msg,
+    destination: routed.target,
+    label: `NOTIFY ${action.legId}`,
+    legId: action.legId,
+  })
+}
+
+// ── update-transfer ───────────────────────────────────────────────────────
+
+/**
+ * Merge a Partial<TransferState> onto `call.transfer`, or seed it when absent.
+ *
+ * When seeding from empty, the caller must include every required field of
+ * TransferState (phase, referrerLegId, referToUri, startedAtMs). Subsequent
+ * updates typically flip the phase or attach the created C-leg id / callback
+ * context.
+ */
+function executeUpdateTransfer(
+  action: Extract<RuleAction, { type: "update-transfer" }>,
+  _ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const existing = state.call.transfer ?? null
+  const merged = (existing === null
+    ? (action.update as TransferState)
+    : { ...existing, ...action.update }) satisfies TransferState
+  state.call = { ...state.call, transfer: merged }
 }

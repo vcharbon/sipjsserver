@@ -30,6 +30,7 @@ import {
   relayProvisionalRule,
   confirmDialogRule,
   absorbBye200Rule,
+  absorbNotify200Rule,
   absorbOptions200Rule,
   relayNonInvite200Rule,
 } from "./DialogRules.js"
@@ -52,8 +53,14 @@ import {
 // Failure rules
 import { routeFailureRule, noAnswerFailoverRule, absorbStaleFailureRule } from "./FailureRules.js"
 
+// Transfer rules (REFER — custom priority band 100-199)
+import { transferRules } from "./TransferRules.js"
+
 /** All default rules in registration order. Priority is set on each rule definition. */
 export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
+  // Transfer rules (100-199 band) — REFER-driven blind transfer
+  ...transferRules,
+
   // Terminating-state rules (800 band) — intercept events during teardown
   resolveByeResponseRule,
   resolveCrossByeRule,
@@ -65,6 +72,7 @@ export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
   retransmit200Rule,
   relayReinviteResponseRule,
   absorbBye200Rule,
+  absorbNotify200Rule,
   absorbOptions200Rule,
   handle481Rule,
 

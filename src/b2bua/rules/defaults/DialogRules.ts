@@ -204,6 +204,35 @@ export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
   },
 }
 
+// ── absorb-notify-200 (priority 835) ──────────────────────────────────────
+
+/**
+ * Absorb 200 OK for a B2BUA-originated NOTIFY (REFER-subscription sipfrag).
+ *
+ * The B2BUA never relays NOTIFY end-to-end in v1 — NOTIFY is only emitted
+ * locally by TransferRules to report subscription progress. The remote UA's
+ * 200 OK for that NOTIFY must be absorbed so `relay-non-invite-200` does
+ * not forward it to the opposite leg as a spurious response.
+ */
+export const absorbNotify200Rule: RuleDefinition<undefined, undefined> = {
+  id: "absorb-notify-200",
+  name: "Absorb NOTIFY 200 OK",
+  alwaysActive: true,
+  defaultPriority: 835,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "response",
+    cseqMethod: "NOTIFY",
+    statusClass: "2xx",
+  },
+
+  init: () => undefined,
+
+  handle: () => Effect.succeed({ actions: [], state: undefined }),
+}
+
 // ── relay-non-invite-200 (priority 927) ───────────────────────────────────
 
 /** Relay 200 OK for non-INVITE methods (PRACK, UPDATE, INFO) to peer. */
@@ -217,9 +246,10 @@ export const relayNonInvite200Rule: RuleDefinition<undefined, undefined> = {
 
   // OPTIONS with pending relay snapshot lands here; keepalive OPTIONS is
   // taken by absorb-options-200 (same columns + filter → more specific).
+  // NOTIFY is taken by absorb-notify-200 (B2BUA-originated sipfrag).
   match: {
     kind: "response",
-    cseqMethod: ["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "NOTIFY", "SUBSCRIBE"],
+    cseqMethod: ["OPTIONS", "INFO", "PRACK", "UPDATE", "REFER", "MESSAGE", "SUBSCRIBE"],
     statusClass: "2xx",
   },
 

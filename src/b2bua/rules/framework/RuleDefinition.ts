@@ -8,11 +8,12 @@
 
 import type { Effect, Schema } from "effect"
 import type { SipRequest, SipResponse, RemoteInfo } from "../../../sip/types.js"
-import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType, TransferPhase } from "../../../call/CallModel.js"
+import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType, TransferPhase, TransferState } from "../../../call/CallModel.js"
 import type { AppConfigData } from "../../../config/AppConfig.js"
 import type { CallEvent } from "../../../sip/SipRouter.js"
 import type { CallControlClient } from "../../../http/CallControlClient.js"
 import type { CallLimiter } from "../../../call/CallLimiter.js"
+import type { CallReferRequest as CallReferRequestType } from "../../../http/CallControlSchemas.js"
 
 // ── Declarative match schema (reified predicates) ─────────────────────────
 //
@@ -113,6 +114,22 @@ export interface CancelledMatch {
   readonly filter?: MatchFilter
 }
 
+/**
+ * Match descriptor for synthetic in-process events (e.g. async HTTP result
+ * from /call/refer). Rules discriminate by `topic` + `outcome` and may
+ * additionally gate by transfer phase.
+ */
+export interface InternalEventMatch {
+  readonly kind: "internal-event"
+  /** Omitted = match any topic. */
+  readonly topic?: OneOrMany<string>
+  /** Omitted = match any outcome. */
+  readonly outcome?: OneOrMany<string>
+  readonly callState?: OneOrMany<CallModelState>
+  readonly transferPhase?: TransferPhaseGate
+  readonly filter?: MatchFilter
+}
+
 /** Declarative match descriptor. Replaces imperative matches(). */
 export type Match =
   | RequestMatch
@@ -120,6 +137,7 @@ export type Match =
   | TimerMatch
   | TimeoutMatch
   | CancelledMatch
+  | InternalEventMatch
 
 // ── Rule context (what rules see) ──────────────────────────────────────────
 
@@ -289,6 +307,23 @@ export type RuleAction =
   // ── Escape hatch (NOTIFY body, custom messages) ──
   | { readonly type: "send-raw"; readonly message: SipRequest | SipResponse;
       readonly destination: RemoteInfo; readonly label: string }
+
+  // ── REFER subscription NOTIFY (structured) ──
+  // Builds a NOTIFY on the target leg's dialog (typically the referrer B-leg).
+  // Body (if any) is passed through verbatim — REFER uses message/sipfrag
+  // bodies (RFC 3420) built via SipFragUtils.
+  | { readonly type: "send-notify"; readonly legId: string;
+      readonly event: string; readonly subscriptionState: string;
+      readonly contentType?: string; readonly body?: Uint8Array }
+
+  // ── REFER transfer state management ──
+  // update-transfer merges onto Call.transfer (creating it if absent).
+  // clear-transfer nulls Call.transfer outright (final cleanup).
+  | { readonly type: "update-transfer"; readonly update: Partial<TransferState> }
+  | { readonly type: "clear-transfer" }
+
+  // ── Fire /call/refer; the result re-enters withCall as an internal-event ──
+  | { readonly type: "refer-async-http"; readonly request: CallReferRequestType }
 
 // ── Rule definition interface ──────────────────────────────────────────────
 
