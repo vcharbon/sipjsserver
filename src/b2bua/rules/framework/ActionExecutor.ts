@@ -11,7 +11,6 @@
 
 import type { RuleAction, RuleContext, MessageTransform } from "./RuleDefinition.js"
 import { applyBodyUpdate, applyHeaderUpdates } from "./actions/apply.js"
-import type { BodyUpdate, HeaderUpdates } from "./actions/types.js"
 import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
 import type { TimerEntry, Leg, Dialog, TransferState } from "../../../call/CallModel.js"
@@ -575,28 +574,14 @@ function relayRequest(
     }
   }
 
-  // Apply transform if provided
+  // Apply transform if provided (request branch — status/reason are not
+  // applicable for request relay).
   if (transform && relayed.type === "request") {
-    if (transform.headers) {
-      let headers = relayed.headers
-      for (const [name, value] of Object.entries(transform.headers)) {
-        headers = value === null
-          ? headers.filter((h) => h.name.toLowerCase() !== name.toLowerCase())
-          : [...headers.filter((h) => h.name.toLowerCase() !== name.toLowerCase()), { name, value }]
-      }
-      relayed = { ...relayed, headers }
+    if (transform.headerUpdates !== undefined) {
+      relayed = applyHeaderUpdates(relayed, transform.headerUpdates)
     }
-    if (transform.body !== undefined) {
-      const newBody = transform.body ?? new Uint8Array(0)
-      relayed = {
-        ...relayed,
-        body: newBody,
-        headers: relayed.headers.map((hdr) =>
-          hdr.name.toLowerCase() === "content-length"
-            ? { name: hdr.name, value: String(newBody.byteLength) }
-            : hdr
-        ),
-      }
+    if (transform.bodyUpdate !== undefined) {
+      relayed = applyBodyUpdate(relayed, transform.bodyUpdate)
     }
   }
 
@@ -743,29 +728,12 @@ function relayResponseMsg(
     relayed = { ...relayed, status: effectiveStatus, reason: effectiveReason }
   }
 
-  // Apply header transform
-  if (transform?.headers) {
-    let headers = relayed.headers
-    for (const [name, value] of Object.entries(transform.headers)) {
-      headers = value === null
-        ? headers.filter((h) => h.name.toLowerCase() !== name.toLowerCase())
-        : [...headers.filter((h) => h.name.toLowerCase() !== name.toLowerCase()), { name, value }]
-    }
-    relayed = { ...relayed, headers }
+  // Apply typed header + body transforms via the shared apply helpers.
+  if (transform?.headerUpdates !== undefined) {
+    relayed = applyHeaderUpdates(relayed, transform.headerUpdates)
   }
-
-  // Apply body transform — also update Content-Length to match
-  if (transform?.body !== undefined) {
-    const newBody = transform.body ?? new Uint8Array(0)
-    relayed = {
-      ...relayed,
-      body: newBody,
-      headers: relayed.headers.map((hdr) =>
-        hdr.name.toLowerCase() === "content-length"
-          ? { name: hdr.name, value: String(newBody.byteLength) }
-          : hdr
-      ),
-    }
+  if (transform?.bodyUpdate !== undefined) {
+    relayed = applyBodyUpdate(relayed, transform.bodyUpdate)
   }
 
   const destination = targetLeg.legId === "a"
@@ -1089,39 +1057,23 @@ function executeCreateLeg(
     baseInvite = action.fromInvite
   }
 
-  // ── Body: new ADT takes precedence over the legacy `updateBody` string. ──
-  const normalizedBodyUpdate: BodyUpdate | undefined =
-    action.bodyUpdate !== undefined
-      ? action.bodyUpdate
-      : action.updateBody === undefined
-        ? undefined
-        : action.updateBody === null
-          ? { kind: "drop" }
-          : { kind: "set", value: new TextEncoder().encode(action.updateBody) }
-
+  // ── Body: apply the typed BodyUpdate to the cloned base INVITE. ──
+  // `inherit` is a no-op; `set`/`drop` rewrite the bytes and Content-Length.
   if (
     baseInvite !== undefined
-    && normalizedBodyUpdate !== undefined
-    && normalizedBodyUpdate.kind !== "inherit"
+    && action.bodyUpdate !== undefined
+    && action.bodyUpdate.kind !== "inherit"
   ) {
-    baseInvite = applyBodyUpdate(baseInvite, normalizedBodyUpdate)
+    baseInvite = applyBodyUpdate(baseInvite, action.bodyUpdate)
     baseInvite = { ...baseInvite, raw: Buffer.from(baseInvite.body) }
   }
 
-  // ── Request-URI: new `ruri` ADT takes precedence over legacy `newRuri`. ──
-  // `kind:"inherit"` collapses to undefined so createBLegFromRoute falls
-  // back to the base INVITE's URI.
-  const legacyNewRuri: string | undefined =
-    action.ruri !== undefined
-      ? action.ruri.kind === "set" ? (action.ruri.value as string) : undefined
-      : action.newRuri
-
-  // ── Header updates: ADT path is applied *after* the INVITE is built, so
-  // multi-valued headers (Diversion, Supported) are not collapsed by the
-  // legacy Record<string, string | null> shape in createBLegFromRoute. ──
-  const newHeaderUpdates: HeaderUpdates | undefined = action.headerUpdates
-  const legacyUpdateHeaders: Record<string, string | null> | undefined =
-    newHeaderUpdates !== undefined ? undefined : action.updateHeaders
+  // ── Request-URI: typed RuriOp. `kind:"inherit"` collapses to undefined
+  // so createBLegFromRoute falls back to the base INVITE's URI. ──
+  const ruriOverride: string | undefined =
+    action.ruri !== undefined && action.ruri.kind === "set"
+      ? (action.ruri.value as string)
+      : undefined
 
   const port = action.destination.port ?? 5060
   const result = createBLegFromRoute({
@@ -1129,8 +1081,11 @@ function executeCreateLeg(
     baseInvite,
     route: {
       destination: { host: action.destination.host, port },
-      new_ruri: legacyNewRuri,
-      update_headers: legacyUpdateHeaders,
+      new_ruri: ruriOverride,
+      // Header updates are applied *after* the INVITE is built — pass
+      // through nothing here so multi-valued headers (Diversion, Supported)
+      // are not collapsed by the Record<string, string | null> shape.
+      update_headers: undefined,
       no_answer_timeout_sec: action.noAnswerTimeoutSec,
       callback_context: action.callbackContext,
     },
@@ -1140,12 +1095,12 @@ function executeCreateLeg(
 
   state.call = result.call
 
-  // Apply the new ADT header updates to the outbound INVITE envelope.
+  // Apply the typed header updates to the outbound INVITE envelope.
   let outbound = result.outbound
-  if (newHeaderUpdates !== undefined && outbound.length > 0) {
+  if (action.headerUpdates !== undefined && outbound.length > 0) {
     const first = outbound[0]!
     if (first.message.type === "request") {
-      const patched = applyHeaderUpdates(first.message, newHeaderUpdates)
+      const patched = applyHeaderUpdates(first.message, action.headerUpdates)
       outbound = [{ ...first, message: patched }, ...outbound.slice(1)]
     }
   }

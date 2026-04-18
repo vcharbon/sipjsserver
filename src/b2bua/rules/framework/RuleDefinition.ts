@@ -176,16 +176,23 @@ export interface RuleContext {
 
 // ── Message transform ──────────────────────────────────────────────────────
 
-/** Transform applied to a message during relay (e.g., 183→200 conversion). */
+/**
+ * Transform applied to a message during relay (e.g., 183→200 conversion).
+ *
+ * Header and body mutations go through the typed ADT shapes (`HeaderUpdates`,
+ * `BodyUpdate`) so the executor can share the same `applyHeaderUpdates` /
+ * `applyBodyUpdate` helpers used by `create-leg`. Rules build these via the
+ * factories in `./actions/factories.ts`.
+ */
 export interface MessageTransform {
   /** Override response status code (e.g., 183 → 200). */
   readonly status?: number
   /** Override reason phrase. */
   readonly reason?: string
-  /** Add/modify/remove headers. null value = remove header. */
-  readonly headers?: Record<string, string | null>
-  /** Replace message body. null = remove body. */
-  readonly body?: Uint8Array | null
+  /** Typed header mutation — replace/remove per header name. */
+  readonly headerUpdates?: HeaderUpdates
+  /** Typed body mutation — inherit/set/drop. */
+  readonly bodyUpdate?: BodyUpdate
 }
 
 // ── Rule actions (what rules can do) ───────────────────────────────────────
@@ -275,45 +282,25 @@ export type RuleAction =
 
   // ── Leg lifecycle ──
   //
-  // The three "slot" pairs below (body / headers / ruri) give the
-  // create-leg action both a legacy shape (`updateBody` / `updateHeaders`
-  // / `newRuri` — string-typed, tri-state) and a new ADT shape
-  // (`bodyUpdate` / `headerUpdates` / `ruri` — see
-  // `./actions/types.ts`). Per-slot XOR prevents both forms from being
-  // set together on a single action.
-  //
-  // Legacy fields are deprecated and scheduled for removal in Slice F
-  // of the rule-framework ADT refactor. New rules should emit the ADT
-  // fields and read source values via `./actions/readers.ts`.
-  | (
-      {
-        readonly type: "create-leg";
-        readonly destination: LegDestination;
-        /** "snapshot" = use aLegInviteSnapshot; or provide a specific SipRequest. */
-        readonly fromInvite?: "snapshot" | SipRequest;
-        readonly noAnswerTimeoutSec?: number;
-        /** Propagate callback_context from failover response for subsequent failovers. */
-        readonly callbackContext?: string;
-      }
-      & (
-        | { readonly updateBody?: string | null; readonly bodyUpdate?: never }
-        | { readonly bodyUpdate?: BodyUpdate; readonly updateBody?: never }
-      )
-      & (
-        | { readonly updateHeaders?: Record<string, string | null>; readonly headerUpdates?: never }
-        | { readonly headerUpdates?: HeaderUpdates; readonly updateHeaders?: never }
-      )
-      & (
-        | {
-            /** Legacy: override Request-URI for the outbound INVITE. */
-            readonly newRuri?: string; readonly ruri?: never
-          }
-        | {
-            /** New: typed Request-URI operation (inherit / set BareSipUri). */
-            readonly ruri?: RuriOp; readonly newRuri?: never
-          }
-      )
-    )
+  // Body / headers / Request-URI mutations go through the typed ADT slots
+  // (`bodyUpdate`, `headerUpdates`, `ruri` — see `./actions/types.ts`).
+  // Rules build these via `./actions/factories.ts` and read source values
+  // via `./actions/readers.ts`.
+  | {
+      readonly type: "create-leg"
+      readonly destination: LegDestination
+      /** "snapshot" = use aLegInviteSnapshot; or provide a specific SipRequest. */
+      readonly fromInvite?: "snapshot" | SipRequest
+      readonly noAnswerTimeoutSec?: number
+      /** Propagate callback_context from failover response for subsequent failovers. */
+      readonly callbackContext?: string
+      /** Typed body mutation for the cloned base INVITE (inherit/set/drop). */
+      readonly bodyUpdate?: BodyUpdate
+      /** Typed header mutations layered on the outbound INVITE. */
+      readonly headerUpdates?: HeaderUpdates
+      /** Typed Request-URI operation (inherit — default — or set BareSipUri). */
+      readonly ruri?: RuriOp
+    }
   | {
       /**
        * Destroy a single leg by sending the appropriate teardown SIP message

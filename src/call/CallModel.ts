@@ -475,8 +475,9 @@ export const Call = Schema.Struct({
   policies: Schema.optional(CallPolicies),
   /**
    * Header overrides derived from policy flags, applied to all b-leg INVITEs
-   * (including failover). Set during initial INVITE handling. ActionExecutor
-   * merges these with per-action updateHeaders in executeCreateLeg.
+   * (including failover). Set during initial INVITE handling.
+   * `createBLegFromRoute` applies them when building the outbound INVITE, and
+   * per-action `headerUpdates` layer on top afterwards in ActionExecutor.
    */
   policyUpdateHeaders: Schema.optional(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
   /**

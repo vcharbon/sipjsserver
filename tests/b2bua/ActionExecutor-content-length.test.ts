@@ -123,7 +123,7 @@ describe("ActionExecutor Content-Length correctness", () => {
     test("body replacement updates Content-Length", () => {
       const ctx = makeCtx(call, aLeg, aDialog, "from-a", reinvite)
       const actions: RuleAction[] = [
-        { type: "relay-to-leg", legId: "b-1", transform: { body: newSdpBody } },
+        { type: "relay-to-leg", legId: "b-1", transform: { bodyUpdate: { kind: "set", value: newSdpBody } } },
       ]
 
       const result = executeActions(actions, ctx, "test-rule")
@@ -134,10 +134,10 @@ describe("ActionExecutor Content-Length correctness", () => {
       expect(getHeaderValue(out.headers, "Content-Length")).toBe(String(newSdpBody.byteLength))
     })
 
-    test("body: null sets Content-Length to 0", () => {
+    test("bodyUpdate drop sets Content-Length to 0", () => {
       const ctx = makeCtx(call, aLeg, aDialog, "from-a", reinvite)
       const actions: RuleAction[] = [
-        { type: "relay-to-leg", legId: "b-1", transform: { body: null } },
+        { type: "relay-to-leg", legId: "b-1", transform: { bodyUpdate: { kind: "drop" } } },
       ]
 
       const result = executeActions(actions, ctx, "test-rule")
@@ -181,10 +181,10 @@ describe("ActionExecutor Content-Length correctness", () => {
       },
     }
 
-    test("body: null on response sets Content-Length to 0", () => {
+    test("bodyUpdate drop on response sets Content-Length to 0", () => {
       const ctx = makeCtx(call, bLeg, bDialog, "from-b", resp183)
       const actions: RuleAction[] = [
-        { type: "relay-to-leg", legId: "a", transform: { status: 180, reason: "Ringing", body: null } },
+        { type: "relay-to-leg", legId: "a", transform: { status: 180, reason: "Ringing", bodyUpdate: { kind: "drop" } } },
       ]
 
       const result = executeActions(actions, ctx, "test-rule")
@@ -198,7 +198,7 @@ describe("ActionExecutor Content-Length correctness", () => {
     test("body replacement on response updates Content-Length", () => {
       const ctx = makeCtx(call, bLeg, bDialog, "from-b", resp183)
       const actions: RuleAction[] = [
-        { type: "relay-to-leg", legId: "a", transform: { body: newSdpBody } },
+        { type: "relay-to-leg", legId: "a", transform: { bodyUpdate: { kind: "set", value: newSdpBody } } },
       ]
 
       const result = executeActions(actions, ctx, "test-rule")

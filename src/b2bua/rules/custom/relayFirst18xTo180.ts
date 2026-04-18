@@ -17,6 +17,8 @@ import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import { definePolicyModule } from "../framework/PolicyModule.js"
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader, getHeaders, newTag } from "../../../sip/MessageFactory.js"
+import { H, removeH } from "../framework/actions/factories.js"
+import type { HeaderName, HeaderUpdate } from "../framework/actions/types.js"
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -116,8 +118,13 @@ const suppress18x: RuleDefinition<PolicyState, undefined> = {
       { type: "add-tag-mapping", aTag: aFacingTag,
         bLegId: ctx.sourceLeg.legId, bTag },
       { type: "relay-to-peer", transform: {
-        status: 180, reason: "Ringing", body: null,
-        headers: { "Content-Type": null, "Require": null, "RSeq": null },
+        status: 180, reason: "Ringing",
+        bodyUpdate: { kind: "drop" },
+        headerUpdates: new Map<HeaderName, HeaderUpdate>([
+          [H["Content-Type"], removeH()],
+          [H.Require, removeH()],
+          [H.RSeq, removeH()],
+        ]),
       }},
       { type: "add-cdr-event", eventType: "provisional" as const,
         legId: ctx.sourceLeg.legId, statusCode: resp.status },
