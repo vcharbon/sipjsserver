@@ -12,6 +12,7 @@ import type {
   BareSipUri,
   HeaderName,
   HeaderUpdate,
+  HeaderUpdates,
   KnownHeader,
   NameAddr,
 } from "./types.js"
@@ -150,4 +151,42 @@ export function replaceH(...values: [string, ...string[]]): HeaderUpdate {
 /** Remove every occurrence of the header. */
 export function removeH(): HeaderUpdate {
   return { kind: "remove" }
+}
+
+/**
+ * Build a `HeaderName` from a raw string. Dispatches to `H.*` when the
+ * name (case-insensitively) matches a known header, otherwise routes to
+ * `custom()`. Used at wire-boundary adapters (HTTP API, tests) that
+ * receive untyped string keys and need to produce a typed `HeaderName`.
+ */
+export function headerName(name: string): HeaderName {
+  const trimmed = name.trim()
+  if (trimmed.length === 0) {
+    throw new Error("headerName() requires a non-empty header name")
+  }
+  const lower = trimmed.toLowerCase()
+  const canonical = KNOWN_HEADERS.find((n) => n.toLowerCase() === lower)
+  return canonical !== undefined ? knownHeader(canonical) : custom(trimmed)
+}
+
+/**
+ * Convert a `Record<string, string | null>` (the shape the call-control
+ * HTTP API and legacy rule code produce) into a typed `HeaderUpdates`.
+ *
+ * Semantics:
+ *   - `null`  → `removeH()`
+ *   - string  → `replaceH(value)` (single value, replaces all occurrences)
+ *
+ * Key case is normalized through `headerName(...)`, so records keyed with
+ * different casings collapse onto the same header slot.
+ */
+export function headerUpdatesFromRecord(
+  record: Record<string, string | null>,
+): HeaderUpdates {
+  const out = new Map<HeaderName, HeaderUpdate>()
+  for (const [k, v] of Object.entries(record)) {
+    const name = headerName(k)
+    out.set(name, v === null ? removeH() : replaceH(v))
+  }
+  return out
 }

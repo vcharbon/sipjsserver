@@ -9,6 +9,7 @@ import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader } from "../../../sip/MessageFactory.js"
+import { headerUpdatesFromRecord, toBareUri } from "../framework/actions/factories.js"
 
 // ── Helper ────────────────────────────────────────────────────────────────
 
@@ -85,9 +86,9 @@ export const routeFailureRule: RuleDefinition<undefined, undefined> = {
             type: "create-leg",
             destination: { host: failureResp.destination.host, port: failureResp.destination.port ?? 5060 },
             fromInvite: "snapshot",
-            ...(updateHeaders !== undefined ? { updateHeaders } : {}),
+            ...(updateHeaders !== undefined ? { headerUpdates: headerUpdatesFromRecord(updateHeaders) } : {}),
             ...(failureResp.no_answer_timeout_sec !== undefined ? { noAnswerTimeoutSec: failureResp.no_answer_timeout_sec } : {}),
-            ...(failureResp.new_ruri !== undefined ? { newRuri: failureResp.new_ruri } : {}),
+            ...(failureResp.new_ruri !== undefined ? { ruri: { kind: "set" as const, value: toBareUri(failureResp.new_ruri) } } : {}),
             ...(failureResp.callback_context !== undefined ? { callbackContext: failureResp.callback_context } : {}),
           })
           return { actions, state: undefined }
@@ -154,9 +155,9 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
             type: "create-leg",
             destination: { host: failureResp.destination.host, port: failureResp.destination.port ?? 5060 },
             fromInvite: "snapshot",
-            ...(updateHeaders !== undefined ? { updateHeaders } : {}),
+            ...(updateHeaders !== undefined ? { headerUpdates: headerUpdatesFromRecord(updateHeaders) } : {}),
             ...(failureResp.no_answer_timeout_sec !== undefined ? { noAnswerTimeoutSec: failureResp.no_answer_timeout_sec } : {}),
-            ...(failureResp.new_ruri !== undefined ? { newRuri: failureResp.new_ruri } : {}),
+            ...(failureResp.new_ruri !== undefined ? { ruri: { kind: "set" as const, value: toBareUri(failureResp.new_ruri) } } : {}),
             ...(failureResp.callback_context !== undefined ? { callbackContext: failureResp.callback_context } : {}),
           })
           return { actions, state: undefined }

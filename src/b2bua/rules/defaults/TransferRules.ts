@@ -19,7 +19,8 @@
 import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction, RuleContext } from "../framework/RuleDefinition.js"
 import type { SipRequest } from "../../../sip/types.js"
-import { extractNameAddrUri, getHeader } from "../../../sip/MessageFactory.js"
+import { getHeader } from "../../../sip/MessageFactory.js"
+import { headerUpdatesFromRecord, toBareUri } from "../framework/actions/factories.js"
 import { sipfragFromStatus } from "../../../sip/SipFragUtils.js"
 import { buildHeldSdpFromProfile, extractCodecProfile } from "../../../sip/SdpUtils.js"
 
@@ -340,7 +341,7 @@ interface AllowPayload {
 
 /**
  * /call/refer responded with action=allow. Build the held SDP from A's codec
- * profile, create the C leg via create-leg (with updateBody carrying the held
+ * profile, create the C leg via create-leg (with bodyUpdate carrying the held
  * SDP), advance the transfer phase to `c-ringing`, and record the C leg id.
  *
  * When REFER_ALLOW_ENABLED=false, degrade to NOTIFY 501 Not Implemented so the
@@ -405,9 +406,10 @@ export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
         : ""
 
       // Refer-To arrives as a name-addr (e.g. "<sip:c@example.com>"); the
-      // Request-URI must be the bare URI, so unwrap angle brackets.
+      // Request-URI must be the bare URI — toBareUri unwraps angle brackets
+      // and strips header params, rejecting anything that isn't sip:/sips:.
       const rawReferTo = payload.new_refer_to ?? transfer.referToUri
-      const effectiveReferTo = extractNameAddrUri(rawReferTo)
+      const effectiveReferTo = toBareUri(rawReferTo)
       // C leg id anticipates the b-leg slot createBLegFromRoute will fill.
       const cLegId = `b-${ctx.call.bLegs.length + 1}`
 
@@ -420,9 +422,13 @@ export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
             ...(payload.destination.transport !== undefined ? { transport: payload.destination.transport } : {}),
           },
           fromInvite: "snapshot" as const,
-          updateBody: heldSdp,
-          newRuri: effectiveReferTo,
-          ...(payload.update_headers !== undefined ? { updateHeaders: payload.update_headers } : {}),
+          bodyUpdate: heldSdp.length > 0
+            ? { kind: "set" as const, value: new TextEncoder().encode(heldSdp) }
+            : { kind: "drop" as const },
+          ruri: { kind: "set" as const, value: effectiveReferTo },
+          ...(payload.update_headers !== undefined
+            ? { headerUpdates: headerUpdatesFromRecord(payload.update_headers as Record<string, string | null>) }
+            : {}),
           ...(payload.no_answer_timeout_sec !== undefined ? { noAnswerTimeoutSec: payload.no_answer_timeout_sec } : {}),
           ...(payload.callback_context !== undefined ? { callbackContext: payload.callback_context } : {}),
         },
@@ -431,7 +437,7 @@ export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
           update: {
             phase: "c-ringing" as const,
             cLegId,
-            effectiveReferToUri: effectiveReferTo,
+            effectiveReferToUri: effectiveReferTo as string,
             ...(payload.callback_context !== undefined ? { callbackContext: payload.callback_context } : {}),
           },
         },
