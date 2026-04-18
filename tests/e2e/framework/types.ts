@@ -200,6 +200,13 @@ export interface AgentConfig {
   readonly uri: string
   readonly port?: number
   readonly sutTarget?: SutTarget
+  /**
+   * Bind IP for this agent. Defaults to 127.0.0.1. Only supported by the
+   * simulated backend, where the `SignalingNetwork` fabric routes purely by
+   * `dstIp:dstPort` so tests can pin different agents to distinct fake IPs
+   * (e.g. 10.0.0.1, 10.0.0.2).
+   */
+  readonly ip?: string
 }
 
 // ---------------------------------------------------------------------------
