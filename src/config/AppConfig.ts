@@ -71,6 +71,14 @@ export const AppConfigData = Schema.Struct({
   /** Bind port for emergency listener (when enabled). */
   emergencyListenerPort: Schema.Int,
 
+  // ── REFER transfer timers (RFC 3515 / v1 blind transfer) ─────────────
+  /** NOTIFY subscription expiry for a REFER transfer while /call/refer is pending (seconds). */
+  referSubscriptionExpirySec: Schema.Int,
+  /** Watchdog for each B2BUA-originated realign re-INVITE (seconds). */
+  referReinviteAnswerSec: Schema.Int,
+  /** End-to-end safety net for a whole REFER transfer (seconds). */
+  referOverallSafetySec: Schema.Int,
+
   // ── Tracing ───────────────────────────────────────────────────────────
   /** Header names whose values are redacted in sip.raw_message span attributes. */
   scrubHeaders: Schema.Array(Schema.String),
@@ -130,6 +138,9 @@ function readConfigFromEnv(): AppConfigData {
     emergencyListenerEnabled: envOrDefault("EMERGENCY_LISTENER_ENABLED", "false") === "true",
     emergencyListenerHost: envOrDefault("EMERGENCY_LISTENER_HOST", "127.0.0.1"),
     emergencyListenerPort: parseInt(envOrDefault("EMERGENCY_LISTENER_PORT", "5070"), 10),
+    referSubscriptionExpirySec: parseInt(envOrDefault("REFER_SUBSCRIPTION_EXPIRY_SEC", "60"), 10),
+    referReinviteAnswerSec: parseInt(envOrDefault("REFER_REINVITE_ANSWER_SEC", "32"), 10),
+    referOverallSafetySec: parseInt(envOrDefault("REFER_OVERALL_SAFETY_SEC", "120"), 10),
     scrubHeaders: envOrDefault("SCRUB_HEADERS", "Authorization,Proxy-Authorization")
       .split(",")
       .map((h) => h.trim())

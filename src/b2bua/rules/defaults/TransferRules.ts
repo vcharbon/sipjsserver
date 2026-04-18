@@ -93,6 +93,7 @@ const PRIO_A_REALIGN_FAIL = 180
 const PRIO_A_REALIGN_200 = 185
 const PRIO_A_REALIGN_TIMEOUT = 190
 const PRIO_A_GLARE_REINVITE = 195
+const PRIO_OVERALL_TIMEOUT = 198
 
 // Subscription-State fragments (RFC 3265 §3.2.4)
 const SUB_STATE_ACTIVE_60 = "active;expires=60"
@@ -243,12 +244,12 @@ export const transferInterceptReferRule: RuleDefinition<undefined, undefined> = 
         {
           type: "schedule-timer" as const,
           timerType: "refer_subscription_expiry" as const,
-          delaySec: 60,
+          delaySec: ctx.config.referSubscriptionExpirySec,
         },
         {
           type: "schedule-timer" as const,
           timerType: "refer_overall_safety" as const,
-          delaySec: 120,
+          delaySec: ctx.config.referOverallSafetySec,
         },
         {
           type: "send-notify" as const,
@@ -630,7 +631,7 @@ export const transferCLegAnswerRule: RuleDefinition<undefined, undefined> = {
         {
           type: "schedule-timer" as const,
           timerType: "refer_reinvite_answer" as const,
-          delaySec: 32,
+          delaySec: ctx.config.referReinviteAnswerSec,
           legId: cLegId,
         },
         {
@@ -852,7 +853,7 @@ export const transferCRealign200Rule: RuleDefinition<undefined, undefined> = {
         {
           type: "schedule-timer" as const,
           timerType: "refer_reinvite_answer" as const,
-          delaySec: 32,
+          delaySec: ctx.config.referReinviteAnswerSec,
           legId: "a",
         },
         {
@@ -1224,6 +1225,59 @@ export const transferBInCrArRejectRule: RuleDefinition<undefined, undefined> = {
     }),
 }
 
+// ── transfer-overall-timeout ──────────────────────────────────────────────
+
+/**
+ * End-to-end safety net: the overall-safety timer armed at REFER interception
+ * expired while a transfer was still in progress. In a healthy flow, every
+ * phase-local timeout rule (subscription-expiry, re-INVITE-answer C / A) fires
+ * first and cancels `refer_overall_safety` before it can expire. If we reach
+ * this rule, the transfer is genuinely stuck — force a full rollback so no
+ * call is left half-swapped.
+ */
+export const transferOverallTimeoutRule: RuleDefinition<undefined, undefined> = {
+  id: "transfer-overall-timeout",
+  name: "Transfer overall-safety timer → rollback",
+  alwaysActive: true,
+  defaultPriority: PRIO_OVERALL_TIMEOUT,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "timer",
+    timerType: "refer_overall_safety",
+    transferPhase: ["refer-authorizing", "c-ringing", "c-realigning", "a-realigning"],
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) =>
+    Effect.gen(function* () {
+      const transfer = ctx.call.transfer
+      if (transfer === null || transfer === undefined) return undefined
+      const cLegId = transfer.cLegId
+
+      const actions: RuleAction[] = [
+        { type: "cancel-timer" as const, timerId: `refer_subscription_expiry-${ctx.callRef}` },
+        ...(cLegId !== undefined
+          ? [{
+              type: "cancel-timer" as const,
+              timerId: `refer_reinvite_answer-${ctx.callRef}-${cLegId}`,
+            }]
+          : []),
+        { type: "cancel-timer" as const, timerId: `refer_reinvite_answer-${ctx.callRef}-a` },
+        {
+          type: "add-cdr-event" as const,
+          eventType: "timeout" as const,
+          legId: "a",
+          reason: "transfer-overall-timeout",
+        },
+        { type: "begin-termination" as const },
+      ]
+      return { actions, state: undefined }
+    }),
+}
+
 // ── Exported rule list (registration order is irrelevant — Matcher ranks) ─
 
 export const transferRules: ReadonlyArray<RuleDefinition<undefined, undefined>> = [
@@ -1247,4 +1301,5 @@ export const transferRules: ReadonlyArray<RuleDefinition<undefined, undefined>> 
   transferARealignFailRule,
   transferARealignTimeoutRule,
   transferAGlareReinviteRule,
+  transferOverallTimeoutRule,
 ]
