@@ -12,8 +12,8 @@
 
 import { Clock, Effect, Layer, ServiceMap, Stream } from "effect"
 import type { RemoteInfo, SipHeader, SipMessage, SipRequest, SipResponse } from "./types.js"
-import { TransactionLayer, type TransactionEvent } from "./TransactionLayer.js"
-import { serialize, sipSummary, messageSummary } from "./Serializer.js"
+import { TransactionLayer } from "./TransactionLayer.js"
+import { serialize, messageSummary } from "./Serializer.js"
 import {
   buildRejectResponse,
   extractNameAddrUri,
@@ -32,13 +32,11 @@ import { CdrWriter } from "../cdr/CdrWriter.js"
 import { TracingService } from "../tracing/TracingService.js"
 import {
   type Call,
-  type CdrEvent,
   type Leg,
   type Dialog,
   type TimerEntry,
   type TimerType,
   deriveCallRef,
-  makeEmptyDialog,
   updateDialog,
   updateLeg,
 } from "../call/CallModel.js"

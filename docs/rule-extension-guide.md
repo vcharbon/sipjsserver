@@ -243,6 +243,33 @@ Available actions that rules can emit (see `RuleAction` in `RuleDefinition.ts`):
 }
 ```
 
+## Adding a new action field
+
+Every `execute*` function in [src/b2bua/rules/framework/ActionExecutor.ts](../src/b2bua/rules/framework/ActionExecutor.ts) begins by destructuring every field of its action parameter. Combined with the repo-wide `noUnusedLocals` / `noUnusedParameters` flags in [tsconfig.json](../tsconfig.json), this turns "declared but never read" fields into a compile-time error.
+
+When adding a new field to a `RuleAction` variant:
+
+1. Add the field to the action variant in [src/b2bua/rules/framework/RuleDefinition.ts](../src/b2bua/rules/framework/RuleDefinition.ts).
+2. Add the field to the destructure at the top of the corresponding `executeXxx` in [src/b2bua/rules/framework/ActionExecutor.ts](../src/b2bua/rules/framework/ActionExecutor.ts).
+3. Reference the identifier in the executor body (or `void` it with a one-line comment explaining why it's intentionally unused — the discriminator `type` is the only pre-existing case).
+4. Add a reach test in `tests/unit/rules/actions-reach.test.ts` asserting the field's observable effect (what state it mutates or what outbound it affects).
+5. Re-run `npm run typecheck` + `npm test` and confirm both are green.
+
+Pattern:
+
+```ts
+function executeCreateLeg(
+  action: Extract<RuleAction, { type: "create-leg" }>,
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const { type, destination, fromInvite, noAnswerTimeoutSec, callbackContext, bodyUpdate, headerUpdates, ruri } = action
+  void type  // discriminator, intentionally unused
+  // every other identifier MUST be referenced below or typecheck fails
+  ...
+}
+```
+
 ## Testing Patterns
 
 ### Mock call control via X-Api-Call

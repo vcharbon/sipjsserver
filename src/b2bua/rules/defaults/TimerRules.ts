@@ -24,7 +24,7 @@ export const maxDurationRule: RuleDefinition<undefined, undefined> = {
 
   init: () => undefined,
 
-  handle: (ctx) =>
+  handle: () =>
     Effect.succeed({
       actions: [
         { type: "add-cdr-event", eventType: "bye" as const, legId: "a" },

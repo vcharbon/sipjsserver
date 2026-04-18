@@ -11,7 +11,7 @@
  */
 
 import type { SipHeader } from "../../types.js"
-import { Scanner, COLON, SP, HTAB, CR, LF, isWSP } from "./scanner.js"
+import { Scanner, COLON, CR, LF, isWSP } from "./scanner.js"
 import { expandCompactForm } from "./compact-forms.js"
 
 export interface ParsedHeaders {

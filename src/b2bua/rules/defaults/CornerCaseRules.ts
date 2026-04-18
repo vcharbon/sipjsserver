@@ -12,13 +12,6 @@ import { getHeader, newTag } from "../../../sip/MessageFactory.js"
 import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
 import { confirmBridgedCall } from "../framework/actions/composites.js"
 
-// ── Helper ────────────────────────────────────────────────────────────────
-
-function cseqMethod(resp: SipResponse): string {
-  const h = getHeader(resp.headers, "cseq") ?? ""
-  return h.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
-}
-
 // ── cancel-200-crossing (priority 850) ────────────────────────────────────
 
 /**

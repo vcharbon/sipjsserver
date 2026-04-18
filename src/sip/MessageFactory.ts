@@ -498,7 +498,7 @@ export function buildRelayedBye(
   toTag: string,
   requestUri: string,
   cseq: string,
-  direction: "a-to-b" | "b-to-a",
+  _direction: "a-to-b" | "b-to-a",
   fromUri?: string,
   dialogToUri?: string
 ): SipRequest {

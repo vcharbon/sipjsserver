@@ -208,13 +208,12 @@ export type RuleAction =
   // ── Message relay (framework handles CSeq, tags, Via, Contact) ──
   | { readonly type: "relay-to-peer"; readonly transform?: MessageTransform }
   | { readonly type: "relay-to-leg"; readonly legId: string; readonly transform?: MessageTransform }
-  | { readonly type: "respond"; readonly status: number; readonly reason?: string;
-      readonly headers?: Record<string, string | null> }
+  | { readonly type: "respond"; readonly status: number; readonly reason?: string }
   | { readonly type: "ack-leg"; readonly legId: string }
 
   // ── Generate new request to a leg (keepalive OPTIONS, INFO, etc.) ──
   | { readonly type: "send-request-to-leg"; readonly legId: string; readonly method: string;
-      readonly headers?: Record<string, string | null>; readonly body?: Uint8Array | null }
+      readonly body?: Uint8Array }
 
   // ── Synthesize a PRACK toward a leg in response to a reliable 1xx we
   // received but are not relaying to the peer (RFC 3262 §3-4). Uses the

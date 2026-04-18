@@ -22,11 +22,6 @@ import type { HeaderName, HeaderUpdate } from "../framework/actions/types.js"
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function cseqMethod(resp: SipResponse): string {
-  const h = getHeader(resp.headers, "cseq") ?? ""
-  return h.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
-}
-
 function cseqNumber(resp: SipResponse): number {
   const h = getHeader(resp.headers, "cseq") ?? ""
   return parseInt(h.trim().split(/\s+/)[0] ?? "0", 10)

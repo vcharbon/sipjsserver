@@ -258,7 +258,7 @@ export class TransactionLayer extends ServiceMap.Service<
 
       // ── Cleanup sweep ────────────────────────────────────────────────
 
-      const sweepFiber = yield* Effect.forkDetach(
+      yield* Effect.forkDetach(
         Effect.forever(
           Effect.gen(function* () {
             yield* Effect.sleep(Duration.millis(TXN_SWEEP_INTERVAL))
@@ -586,7 +586,7 @@ export class TransactionLayer extends ServiceMap.Service<
       // which creates independent root spans per packet — noise. The meaningful work
       // is already traced inside the call.lifecycle span hierarchy via SipRouter.
       // Parse errors still get an always-sampled error span (re-enables tracing).
-      const processPacket = yield* Effect.forkDetach(
+      yield* Effect.forkDetach(
         Stream.runForEach(transport.messages, (packet) =>
           Effect.gen(function* () {
             yield* Effect.logDebug(`SIP IN <- ${packet.rinfo.address}:${packet.rinfo.port} ${sipSummary(packet.raw)}`)

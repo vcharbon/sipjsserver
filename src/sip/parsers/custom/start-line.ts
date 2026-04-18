@@ -7,7 +7,7 @@
  * Uses the Scanner for byte-level access. No regex.
  */
 
-import { Scanner, SP, CR, LF, isTokenChar } from "./scanner.js"
+import { Scanner, SP, CR, LF } from "./scanner.js"
 
 export interface RequestLine {
   readonly type: "request"

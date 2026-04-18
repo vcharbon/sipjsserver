@@ -2,7 +2,7 @@
  * Centralised application configuration read from environment variables.
  */
 
-import { Effect, Layer, Schema, ServiceMap } from "effect"
+import { Layer, Schema, ServiceMap } from "effect"
 
 // ---------------------------------------------------------------------------
 // Schema

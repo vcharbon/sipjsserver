@@ -11,13 +11,6 @@ import { getHeader, newTag } from "../../../sip/MessageFactory.js"
 import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
 import { confirmBridgedCall } from "../framework/actions/composites.js"
 
-// ── Helper: extract CSeq method from a SIP response ──────────────────────
-
-function cseqMethod(resp: SipResponse): string {
-  const h = getHeader(resp.headers, "cseq") ?? ""
-  return h.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
-}
-
 // ── relay-provisional (priority 900) ──────────────────────────────────────
 
 /** Relay 1xx provisional response from b-leg to a-leg. */

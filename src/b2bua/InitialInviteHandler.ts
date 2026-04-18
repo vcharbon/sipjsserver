@@ -7,7 +7,7 @@
 
 import { Effect } from "effect"
 import type { SipRequest } from "../sip/types.js"
-import type { ResolvedContext, HandlerResult, OutboundEnvelope, Handler } from "../sip/SipRouter.js"
+import type { HandlerResult, OutboundEnvelope, Handler } from "../sip/SipRouter.js"
 import {
   buildRejectResponse,
   getHeader,

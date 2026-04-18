@@ -5,7 +5,7 @@
  * Headers are utf-8; body is raw bytes passed through unmodified.
  */
 
-import type { SipHeader, SipMessage, SipRequest, SipResponse } from "./types.js"
+import type { SipHeader, SipMessage } from "./types.js"
 
 /** Serialize a structured SIP message to a wire-format Buffer. */
 export function serialize(msg: SipMessage): Buffer {

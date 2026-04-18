@@ -5,16 +5,7 @@
  */
 
 import { Effect, Schema } from "effect"
-import type { RuleDefinition, RuleHandleResult, RuleAction } from "../framework/RuleDefinition.js"
-import type { SipResponse } from "../../../sip/types.js"
-import { getHeader } from "../../../sip/MessageFactory.js"
-
-// ── Helper ────────────────────────────────────────────────────────────────
-
-function cseqMethod(resp: SipResponse): string {
-  const h = getHeader(resp.headers, "cseq") ?? ""
-  return h.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
-}
+import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 
 // ── handle-timeout (priority 930) ─────────────────────────────────────────
 

@@ -267,23 +267,16 @@ function executeAction(
       executeCancelLeg(action, ctx, state)
       break
     case "merge":
-      // Reach (Slice C audit — primitive): call.activePeer → { legA, legB }.
-      // Both legs are named in the action parameters; no leg-level mutation.
-      state.call = mergeLeg(state.call, action.legA, action.legB)
+      executeMerge(action, state)
       break
     case "split":
-      // Reach (Slice C audit — primitive): call.activePeer → null when the
-      // named leg was part of the current pair. Clearing `activePeer`
-      // structurally un-peers both sides — that is inherent to the singleton
-      // representation, not a hidden mutation of another leg's own state.
-      state.call = splitLeg(state.call, action.legId)
+      executeSplit(action, state)
       break
     case "schedule-timer":
       executeScheduleTimer(action, ctx, state)
       break
     case "cancel-timer":
-      state.effects.push({ type: "cancel-timer", id: action.timerId })
-      state.call = { ...state.call, timers: state.call.timers.filter((t) => t.id !== action.timerId) }
+      executeCancelTimer(action, state)
       break
     case "cancel-all-timers":
       state.effects.push({ type: "cancel-all-timers" })
@@ -296,38 +289,19 @@ function executeAction(
       executeBeginTermination(ctx, state)
       break
     case "terminate-leg":
-      // Reach (Slice C audit — primitive):
-      //   legs.{action.legId}.state          → "terminated"
-      //   legs.{action.legId}.byeDisposition → action.byeDisposition (when set)
-      // No call-level mutation, no peer touch, no outbound.
-      state.call = setLegState(state.call, action.legId, "terminated")
-      if (action.byeDisposition !== undefined) {
-        state.call = setByeDisposition(state.call, action.legId, action.byeDisposition)
-      }
+      executeTerminateLeg(action, state)
       break
     case "add-cdr-event":
-      state.call = addCdrEvent(state.call, {
-        type: action.eventType,
-        timestamp: ctx.nowMs,
-        legId: action.legId,
-        statusCode: action.statusCode,
-        reason: action.reason,
-      })
+      executeAddCdrEvent(action, ctx, state)
       break
     case "deactivate-rule":
       state.call = deactivateRule(state.call, ruleId)
       break
     case "add-tag-mapping":
-      state.call = addTagMapping(state.call, {
-        aTag: action.aTag, bLegId: action.bLegId, bTag: action.bTag,
-      })
+      executeAddTagMapping(action, state)
       break
     case "send-raw":
-      state.outbound.push({
-        message: action.message,
-        destination: { host: action.destination.address, port: action.destination.port },
-        label: action.label,
-      })
+      executeSendRaw(action, state)
       break
     case "send-notify":
       executeSendNotify(action, ctx, state)
@@ -339,11 +313,7 @@ function executeAction(
       state.call = { ...state.call, transfer: null }
       break
     case "refer-async-http":
-      state.effects.push({
-        type: "refer-async-http",
-        callRef: ctx.callRef,
-        request: action.request,
-      })
+      executeReferAsyncHttp(action, ctx, state)
       break
   }
 }
@@ -355,15 +325,18 @@ function executeRespond(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
+  const { type, status, reason } = action
+  void type
+
   if (ctx.event.type !== "sip") return
   const msg = ctx.event.message
   if (msg.type !== "request") return
 
-  const response = buildRejectResponse(msg, action.status, action.reason ?? "")
+  const response = buildRejectResponse(msg, status, reason ?? "")
   state.outbound.push({
     message: response,
     destination: { host: ctx.event.rinfo.address, port: ctx.event.rinfo.port },
-    label: `respond ${action.status}`,
+    label: `respond ${status}`,
     legId: ctx.sourceLeg.legId,
   })
 }
@@ -375,6 +348,9 @@ function executeRelayToPeer(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
+  const { type, transform } = action
+  void type
+
   let peerLegId = getPeer(state.call, ctx.sourceLeg.legId)
 
   // Fallback: during early dialog (before merge), b-leg's implicit peer is "a".
@@ -405,7 +381,7 @@ function executeRelayToPeer(
 
   if (peerLegId === undefined) return
 
-  executeRelayToTarget(peerLegId, action.transform, ctx, state, targetToTag)
+  executeRelayToTarget(peerLegId, transform, ctx, state, targetToTag)
 }
 
 // ── relay-to-leg ───────────────────────────────────────────────────────────
@@ -415,7 +391,10 @@ function executeRelayToLeg(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  executeRelayToTarget(action.legId, action.transform, ctx, state)
+  const { type, legId, transform } = action
+  void type
+
+  executeRelayToTarget(legId, transform, ctx, state)
 }
 
 // ── Core relay implementation ──────────────────────────────────────────────
@@ -789,11 +768,14 @@ function executeConfirmDialog(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
+  const { type, legId } = action
+  void type
+
   if (ctx.event.type !== "sip") return
   const resp = ctx.event.message
   if (resp.type !== "response") return
 
-  const leg = findLeg(state.call, action.legId)
+  const leg = findLeg(state.call, legId)
   if (leg === undefined) return
 
   const toTag = resp.parsed?.to?.tag ?? ""
@@ -844,11 +826,14 @@ function executeUpdateLegState(
   action: Extract<RuleAction, { type: "update-leg-state" }>,
   state: ExecutionState,
 ): void {
-  const leg = findLeg(state.call, action.legId)
+  const { type, legId, state: legState, disposition } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
   if (leg === undefined) return
-  state.call = setLegState(state.call, action.legId, action.state)
-  if (action.disposition !== undefined) {
-    state.call = setLegDisposition(state.call, action.legId, action.disposition)
+  state.call = setLegState(state.call, legId, legState)
+  if (disposition !== undefined) {
+    state.call = setLegDisposition(state.call, legId, disposition)
   }
 }
 
@@ -870,14 +855,17 @@ function executeStampDialogToTag(
   action: Extract<RuleAction, { type: "stamp-dialog-to-tag" }>,
   state: ExecutionState,
 ): void {
-  const leg = findLeg(state.call, action.legId)
+  const { type, legId, toTag } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
   if (leg === undefined) return
 
   if (leg.dialogs.length === 0) {
-    const dialog = action.legId === "a"
-      ? makeDialogFromIncoming(action.toTag, state.call.aLegInviteCSeq)
-      : { ...makeEmptyDialog(action.toTag) }
-    state.call = updateLeg(state.call, action.legId, (l) => ({
+    const dialog = legId === "a"
+      ? makeDialogFromIncoming(toTag, state.call.aLegInviteCSeq)
+      : { ...makeEmptyDialog(toTag) }
+    state.call = updateLeg(state.call, legId, (l) => ({
       ...l,
       dialogs: [dialog],
     }))
@@ -885,9 +873,9 @@ function executeStampDialogToTag(
   }
 
   const existing = leg.dialogs[0]!
-  state.call = updateLeg(state.call, action.legId, (l) => ({
+  state.call = updateLeg(state.call, legId, (l) => ({
     ...l,
-    dialogs: [{ ...existing, toTag: action.toTag }, ...l.dialogs.slice(1)],
+    dialogs: [{ ...existing, toTag }, ...l.dialogs.slice(1)],
   }))
 }
 
@@ -898,7 +886,10 @@ function executeAckLeg(
   _ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const leg = findLeg(state.call, action.legId)
+  const { type, legId } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
   if (leg === undefined) return
   const dialog = leg.dialogs[0]
   if (dialog === undefined) return
@@ -915,8 +906,8 @@ function executeAckLeg(
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
-    label: `ACK ${action.legId}`,
-    legId: action.legId,
+    label: `ACK ${legId}`,
+    legId,
   })
 }
 
@@ -932,7 +923,10 @@ function executeSendRequestToLeg(
   _ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const leg = findLeg(state.call, action.legId)
+  const { type, legId, method, body } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
   if (leg === undefined || leg.state === "terminated") return
   const dialog = leg.dialogs[0]
   if (dialog === undefined) return
@@ -947,14 +941,14 @@ function executeSendRequestToLeg(
   // Build the request based on method
   const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
 
-  if (action.method === "OPTIONS") {
+  if (method === "OPTIONS") {
     const optMsg = buildOptions(leg.callId, fromTag, toTag, targetUri, cseq, leg.localUri, leg.remoteUri)
     const routed = leg.legId !== "a" ? applyRouteSet(optMsg, dialog, target) : { msg: optMsg, target }
     state.outbound.push({
       message: routed.msg,
       destination: routed.target,
-      label: `${action.method} to ${action.legId}`,
-      legId: action.legId,
+      label: `${method} to ${legId}`,
+      legId,
     })
   } else {
     // Generic request construction for INFO, UPDATE, etc.
@@ -963,16 +957,16 @@ function executeSendRequestToLeg(
     // Override method and CSeq
     const updatedMsg = {
       ...msg,
-      method: action.method,
+      method,
       headers: msg.headers.map((h) =>
-        h.name.toLowerCase() === "cseq" ? { ...h, value: `${cseq} ${action.method}` } : h,
+        h.name.toLowerCase() === "cseq" ? { ...h, value: `${cseq} ${method}` } : h,
       ),
     }
-    if (action.body !== undefined && action.body !== null) {
-      updatedMsg.body = action.body
+    if (body !== undefined) {
+      updatedMsg.body = body
       updatedMsg.headers = updatedMsg.headers.map((hdr) =>
         hdr.name.toLowerCase() === "content-length"
-          ? { name: hdr.name, value: String(action.body!.byteLength) }
+          ? { name: hdr.name, value: String(body.byteLength) }
           : hdr
       )
     }
@@ -980,8 +974,8 @@ function executeSendRequestToLeg(
     state.outbound.push({
       message: routed.msg,
       destination: routed.target,
-      label: `${action.method} to ${action.legId}`,
-      legId: action.legId,
+      label: `${method} to ${legId}`,
+      legId,
     })
   }
 }
@@ -1004,9 +998,12 @@ function executeSendPrackToLeg(
   _ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const leg = findLeg(state.call, action.legId)
+  const { type, legId, rseq, inviteCSeq, bTag } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
   if (leg === undefined || leg.state === "terminated") return
-  const dialog = leg.dialogs.find((d) => d.toTag === action.bTag) ?? leg.dialogs[0]
+  const dialog = leg.dialogs.find((d) => d.toTag === bTag) ?? leg.dialogs[0]
   if (dialog === undefined) return
 
   const target = legTarget(leg)
@@ -1014,12 +1011,12 @@ function executeSendPrackToLeg(
 
   state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
   const cseq = dialog.localCSeq + 1
-  const rack = `${action.rseq} ${action.inviteCSeq} INVITE`
+  const rack = `${rseq} ${inviteCSeq} INVITE`
 
   const prack = buildPrack(
     leg.callId,
     leg.fromTag,
-    action.bTag,
+    bTag,
     targetUri,
     cseq,
     rack,
@@ -1031,8 +1028,8 @@ function executeSendPrackToLeg(
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
-    label: `PRACK to ${action.legId}`,
-    legId: action.legId,
+    label: `PRACK to ${legId}`,
+    legId,
   })
 }
 
@@ -1043,9 +1040,12 @@ function executeCreateLeg(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
+  const { type, destination, fromInvite, noAnswerTimeoutSec, callbackContext, bodyUpdate, headerUpdates, ruri } = action
+  void type
+
   // Resolve the base INVITE to clone.
   let baseInvite: SipRequest | undefined
-  if (action.fromInvite === "snapshot" && state.call.aLegInviteSnapshot) {
+  if (fromInvite === "snapshot" && state.call.aLegInviteSnapshot) {
     const snapshot = state.call.aLegInviteSnapshot
     baseInvite = {
       type: "request", method: "INVITE", uri: snapshot.uri,
@@ -1053,41 +1053,41 @@ function executeCreateLeg(
       headers: snapshot.headers.map((h) => ({ name: h.name, value: h.value })),
       body: snapshot.body, raw: Buffer.from(snapshot.body),
     }
-  } else if (action.fromInvite !== undefined && action.fromInvite !== "snapshot") {
-    baseInvite = action.fromInvite
+  } else if (fromInvite !== undefined && fromInvite !== "snapshot") {
+    baseInvite = fromInvite
   }
 
   // ── Body: apply the typed BodyUpdate to the cloned base INVITE. ──
   // `inherit` is a no-op; `set`/`drop` rewrite the bytes and Content-Length.
   if (
     baseInvite !== undefined
-    && action.bodyUpdate !== undefined
-    && action.bodyUpdate.kind !== "inherit"
+    && bodyUpdate !== undefined
+    && bodyUpdate.kind !== "inherit"
   ) {
-    baseInvite = applyBodyUpdate(baseInvite, action.bodyUpdate)
+    baseInvite = applyBodyUpdate(baseInvite, bodyUpdate)
     baseInvite = { ...baseInvite, raw: Buffer.from(baseInvite.body) }
   }
 
   // ── Request-URI: typed RuriOp. `kind:"inherit"` collapses to undefined
   // so createBLegFromRoute falls back to the base INVITE's URI. ──
   const ruriOverride: string | undefined =
-    action.ruri !== undefined && action.ruri.kind === "set"
-      ? (action.ruri.value as string)
+    ruri !== undefined && ruri.kind === "set"
+      ? (ruri.value as string)
       : undefined
 
-  const port = action.destination.port ?? 5060
+  const port = destination.port ?? 5060
   const result = createBLegFromRoute({
     call: state.call,
     baseInvite,
     route: {
-      destination: { host: action.destination.host, port },
+      destination: { host: destination.host, port },
       new_ruri: ruriOverride,
       // Header updates are applied *after* the INVITE is built — pass
       // through nothing here so multi-valued headers (Diversion, Supported)
       // are not collapsed by the Record<string, string | null> shape.
       update_headers: undefined,
-      no_answer_timeout_sec: action.noAnswerTimeoutSec,
-      callback_context: action.callbackContext,
+      no_answer_timeout_sec: noAnswerTimeoutSec,
+      callback_context: callbackContext,
     },
     config: ctx.config,
     nowMs: ctx.nowMs,
@@ -1097,10 +1097,10 @@ function executeCreateLeg(
 
   // Apply the typed header updates to the outbound INVITE envelope.
   let outbound = result.outbound
-  if (action.headerUpdates !== undefined && outbound.length > 0) {
+  if (headerUpdates !== undefined && outbound.length > 0) {
     const first = outbound[0]!
     if (first.message.type === "request") {
-      const patched = applyHeaderUpdates(first.message, action.headerUpdates)
+      const patched = applyHeaderUpdates(first.message, headerUpdates)
       outbound = [{ ...first, message: patched }, ...outbound.slice(1)]
     }
   }
@@ -1135,7 +1135,10 @@ function executeDestroyLeg(
   _ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const leg = findLeg(state.call, action.legId)
+  const { type, legId } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
   if (leg === undefined || leg.state === "terminated") return
 
   const target = legTarget(leg)
@@ -1150,11 +1153,11 @@ function executeDestroyLeg(
       state.outbound.push({
         message: routed.msg,
         destination: routed.target,
-        label: `BYE ${action.legId}`,
-        legId: action.legId,
+        label: `BYE ${legId}`,
+        legId,
       })
     }
-    state.call = setByeDisposition(state.call, action.legId, "bye_sent")
+    state.call = setByeDisposition(state.call, legId, "bye_sent")
   } else if (leg.disposition === "cancelling") {
     // CANCEL already in flight via executeCancelLeg — do not re-emit
     // (RFC 3261 §9.1 / §17.1.3: each CANCEL is a separate transaction with
@@ -1162,17 +1165,17 @@ function executeDestroyLeg(
     // INVITE, so a second CANCEL with the reused INVITE branch would either
     // be absorbed as a retransmit or rejected). Just record disposition and
     // let resolveCancelResponseRule/cancel200CrossingRule finish cleanup.
-    state.call = setByeDisposition(state.call, action.legId, "cancelled")
+    state.call = setByeDisposition(state.call, legId, "cancelled")
   } else {
     // CANCEL an early/trying leg
     state.outbound.push(buildCancelEnvelope(leg, target, ""))
-    state.call = setByeDisposition(state.call, action.legId, "cancelled")
-    state.call = setLegDisposition(state.call, action.legId, "cancelling")
+    state.call = setByeDisposition(state.call, legId, "cancelled")
+    state.call = setLegDisposition(state.call, legId, "cancelling")
   }
 
-  state.call = setLegState(state.call, action.legId, "terminated")
+  state.call = setLegState(state.call, legId, "terminated")
   // Split from peer if peered
-  state.call = splitLeg(state.call, action.legId)
+  state.call = splitLeg(state.call, legId)
 }
 
 // ── cancel-leg (primitive) ────────────────────────────────────────────────
@@ -1199,14 +1202,17 @@ function executeCancelLeg(
   _ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const leg = findLeg(state.call, action.legId)
+  const { type, legId } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
   if (leg === undefined) return
   if (leg.state === "terminated") return
   if (leg.state === "confirmed") return // caller should have used destroy-leg
 
   const target = legTarget(leg)
   state.outbound.push(buildCancelEnvelope(leg, target, ""))
-  state.call = setLegDisposition(state.call, action.legId, "cancelling")
+  state.call = setLegDisposition(state.call, legId, "cancelling")
 }
 
 // ── schedule-timer ─────────────────────────────────────────────────────────
@@ -1216,12 +1222,15 @@ function executeScheduleTimer(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const timerId = `${action.timerType}-${ctx.callRef}${action.legId ? `-${action.legId}` : ""}`
+  const { type, timerType, delaySec, legId } = action
+  void type
+
+  const timerId = `${timerType}-${ctx.callRef}${legId ? `-${legId}` : ""}`
   const timer: TimerEntry = {
     id: timerId,
-    type: action.timerType,
-    fireAt: ctx.nowMs + action.delaySec * 1000,
-    legId: action.legId,
+    type: timerType,
+    fireAt: ctx.nowMs + delaySec * 1000,
+    legId,
   }
   state.call = { ...state.call, timers: [...state.call.timers, timer] }
   state.effects.push({ type: "schedule-timer", timer })
@@ -1395,7 +1404,10 @@ function executeSendNotify(
   _ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const leg = findLeg(state.call, action.legId)
+  const { type, legId, event, subscriptionState, contentType, body } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
   if (leg === undefined || leg.state === "terminated") return
   const dialog = leg.dialogs[0]
   if (dialog === undefined) return
@@ -1416,18 +1428,18 @@ function executeSendNotify(
     cseq,
     ...(leg.localUri !== undefined ? { fromUri: leg.localUri } : {}),
     ...(leg.remoteUri !== undefined ? { dialogToUri: leg.remoteUri } : {}),
-    event: action.event,
-    subscriptionState: action.subscriptionState,
-    ...(action.contentType !== undefined ? { contentType: action.contentType } : {}),
-    ...(action.body !== undefined ? { body: action.body } : {}),
+    event,
+    subscriptionState,
+    ...(contentType !== undefined ? { contentType } : {}),
+    ...(body !== undefined ? { body } : {}),
   })
 
   const routed = leg.legId !== "a" ? applyRouteSet(notifyMsg, dialog, target) : { msg: notifyMsg, target }
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
-    label: `NOTIFY ${action.legId}`,
-    legId: action.legId,
+    label: `NOTIFY ${legId}`,
+    legId,
   })
 }
 
@@ -1446,9 +1458,120 @@ function executeUpdateTransfer(
   _ctx: RuleContext,
   state: ExecutionState,
 ): void {
+  const { type, update } = action
+  void type
+
   const existing = state.call.transfer ?? null
   const merged = (existing === null
-    ? (action.update as TransferState)
-    : { ...existing, ...action.update }) satisfies TransferState
+    ? (update as TransferState)
+    : { ...existing, ...update }) satisfies TransferState
   state.call = { ...state.call, transfer: merged }
+}
+
+// ── merge / split (peering primitives) ────────────────────────────────────
+
+function executeMerge(
+  action: Extract<RuleAction, { type: "merge" }>,
+  state: ExecutionState,
+): void {
+  const { type, legA, legB } = action
+  void type
+  // Reach: call.activePeer → { legA, legB }. Both legs named in parameters.
+  state.call = mergeLeg(state.call, legA, legB)
+}
+
+function executeSplit(
+  action: Extract<RuleAction, { type: "split" }>,
+  state: ExecutionState,
+): void {
+  const { type, legId } = action
+  void type
+  // Reach: call.activePeer → null when legId is part of the pair. Clearing
+  // activePeer structurally un-peers both sides — inherent to the singleton
+  // representation, not a hidden mutation of the other leg's own state.
+  state.call = splitLeg(state.call, legId)
+}
+
+// ── cancel-timer ──────────────────────────────────────────────────────────
+
+function executeCancelTimer(
+  action: Extract<RuleAction, { type: "cancel-timer" }>,
+  state: ExecutionState,
+): void {
+  const { type, timerId } = action
+  void type
+  state.effects.push({ type: "cancel-timer", id: timerId })
+  state.call = { ...state.call, timers: state.call.timers.filter((t) => t.id !== timerId) }
+}
+
+// ── terminate-leg (primitive) ─────────────────────────────────────────────
+
+function executeTerminateLeg(
+  action: Extract<RuleAction, { type: "terminate-leg" }>,
+  state: ExecutionState,
+): void {
+  const { type, legId, byeDisposition } = action
+  void type
+  // Reach: legs.{legId}.state → "terminated"; legs.{legId}.byeDisposition
+  // → byeDisposition (only when set). No call-level mutation, no peer touch.
+  state.call = setLegState(state.call, legId, "terminated")
+  if (byeDisposition !== undefined) {
+    state.call = setByeDisposition(state.call, legId, byeDisposition)
+  }
+}
+
+// ── add-cdr-event ─────────────────────────────────────────────────────────
+
+function executeAddCdrEvent(
+  action: Extract<RuleAction, { type: "add-cdr-event" }>,
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const { type, eventType, legId, statusCode, reason } = action
+  void type
+  state.call = addCdrEvent(state.call, {
+    type: eventType,
+    timestamp: ctx.nowMs,
+    legId,
+    statusCode,
+    reason,
+  })
+}
+
+// ── add-tag-mapping ───────────────────────────────────────────────────────
+
+function executeAddTagMapping(
+  action: Extract<RuleAction, { type: "add-tag-mapping" }>,
+  state: ExecutionState,
+): void {
+  const { type, aTag, bLegId, bTag } = action
+  void type
+  state.call = addTagMapping(state.call, { aTag, bLegId, bTag })
+}
+
+// ── send-raw (escape hatch) ───────────────────────────────────────────────
+
+function executeSendRaw(
+  action: Extract<RuleAction, { type: "send-raw" }>,
+  state: ExecutionState,
+): void {
+  const { type, message, destination, label } = action
+  void type
+  state.outbound.push({
+    message,
+    destination: { host: destination.address, port: destination.port },
+    label,
+  })
+}
+
+// ── refer-async-http ──────────────────────────────────────────────────────
+
+function executeReferAsyncHttp(
+  action: Extract<RuleAction, { type: "refer-async-http" }>,
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const { type, request } = action
+  void type
+  state.effects.push({ type: "refer-async-http", callRef: ctx.callRef, request })
 }

@@ -5,7 +5,7 @@
  * by the dispatcher when spawning child processes.
  */
 
-import { Effect, Layer, ServiceMap } from "effect"
+import { Layer, ServiceMap } from "effect"
 
 export interface WorkerConfigData {
   readonly workerIndex: number
