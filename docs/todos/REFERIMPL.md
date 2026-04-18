@@ -1,5 +1,8 @@
 # REFER-Driven Blind Transfer on the B2BUA
 
+**Status:** Slice 1, 2, 3, 4, 5, 6 done
+**Driver:** Implement REFER blind transfer for called
+
 ## Context
 
 Today the B2BUA has no REFER handling — `/call/refer` exists as a stub on `MockCallControlServer` that always rejects 603, and no rule in `src/b2bua/rules/` matches REFER. We want **B2BUA-mediated blind transfer** where the B2BUA, not A, places the outbound call to the transfer target C, hides the transfer from A (no REFER/NOTIFY reaches A), and swaps A's media endpoint from B to C via B2BUA-originated re-INVITEs. Direction: REFER arrives on the **B leg** (B is the remote UAS talking to our b-leg UAC). Scope v1: **only blind in-dialog REFER on the B leg.** Attended-with-Replaces, REFER on A-leg, and out-of-dialog REFER are rejected with clean SIP errors.
@@ -60,6 +63,31 @@ A                      B2BUA                      B                      C
 
 ---
 
+## Post-refactor constraints (apply to every remaining slice)
+
+The rule-framework ADT refactor (slices A–G of [RULE-FRAMEWORK-ADT-REFACTOR.md](RULE-FRAMEWORK-ADT-REFACTOR.md)) landed after REFER slices 1–4 shipped. Every remaining REFER slice must respect the following contracts — they are compile-time enforced:
+
+1. **Typed body / header / URI slots only.** Any rule that mutates outbound bodies, headers, or Request-URIs routes through the ADTs in [src/b2bua/rules/framework/actions/types.ts](../../src/b2bua/rules/framework/actions/types.ts):
+   - Body → `bodyUpdate: BodyUpdate` (`{ kind: "inherit" | "set" | "drop" }`).
+   - Headers → `headerUpdates: HeaderUpdates` with `replaceH(...)` / `removeH()` factories from [actions/factories.ts](../../src/b2bua/rules/framework/actions/factories.ts).
+   - Request-URI → `ruri: RuriOp` with `toBareUri(...)` — never a raw string. Name-addr strings (from `Refer-To`, `Contact`) must be converted via `toBareUri` which strips brackets/display/header-params.
+   - The legacy `updateBody` / `updateHeaders` / `newRuri` fields no longer exist (removed in slice F). Do not reintroduce them.
+
+2. **`MessageTransform` on relay actions uses the same ADTs.** If a transfer-rule mutates a relayed message, it passes `headerUpdates` / `bodyUpdate` inside `MessageTransform` — not `Record<string, string | null>` / `Uint8Array | null`.
+
+3. **Executor destructure discipline (slice G).** Any new `executeXxx` for a new action (e.g. `send-reinvite`) MUST begin:
+   ```ts
+   const { type, /* every other field */ } = action
+   void type
+   ```
+   `noUnusedLocals` / `noUnusedParameters` in [tsconfig.json](../../tsconfig.json) turns any ignored action field into a typecheck error — preventing the class of bug where `create-leg.updateBody` shipped "typed but never read" through four review passes.
+
+4. **Single-reach primitive actions.** Prefer primitives over composites. `confirmDialog({legId})` touches only the named leg; `updateLegState({legId, state})` touches only that leg's state; the `confirmBridgedCall(sourceLeg, aLeg, sourceTag)` factory in [actions/composites.ts](../../src/b2bua/rules/framework/actions/composites.ts) is the documented composite for the full A↔B confirm dance. **The C-leg confirm** at `transfer-c-200-initial` MUST use `confirmDialog({ legId: cLeg.legId })` directly — not `confirmBridgedCall` (the C leg is not yet peered to A) and not a `skipPeerSync` workaround (that flag no longer exists — it was removed in slice B).
+
+5. **Reach tests per new primitive.** `tests/unit/rules/actions-reach.test.ts` gains one test per new action field introduced by REFER. A `send-reinvite` with `bodyUpdate: { kind: "set", value }` must have a test asserting the outbound carries exactly that value and no other state is touched.
+
+---
+
 ## Files to create or modify
 
 ### Create
@@ -76,9 +104,12 @@ A                      B2BUA                      B                      C
 - `src/call/CallModel.ts` — add `TransferPhase` literal, `TransferState` struct, `Call.transfer?: TransferState | null` field. Extend `TimerType` with `refer_subscription_expiry | refer_reinvite_answer | refer_overall_safety`.
 - `src/b2bua/rules/framework/RuleDefinition.ts` — extend `Match.filter` with a `transferPhase?: TransferPhase | TransferPhase[]` hint that the Matcher evaluates against `call.transfer?.phase`.
 - `src/b2bua/rules/framework/Matcher.ts` — read the new filter hint and gate candidates.
-- `src/b2bua/rules/framework/ActionExecutor.ts` — add `send-notify` action (structured) and `send-reinvite` action (which composes `buildOriginatedInvite` + CSeq bump + placeholder stamping + route-set). These sit next to `send-request-to-leg` and share its infrastructure; REFER-specific semantics stay in the rules.
+- `src/b2bua/rules/framework/ActionExecutor.ts` — `send-notify` is already landed (slice 4). Still to add: `send-reinvite` action (composes `buildOriginatedInvite` + CSeq bump + placeholder stamping + route-set). It sits next to `send-request-to-leg` and shares its infrastructure; REFER-specific semantics stay in the rules. **Post-refactor constraints (slices A–G of the rule-framework ADT refactor):**
+  - SDP/body parameter on `send-reinvite` MUST be a `bodyUpdate: BodyUpdate` slot (from [`./actions/types.ts`](../../src/b2bua/rules/framework/actions/types.ts)), not a raw `Uint8Array | null`. Build with `{ kind: "set", value: sdpBytes }` at the call site. Matches the `create-leg.bodyUpdate` shape so `applyBodyUpdate` can be reused.
+  - Any extra headers MUST use `headerUpdates: HeaderUpdates` via `replaceH(...)` / `removeH()` factories — not `Record<string, string | null>`.
+  - `executeSendReinvite` MUST begin with a full destructure of every action field + `void type` discriminator marker (Slice G destructure discipline). `noUnusedLocals` / `noUnusedParameters` will break the build if any declared field is not read.
 - `src/b2bua/B2buaCore.ts` — register the new TransferRules in the handler registry.
-- `src/b2bua/InitialInviteHandler.ts` or `helpers.ts` — if `createBLegFromRoute` needs a new parameter for "build with held SDP instead of copying a-leg body", add it. Otherwise call it as-is and have the rule override the body via `update_body` / `updateHeaders`.
+- `src/b2bua/InitialInviteHandler.ts` or `helpers.ts` — if `createBLegFromRoute` needs a new parameter for "build with held SDP instead of copying a-leg body", add it. Otherwise call it as-is and have the rule override the body via `create-leg.bodyUpdate` + `create-leg.headerUpdates` (the typed ADT slots; the old `updateBody` / `updateHeaders` / `newRuri` fields were removed in slice F).
 
 ### Tests
 - `tests/sip/sdp-utils.test.ts` — unit
@@ -98,13 +129,13 @@ A                      B2BUA                      B                      C
 | `transfer-reject-second-refer` | `{ kind:"request", method:"REFER", direction:"inbound", transferPhase:["refer-authorizing","c-ringing","c-realigning","a-realigning"] }` | `respond 491` |
 | `transfer-reject-replaces` | `{ kind:"request", method:"REFER", direction:"inbound", filter: has Replaces in Refer-To }` | `respond 501` |
 | `transfer-reject-a-leg-refer` | `{ kind:"request", method:"REFER", direction:"inbound", legDisposition: "a-leg-something" }` | `respond 501` |
-| `transfer-http-allow` | `{ kind:"callcontrol-response", endpoint:"/call/refer", outcome:"allow", transferPhase:"refer-authorizing" }` — new match kind (see below) | `create-leg` with destination + held SDP body (built from `extractCodecProfile` on `call.aLeg.lastRemoteSdp`); set `call.transfer.phase="c-ringing"` |
+| `transfer-http-allow` | `{ kind:"callcontrol-response", endpoint:"/call/refer", outcome:"allow", transferPhase:"refer-authorizing" }` — new match kind (see below) | `create-leg` with destination + held SDP body passed as `bodyUpdate: { kind: "set", value: heldSdp }` (built from `extractCodecProfile` on `call.aLeg.lastRemoteSdp`); `update-transfer { phase: "c-ringing", cLegId }` |
 | `transfer-http-reject` | `{ kind:"callcontrol-response", endpoint:"/call/refer", outcome:"reject", transferPhase:"refer-authorizing" }` | `send-notify <code> terminated`, clear `call.transfer`, `cancel-timer refer_*` |
 | `transfer-http-timeout` | `{ kind:"timer", timerType:"refer_subscription_expiry", transferPhase:"refer-authorizing" }` | `send-notify 500 terminated`, clear transfer |
 | `transfer-c-1xx-to-notify` | `{ kind:"response", cseqMethod:"INVITE", statusClass:"1xx", sourceLeg:"c", transferPhase:"c-ringing" }` | `send-notify <1xx> active`; dedup by last-sent-status |
-| `transfer-c-200-initial` | `{ kind:"response", cseqMethod:"INVITE", statusClass:"2xx", sourceLeg:"c", transferPhase:"c-ringing" }` | `ack-leg C`, capture `cInitialSdp`, `send-notify 200 terminated`, `cancel-timer refer_subscription_expiry`, set phase `c-realigning`, `schedule-timer refer_reinvite_answer`, `send-reinvite C` with A's SDP |
+| `transfer-c-200-initial` | `{ kind:"response", cseqMethod:"INVITE", statusClass:"2xx", sourceLeg:"c", transferPhase:"c-ringing" }` | `ack-leg C`, capture `cInitialSdp` into transfer state, `send-notify 200 terminated`, `cancel-timer refer_subscription_expiry`, `update-transfer { phase: "c-realigning", cInitialSdp }`, `schedule-timer refer_reinvite_answer`, `send-reinvite C` with `bodyUpdate: { kind: "set", value: aLegSdp }` |
 | `transfer-c-fail-initial` | `{ kind:"response", cseqMethod:"INVITE", statusClass:["3xx","4xx","5xx","6xx"], sourceLeg:"c", transferPhase:"c-ringing" }` | `send-notify <code> terminated`, clear transfer (C leg auto-terminates via existing route-failure rule) |
-| `transfer-c-realign-200` | `{ kind:"response", cseqMethod:"INVITE", statusClass:"2xx", sourceLeg:"c", transferPhase:"c-realigning" }` | `ack-leg C`, `cancel-timer refer_reinvite_answer`, set phase `a-realigning`, `schedule-timer refer_reinvite_answer`, `send-reinvite A` with `cInitialSdp` |
+| `transfer-c-realign-200` | `{ kind:"response", cseqMethod:"INVITE", statusClass:"2xx", sourceLeg:"c", transferPhase:"c-realigning" }` | `ack-leg C`, `cancel-timer refer_reinvite_answer`, `update-transfer { phase: "a-realigning" }`, `schedule-timer refer_reinvite_answer`, `send-reinvite A` with `bodyUpdate: { kind: "set", value: cInitialSdp }` |
 | `transfer-c-realign-fail` | `{ kind:"response", cseqMethod:"INVITE", statusClass:["4xx","5xx","6xx"], sourceLeg:"c", transferPhase:"c-realigning" }` OR timer | `begin-termination`, CDR `transfer-rollback-c-realign` |
 | `transfer-a-realign-200` | `{ kind:"response", cseqMethod:"INVITE", statusClass:"2xx", sourceLeg:"a", transferPhase:"a-realigning" }` | `ack-leg A`, `cancel-timer refer_*`, `merge(a,c)`, clear `call.transfer`, CDR `transfer-completed` |
 | `transfer-a-realign-fail` | response 4xx/5xx/6xx on A or timer | `begin-termination`, CDR `transfer-rollback-a-realign` |
@@ -161,7 +192,7 @@ Each slice ends on green `npm test` and green `npm run typecheck`. Slices 1–3 
   - Second REFER during `refer-authorizing` → 491.
 
 ### Slice 5 — Allow path through final NOTIFY (no re-INVITEs)
-- Rules: `transfer-http-allow` (creates C leg via `createBLegFromRoute` with held SDP body), `transfer-c-1xx-to-notify`, `transfer-c-200-initial` (but stop before `send-reinvite C` — ACK + final NOTIFY only; phase stays `c-ringing` or set a dummy), `transfer-c-fail-initial`.
+- Rules: `transfer-http-allow` (creates C leg via `create-leg` with `bodyUpdate: { kind: "set", value: heldSdpBytes }` — `createBLegFromRoute` is invoked by `executeCreateLeg` and the typed `bodyUpdate` overrides the a-leg body), `transfer-c-1xx-to-notify`, `transfer-c-200-initial` (but stop before `send-reinvite C` — ACK + final NOTIFY only + `confirmDialog({ legId: cLeg.legId })` for the C dialog; phase stays `c-ringing` or set a dummy), `transfer-c-fail-initial`.
 - MockCallControlServer: add `refer-allow-c` returning destination pointing at the e2e harness's C UA.
 - **Still feature-flagged:** leave re-INVITEs disabled.
 - **E2E tests (`tests/e2e/refer/c-leg-lifecycle.test.ts`):**
@@ -174,6 +205,8 @@ Each slice ends on green `npm test` and green `npm run typecheck`. Slices 1–3 
   - B BYE during c-ringing: NOTIFY 487, CANCEL C, BYE relayed to A.
 
 ### Slice 6 — re-INVITE C with A's SDP (c-realigning)
+- Add the `send-reinvite` action variant to `RuleAction` in `RuleDefinition.ts` with shape `{ type, legId, bodyUpdate?: BodyUpdate, headerUpdates?: HeaderUpdates }` and its `executeSendReinvite` in `ActionExecutor.ts`. Executor MUST destructure every field + `void type` per slice-G discipline. Reuse `applyBodyUpdate` and `applyHeaderUpdates` from the existing helpers so the same ADT semantics hold as for `create-leg`.
+- Add a reach test in `tests/unit/rules/actions-reach.test.ts` asserting `send-reinvite { legId, bodyUpdate: { kind: "set", value } }` produces exactly one outbound INVITE with that body and mutates no unrelated state.
 - Enable `send-reinvite C` path in `transfer-c-200-initial`. Add rules: `transfer-c-realign-200`, `transfer-c-realign-fail`, `transfer-c-glare-reinvite`, `transfer-b-in-cre-are-reject`.
 - **E2E tests (`tests/e2e/refer/c-realign.test.ts`):**
   - Happy c-realign: observe re-INVITE C carries A's SDP, CSeq bumped, Contact stamped with leg=b-2; C answers 200; ACK; phase = a-realigning (stops before a-realign in this slice? better: leave a-realigning as another stub stop, or continue — simpler to wire both at once in S7).
@@ -217,7 +250,7 @@ Each slice ends on green `npm test` and green `npm run typecheck`. Slices 1–3 
 
 ### Slice 10 — Rule coverage + kill testing
 - Run `npm test` — confirm all new rules appear in `test-results/fake-clock/index.html` rule-coverage with ≥1 firing.
-- Run `npm run test:rule-kill` — assert zero surviving mutants for every new rule. Where mutants survive, add the missing test in the relevant slice's test file (not here — backfill).
+- Kill testing: `npm run test:rule-kill` is currently a no-op pending a fake-clock speedup. Run `tsx scripts/rule-kill.ts` manually against the transfer rule ids and assert zero surviving mutants. Where mutants survive, add the missing test in the relevant slice's test file (not here — backfill). See [rule-coverage-and-killing.md](../rule-coverage-and-killing.md).
 
 ---
 
@@ -227,7 +260,7 @@ Each slice ends on green `npm test` and green `npm run typecheck`. Slices 1–3 
 - **Unit:** `npm test` (unit subset) green after each slice. New unit tests listed per slice.
 - **E2E simulated:** each slice's e2e file runs under the e2e framework in `tests/e2e/` against the in-memory `simulated-backend.ts` (which uses `B2buaCoreLayer`). No real network. Fake clock for timers.
 - **Rule coverage:** inspect `test-results/fake-clock/index.html` after slice 10 — every new rule has non-zero firing count.
-- **Rule kill (mutation testing):** `npm run test:rule-kill` must report zero surviving mutants for the new transfer rules.
+- **Rule kill (mutation testing):** `tsx scripts/rule-kill.ts` (run manually — `npm run test:rule-kill` is a no-op pending fake-clock speedup) must report zero surviving mutants for the new transfer rules.
 - **Interop (optional, post-v1):** run a real SIPp scenario from `sippperftest/` against a live B2BUA instance with MockCallControlServer; issue REFER via a modified SIPp scenario; capture pcap and verify wire compliance.
 
 ---

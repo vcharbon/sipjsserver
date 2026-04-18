@@ -461,6 +461,31 @@ export type RuleAction =
       readonly event: string; readonly subscriptionState: string;
       readonly contentType?: string; readonly body?: Uint8Array }
 
+  // ── B2BUA-originated re-INVITE (REFER realigning flows) ──
+  //
+  // Emits a re-INVITE on the named leg's confirmed dialog with a chosen SDP
+  // body. Framework bumps the dialog CSeq, stamps Contact/Via placeholders,
+  // applies the route set, and tracks a pendingRequest so the response is
+  // correlated back via findPendingRequest just like a relayed re-INVITE.
+  //
+  // Body / header mutations use the same typed ADT slots as `create-leg`:
+  //   - bodyUpdate: BodyUpdate — `{ kind: "set", value }` for a fresh SDP
+  //                 offer, `{ kind: "drop" }` for a body-less re-INVITE.
+  //                 `inherit` is invalid (there is no base body to inherit
+  //                 from) and is treated as drop by the executor.
+  //   - headerUpdates: HeaderUpdates — optional extra headers layered onto
+  //                 the outbound INVITE via replaceH/removeH factories.
+  //
+  // Reach (Slice C audit — primitive, single named leg):
+  //   legs.{legId}.dialogs[0].localCSeq     → +1
+  //   legs.{legId}.dialogs[0].lastInviteCSeq → new CSeq (so ACK-for-2xx echoes)
+  //   legs.{legId}.dialogs[0].pendingRequests → add { method: "INVITE", ... }
+  //
+  // Used by REFER transfer rules (c-realign, a-realign). Not a general
+  // "re-negotiate SDP" action — that would belong in a different primitive.
+  | { readonly type: "send-reinvite"; readonly legId: string;
+      readonly bodyUpdate?: BodyUpdate; readonly headerUpdates?: HeaderUpdates }
+
   // ── REFER transfer state management ──
   // update-transfer merges onto Call.transfer (creating it if absent).
   // clear-transfer nulls Call.transfer outright (final cleanup).

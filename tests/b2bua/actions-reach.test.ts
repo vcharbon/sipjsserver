@@ -26,7 +26,7 @@ import { executeActions } from "../../src/b2bua/rules/framework/ActionExecutor.j
 import type { RuleAction } from "../../src/b2bua/rules/framework/RuleDefinition.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
 import type { SipRequest } from "../../src/sip/types.js"
-import { makeDialog, makeLeg, makeCall, makeCtx, make200InviteFromB } from "./helpers/reach.js"
+import { diffCall, makeDialog, makeLeg, makeCall, makeCtx, make200InviteFromB } from "./helpers/reach.js"
 
 // ── update-leg-state ────────────────────────────────────────────────────────
 
@@ -688,5 +688,132 @@ describe("terminate-call reach (composite)", () => {
     expect(result.call.bLegs[0]!.state).toBe("terminated")
     expect(result.call.state).toBe("terminated")
     expect(result.call.activePeer).toBeNull()
+  })
+})
+
+// ── send-reinvite ───────────────────────────────────────────────────────────
+//
+// Reach contract: legs.{legId}.dialogs[0].localCSeq (+1) and
+//                 legs.{legId}.dialogs[0].lastInviteCSeq (set to new CSeq).
+// Nothing else on the leg, no tagMap touch, no call-level mutation, no
+// activePeer change, and exactly one outbound re-INVITE whose body equals
+// the supplied `bodyUpdate.value`.
+describe("send-reinvite reach", () => {
+  test("emits one INVITE with the exact body and bumps dialog CSeq + lastInviteCSeq; no unrelated state touched", () => {
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "confirmed" }
+    const bLeg: Leg = {
+      ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag", 1000)),
+      state: "confirmed",
+      disposition: "bridged",
+    }
+    const call = makeCall(aLeg, bLeg)
+    const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
+
+    const sdp = new TextEncoder().encode(
+      "v=0\r\no=alice 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\n",
+    )
+
+    const result = executeActions(
+      [
+        {
+          type: "send-reinvite",
+          legId: "b-1",
+          bodyUpdate: { kind: "set", value: sdp },
+        },
+      ],
+      ctx,
+      "test-rule",
+    )
+
+    // Exactly one outbound re-INVITE carrying the supplied SDP.
+    expect(result.outbound).toHaveLength(1)
+    const env = result.outbound[0]!
+    expect(env.label).toBe("re-INVITE b-1")
+    expect(env.legId).toBe("b-1")
+    const msg = env.message
+    expect(msg.type).toBe("request")
+    const req = msg as SipRequest
+    expect(req.method).toBe("INVITE")
+    expect(req.body).toEqual(sdp)
+
+    // Content-Length reflects the set body.
+    const cl = req.headers.find((h) => h.name.toLowerCase() === "content-length")
+    expect(cl?.value).toBe(String(sdp.byteLength))
+
+    // CSeq header is the bumped value (was 1000 → next request is 1001).
+    const cseqHdr = req.headers.find((h) => h.name.toLowerCase() === "cseq")
+    expect(cseqHdr?.value).toBe("1001 INVITE")
+
+    // Dialog state: localCSeq bumped, lastInviteCSeq set to the new CSeq.
+    const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
+    const outDialog = outB.dialogs[0]!
+    expect(outDialog.localCSeq).toBe(1001)
+    expect(outDialog.lastInviteCSeq).toBe(1001)
+
+    // Reach: only the b-1 dialog[0] localCSeq + lastInviteCSeq moved.
+    const paths = diffCall(call, result.call)
+    expect(paths).toEqual(new Set([
+      "legs.b-1.dialogs[0].localCSeq",
+      "legs.b-1.dialogs[0].lastInviteCSeq",
+    ]))
+  })
+
+  test("bodyUpdate omitted or drop → empty body, Content-Length: 0", () => {
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "confirmed" }
+    const bLeg: Leg = {
+      ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag", 50)),
+      state: "confirmed",
+    }
+    const call = makeCall(aLeg, bLeg)
+    const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
+
+    const result = executeActions(
+      [{ type: "send-reinvite", legId: "b-1", bodyUpdate: { kind: "drop" } }],
+      ctx,
+      "test-rule",
+    )
+
+    expect(result.outbound).toHaveLength(1)
+    const req = result.outbound[0]!.message as SipRequest
+    expect(req.body.byteLength).toBe(0)
+    const cl = req.headers.find((h) => h.name.toLowerCase() === "content-length")
+    expect(cl?.value).toBe("0")
+  })
+
+  test("unknown legId → no-op (call unchanged by reference, no outbound)", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
+    const call = makeCall(aLeg, bLeg)
+    const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
+
+    const result = executeActions(
+      [{ type: "send-reinvite", legId: "b-does-not-exist" }],
+      ctx,
+      "test-rule",
+    )
+    expect(result.call).toBe(call)
+    expect(result.outbound).toHaveLength(0)
+  })
+
+  test("terminated leg → no-op (no re-INVITE emitted)", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg: Leg = {
+      ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")),
+      state: "terminated",
+    }
+    const call = makeCall(aLeg, bLeg)
+    const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
+
+    const result = executeActions(
+      [{
+        type: "send-reinvite",
+        legId: "b-1",
+        bodyUpdate: { kind: "set", value: new TextEncoder().encode("x") },
+      }],
+      ctx,
+      "test-rule",
+    )
+    expect(result.outbound).toHaveLength(0)
+    expect(result.call).toBe(call)
   })
 })

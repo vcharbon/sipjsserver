@@ -53,6 +53,9 @@ export const referAllowHappy = scenario("refer-allow-happy", (s) => {
   alice.allowExtra("BYE")
   bob.allowExtra("BYE")
   charlie.allowExtra("BYE")
+  // Slice 6: after C's 200, the B2BUA emits the c-realigning re-INVITE to C.
+  // This scenario does not script the re-INVITE exchange — tolerate it here.
+  charlie.allowExtra("INVITE")
 
   const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite(
     "sip:+1234@127.0.0.1:15062",
@@ -331,6 +334,8 @@ export const referAllowCMultiple18x = scenario(
     alice.allowExtra("BYE")
     bob.allowExtra("BYE")
     charlie.allowExtra("BYE")
+    // Slice 6: after C's 200, the B2BUA emits the c-realigning re-INVITE to C.
+    charlie.allowExtra("INVITE")
 
     const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite(
       "sip:+1234@127.0.0.1:15062",

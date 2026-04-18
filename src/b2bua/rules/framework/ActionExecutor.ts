@@ -47,6 +47,7 @@ import {
   buildBye,
   buildCancel,
   buildNotify,
+  buildOriginatedInvite,
   buildRejectResponse,
   buildRelayedAck,
   buildRelayedBye,
@@ -305,6 +306,9 @@ function executeAction(
       break
     case "send-notify":
       executeSendNotify(action, ctx, state)
+      break
+    case "send-reinvite":
+      executeSendReinvite(action, ctx, state)
       break
     case "update-transfer":
       executeUpdateTransfer(action, ctx, state)
@@ -1439,6 +1443,88 @@ function executeSendNotify(
     message: routed.msg,
     destination: routed.target,
     label: `NOTIFY ${legId}`,
+    legId,
+  })
+}
+
+// ── send-reinvite ─────────────────────────────────────────────────────────
+
+/**
+ * Emit a B2BUA-originated re-INVITE on the named leg's confirmed dialog.
+ *
+ * Used by the REFER transfer flow (c-realigning, a-realigning) to swap SDP
+ * on an already-established leg. Framework bumps the dialog CSeq, stamps
+ * Contact/Via placeholders via the standard SipRouter path, applies the
+ * dialog route set, and updates `lastInviteCSeq` so the matching ACK (for
+ * the 2xx) echoes the right CSeq (RFC 3261 §13.2.2.4).
+ *
+ * Body semantics:
+ *   - `bodyUpdate: { kind: "set", value }` — carry the given SDP offer.
+ *   - `bodyUpdate: { kind: "drop" }` or omitted — empty body.
+ *   - `bodyUpdate: { kind: "inherit" }` — not meaningful (no base body to
+ *     inherit from); treated as drop.
+ *
+ * Reach (Slice C audit — primitive, single named leg):
+ *   legs.{legId}.dialogs[0].localCSeq     → +1
+ *   legs.{legId}.dialogs[0].lastInviteCSeq → outbound CSeq
+ *
+ * No tagMap touch; no peer mutation. Responses are matched by transfer rules
+ * via `direction` + `filter` and handled explicitly (no pending-request
+ * snapshot is recorded because the response is not transparently relayed).
+ */
+function executeSendReinvite(
+  action: Extract<RuleAction, { type: "send-reinvite" }>,
+  _ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const { type, legId, bodyUpdate, headerUpdates } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
+  if (leg === undefined || leg.state === "terminated") return
+  const dialog = leg.dialogs[0]
+  if (dialog === undefined) return
+
+  const target = legTarget(leg)
+  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
+
+  state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
+  const cseq = dialog.localCSeq + 1
+
+  const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
+
+  // `inherit` would normally copy the relayed message body, but send-reinvite
+  // has no base body — collapse inherit to drop (empty body).
+  const body = bodyUpdate !== undefined && bodyUpdate.kind === "set"
+    ? bodyUpdate.value
+    : new Uint8Array(0)
+
+  let reinvite = buildOriginatedInvite({
+    callId: leg.callId,
+    fromTag,
+    toTag,
+    requestUri: targetUri,
+    cseq,
+    ...(leg.localUri !== undefined ? { fromUri: leg.localUri } : {}),
+    ...(leg.remoteUri !== undefined ? { dialogToUri: leg.remoteUri } : {}),
+    body,
+  })
+
+  if (headerUpdates !== undefined) {
+    reinvite = applyHeaderUpdates(reinvite, headerUpdates)
+  }
+
+  // Remember this INVITE's CSeq so the ACK-for-2xx echoes it (RFC 3261
+  // §13.2.2.4) — same bookkeeping `relayRequest` performs for relayed INVITEs.
+  state.call = updateDialog(state.call, leg.legId, dialog.toTag, (d) => ({
+    ...d, lastInviteCSeq: cseq,
+  }))
+
+  const routed = leg.legId !== "a" ? applyRouteSet(reinvite, dialog, target) : { msg: reinvite, target }
+  state.outbound.push({
+    message: routed.msg,
+    destination: routed.target,
+    label: `re-INVITE ${legId}`,
     legId,
   })
 }

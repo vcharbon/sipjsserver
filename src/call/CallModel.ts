@@ -354,6 +354,13 @@ export const TransferState = Schema.Struct({
    * is translated.
    */
   lastCLegNotifiedStatus: Schema.optional(Schema.Int),
+  /**
+   * C-leg's initial answer SDP (captured from C's 200 OK to the initial
+   * INVITE). Carried across the c-realigning phase so that when the
+   * c-realign re-INVITE (with A's SDP) succeeds we already know the SDP
+   * to offer back to A in the a-realigning re-INVITE.
+   */
+  cInitialSdp: Schema.optional(Schema.Uint8ArrayFromBase64),
 })
 export type TransferState = typeof TransferState.Type
 
