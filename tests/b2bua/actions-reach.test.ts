@@ -23,110 +23,10 @@
 
 import { describe, test, expect } from "vitest"
 import { executeActions } from "../../src/b2bua/rules/framework/ActionExecutor.js"
-import type { RuleAction, RuleContext } from "../../src/b2bua/rules/framework/RuleDefinition.js"
-import type { Call, Leg, Dialog } from "../../src/call/CallModel.js"
-import type { SipRequest, SipResponse, SipHeader, RemoteInfo } from "../../src/sip/types.js"
-import type { AppConfigData } from "../../src/config/AppConfig.js"
-import type { CallControlClient } from "../../src/http/CallControlClient.js"
-import type { CallLimiter } from "../../src/call/CallLimiter.js"
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-const h = (name: string, value: string): SipHeader => ({ name, value })
-const rinfo: RemoteInfo = { address: "192.168.1.100", port: 5060 }
-
-function makeDialog(toTag: string, localCSeq = 1000): Dialog {
-  return {
-    toTag,
-    contact: "<sip:peer@192.168.1.200:5060>",
-    localCSeq,
-    remoteCSeq: 1,
-    inboundPendingRequests: [],
-    routeSet: [],
-  }
-}
-
-function makeLeg(legId: string, callId: string, fromTag: string, dialog?: Dialog): Leg {
-  return {
-    legId,
-    callId,
-    fromTag,
-    source: { address: "192.168.1.200", port: 5060 },
-    state: "trying",
-    disposition: "bridged",
-    dialogs: dialog ? [dialog] : [],
-  }
-}
-
-function makeCall(aLeg: Leg, bLeg: Leg): Call {
-  return {
-    callRef: `${aLeg.callId}|${aLeg.fromTag}`,
-    aLeg,
-    bLegs: [bLeg],
-    activePeer: { legA: "a", legB: bLeg.legId },
-    aLegVias: ["SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig"],
-    aLegFrom: `<sip:alice@example.com>;tag=${aLeg.fromTag}`,
-    aLegTo: "<sip:bob@example.com>",
-    aLegInviteCSeq: 42,
-    tagMap: [],
-    limiterEntries: [],
-    timers: [],
-    cdrEvents: [],
-    state: "active",
-    createdAt: 0,
-  }
-}
-
-function makeCtx(
-  call: Call,
-  sourceLeg: Leg,
-  sourceDialog: Dialog | undefined,
-  direction: "from-a" | "from-b",
-  message: SipRequest | SipResponse,
-): RuleContext {
-  return {
-    call,
-    callRef: call.callRef,
-    event: { type: "sip" as const, message, rinfo },
-    sourceLeg,
-    sourceDialog,
-    direction,
-    config: { sipLocalIp: "10.0.0.1", sipLocalPort: 5060, noAnswerTimeoutSec: 60 } as AppConfigData,
-    callControl: {} as CallControlClient["Service"],
-    limiter: {} as CallLimiter["Service"],
-    nowMs: Date.now(),
-  }
-}
-
-// Build a 200 OK INVITE response from the b-leg. Rules that call
-// confirm-dialog emit the action in response to exactly this event shape.
-function make200InviteFromB(toTag: string, recordRoutes: ReadonlyArray<string> = []): SipResponse {
-  const rrHeaders: ReadonlyArray<SipHeader> = recordRoutes.map((v) => h("Record-Route", v))
-  return {
-    type: "response",
-    version: "SIP/2.0",
-    status: 200,
-    reason: "OK",
-    headers: [
-      h("Via", "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-b1"),
-      h("From", `<sip:bob@example.com>;tag=tagB2BUA`),
-      h("To", `<sip:alice@example.com>;tag=${toTag}`),
-      h("Call-ID", "1-call-1"),
-      h("CSeq", "1000 INVITE"),
-      h("Contact", "<sip:bob@192.168.1.200:5060>"),
-      h("Content-Length", "0"),
-      ...rrHeaders,
-    ],
-    body: new Uint8Array(0),
-    raw: Buffer.alloc(0),
-    parsed: {
-      to: { displayName: undefined, uri: "sip:alice@example.com", tag: toTag, params: {} },
-      from: undefined, callId: undefined, cseq: undefined, via: undefined, vias: [],
-      contact: { displayName: undefined, uri: "sip:bob@192.168.1.200:5060", params: {} },
-      requestUri: undefined,
-    },
-  }
-}
+import type { RuleAction } from "../../src/b2bua/rules/framework/RuleDefinition.js"
+import type { Call, Leg } from "../../src/call/CallModel.js"
+import type { SipRequest } from "../../src/sip/types.js"
+import { makeDialog, makeLeg, makeCall, makeCtx, make200InviteFromB } from "./helpers/reach.js"
 
 // ── update-leg-state ────────────────────────────────────────────────────────
 
@@ -331,7 +231,7 @@ describe("confirm-dialog reach", () => {
       method: "INVITE",
       uri: "sip:b2bua@10.0.0.1:5060",
       version: "SIP/2.0",
-      headers: [h("Via", "SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig")],
+      headers: [{ name: "Via", value: "SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig" }],
       body: new Uint8Array(0),
       raw: Buffer.alloc(0),
     }

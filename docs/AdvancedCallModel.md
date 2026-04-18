@@ -170,6 +170,25 @@ Defined in [src/b2bua/rules/framework/actions/composites.ts](../src/b2bua/rules/
 
 Rules call it from `DialogRules.confirmDialogRule` and `CornerCaseRules.cancel200CrossingRule`. The REFER slice-5 `transfer-c-200-initial` rule does **not** use it — C-leg confirmation must not touch A↔B, so it emits `update-leg-state` + `confirm-dialog` on the C-leg only.
 
+### Action reach discipline
+
+**Invariant:** every primitive action's state mutation reach equals the state named in its parameters. A primitive that names `{legId}` must mutate nothing outside `legs.{legId}.*`; a primitive that names a single field (e.g. `cancel-leg` → `disposition`) must not touch any sibling field. Composite actions (`destroy-leg`, `begin-termination`, `terminate-call`) declare their wider scope in the action contract — their reach is still bounded, just broader.
+
+**Enforced by** [tests/b2bua/actions-reach-diff.test.ts](../tests/b2bua/actions-reach-diff.test.ts) using two shared helpers in [tests/b2bua/helpers/reach.ts](../tests/b2bua/helpers/reach.ts):
+
+- `runActions(actions, ctx) → { after, result }` — thin wrapper over `executeActions`.
+- `diffCall(before, after) → Set<string>` — returns the set of dotted paths whose values changed. Legs are keyed by `legId` (not array position); top-level collections like `tagMap`, `timers`, `cdrEvents`, `activeRules`, `ruleState` are reported as a single path; dialog fields surface as `legs.{legId}.dialogs[i].{field}`.
+
+Each Slice-D test then asserts:
+
+```ts
+expect(diffCall(before, after)).toEqual(new Set(["legs.b-1.state"]))
+```
+
+Any extra path is a reach violation — the action mutated state it did not declare. Any missing path means the test's `before` fixture failed to observe the named mutation. When adding a new primitive action, add a reach-diff test alongside the executor change in the same commit; the test doubles as living documentation of the action's contract.
+
+Branch-specific behaviour of the three composites is covered by the scenario tests in [tests/b2bua/actions-reach.test.ts](../tests/b2bua/actions-reach.test.ts) (reference-equality checks for out-of-reach regions + outbound envelope assertions).
+
 ### MessageTransform
 
 Applied to relay actions for protocol conversion (e.g., 183 -> 200):

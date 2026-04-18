@@ -1,6 +1,6 @@
 # Rule Framework ADT Refactor — Plan
 
-**Status:** A + B done
+**Status:** A + B + C + D done
 **Driver:** issues #1, #2, #3 of [REFER-SLICE5-SURPRISES.md](REFER-SLICE5-SURPRISES.md) — junior-engineer fixes deemed not radical enough for long-term maintainability.
 **Owner:** TBD
 **Rough cost:** ~1.5 weeks focused effort, 8–10 PRs.
