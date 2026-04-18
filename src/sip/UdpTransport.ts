@@ -1,23 +1,24 @@
 /**
- * UdpTransport service — wraps a Node.js dgram socket as an Effect service.
+ * UdpTransport — facade over SignalingNetwork.real.bindUdp.
  *
- * Incoming packets land in a *bounded* Queue and are exposed as a Stream.
- * Effect.acquireRelease inside Layer.effect ensures clean socket shutdown.
+ * Owns the B2BUA-specific policy glue that sits on top of the raw UDP
+ * primitive:
+ *   - Tier 1 overload brake (preIngress hook: stateless 503 template
+ *     for new, non-emergency INVITEs when the ingress queue crosses
+ *     `udpQueueTier1ThresholdPct` of `udpQueueMax`).
+ *   - UdpTransportMetrics — the Prometheus-visible shape expected by
+ *     StatusServer. Brake counters are mutated in the preIngress hook;
+ *     queue depth and tail-drop count are proxied live from the
+ *     underlying UdpEndpoint.
+ *   - `localAddress` — the transport's bound (ip, port), surfaced from
+ *     `endpoint.localAddress`. Single source of truth for Via/Contact
+ *     stamping (SipRouter reads this instead of raw AppConfig fields).
  *
- * Overload protection (Tier 1 — pre-parse emergency brake):
- *   When the queue depth crosses `udpQueueTier1ThresholdPct` of `udpQueueMax`,
- *   the recv callback runs a cheap byte-level classifier on incoming packets.
- *   New, non-emergency INVITEs are answered with a templated stateless 503
- *   built by header-line slicing (no JsSIP parse, no transaction, no fiber).
- *   In-dialog traffic, responses, ACKs, BYEs, and emergency INVITEs all pass
- *   through untouched.
- *
- *   When the bounded queue is *fully* saturated even after the brake, the
- *   recv callback tail-drops the packet (counter increment + log).
+ * The IpcTransport (cluster worker variant) satisfies the same
+ * interface, sourcing `localAddress` from shared AppConfig.
  */
 
-import * as dgram from "node:dgram"
-import { Cause, Effect, Layer, Queue, ServiceMap, Stream } from "effect"
+import { Effect, Layer, ServiceMap, Stream } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
 import {
@@ -26,17 +27,19 @@ import {
   isInviteRequestBuffer,
   jitteredRetryAfter,
 } from "./MessageFactory.js"
-import type { RemoteInfo } from "./types.js"
+import {
+  PreIngressAction,
+  SignalingNetwork,
+  type PreIngressHook,
+  type UdpPacket,
+} from "./SignalingNetwork.js"
 
-export interface UdpPacket {
-  readonly raw: Buffer
-  readonly rinfo: RemoteInfo
-}
+export type { UdpPacket } from "./SignalingNetwork.js"
 
 /**
  * Lightweight per-instance counters for overload observability. Exposed via
- * the StatusServer / Prometheus endpoint. Intentionally plain-object so reads
- * are O(1) and writes are zero-cost.
+ * the StatusServer / Prometheus endpoint. Reads are O(1); `queueDepth` and
+ * `dropsTailDrop` are live getters backed by the underlying endpoint.
  */
 export interface UdpTransportMetrics {
   queueDepth: number
@@ -49,118 +52,103 @@ export interface UdpTransportMetrics {
 export class UdpTransport extends ServiceMap.Service<
   UdpTransport,
   {
-    readonly send: (msg: Buffer, port: number, address: string) => Effect.Effect<void, Error>
+    readonly send: (msg: Buffer, port: number, address: string) => Effect.Effect<void>
     readonly messages: Stream.Stream<UdpPacket>
     readonly metrics: UdpTransportMetrics
+    readonly localAddress: { readonly ip: string; readonly port: number }
   }
 >()("@sipjsserver/UdpTransport") {
-  static readonly layer = (bindPort: number) =>
-    Layer.effect(
-      UdpTransport,
-      Effect.gen(function* () {
-        const config = yield* AppConfig
-        const registry = yield* MetricsRegistry
-        const queueMax = config.udpQueueMax
-        const tier1Threshold = Math.floor((queueMax * config.udpQueueTier1ThresholdPct) / 100)
-        const retryAfterBase = config.retryAfterBaseSec
-        const retryAfterJitter = config.retryAfterJitterSec
+  static readonly layer = Layer.effect(
+    UdpTransport,
+    Effect.gen(function* () {
+      const config = yield* AppConfig
+      const registry = yield* MetricsRegistry
+      const network = yield* SignalingNetwork
+      const queueMax = config.udpQueueMax
+      const tier1Threshold = Math.floor((queueMax * config.udpQueueTier1ThresholdPct) / 100)
+      const retryAfterBase = config.retryAfterBaseSec
+      const retryAfterJitter = config.retryAfterJitterSec
 
-        // Bounded queue. Queue error type includes Cause.Done so Stream.fromQueue terminates cleanly.
-        const queue = yield* Queue.bounded<UdpPacket, Cause.Done>(queueMax)
+      // Brake counters — mutated synchronously inside preIngress.
+      let dropsTier1Brake = 0
+      let tier1RejectSent = 0
 
-        const metrics: UdpTransportMetrics = {
-          queueDepth: 0,
-          queueMax,
-          dropsTier1Brake: 0,
-          dropsTailDrop: 0,
-          tier1RejectSent: 0,
-        }
-        registry.udp = metrics
-
-        const socket = yield* Effect.acquireRelease(
-          Effect.callback<dgram.Socket>((resume) => {
-            const sock = dgram.createSocket("udp4")
-            sock.once("listening", () => resume(Effect.succeed(sock)))
-            sock.once("error", (err) => resume(Effect.die(err)))
-            sock.bind(bindPort)
-          }),
-          (sock) =>
-            Effect.callback<void>((resume) => {
-              sock.close(() => resume(Effect.void))
-            })
-        )
-
-        // Stateless reject — bypasses TransactionLayer entirely.
-        const sendStatelessReject = (raw: Buffer, rinfo: dgram.RemoteInfo): boolean => {
+      const preIngress: PreIngressHook = (raw, _rinfo, depth) => {
+        if (
+          depth >= tier1Threshold &&
+          isInviteRequestBuffer(raw) &&
+          !bufferHasEmergencyMarker(raw)
+        ) {
           const retryAfter = jitteredRetryAfter(retryAfterBase, retryAfterJitter)
           const respBuf = buildStatelessReject503Buffer(raw, retryAfter)
-          if (respBuf === null) return false
-          // Fire-and-forget send. Errors are logged via the socket error handler.
-          socket.send(respBuf, 0, respBuf.length, rinfo.port, rinfo.address, () => {})
-          metrics.tier1RejectSent++
-          return true
+          if (respBuf !== null) {
+            dropsTier1Brake++
+            tier1RejectSent++
+            return PreIngressAction.reply({ buf: respBuf })
+          }
+          // Templating failed (malformed buffer) — accept and let the
+          // normal pipeline reject.
         }
+        return PreIngressAction.accept()
+      }
 
-        // Register message handler — push into bounded queue from event loop.
-        // Uses Queue.offerUnsafe + size check to keep the recv callback synchronous.
-        yield* Effect.acquireRelease(
-          Effect.sync(() => {
-            socket.on("message", (msg: Buffer, rinfo: dgram.RemoteInfo) => {
-              // O(1) depth read for the brake decision
-              const depth = Queue.sizeUnsafe(queue)
-              metrics.queueDepth = depth
-
-              // Tier 1 — pre-parse emergency brake.
-              // Activates only when ingress queue is past the configured threshold.
-              if (depth >= tier1Threshold) {
-                if (isInviteRequestBuffer(msg) && !bufferHasEmergencyMarker(msg)) {
-                  // Templated 503 — bypasses TransactionLayer entirely.
-                  if (sendStatelessReject(msg, rinfo)) {
-                    metrics.dropsTier1Brake++
-                    return
-                  }
-                  // Templating failed (malformed buffer): fall through to enqueue.
-                }
-                // Emergency / in-dialog / response: pass through.
-              }
-
-              const packet: UdpPacket = {
-                raw: msg,
-                rinfo: { address: rinfo.address, port: rinfo.port },
-              }
-              // offerUnsafe returns false if the bounded queue is full (tail-drop).
-              if (!Queue.offerUnsafe(queue, packet)) {
-                metrics.dropsTailDrop++
-                return
-              }
-              metrics.queueDepth = Queue.sizeUnsafe(queue)
-            })
-            socket.on("error", (err: Error) => {
-              console.error(`UDP socket error: ${err.message}`)
-            })
-          }),
-          () => Effect.sync(() => Queue.endUnsafe(queue))
-        )
-
-        yield* Effect.logInfo(
-          `UDP socket listening on port ${bindPort} (queueMax=${queueMax}, tier1Threshold=${tier1Threshold})`
-        )
-
-        const send = Effect.fn("UdpTransport.send")(function* (
-          msg: Buffer,
-          port: number,
-          address: string
-        ) {
-          yield* Effect.callback<void, Error>((resume) => {
-            socket.send(msg, 0, msg.length, port, address, (err) => {
-              resume(err ? Effect.fail(err) : Effect.void)
-            })
-          })
+      const endpoint = yield* network
+        .bindUdp({
+          ip: config.sipLocalIp,
+          port: config.sipLocalPort,
+          queueMax,
+          preIngress,
         })
+        .pipe(Effect.orDie)
 
-        const messages = Stream.fromQueue(queue)
-
-        return { send, messages, metrics }
+      // Prometheus-visible shape. `queueDepth` / `dropsTailDrop` are
+      // live-backed by the endpoint's counters so no polling loop is
+      // needed to keep them current.
+      const metrics = {
+        queueMax,
+        dropsTier1Brake: 0,
+        tier1RejectSent: 0,
+      } as UdpTransportMetrics
+      Object.defineProperty(metrics, "queueDepth", {
+        get: () => endpoint.queueDepth(),
+        enumerable: true,
       })
-    )
+      Object.defineProperty(metrics, "dropsTailDrop", {
+        get: () => endpoint.counters.tailDropped,
+        enumerable: true,
+      })
+      Object.defineProperty(metrics, "dropsTier1Brake", {
+        get: () => dropsTier1Brake,
+        enumerable: true,
+      })
+      Object.defineProperty(metrics, "tier1RejectSent", {
+        get: () => tier1RejectSent,
+        enumerable: true,
+      })
+      registry.udp = metrics
+
+      yield* Effect.logInfo(
+        `UDP socket listening on ${endpoint.localAddress.ip}:${endpoint.localAddress.port} (queueMax=${queueMax}, tier1Threshold=${tier1Threshold})`
+      )
+
+      // Fire-and-forget from TransactionLayer's perspective. SendErrors are
+      // infrastructure-level (socket gone, kernel queue full) — surface as
+      // defects so they're logged by the top-level runtime rather than
+      // polluting the typed failure channel of every caller.
+      const send = Effect.fn("UdpTransport.send")(function* (
+        msg: Buffer,
+        port: number,
+        address: string
+      ) {
+        yield* endpoint.send(msg, port, address).pipe(Effect.orDie)
+      })
+
+      return {
+        send,
+        messages: endpoint.messages,
+        metrics,
+        localAddress: endpoint.localAddress,
+      }
+    })
+  )
 }

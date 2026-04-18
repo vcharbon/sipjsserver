@@ -5,10 +5,15 @@
  * Inbound: raw packets arrive as IPC messages from the dispatcher.
  * Outbound: serialized buffers are sent back to the dispatcher via IPC.
  *
+ * `localAddress` is sourced from shared AppConfig — in cluster mode the
+ * dispatcher and every worker see the same `sipLocalIp:sipLocalPort` via
+ * env. The dispatcher is the one that actually binds the OS socket.
+ *
  * This layer is used by worker child processes in cluster mode.
  */
 
 import { Cause, Effect, Layer, Queue, Stream } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
 import { UdpTransport, type UdpPacket, type UdpTransportMetrics } from "../sip/UdpTransport.js"
 import type { MainToWorkerMessage, WorkerToMainMessage } from "./IpcProtocol.js"
 
@@ -16,9 +21,10 @@ import type { MainToWorkerMessage, WorkerToMainMessage } from "./IpcProtocol.js"
  * UdpTransport layer backed by IPC with the parent dispatcher process.
  * Must only be used inside a worker child process (process.send must exist).
  */
-export const IpcTransportLayer: Layer.Layer<UdpTransport> = Layer.effect(
+export const IpcTransportLayer: Layer.Layer<UdpTransport, never, AppConfig> = Layer.effect(
   UdpTransport,
   Effect.gen(function* () {
+    const config = yield* AppConfig
     const queue = yield* Queue.unbounded<UdpPacket, Cause.Done>()
 
     // Workers see only IPC packets from the dispatcher; the real UDP-level
@@ -81,6 +87,11 @@ export const IpcTransportLayer: Layer.Layer<UdpTransport> = Layer.effect(
 
     const messages = Stream.fromQueue(queue)
 
-    return { send, messages, metrics }
+    return {
+      send,
+      messages,
+      metrics,
+      localAddress: { ip: config.sipLocalIp, port: config.sipLocalPort },
+    }
   })
 )

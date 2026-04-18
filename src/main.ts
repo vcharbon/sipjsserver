@@ -23,6 +23,7 @@ import { CallLimiter } from "./call/CallLimiter.js"
 import { CdrWriter } from "./cdr/CdrWriter.js"
 import { RedisClient } from "./redis/RedisClient.js"
 import { UdpTransport } from "./sip/UdpTransport.js"
+import { SignalingNetwork } from "./sip/SignalingNetwork.js"
 import { StatusServerLayer } from "./http/StatusServer.js"
 import { CallControlClient } from "./http/CallControlClient.js"
 import { TracingService } from "./tracing/TracingService.js"
@@ -86,12 +87,11 @@ const OtelLayer = Layer.unwrap(
   })
 ).pipe(Layer.provide(AppConfigLayer))
 
-const UdpLayer = Layer.unwrap(
-  Effect.gen(function* () {
-    const config = yield* AppConfig
-    return UdpTransport.layer(config.sipLocalPort)
-  })
-).pipe(Layer.provide(AppConfigLayer), Layer.provide(MetricsRegistryLayer))
+const UdpLayer = UdpTransport.layer.pipe(
+  Layer.provide(AppConfigLayer),
+  Layer.provide(MetricsRegistryLayer),
+  Layer.provide(SignalingNetwork.real)
+)
 
 // ---------------------------------------------------------------------------
 // Composed B2BUA layer (core + environment deps)

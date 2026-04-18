@@ -13,6 +13,7 @@
 import { Clock, Effect, Layer, ServiceMap, Stream } from "effect"
 import type { RemoteInfo, SipHeader, SipMessage, SipRequest, SipResponse } from "./types.js"
 import { TransactionLayer } from "./TransactionLayer.js"
+import { UdpTransport } from "./UdpTransport.js"
 import { serialize, messageSummary } from "./Serializer.js"
 import {
   buildRejectResponse,
@@ -282,6 +283,7 @@ export class SipRouter extends ServiceMap.Service<
     Effect.gen(function* () {
       const config = yield* AppConfig
       const txnLayer = yield* TransactionLayer
+      const transport = yield* UdpTransport
       const callState = yield* CallState
       const callControl = yield* CallControlClient
       const limiter = yield* CallLimiter
@@ -340,7 +342,7 @@ export class SipRouter extends ServiceMap.Service<
             }
 
             const { message: stampedMsg, branch } = stampHeaders(
-              env.message, config.sipLocalIp, config.sipLocalPort, callRef, outLeg,
+              env.message, transport.localAddress.ip, transport.localAddress.port, callRef, outLeg,
               workingCall.emergency === true, forceBranch,
             )
 
@@ -624,7 +626,7 @@ export class SipRouter extends ServiceMap.Service<
                 // Replace Contact placeholder with concrete value (no call context for stamping)
                 const rejectHeaders = reject.headers.map(hdr =>
                   hdr.value === "__PLACEHOLDER__"
-                    ? { name: hdr.name, value: `<sip:b2bua@${config.sipLocalIp}:${config.sipLocalPort}>` }
+                    ? { name: hdr.name, value: `<sip:b2bua@${transport.localAddress.ip}:${transport.localAddress.port}>` }
                     : hdr
                 )
                 const rejectMsg: SipResponse = { ...reject, headers: rejectHeaders }
@@ -651,7 +653,7 @@ export class SipRouter extends ServiceMap.Service<
               const reject = buildRejectResponse(event.message as SipRequest, 481, "Call/Transaction Does Not Exist")
               const rejectHeaders = reject.headers.map(hdr =>
                 hdr.value === "__PLACEHOLDER__"
-                  ? { name: hdr.name, value: `<sip:b2bua@${config.sipLocalIp}:${config.sipLocalPort}>` }
+                  ? { name: hdr.name, value: `<sip:b2bua@${transport.localAddress.ip}:${transport.localAddress.port}>` }
                   : hdr
               )
               const rejectMsg: SipResponse = { ...reject, headers: rejectHeaders }

@@ -394,6 +394,7 @@ export function createSimulatedTransport(opts?: {
             dropsTailDrop: 0,
             tier1RejectSent: 0,
           },
+          localAddress: { ip: config.sipLocalIp, port: config.sipLocalPort },
         })
 
         const RedisLayer = RedisClient.layer.pipe(Layer.provide(AppConfigLayer))

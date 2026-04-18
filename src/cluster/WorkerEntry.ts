@@ -105,7 +105,7 @@ const OtelLayer = Layer.unwrap(
 
 const SipLayer = B2buaCoreLayer.pipe(
   Layer.provide(AppConfigLayer),
-  Layer.provide(IpcTransportLayer),
+  Layer.provide(IpcTransportLayer.pipe(Layer.provide(AppConfigLayer))),
   Layer.provide(OverloadControllerLayer),
   Layer.provide(CallStateCacheLayer),
   Layer.provide(CallLimiterLayer),
