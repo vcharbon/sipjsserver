@@ -1165,12 +1165,15 @@ export const transferARealignTimeoutRule: RuleDefinition<undefined, undefined> =
 // ── transfer-a-glare-reinvite ──────────────────────────────────────────
 
 /**
- * A sent its own re-INVITE while our a-realigning re-INVITE was
- * outstanding. RFC 3261 §14.1 — respond 491 Request Pending.
+ * A sent a re-INVITE while the B2BUA is performing the SDP swap (phase
+ * c-realigning or a-realigning). RFC 3261 §14.1 — respond 491 Request
+ * Pending so A retries after our exchange completes. During Regime 1
+ * (refer-authorizing, c-ringing) A re-INVITEs still relay transparently
+ * to B — this rule only gates Regime 2.
  */
 export const transferAGlareReinviteRule: RuleDefinition<undefined, undefined> = {
   id: "transfer-a-glare-reinvite",
-  name: "A-leg re-INVITE during a-realigning → 491",
+  name: "A-leg re-INVITE during realigning → 491",
   alwaysActive: true,
   defaultPriority: PRIO_A_GLARE_REINVITE,
   stateSchema: Schema.Undefined,
@@ -1180,7 +1183,7 @@ export const transferAGlareReinviteRule: RuleDefinition<undefined, undefined> = 
     kind: "request",
     method: "INVITE",
     direction: "from-a",
-    transferPhase: "a-realigning",
+    transferPhase: ["c-realigning", "a-realigning"],
   },
 
   init: () => undefined,

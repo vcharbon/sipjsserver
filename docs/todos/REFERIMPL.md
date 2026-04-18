@@ -1,6 +1,6 @@
 # REFER-Driven Blind Transfer on the B2BUA
 
-**Status:** Slice 1, 2, 3, 4, 5, 6 done
+**Status:** Slice 1, 2, 3, 4, 5, 6, 7, 8, 9 done
 **Driver:** Implement REFER blind transfer for called
 
 ## Context
