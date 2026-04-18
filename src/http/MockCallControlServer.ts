@@ -166,10 +166,11 @@ export type MockReferBehavior =
  * Decide how to respond to a /call/refer request based on X-Api-Call in
  * `sip_headers`. Pure — no Effect, no HTTP. Throws on invalid X-Api-Call JSON.
  *
- * Recognised keys (v1 slice 1 subset):
+ * Recognised keys:
  *   - `refer-reject-403`     → { action: "reject", reject_code: 403 }
  *   - `refer-http-500`       → mock HTTP 500 (transport-level error)
  *   - `refer-http-timeout`   → mock hangs indefinitely (transport-level stall)
+ *   - `refer-allow-c`        → { action: "allow", destination, ... } (slice 5)
  *
  * Default (no X-Api-Call) → reject 603 (Declined).
  */
@@ -199,6 +200,24 @@ export function mockCallReferBehavior(body: CallReferRequestType): MockReferBeha
       return { type: "http500" }
     case "refer-http-timeout":
       return { type: "hang" }
+    case "refer-allow-c": {
+      const dest = instruction.destination as { host?: string; port?: number } | undefined
+      const response: Record<string, unknown> = {
+        action: "allow",
+        destination: {
+          host: dest?.host ?? "127.0.0.1",
+          port: dest?.port ?? 5667,
+          transport: "udp",
+        },
+      }
+      if (instruction.new_refer_to !== undefined) response.new_refer_to = instruction.new_refer_to
+      if (instruction.update_headers !== undefined) response.update_headers = instruction.update_headers
+      if (instruction.no_answer_timeout_sec !== undefined) response.no_answer_timeout_sec = instruction.no_answer_timeout_sec
+      if (instruction.call_limiter !== undefined) response.call_limiter = instruction.call_limiter
+      if (instruction.callback_context !== undefined) response.callback_context = instruction.callback_context
+      if (instruction.relay_first_18x_to_180) response.relay_first_18x_to_180 = true
+      return { type: "respond", body: response as CallReferResponseType }
+    }
     default:
       return {
         type: "respond",

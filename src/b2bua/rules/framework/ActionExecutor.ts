@@ -248,7 +248,7 @@ function executeAction(
       executeSendPrackToLeg(action, ctx, state)
       break
     case "confirm-dialog":
-      executeConfirmDialog(ctx, state)
+      executeConfirmDialog(action, ctx, state)
       break
     case "create-leg":
       executeCreateLeg(action, ctx, state)
@@ -791,6 +791,7 @@ function relayResponseMsg(
  * Must be the first action in the sequence — before merge and relay-to-peer.
  */
 function executeConfirmDialog(
+  action: Extract<RuleAction, { type: "confirm-dialog" }>,
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
@@ -837,6 +838,10 @@ function executeConfirmDialog(
     disposition: "bridged" as const,
     dialogs: [dialog],
   }))
+
+  // Transfer C-leg 200: skip A↔source tag mapping and a-leg rewrite so the
+  // existing A↔B dialog stays intact. The C leg is confirmed but not peered.
+  if (action.skipPeerSync) return
 
   // Resolve or create tag mapping for this b-leg toTag
   const existingMapping = findByBTag(state.call, bLeg.legId, toTag)
@@ -1030,6 +1035,15 @@ function executeCreateLeg(
     }
   } else if (action.fromInvite !== undefined && action.fromInvite !== "snapshot") {
     baseInvite = action.fromInvite
+  }
+
+  // Honour body override (used by transfer-http-allow to send held SDP).
+  // `null` explicitly empties the body.
+  if (baseInvite !== undefined && action.updateBody !== undefined) {
+    const newBody = action.updateBody === null
+      ? new Uint8Array(0)
+      : new TextEncoder().encode(action.updateBody)
+    baseInvite = { ...baseInvite, body: newBody, raw: Buffer.from(newBody) }
   }
 
   const port = action.destination.port ?? 5060

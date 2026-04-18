@@ -222,8 +222,15 @@ export type RuleAction =
        * Sets a-leg: state="confirmed".
        * Creates/updates tag mapping.
        * Must be placed BEFORE relay-to-peer and merge in the action sequence.
+       *
+       * `skipPeerSync` (used by the REFER-transfer C-leg flow) suppresses the
+       * a-leg state/dialog rewrite and the A↔source tag-mapping side effects.
+       * Only the source leg's dialog is confirmed. Leaves the A↔B peering
+       * untouched, which is what the C-leg 200 requires — A is still bridged
+       * with B at that point.
        */
       readonly type: "confirm-dialog"
+      readonly skipPeerSync?: boolean
     }
 
   // ── Leg lifecycle ──

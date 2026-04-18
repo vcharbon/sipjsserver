@@ -347,6 +347,13 @@ export const TransferState = Schema.Struct({
   referCSeq: Schema.optional(Schema.Int),
   /** Wall-clock ms when the REFER was received — drives the overall safety timer. */
   startedAtMs: Schema.Number,
+  /**
+   * Last 1xx status code forwarded on the REFER subscription as a NOTIFY
+   * sipfrag. Used by `transfer-c-1xx-to-notify` to dedupe repeats (180,
+   * then another 180 → only one NOTIFY). Unset until the first provisional
+   * is translated.
+   */
+  lastCLegNotifiedStatus: Schema.optional(Schema.Int),
 })
 export type TransferState = typeof TransferState.Type
 
