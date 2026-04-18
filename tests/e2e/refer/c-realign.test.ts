@@ -5,8 +5,6 @@
  * resulting phase transition to `a-realigning`. Slice 7 adds the re-INVITE
  * A exchange — this slice stops once the B2BUA has ACKed C's 200 for the
  * re-INVITE (or rolled back on failure).
- *
- * Runner is configured with `referAllowEnabled: true`.
  */
 
 import { describe, it } from "@effect/vitest"
@@ -31,7 +29,6 @@ describe("E2E (fake clock) — REFER c-realigning phase", () => {
     sipPort: 15063,
     httpPort: 13005,
     outputDir: OUTPUT_DIR,
-    configOverrides: { referAllowEnabled: true },
   })
 
   it.effect(

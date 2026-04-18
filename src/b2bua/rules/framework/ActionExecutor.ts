@@ -904,7 +904,13 @@ function executeAckLeg(
   // the dialog as lastInviteCSeq).
   const ackCSeq = dialog.lastInviteCSeq ?? dialog.localCSeq ?? 1
 
-  const ackMsg = buildAck(leg.callId, leg.fromTag, dialog.toTag, targetUri, ackCSeq, leg.localUri, leg.remoteUri)
+  // Dialog-leg asymmetry — directionalTags gives the correct From/To tags for
+  // an outbound request on either leg. A-leg: B2BUA is UAC on a re-INVITE,
+  // so From=b2bua (dialog.toTag), To=alice (leg.fromTag). B-leg: From=b2bua
+  // (leg.fromTag), To=bob (dialog.toTag) — the existing shape.
+  const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
+
+  const ackMsg = buildAck(leg.callId, fromTag, toTag, targetUri, ackCSeq, leg.localUri, leg.remoteUri)
   const routed = leg.legId !== "a" ? applyRouteSet(ackMsg, dialog, target) : { msg: ackMsg, target }
 
   state.outbound.push({

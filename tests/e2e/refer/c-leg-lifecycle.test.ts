@@ -5,10 +5,6 @@
  * authorisation up to (but not including) re-INVITEs. Slices 6/7 add the
  * c-realigning and a-realigning phases on top of this foundation.
  *
- * The runner is configured with `referAllowEnabled: true` so that the
- * `transfer-http-allow` rule builds the C leg instead of degrading to
- * NOTIFY 501.
- *
  * Coverage results land in `test-results/fake-clock/index.html` alongside
  * the rest of the fake-clock e2e output.
  */
@@ -35,7 +31,6 @@ describe("E2E (fake clock) — REFER allow path (C leg lifecycle)", () => {
     sipPort: 15062,
     httpPort: 13004,
     outputDir: OUTPUT_DIR,
-    configOverrides: { referAllowEnabled: true },
   })
 
   it.effect(

@@ -3,11 +3,8 @@
  *
  * The B2BUA intercepts an in-dialog REFER from the remote B leg, authorizes
  * the transfer via POST /call/refer, and either drives the outbound call to
- * the transfer target (C leg, implemented across slices 5–7) or rejects with
- * a terminal NOTIFY. Slice 4 wires up the reject paths plus the initial
- * intercept+NOTIFY-100 handshake. When REFER_ALLOW_ENABLED=false, an allow
- * outcome is also treated as a reject (NOTIFY 501) so the slice is
- * self-contained.
+ * the transfer target (C leg + c-realign + a-realign + merge) or rejects
+ * with a terminal NOTIFY on the REFER subscription.
  *
  * References:
  *  - RFC 3515 §2.4 — REFER request/response and implicit subscription
@@ -92,6 +89,10 @@ const PRIO_C_REALIGN_200 = 160
 const PRIO_C_REALIGN_TIMEOUT = 165
 const PRIO_C_GLARE_REINVITE = 170
 const PRIO_B_IN_CR_AR_REJECT = 175
+const PRIO_A_REALIGN_FAIL = 180
+const PRIO_A_REALIGN_200 = 185
+const PRIO_A_REALIGN_TIMEOUT = 190
+const PRIO_A_GLARE_REINVITE = 195
 
 // Subscription-State fragments (RFC 3265 §3.2.4)
 const SUB_STATE_ACTIVE_60 = "active;expires=60"
@@ -348,11 +349,6 @@ interface AllowPayload {
  * /call/refer responded with action=allow. Build the held SDP from A's codec
  * profile, create the C leg via create-leg (with bodyUpdate carrying the held
  * SDP), advance the transfer phase to `c-ringing`, and record the C leg id.
- *
- * When REFER_ALLOW_ENABLED=false, degrade to NOTIFY 501 Not Implemented so the
- * reject path covers the slice without touching C-leg creation (used only
- * before slice 5 rules land; left as a safety net for operators who explicitly
- * disable the feature flag).
  */
 export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
   id: "transfer-http-allow",
@@ -375,25 +371,6 @@ export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
     Effect.gen(function* () {
       const transfer = ctx.call.transfer
       if (transfer === null || transfer === undefined) return undefined
-      const legId = transfer.referrerLegId
-
-      if (!ctx.config.referAllowEnabled) {
-        const body = sipfragFromStatus(501, "Not Implemented")
-        const actions: RuleAction[] = [
-          {
-            type: "send-notify" as const,
-            legId,
-            event: "refer",
-            subscriptionState: SUB_STATE_TERMINATED_NORESOURCE,
-            contentType: "message/sipfrag;version=2.0",
-            body,
-          },
-          { type: "cancel-timer" as const, timerId: `refer_subscription_expiry-${ctx.callRef}` },
-          { type: "cancel-timer" as const, timerId: `refer_overall_safety-${ctx.callRef}` },
-          { type: "clear-transfer" as const },
-        ]
-        return { actions, state: undefined }
-      }
 
       if (ctx.event.type !== "internal-event") return undefined
       const payload = ctx.event.payload as AllowPayload | undefined
@@ -829,16 +806,15 @@ function isReferrerBLegNonBye(ctx: RuleContext): boolean {
 // ── transfer-c-realign-200 ────────────────────────────────────────────────
 
 /**
- * C answered our c-realigning re-INVITE with 2xx. ACK C, cancel the
- * re-INVITE answer watchdog, and transition to `a-realigning`.
- *
- * Slice 6 scope: stop here. Slice 7 extends this rule to also emit
- * `send-reinvite A` with the captured `transfer.cInitialSdp` and arm a fresh
- * answer watchdog.
+ * C answered our c-realigning re-INVITE with 2xx. ACK C, cancel the C-side
+ * re-INVITE answer watchdog, transition to `a-realigning`, arm a fresh
+ * watchdog keyed on the a-leg, and emit the B2BUA-originated re-INVITE on
+ * A carrying C's captured initial SDP. A's 2xx completes the merge
+ * (transfer-a-realign-200); 4xx/5xx/6xx rolls back (transfer-a-realign-fail).
  */
 export const transferCRealign200Rule: RuleDefinition<undefined, undefined> = {
   id: "transfer-c-realign-200",
-  name: "C-leg 2xx to c-realign re-INVITE → phase a-realigning",
+  name: "C-leg 2xx to c-realign re-INVITE → phase a-realigning + re-INVITE A",
   alwaysActive: true,
   defaultPriority: PRIO_C_REALIGN_200,
   stateSchema: Schema.Undefined,
@@ -861,6 +837,7 @@ export const transferCRealign200Rule: RuleDefinition<undefined, undefined> = {
       if (transfer === null || transfer === undefined) return undefined
       const cLegId = transfer.cLegId
       if (cLegId === undefined) return undefined
+      const cInitialSdp = transfer.cInitialSdp
 
       const actions: RuleAction[] = [
         { type: "ack-leg" as const, legId: cLegId },
@@ -871,6 +848,19 @@ export const transferCRealign200Rule: RuleDefinition<undefined, undefined> = {
         {
           type: "update-transfer" as const,
           update: { phase: "a-realigning" as const },
+        },
+        {
+          type: "schedule-timer" as const,
+          timerType: "refer_reinvite_answer" as const,
+          delaySec: 32,
+          legId: "a",
+        },
+        {
+          type: "send-reinvite" as const,
+          legId: "a",
+          bodyUpdate: cInitialSdp !== undefined && cInitialSdp.byteLength > 0
+            ? { kind: "set" as const, value: cInitialSdp }
+            : { kind: "drop" as const },
         },
       ]
       return { actions, state: undefined }
@@ -1011,6 +1001,196 @@ export const transferCGlareReinviteRule: RuleDefinition<undefined, undefined> = 
     }),
 }
 
+// ── A-leg predicates for a-realigning rules ──────────────────────────────
+
+/** Response arrived on the a-leg (direction: from-a). */
+function isALegResponse(ctx: RuleContext): boolean {
+  if (ctx.event.type !== "sip") return false
+  const msg = ctx.event.message
+  if (msg.type !== "response") return false
+  return ctx.sourceLeg.legId === "a"
+}
+
+/** Timer fired for the a-leg refer_reinvite_answer watchdog. */
+function isALegReinviteTimer(ctx: RuleContext): boolean {
+  if (ctx.event.type !== "timer") return false
+  return ctx.event.legId === "a"
+}
+
+// ── transfer-a-realign-200 ──────────────────────────────────────────────
+
+/**
+ * A answered our a-realigning re-INVITE with 2xx. The media swap is
+ * complete. ACK A, cancel the answer watchdog and the overall-safety
+ * timer, merge(a, cLeg) so subsequent in-dialog traffic routes to the
+ * new peer, clear transfer state, and CDR the completion.
+ */
+export const transferARealign200Rule: RuleDefinition<undefined, undefined> = {
+  id: "transfer-a-realign-200",
+  name: "A-leg 2xx to a-realign re-INVITE → merge(a, c), transfer complete",
+  alwaysActive: true,
+  defaultPriority: PRIO_A_REALIGN_200,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "2xx",
+    direction: "from-a",
+    transferPhase: "a-realigning",
+    filter: isALegResponse,
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) =>
+    Effect.gen(function* () {
+      const transfer = ctx.call.transfer
+      if (transfer === null || transfer === undefined) return undefined
+      const cLegId = transfer.cLegId
+      if (cLegId === undefined) return undefined
+
+      const actions: RuleAction[] = [
+        { type: "ack-leg" as const, legId: "a" },
+        {
+          type: "cancel-timer" as const,
+          timerId: `refer_reinvite_answer-${ctx.callRef}-a`,
+        },
+        { type: "cancel-timer" as const, timerId: `refer_overall_safety-${ctx.callRef}` },
+        { type: "merge" as const, legA: "a", legB: cLegId },
+        {
+          type: "add-cdr-event" as const,
+          eventType: "answer" as const,
+          legId: "a",
+          statusCode: 200,
+          reason: "transfer-completed",
+        },
+        { type: "clear-transfer" as const },
+      ]
+      return { actions, state: undefined }
+    }),
+}
+
+// ── transfer-a-realign-fail ─────────────────────────────────────────────
+
+/**
+ * A rejected the a-realigning re-INVITE with 4xx/5xx/6xx. The merge
+ * cannot complete — roll back all legs.
+ */
+export const transferARealignFailRule: RuleDefinition<undefined, undefined> = {
+  id: "transfer-a-realign-fail",
+  name: "A-leg rejects a-realign re-INVITE → rollback",
+  alwaysActive: true,
+  defaultPriority: PRIO_A_REALIGN_FAIL,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: ["4xx", "5xx", "6xx"],
+    direction: "from-a",
+    transferPhase: "a-realigning",
+    filter: isALegResponse,
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) =>
+    Effect.gen(function* () {
+      if (ctx.event.type !== "sip") return undefined
+      const resp = ctx.event.message
+      if (resp.type !== "response") return undefined
+
+      const actions: RuleAction[] = [
+        {
+          type: "cancel-timer" as const,
+          timerId: `refer_reinvite_answer-${ctx.callRef}-a`,
+        },
+        { type: "cancel-timer" as const, timerId: `refer_overall_safety-${ctx.callRef}` },
+        {
+          type: "add-cdr-event" as const,
+          eventType: "reject" as const,
+          legId: "a",
+          statusCode: resp.status,
+          reason: "transfer-rollback-a-realign",
+        },
+        { type: "begin-termination" as const },
+      ]
+      return { actions, state: undefined }
+    }),
+}
+
+// ── transfer-a-realign-timeout ──────────────────────────────────────────
+
+/**
+ * The refer_reinvite_answer watchdog fired during `a-realigning` — A did
+ * not respond to our re-INVITE within 32s. Roll back all legs.
+ */
+export const transferARealignTimeoutRule: RuleDefinition<undefined, undefined> = {
+  id: "transfer-a-realign-timeout",
+  name: "a-realign re-INVITE timeout → rollback",
+  alwaysActive: true,
+  defaultPriority: PRIO_A_REALIGN_TIMEOUT,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "timer",
+    timerType: "refer_reinvite_answer",
+    transferPhase: "a-realigning",
+    filter: isALegReinviteTimer,
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) =>
+    Effect.gen(function* () {
+      const actions: RuleAction[] = [
+        { type: "cancel-timer" as const, timerId: `refer_overall_safety-${ctx.callRef}` },
+        {
+          type: "add-cdr-event" as const,
+          eventType: "timeout" as const,
+          legId: "a",
+          reason: "transfer-rollback-a-realign",
+        },
+        { type: "begin-termination" as const },
+      ]
+      return { actions, state: undefined }
+    }),
+}
+
+// ── transfer-a-glare-reinvite ──────────────────────────────────────────
+
+/**
+ * A sent its own re-INVITE while our a-realigning re-INVITE was
+ * outstanding. RFC 3261 §14.1 — respond 491 Request Pending.
+ */
+export const transferAGlareReinviteRule: RuleDefinition<undefined, undefined> = {
+  id: "transfer-a-glare-reinvite",
+  name: "A-leg re-INVITE during a-realigning → 491",
+  alwaysActive: true,
+  defaultPriority: PRIO_A_GLARE_REINVITE,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "request",
+    method: "INVITE",
+    direction: "from-a",
+    transferPhase: "a-realigning",
+  },
+
+  init: () => undefined,
+
+  handle: () =>
+    Effect.succeed({
+      actions: [{ type: "respond" as const, status: 491, reason: "Request Pending" }],
+      state: undefined,
+    }),
+}
+
 // ── transfer-b-in-cre-are-reject ─────────────────────────────────────────
 
 /**
@@ -1063,4 +1243,8 @@ export const transferRules: ReadonlyArray<RuleDefinition<undefined, undefined>> 
   transferCRealignTimeoutRule,
   transferCGlareReinviteRule,
   transferBInCrArRejectRule,
+  transferARealign200Rule,
+  transferARealignFailRule,
+  transferARealignTimeoutRule,
+  transferAGlareReinviteRule,
 ]

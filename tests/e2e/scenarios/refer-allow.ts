@@ -5,9 +5,6 @@
  * mock /call/refer authorises (X-Api-Call `refer-allow-c`). The B2BUA builds
  * a C leg with held SDP and drives it through initial INVITE/200 OK/ACK —
  * stopping **before** any re-INVITEs (slices 6+ wire those).
- *
- * Requires `configOverrides: { referAllowEnabled: true }` on the runner —
- * otherwise the allow response degrades to a NOTIFY 501 (reject path).
  */
 
 import { scenario } from "../framework/dsl.js"

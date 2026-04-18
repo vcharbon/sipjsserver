@@ -77,16 +77,7 @@ export const AppConfigData = Schema.Struct({
   /** Max span attribute value length (bytes) passed to OTel SDK spanLimits. */
   otelMaxAttributeValueLength: Schema.Int,
   /** Emit tombstone spans (call.started / call.ended) for non-sampled calls. */
-  traceTombstoneEnabled: Schema.Boolean,
-
-  // ── REFER-driven blind transfer ───────────────────────────────────────
-  /**
-   * Feature flag: when false (default during slice 4), an `allow` decision
-   * from /call/refer is logged and a NOTIFY 501 terminated is emitted
-   * toward the referrer. Slices 5–7 progressively light up the real path;
-   * the flag is removed at the end of slice 7.
-   */
-  referAllowEnabled: Schema.Boolean
+  traceTombstoneEnabled: Schema.Boolean
 })
 
 export type AppConfigData = typeof AppConfigData.Type
@@ -144,8 +135,7 @@ function readConfigFromEnv(): AppConfigData {
       .map((h) => h.trim())
       .filter((h) => h.length > 0),
     otelMaxAttributeValueLength: parseInt(envOrDefault("OTEL_MAX_ATTRIBUTE_VALUE_LENGTH", "32768"), 10),
-    traceTombstoneEnabled: envOrDefault("TRACE_TOMBSTONE_ENABLED", "true") === "true",
-    referAllowEnabled: envOrDefault("REFER_ALLOW_ENABLED", "false") === "true"
+    traceTombstoneEnabled: envOrDefault("TRACE_TOMBSTONE_ENABLED", "true") === "true"
   }
 }
 

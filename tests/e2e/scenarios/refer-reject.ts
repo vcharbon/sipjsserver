@@ -8,9 +8,6 @@
  *   - Refer-To carrying a Replaces= URI parameter (attended transfer)
  *   - REFER with an unknown Call-ID (out of dialog)
  *   - A second REFER while the first is still in refer-authorizing
- *
- * All five assume `REFER_ALLOW_ENABLED=false`, but that flag does not affect
- * reject paths — it only gates the slice-5 allow branch.
  */
 
 import { scenario } from "../framework/dsl.js"
