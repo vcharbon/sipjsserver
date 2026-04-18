@@ -7,8 +7,9 @@
 import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
-import { getHeader } from "../../../sip/MessageFactory.js"
-import { findPendingRequest } from "../../../call/CallModel.js"
+import { getHeader, newTag } from "../../../sip/MessageFactory.js"
+import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
+import { confirmBridgedCall } from "../framework/actions/composites.js"
 
 // ── Helper: extract CSeq method from a SIP response ──────────────────────
 
@@ -80,11 +81,25 @@ export const confirmDialogRule: RuleDefinition<undefined, undefined> = {
   handle: (ctx) => {
     const resp = (ctx.event as Extract<typeof ctx.event, { type: "sip" }>).message as SipResponse
     const bLeg = ctx.sourceLeg
+    const bTag = resp.parsed?.to?.tag ?? ""
+
+    // Resolve or create the a-facing tag for this (bLeg, bTag). Policy
+    // modules such as relayFirst18xTo180 pre-seed the mapping via the
+    // composition hook, so the mapping may already exist with a chosen
+    // tag — reuse its aTag to keep the caller's dialog identity stable.
+    const existingMapping = findByBTag(ctx.call, bLeg.legId, bTag)
+    const aFacingTag = existingMapping?.aTag ?? newTag()
 
     const actions: RuleAction[] = []
 
     // Confirm b-leg dialog + a-leg state (must precede merge and relay)
-    actions.push({ type: "confirm-dialog" })
+    actions.push(...confirmBridgedCall({
+      sourceLegId: bLeg.legId,
+      sourceTag: bTag,
+      aFacingTag,
+      aLegId: "a",
+      mappingAlreadyExists: existingMapping !== undefined,
+    }))
 
     // Merge a-leg ↔ winning b-leg
     actions.push({ type: "merge", legA: "a", legB: bLeg.legId })

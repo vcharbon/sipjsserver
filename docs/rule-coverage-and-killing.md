@@ -57,10 +57,13 @@ Use this when:
 - A rule has coverage but you suspect no assertion actually depends on it.
 - You're stuck and want to know whether a specific rule is actually being exercised.
 
+> **Disabled as of 2026-04-18.** The `npm run test:rule-kill` script is currently a no-op: each mutation run is too slow under the simulated suite's fake clock, and a full campaign is impractical until fake-clock throughput is improved. The orchestrator itself ([scripts/rule-kill.ts](../scripts/rule-kill.ts)) still works — run it directly with `tsx scripts/rule-kill.ts` if you need the audit now.
+
 ### Run the whole campaign
 
 ```bash
-npm run test:rule-kill
+npm run test:rule-kill    # currently a no-op — prints a notice
+tsx scripts/rule-kill.ts  # run the actual mutation pass manually
 ```
 
 What happens:

@@ -137,7 +137,10 @@ Omitting a column means "accept any value". `OneOrMany<T>` accepts either a sing
 | `destroy-leg` | BYE (confirmed) or CANCEL (early) a leg. Sets `byeDisposition` automatically. |
 | `merge` | Connect two legs (set activePeer) |
 | `split` | Disconnect a leg from its peer (clear activePeer) |
-| `confirm-dialog` | Confirm a dialog (200 OK INVITE): set leg state to confirmed, update dialog, destroy losing b-legs, merge, schedule timers, cancel no-answer timers |
+| `confirm-dialog` | Populate `legs.{legId}.dialogs[0]` from the current 200 OK response (toTag, contact, RFC 3261 §12.1.2 route set from Record-Route, CSeq floor). Reach is one dialog. No peer-sync, no timers, no merge — rules compose with `update-leg-state`/`add-tag-mapping`/`stamp-dialog-to-tag` via the `confirmBridgedCall` helper when they need the full A↔B flip. |
+| `update-leg-state` | Set `legs.{legId}.state` and optionally `legs.{legId}.disposition`. |
+| `stamp-dialog-to-tag` | Stamp an explicit `toTag` onto `legs.{legId}.dialogs[0]` (or create one via `makeDialogFromIncoming`/`makeEmptyDialog` when no dialog exists). Used on the a-leg (UAS side) at 200-OK-INVITE time. |
+| `add-tag-mapping` | Append `{aTag,bLegId,bTag}` to `call.tagMap`. Idempotent by `(bLegId,bTag)`. |
 | `schedule-timer` | Schedule a timer (typed — see TimerType) |
 | `cancel-timer` | Cancel a timer by ID |
 | `cancel-all-timers` | Cancel all timers on the call |
@@ -153,6 +156,18 @@ Omitting a column means "accept any value". `OneOrMany<T>` accepts either a sing
 All rules use `begin-termination` for call-level termination (BYE, CANCEL, timeout, max-duration, keepalive-timeout). This sends BYE/CANCEL to each live leg and transitions to `"terminating"`. If all legs are already resolved (e.g., pre-dialog failure), `isFullyResolved()` is immediately true and the framework transitions to `"terminated"` on the spot — same code path, no special case.
 
 `terminate-call` is reserved for pre-dialog immediate failures where no confirmed legs exist and no BYE exchange is needed.
+
+### Composite: `confirmBridgedCall`
+
+Defined in [src/b2bua/rules/framework/actions/composites.ts](../src/b2bua/rules/framework/actions/composites.ts). Bundles the five single-reach primitives a rule needs to confirm an A↔B dialog on a 200 OK INVITE arriving from the source (B) leg:
+
+1. `update-leg-state` → source leg to `confirmed/bridged`
+2. `confirm-dialog`   → populate source-leg dialog[0] from the response
+3. `add-tag-mapping`  → record the chosen a-facing tag (skipped when the caller reports `mappingAlreadyExists: true`, e.g. when a policy module pre-seeded the mapping)
+4. `update-leg-state` → a-leg to `confirmed`
+5. `stamp-dialog-to-tag` → a-leg dialog[0] toTag
+
+Rules call it from `DialogRules.confirmDialogRule` and `CornerCaseRules.cancel200CrossingRule`. The REFER slice-5 `transfer-c-200-initial` rule does **not** use it — C-leg confirmation must not touch A↔B, so it emits `update-leg-state` + `confirm-dialog` on the C-leg only.
 
 ### MessageTransform
 
@@ -207,7 +222,7 @@ Priority only decides ties when two rules have identical specificity scores. Day
 | `relay-reinvite` | INVITE request (in-dialog) | relay-to-peer |
 | `relay-prack` | PRACK request | relay-to-peer |
 | `relay-provisional` | 1xx INVITE from b-leg | relay-to-peer, CDR |
-| `confirm-dialog` | 200 OK INVITE from b-leg (new, not retransmit) | confirm-dialog action (merge, relay, destroy losers, timers, CDR) |
+| `confirm-dialog` | 200 OK INVITE from b-leg (new, not retransmit) | `confirmBridgedCall` composite (`update-leg-state` × 2 + `confirm-dialog` + `add-tag-mapping` + `stamp-dialog-to-tag`) + `merge` + `relay-to-peer` + destroy losers + timers + CDR |
 | `relay-non-invite-200` | 200 OK for PRACK/UPDATE/INFO/OPTIONS (relayed) | relay-to-peer |
 | `handle-timeout` | Transaction timeout | begin-termination |
 | `handle-cancel` | CANCEL from a-leg | destroy all b-legs, CDR, begin-termination |

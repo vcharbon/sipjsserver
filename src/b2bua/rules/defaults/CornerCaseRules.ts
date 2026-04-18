@@ -8,8 +8,9 @@
 import { Effect, Schema } from "effect"
 import type { RuleDefinition } from "../framework/RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
-import { getHeader } from "../../../sip/MessageFactory.js"
-import { findPendingRequest } from "../../../call/CallModel.js"
+import { getHeader, newTag } from "../../../sip/MessageFactory.js"
+import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
+import { confirmBridgedCall } from "../framework/actions/composites.js"
 
 // ── Helper ────────────────────────────────────────────────────────────────
 
@@ -52,15 +53,28 @@ export const cancel200CrossingRule: RuleDefinition<undefined, undefined> = {
 
   init: () => undefined,
 
-  handle: (ctx) =>
-    Effect.succeed({
+  handle: (ctx) => {
+    const resp = (ctx.event as Extract<typeof ctx.event, { type: "sip" }>).message as SipResponse
+    const bLeg = ctx.sourceLeg
+    const bTag = resp.parsed?.to?.tag ?? ""
+    const existingMapping = findByBTag(ctx.call, bLeg.legId, bTag)
+    const aFacingTag = existingMapping?.aTag ?? newTag()
+
+    return Effect.succeed({
       actions: [
-        { type: "confirm-dialog" },
-        { type: "ack-leg", legId: ctx.sourceLeg.legId },
-        { type: "destroy-leg", legId: ctx.sourceLeg.legId },
+        ...confirmBridgedCall({
+          sourceLegId: bLeg.legId,
+          sourceTag: bTag,
+          aFacingTag,
+          aLegId: "a",
+          mappingAlreadyExists: existingMapping !== undefined,
+        }),
+        { type: "ack-leg", legId: bLeg.legId },
+        { type: "destroy-leg", legId: bLeg.legId },
       ],
       state: undefined,
-    }),
+    })
+  },
 }
 
 // ── retransmit-200 (priority 850) ─────────────────────────────────────────

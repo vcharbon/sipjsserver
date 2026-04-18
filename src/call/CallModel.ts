@@ -698,8 +698,17 @@ export function remoteTag(call: Call, legId: string): string | undefined {
 
 // ── Tag mapping helpers ───────────────────────────────────────────────────
 
-/** Add a tag mapping entry. */
+/**
+ * Add a tag mapping entry, keyed by (bLegId, bTag). If a mapping with the
+ * same (bLegId, bTag) is already present the call is returned unchanged —
+ * the tagMap is a dialog-identity index, duplicate rows would break
+ * findByATag / findByBTag lookups.
+ */
 export function addTagMapping(call: Call, mapping: TagMapping): Call {
+  const exists = call.tagMap.some(
+    (m) => m.bLegId === mapping.bLegId && m.bTag === mapping.bTag,
+  )
+  if (exists) return call
   return { ...call, tagMap: [...call.tagMap, mapping] }
 }
 

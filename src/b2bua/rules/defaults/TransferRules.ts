@@ -602,7 +602,13 @@ export const transferCLegAnswerRule: RuleDefinition<undefined, undefined> = {
 
       const body = sipfragFromStatus(200, "OK")
       const actions: RuleAction[] = [
-        { type: "confirm-dialog" as const, skipPeerSync: true },
+        {
+          type: "update-leg-state" as const,
+          legId: cLegId,
+          state: "confirmed",
+          disposition: "bridged",
+        },
+        { type: "confirm-dialog" as const, legId: cLegId },
         { type: "ack-leg" as const, legId: cLegId },
         {
           type: "send-notify" as const,

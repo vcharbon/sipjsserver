@@ -190,9 +190,9 @@ The B2BUA maintains a `TagMapping[]` array on the Call that maps between b-leg d
 { aTag: "b2bua-tag-for-alice", bLegId: "b-1", bTag: "fork1" }
 ```
 
-**Created in:** `handleProvisional` and `handle200OkInvite` — when a new b-leg To-tag appears, a mapping is created with a fresh `newTag()` as the `aTag`.
+**Created via `add-tag-mapping` primitive:** Emitted by `DialogRules.confirmDialogRule` and `CornerCaseRules.cancel200CrossingRule` (through the `confirmBridgedCall` composite), and by the `relayFirst18xTo180` policy module (which pre-seeds the mapping at 18x time so `confirmBridgedCall` can reuse the same `aTag` at 200 OK). `addTagMapping` is idempotent by `(bLegId, bTag)` — emitting it twice for the same b-leg/b-tag pair is a no-op.
 
-**Used in:** `handlePrack` and `handleReInvite` — Alice's PRACK/re-INVITE carries the a-facing tag; `findByATag()` reverse-looks up the b-leg dialog.
+**Used in:** `relay-prack` and `relay-reinvite` rules — Alice's PRACK/re-INVITE carries the a-facing tag; `findByATag()` reverse-looks up the b-leg dialog.
 
 **Relayed via:** `relayResponse()` receives the pre-built To header (with aTag already attached) as the `aLegTo` parameter.
 

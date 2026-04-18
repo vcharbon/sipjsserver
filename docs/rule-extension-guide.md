@@ -2,7 +2,7 @@
 
 How to add new HTTP-piloted custom rules to the B2BUA rule framework.
 
-> **Before shipping a new rule**, confirm it is covered — or prove that it is meaningfully tested. See [rule-coverage-and-killing.md](./rule-coverage-and-killing.md): the e2e HTML index flags never-fired rules automatically, and `npm run test:rule-kill` verifies that removing the rule causes at least one scenario to fail.
+> **Before shipping a new rule**, confirm it is covered — or prove that it is meaningfully tested. See [rule-coverage-and-killing.md](./rule-coverage-and-killing.md): the e2e HTML index flags never-fired rules automatically. The `npm run test:rule-kill` campaign is currently disabled pending a fake-clock speedup — run `tsx scripts/rule-kill.ts` manually if you need the mutation audit for a specific rule.
 
 ## Architecture Overview
 
@@ -216,7 +216,10 @@ Available actions that rules can emit (see `RuleAction` in `RuleDefinition.ts`):
 | `respond` | Generate a response to the source |
 | `ack-leg` | Send ACK to a leg |
 | `send-request-to-leg` | Generate a new request to a leg (OPTIONS, INFO) |
-| `confirm-dialog` | Confirm b-leg dialog on 200 OK |
+| `confirm-dialog` | Populate `legs.{legId}.dialogs[0]` from the current 200 OK response (toTag, contact, routeSet, CSeq floor). One-dialog reach — does not touch leg state, tagMap, or the peer leg. |
+| `update-leg-state` | Set `legs.{legId}.state` and optionally `legs.{legId}.disposition`. |
+| `stamp-dialog-to-tag` | Stamp an explicit `toTag` onto `legs.{legId}.dialogs[0]` (creates a fresh dialog when none exists — see `makeDialogFromIncoming`/`makeEmptyDialog`). Used on the a-leg (UAS side) at 200-OK-INVITE time. |
+| `add-tag-mapping` | Append `{aTag,bLegId,bTag}` to `call.tagMap`. Idempotent by `(bLegId,bTag)`. |
 | `create-leg` | Create a new b-leg from snapshot/INVITE |
 | `destroy-leg` | Send CANCEL/BYE to terminate a leg |
 | `merge` / `split` | INAP-style peering operations |

@@ -252,6 +252,12 @@ function executeAction(
     case "confirm-dialog":
       executeConfirmDialog(action, ctx, state)
       break
+    case "update-leg-state":
+      executeUpdateLegState(action, state)
+      break
+    case "stamp-dialog-to-tag":
+      executeStampDialogToTag(action, state)
+      break
     case "create-leg":
       executeCreateLeg(action, ctx, state)
       break
@@ -780,17 +786,25 @@ function relayResponseMsg(
   }
 }
 
-// ── confirm-dialog ────────────────────────────────────────────────────────
+// ── confirm-dialog (primitive) ────────────────────────────────────────────
 
 /**
- * Confirm dialog on 200 OK INVITE from b-leg.
+ * Confirm the named leg's dialog[0] from the current SIP *response* event.
  *
- * - Source leg (b-leg): state → "confirmed", disposition → "bridged",
- *   dialog updated with contact from 200 OK.
- * - A-leg: state → "confirmed", dialog created/updated with winning tag.
- * - Tag mapping created if not already present.
+ * Reach (Slice B / Action reach discipline):
+ *   legs.{action.legId}.dialogs[0] only — no leg.state, leg.disposition,
+ *   tagMap, or peer-leg state is touched.
  *
- * Must be the first action in the sequence — before merge and relay-to-peer.
+ * Behaviour preserved from the pre-Slice-B composite:
+ *   - If the leg has an early fork dialog with the response's toTag, that
+ *     dialog is refreshed (contact, route set, CSeq).
+ *   - Otherwise a new confirmed dialog is created from the placeholder
+ *     CSeq (or a fresh random initial CSeq if no placeholder exists).
+ *   - RFC 3261 §12.1.2 route set is captured from Record-Route in reverse.
+ *
+ * When the event is not a response (or not a SIP event at all) the action is
+ * a no-op — this mirrors the old composite's behaviour and lets rules emit
+ * the action unconditionally next to a response-shaped event.
  */
 function executeConfirmDialog(
   action: Extract<RuleAction, { type: "confirm-dialog" }>,
@@ -801,9 +815,11 @@ function executeConfirmDialog(
   const resp = ctx.event.message
   if (resp.type !== "response") return
 
-  const bLeg = ctx.sourceLeg
+  const leg = findLeg(state.call, action.legId)
+  if (leg === undefined) return
+
   const toTag = resp.parsed?.to?.tag ?? ""
-  const bLegContact = resp.parsed?.contact?.uri ?? ""
+  const legContact = resp.parsed?.contact?.uri ?? ""
 
   // RFC 3261 §12.1.2: capture the route set from the response's Record-Route
   // headers, in reverse order. The B2BUA is the UAC on the b-leg, so Bob's
@@ -812,65 +828,89 @@ function executeConfirmDialog(
   const recordRoutes = getHeaders(resp.headers, "record-route")
   const routeSet = recordRoutes.length > 0 ? [...recordRoutes].reverse() : []
 
-  // Update b-leg dialog — confirm existing early dialog or create new one.
-  // The placeholder dialog (toTag="") seeded at b-leg creation carries the
-  // INVITE CSeq; any existing fork dialog carries the INVITE CSeq echoed
-  // from its 1xx. ACK for 2xx echoes the INVITE CSeq explicitly via
-  // lastInviteCSeq, so dialog.localCSeq only needs to be a floor for the
-  // next request we originate on this dialog.
-  const placeholder = bLeg.dialogs.find((d) => d.toTag === "")
+  // Confirm existing early dialog or create new one. The placeholder dialog
+  // (toTag="") seeded at b-leg creation carries the INVITE CSeq; any existing
+  // fork dialog carries the INVITE CSeq echoed from its 1xx. ACK for 2xx
+  // echoes the INVITE CSeq explicitly via lastInviteCSeq, so dialog.localCSeq
+  // only needs to be a floor for the next request we originate on this dialog.
+  const placeholder = leg.dialogs.find((d) => d.toTag === "")
   const respCSeqHeader = getHeader(resp.headers, "cseq") ?? ""
   const respCSeqNum = parseInt(respCSeqHeader, 10)
   const baseCSeq = Number.isFinite(respCSeqNum) && respCSeqNum > 0
     ? respCSeqNum
     : placeholder?.lastInviteCSeq ?? placeholder?.localCSeq ?? randomInitialCSeq()
-  const existingDialog = bLeg.dialogs.find((d) => d.toTag === toTag)
+  const existingDialog = leg.dialogs.find((d) => d.toTag === toTag)
   const nextCSeq = existingDialog !== undefined
     ? Math.max(baseCSeq, existingDialog.localCSeq)
     : baseCSeq
   const dialog = existingDialog
-    ? { ...existingDialog, contact: bLegContact, localCSeq: nextCSeq, routeSet,
+    ? { ...existingDialog, contact: legContact, localCSeq: nextCSeq, routeSet,
         lastInviteCSeq: existingDialog.lastInviteCSeq ?? baseCSeq }
-    : { ...makeEmptyDialog(toTag), contact: bLegContact, localCSeq: nextCSeq, routeSet,
+    : { ...makeEmptyDialog(toTag), contact: legContact, localCSeq: nextCSeq, routeSet,
         lastInviteCSeq: baseCSeq }
 
-  state.call = updateLeg(state.call, bLeg.legId, (l) => ({
+  state.call = updateLeg(state.call, leg.legId, (l) => ({
     ...l,
-    state: "confirmed" as const,
-    disposition: "bridged" as const,
     dialogs: [dialog],
   }))
+}
 
-  // Transfer C-leg 200: skip A↔source tag mapping and a-leg rewrite so the
-  // existing A↔B dialog stays intact. The C leg is confirmed but not peered.
-  if (action.skipPeerSync) return
+// ── update-leg-state (primitive) ──────────────────────────────────────────
 
-  // Resolve or create tag mapping for this b-leg toTag
-  const existingMapping = findByBTag(state.call, bLeg.legId, toTag)
-  const aFacingTag = existingMapping ? existingMapping.aTag : newTag()
+/**
+ * Set `leg.state` (and optionally `leg.disposition`) on the named leg.
+ *
+ * Reach: legs.{action.legId}.state + .disposition — nothing else.
+ */
+function executeUpdateLegState(
+  action: Extract<RuleAction, { type: "update-leg-state" }>,
+  state: ExecutionState,
+): void {
+  const leg = findLeg(state.call, action.legId)
+  if (leg === undefined) return
+  state.call = setLegState(state.call, action.legId, action.state)
+  if (action.disposition !== undefined) {
+    state.call = setLegDisposition(state.call, action.legId, action.disposition)
+  }
+}
 
-  if (!existingMapping) {
-    state.call = addTagMapping(state.call, { aTag: aFacingTag, bLegId: bLeg.legId, bTag: toTag })
+// ── stamp-dialog-to-tag (primitive) ───────────────────────────────────────
+
+/**
+ * Stamp an explicit toTag onto the named leg's dialog[0]. Used on the a-leg
+ * (UAS side) when the B2BUA picks the a-facing tag at 200-OK time and needs
+ * to align the a-leg dialog with it.
+ *
+ * When the leg has no dialog yet:
+ *   - legId === "a" → uses makeDialogFromIncoming(toTag, call.aLegInviteCSeq)
+ *     so Alice's inbound CSeq floor is preserved.
+ *   - other legs    → uses makeEmptyDialog(toTag).
+ *
+ * Reach: legs.{action.legId}.dialogs[0].toTag (or a freshly created dialog[0]).
+ */
+function executeStampDialogToTag(
+  action: Extract<RuleAction, { type: "stamp-dialog-to-tag" }>,
+  state: ExecutionState,
+): void {
+  const leg = findLeg(state.call, action.legId)
+  if (leg === undefined) return
+
+  if (leg.dialogs.length === 0) {
+    const dialog = action.legId === "a"
+      ? makeDialogFromIncoming(action.toTag, state.call.aLegInviteCSeq)
+      : { ...makeEmptyDialog(action.toTag) }
+    state.call = updateLeg(state.call, action.legId, (l) => ({
+      ...l,
+      dialogs: [dialog],
+    }))
+    return
   }
 
-  // Ensure a-leg has a dialog, or update its toTag to the winning aFacingTag
-  if (state.call.aLeg.dialogs.length === 0) {
-    state.call = updateLeg(state.call, "a", (l) => ({
-      ...l,
-      state: "confirmed" as const,
-      dialogs: [makeDialogFromIncoming(aFacingTag, state.call.aLegInviteCSeq)],
-    }))
-  } else {
-    const existing = state.call.aLeg.dialogs[0]!
-    state.call = updateLeg(state.call, "a", (l) => ({
-      ...l,
-      state: "confirmed" as const,
-      dialogs: [{
-        ...existing,
-        toTag: aFacingTag,
-      }],
-    }))
-  }
+  const existing = leg.dialogs[0]!
+  state.call = updateLeg(state.call, action.legId, (l) => ({
+    ...l,
+    dialogs: [{ ...existing, toTag: action.toTag }, ...l.dialogs.slice(1)],
+  }))
 }
 
 // ── ack-leg ────────────────────────────────────────────────────────────────

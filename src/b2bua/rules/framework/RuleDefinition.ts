@@ -215,23 +215,62 @@ export type RuleAction =
   | { readonly type: "send-prack-to-leg"; readonly legId: string;
       readonly rseq: number; readonly inviteCSeq: number; readonly bTag: string }
 
-  // ── Dialog lifecycle ──
+  // ── Dialog lifecycle primitives (Slice B of the rule-framework refactor) ──
+  //
+  // The old composite `confirm-dialog` has been decomposed into three
+  // single-reach primitives plus the existing `add-tag-mapping`. Rules that
+  // want the old "confirm source + sync a-leg" behaviour compose them via
+  // `confirmBridgedCall(...)` from `./actions/composites.ts`.
+  //
+  // Reach discipline (see AdvancedCallModel.md §"Action reach"):
+  //   - confirm-dialog    → legs.{legId}.dialogs[0]
+  //   - update-leg-state  → legs.{legId}.state + .disposition
+  //   - stamp-dialog-to-tag → legs.{legId}.dialogs[0].toTag (creates dialog[0] if absent)
+  //   - add-tag-mapping   → tagMap
   | {
       /**
-       * Confirm the source leg's dialog on 200 OK INVITE from b-leg.
-       * Sets source leg: state="confirmed", disposition="bridged", updates dialog contact.
-       * Sets a-leg: state="confirmed".
-       * Creates/updates tag mapping.
-       * Must be placed BEFORE relay-to-peer and merge in the action sequence.
+       * Confirm the named leg's dialog using the current SIP *response* event.
+       * Reads Contact + Record-Route + CSeq from ctx.event and writes them
+       * onto dialog[0]; creates dialog[0] from the response toTag when the
+       * leg has no dialog or only a placeholder (toTag === "") entry.
        *
-       * `skipPeerSync` (used by the REFER-transfer C-leg flow) suppresses the
-       * a-leg state/dialog rewrite and the A↔source tag-mapping side effects.
-       * Only the source leg's dialog is confirmed. Leaves the A↔B peering
-       * untouched, which is what the C-leg 200 requires — A is still bridged
-       * with B at that point.
+       * Scope is narrow: this action does NOT touch leg.state, leg.disposition,
+       * the tagMap, or any other leg's dialog. For the full A↔B bridging
+       * sequence (b-leg dialog + a-leg state + tag mapping), use the
+       * `confirmBridgedCall(...)` composite helper.
+       *
+       * Must be emitted while ctx.event.type === "sip" and the message is a
+       * response; otherwise the action is a no-op.
        */
       readonly type: "confirm-dialog"
-      readonly skipPeerSync?: boolean
+      readonly legId: string
+    }
+  | {
+      /**
+       * Set `leg.state` (and optionally `leg.disposition`) on the named leg.
+       * Generic leg-lifecycle primitive; reach is exactly the two fields
+       * named in its parameters.
+       */
+      readonly type: "update-leg-state"
+      readonly legId: string
+      readonly state: import("../../../call/CallModel.js").LegState
+      readonly disposition?: import("../../../call/CallModel.js").LegDisposition
+    }
+  | {
+      /**
+       * Stamp an explicit toTag onto the named leg's dialog[0]. Used on the
+       * a-leg (UAS side) when the B2BUA picks the a-facing tag at 200-OK
+       * time and needs to align the a-leg dialog with it.
+       *
+       * Creates dialog[0] when the leg has no dialogs:
+       *   - legId === "a" → makeDialogFromIncoming(toTag, call.aLegInviteCSeq)
+       *   - other legs    → makeEmptyDialog(toTag)
+       *
+       * Does not touch leg.state, leg.disposition, or tagMap.
+       */
+      readonly type: "stamp-dialog-to-tag"
+      readonly legId: string
+      readonly toTag: string
     }
 
   // ── Leg lifecycle ──
@@ -282,7 +321,7 @@ export type RuleAction =
   // sends CANCEL but leaves leg.state unchanged and sets leg.disposition to
   // "cancelling". The leg is resolved later when bob responds:
   //   - 3xx-6xx (e.g. 487): resolve-cancel-response fires → terminate-leg
-  //   - 2xx (crossing): cancel-200-crossing fires → confirm-dialog + ack + BYE
+  //   - 2xx (crossing): cancel-200-crossing fires → confirmBridgedCall + ack + BYE
   //
   // This is the correct way to handle CANCEL because it keeps the call in
   // memory long enough to handle the CANCEL/200 race (RFC 3261 §9.1).
