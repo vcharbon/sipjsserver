@@ -10,6 +10,8 @@
  */
 
 import type { RuleAction, RuleContext, MessageTransform } from "./RuleDefinition.js"
+import { applyBodyUpdate, applyHeaderUpdates } from "./actions/apply.js"
+import type { BodyUpdate, HeaderUpdates } from "./actions/types.js"
 import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
 import type { TimerEntry, Leg, Dialog, TransferState } from "../../../call/CallModel.js"
@@ -1023,7 +1025,7 @@ function executeCreateLeg(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  // Resolve the base INVITE to clone
+  // Resolve the base INVITE to clone.
   let baseInvite: SipRequest | undefined
   if (action.fromInvite === "snapshot" && state.call.aLegInviteSnapshot) {
     const snapshot = state.call.aLegInviteSnapshot
@@ -1037,14 +1039,39 @@ function executeCreateLeg(
     baseInvite = action.fromInvite
   }
 
-  // Honour body override (used by transfer-http-allow to send held SDP).
-  // `null` explicitly empties the body.
-  if (baseInvite !== undefined && action.updateBody !== undefined) {
-    const newBody = action.updateBody === null
-      ? new Uint8Array(0)
-      : new TextEncoder().encode(action.updateBody)
-    baseInvite = { ...baseInvite, body: newBody, raw: Buffer.from(newBody) }
+  // ── Body: new ADT takes precedence over the legacy `updateBody` string. ──
+  const normalizedBodyUpdate: BodyUpdate | undefined =
+    action.bodyUpdate !== undefined
+      ? action.bodyUpdate
+      : action.updateBody === undefined
+        ? undefined
+        : action.updateBody === null
+          ? { kind: "drop" }
+          : { kind: "set", value: new TextEncoder().encode(action.updateBody) }
+
+  if (
+    baseInvite !== undefined
+    && normalizedBodyUpdate !== undefined
+    && normalizedBodyUpdate.kind !== "inherit"
+  ) {
+    baseInvite = applyBodyUpdate(baseInvite, normalizedBodyUpdate)
+    baseInvite = { ...baseInvite, raw: Buffer.from(baseInvite.body) }
   }
+
+  // ── Request-URI: new `ruri` ADT takes precedence over legacy `newRuri`. ──
+  // `kind:"inherit"` collapses to undefined so createBLegFromRoute falls
+  // back to the base INVITE's URI.
+  const legacyNewRuri: string | undefined =
+    action.ruri !== undefined
+      ? action.ruri.kind === "set" ? (action.ruri.value as string) : undefined
+      : action.newRuri
+
+  // ── Header updates: ADT path is applied *after* the INVITE is built, so
+  // multi-valued headers (Diversion, Supported) are not collapsed by the
+  // legacy Record<string, string | null> shape in createBLegFromRoute. ──
+  const newHeaderUpdates: HeaderUpdates | undefined = action.headerUpdates
+  const legacyUpdateHeaders: Record<string, string | null> | undefined =
+    newHeaderUpdates !== undefined ? undefined : action.updateHeaders
 
   const port = action.destination.port ?? 5060
   const result = createBLegFromRoute({
@@ -1052,8 +1079,8 @@ function executeCreateLeg(
     baseInvite,
     route: {
       destination: { host: action.destination.host, port },
-      new_ruri: action.newRuri,
-      update_headers: action.updateHeaders,
+      new_ruri: legacyNewRuri,
+      update_headers: legacyUpdateHeaders,
       no_answer_timeout_sec: action.noAnswerTimeoutSec,
       callback_context: action.callbackContext,
     },
@@ -1062,7 +1089,18 @@ function executeCreateLeg(
   })
 
   state.call = result.call
-  state.outbound.push(...result.outbound)
+
+  // Apply the new ADT header updates to the outbound INVITE envelope.
+  let outbound = result.outbound
+  if (newHeaderUpdates !== undefined && outbound.length > 0) {
+    const first = outbound[0]!
+    if (first.message.type === "request") {
+      const patched = applyHeaderUpdates(first.message, newHeaderUpdates)
+      outbound = [{ ...first, message: patched }, ...outbound.slice(1)]
+    }
+  }
+
+  state.outbound.push(...outbound)
   state.effects.push(...result.effects)
 }
 

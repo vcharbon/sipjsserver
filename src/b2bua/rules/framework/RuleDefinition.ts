@@ -14,6 +14,7 @@ import type { CallEvent } from "../../../sip/SipRouter.js"
 import type { CallControlClient } from "../../../http/CallControlClient.js"
 import type { CallLimiter } from "../../../call/CallLimiter.js"
 import type { CallReferRequest as CallReferRequestType } from "../../../http/CallControlSchemas.js"
+import type { BodyUpdate, HeaderUpdates, RuriOp } from "./actions/types.js"
 
 // ── Declarative match schema (reified predicates) ─────────────────────────
 //
@@ -234,17 +235,46 @@ export type RuleAction =
     }
 
   // ── Leg lifecycle ──
-  | { readonly type: "create-leg";
-      readonly destination: LegDestination;
-      /** "snapshot" = use aLegInviteSnapshot; or provide a specific SipRequest. */
-      readonly fromInvite?: "snapshot" | SipRequest;
-      readonly updateHeaders?: Record<string, string | null>;
-      readonly updateBody?: string | null;
-      readonly noAnswerTimeoutSec?: number;
-      /** Override Request-URI for the outbound INVITE (e.g. failover new_ruri). */
-      readonly newRuri?: string;
-      /** Propagate callback_context from failover response for subsequent failovers. */
-      readonly callbackContext?: string }
+  //
+  // The three "slot" pairs below (body / headers / ruri) give the
+  // create-leg action both a legacy shape (`updateBody` / `updateHeaders`
+  // / `newRuri` — string-typed, tri-state) and a new ADT shape
+  // (`bodyUpdate` / `headerUpdates` / `ruri` — see
+  // `./actions/types.ts`). Per-slot XOR prevents both forms from being
+  // set together on a single action.
+  //
+  // Legacy fields are deprecated and scheduled for removal in Slice F
+  // of the rule-framework ADT refactor. New rules should emit the ADT
+  // fields and read source values via `./actions/readers.ts`.
+  | (
+      {
+        readonly type: "create-leg";
+        readonly destination: LegDestination;
+        /** "snapshot" = use aLegInviteSnapshot; or provide a specific SipRequest. */
+        readonly fromInvite?: "snapshot" | SipRequest;
+        readonly noAnswerTimeoutSec?: number;
+        /** Propagate callback_context from failover response for subsequent failovers. */
+        readonly callbackContext?: string;
+      }
+      & (
+        | { readonly updateBody?: string | null; readonly bodyUpdate?: never }
+        | { readonly bodyUpdate?: BodyUpdate; readonly updateBody?: never }
+      )
+      & (
+        | { readonly updateHeaders?: Record<string, string | null>; readonly headerUpdates?: never }
+        | { readonly headerUpdates?: HeaderUpdates; readonly updateHeaders?: never }
+      )
+      & (
+        | {
+            /** Legacy: override Request-URI for the outbound INVITE. */
+            readonly newRuri?: string; readonly ruri?: never
+          }
+        | {
+            /** New: typed Request-URI operation (inherit / set BareSipUri). */
+            readonly ruri?: RuriOp; readonly newRuri?: never
+          }
+      )
+    )
   | { readonly type: "destroy-leg"; readonly legId: string }
 
   // ── Cancel an early/trying b-leg (CANCEL, but keep the leg alive) ──
