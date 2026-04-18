@@ -134,9 +134,10 @@ Omitting a column means "accept any value". `OneOrMany<T>` accepts either a sing
 | `ack-leg` | ACK a 200 OK on a specific leg |
 | `send-request-to-leg` | Generate a new request (OPTIONS, INFO, etc.) to a leg (CSeq bump handled) |
 | `create-leg` | Create a new outgoing INVITE (b-leg) |
-| `destroy-leg` | BYE (confirmed) or CANCEL (early) a leg. Sets `byeDisposition` automatically. |
-| `merge` | Connect two legs (set activePeer) |
-| `split` | Disconnect a leg from its peer (clear activePeer) |
+| `destroy-leg` | **Composite (Slice C audited).** Tear down a single leg: BYE (confirmed), nothing (cancelling — CANCEL already in flight), or CANCEL (trying/early). Reach: `legs.{legId}.state → "terminated"`, `legs.{legId}.byeDisposition`, `legs.{legId}.disposition → "cancelling"` on the trying/early branch, and `call.activePeer → null` when the leg was part of the current pair. Outbound: 0 or 1 SIP message depending on branch. |
+| `cancel-leg` | **Primitive.** Send CANCEL for an outstanding early/trying b-leg INVITE while keeping the leg alive so the CANCEL/2xx race can resolve. Reach: `legs.{legId}.disposition → "cancelling"` only. No state change, no `byeDisposition` — cancel-resolving rules decide the terminal disposition. |
+| `merge` | **Primitive.** Connect two legs — both named in parameters. Reach: `call.activePeer → { legA, legB }`. No leg-level mutation. |
+| `split` | **Primitive (structural un-peer).** Disconnect the named leg from its peer. Reach: `call.activePeer → null` when the leg was part of the current pair, otherwise no-op. Clearing `activePeer` inherently un-peers both sides — that is the shape of the singleton, not hidden reach. |
 | `confirm-dialog` | Populate `legs.{legId}.dialogs[0]` from the current 200 OK response (toTag, contact, RFC 3261 §12.1.2 route set from Record-Route, CSeq floor). Reach is one dialog. No peer-sync, no timers, no merge — rules compose with `update-leg-state`/`add-tag-mapping`/`stamp-dialog-to-tag` via the `confirmBridgedCall` helper when they need the full A↔B flip. |
 | `update-leg-state` | Set `legs.{legId}.state` and optionally `legs.{legId}.disposition`. |
 | `stamp-dialog-to-tag` | Stamp an explicit `toTag` onto `legs.{legId}.dialogs[0]` (or create one via `makeDialogFromIncoming`/`makeEmptyDialog` when no dialog exists). Used on the a-leg (UAS side) at 200-OK-INVITE time. |
@@ -144,9 +145,9 @@ Omitting a column means "accept any value". `OneOrMany<T>` accepts either a sing
 | `schedule-timer` | Schedule a timer (typed — see TimerType) |
 | `cancel-timer` | Cancel a timer by ID |
 | `cancel-all-timers` | Cancel all timers on the call |
-| `begin-termination` | Send BYE/CANCEL to all live legs, set `byeDisposition: "bye_sent"/"cancelled"`, transition to `call.state = "terminating"`, schedule 64s safety timer |
-| `terminate-call` | Immediate death for pre-dialog failures (marks all legs terminated, sets `call.state = "terminated"`) |
-| `terminate-leg` | Mark a single leg terminated with a `byeDisposition` |
+| `begin-termination` | **Composite (Slice C audited — call-scope).** Graceful teardown for the whole call. Reach: every live leg's `byeDisposition` (BYE for confirmed, CANCEL for trying/early b-legs, `"none"` for trying/early a-leg), `legs.{b-leg}.state → "terminated"` for trying/early b-legs, `call.state → "terminating"`, `call.timers` gets the `terminating_timeout` safety timer appended. `call.activePeer` is deliberately preserved so the final BYE 200 OK response still routes. Effects: `cancel-all-timers`, `schedule-timer`, `write-cdr`, `flush-redis`. Legs already marked (`byeDisposition` set, or `disposition = "cancelling"`) are skipped. |
+| `terminate-call` | **Composite (Slice C audited — call-scope).** Immediate call death. Reach: every non-terminated leg’s `state → "terminated"`, `call.state → "terminated"`, `call.activePeer → null`. Outbound: BYE for each confirmed leg, CANCEL for each trying/early b-leg (a-leg in trying/early gets no SIP — the rule already handled it). No safety timer, no side-effects — `InvariantEnforcer` handles limiter/CDR/removal cleanup. Reserved for `onError: "terminate"` fallout and pre-dialog failures. |
+| `terminate-leg` | **Primitive.** Reach: `legs.{legId}.state → "terminated"` and (when named) `legs.{legId}.byeDisposition`. No outbound, no peer touch. |
 | `add-cdr-event` | Append a CDR event |
 | `deactivate-rule` | Deactivate the current rule mid-call |
 | `send-raw` | Escape hatch for custom SIP messages (NOTIFY body, etc.) |

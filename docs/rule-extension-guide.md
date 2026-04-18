@@ -221,12 +221,13 @@ Available actions that rules can emit (see `RuleAction` in `RuleDefinition.ts`):
 | `stamp-dialog-to-tag` | Stamp an explicit `toTag` onto `legs.{legId}.dialogs[0]` (creates a fresh dialog when none exists — see `makeDialogFromIncoming`/`makeEmptyDialog`). Used on the a-leg (UAS side) at 200-OK-INVITE time. |
 | `add-tag-mapping` | Append `{aTag,bLegId,bTag}` to `call.tagMap`. Idempotent by `(bLegId,bTag)`. |
 | `create-leg` | Create a new b-leg from snapshot/INVITE |
-| `destroy-leg` | Send CANCEL/BYE to terminate a leg |
-| `merge` / `split` | INAP-style peering operations |
+| `destroy-leg` | **Composite.** Tear down a single leg (BYE for confirmed, CANCEL for trying/early, nothing when a CANCEL is already in flight). Reach: `legs.{legId}.state`, `legs.{legId}.byeDisposition`, `legs.{legId}.disposition` (trying/early path only), `call.activePeer` cleared if the leg was peered. |
+| `cancel-leg` | **Primitive.** CANCEL an outstanding INVITE on an early/trying b-leg while keeping the leg alive. Reach: `legs.{legId}.disposition → "cancelling"` only — cancel-resolving rules set the final `byeDisposition` when bob responds. |
+| `terminate-leg` | **Primitive.** `legs.{legId}.state → "terminated"` and (when named) `legs.{legId}.byeDisposition`. No outbound. |
+| `merge` / `split` | **Primitives.** INAP-style peering. Reach is limited to `call.activePeer` (merge sets it to `{legA, legB}`; split clears it when the named leg is part of the pair). |
 | `schedule-timer` / `cancel-timer` | Timer management |
-| `begin-termination` | Graceful call teardown (BYE/CANCEL all legs) |
-| `terminate-leg` | Mark a single leg as terminated |
-| `terminate-call` | Immediate call cleanup |
+| `begin-termination` | **Composite (call-scope).** Graceful call teardown. Reach: every live leg’s `byeDisposition` (+ `state` on CANCELed b-legs), `call.state → "terminating"`, appends a `terminating_timeout` safety timer. `call.activePeer` preserved so final BYE responses still route. |
+| `terminate-call` | **Composite (call-scope).** Immediate cleanup — every leg `state → "terminated"`, `call.state → "terminated"`, `call.activePeer → null`. Reserved for `onError:"terminate"` and pre-dialog failures. |
 | `add-cdr-event` | Record CDR event |
 | `add-tag-mapping` | Pre-seed a-facing tag ↔ b-leg tag mapping |
 | `deactivate-rule` | Deactivate this rule for the current call |

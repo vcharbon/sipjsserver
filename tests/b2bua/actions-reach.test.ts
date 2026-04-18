@@ -1,17 +1,24 @@
 /**
- * Reach tests for the Slice-B dialog-confirm primitives.
+ * Reach tests for the rule-action ADT primitives and audited composites.
  *
- * Every primitive in the rule-action ADT is documented with a narrow "reach":
- * the exact state region it is allowed to mutate. Each test below exercises
- * one primitive and asserts:
+ * Every primitive action is documented with a narrow "reach": the exact
+ * state region it is allowed to mutate. Each test exercises one action and
+ * asserts:
  *   - the in-reach region changed as specified,
  *   - every out-of-reach region remained strict-equal to the input call.
  *
- * Reach invariants verified here:
+ * Reach invariants verified here (Slice B + Slice C audit):
  *   update-leg-state      → legs.{legId}.state + .disposition
  *   stamp-dialog-to-tag   → legs.{legId}.dialogs[0].toTag (or a new dialog[0])
  *   confirm-dialog        → legs.{legId}.dialogs[0] (toTag/contact/routeSet/CSeq)
  *   add-tag-mapping       → tagMap (idempotent by (bLegId, bTag))
+ *   cancel-leg            → legs.{legId}.disposition
+ *   terminate-leg         → legs.{legId}.state + .byeDisposition
+ *   merge                 → call.activePeer (both legs named in params)
+ *   split                 → call.activePeer (structural un-peer)
+ *   destroy-leg           → legs.{legId}.* + call.activePeer (composite)
+ *   begin-termination     → all live legs + call.state + call.timers (composite)
+ *   terminate-call        → all legs + call.state + call.activePeer (composite)
  */
 
 import { describe, test, expect } from "vitest"
@@ -379,5 +386,407 @@ describe("add-tag-mapping reach", () => {
 
     expect(result.call.tagMap.length).toBe(1)
     expect(result.call.tagMap[0]!.aTag).toBe("aFacing-1") // first-writer wins
+  })
+})
+
+// ── cancel-leg (primitive) ──────────────────────────────────────────────────
+
+describe("cancel-leg reach", () => {
+  test("flips only disposition → 'cancelling' on a trying b-leg; emits one CANCEL", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "cancel-leg", legId: "b-1" }], ctx, "test-rule")
+    const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
+
+    // In-reach: only disposition changed.
+    expect(outB.disposition).toBe("cancelling")
+    // Out-of-reach: state, byeDisposition, dialogs untouched.
+    expect(outB.state).toBe(bLeg.state)
+    expect(outB.byeDisposition).toBe(bLeg.byeDisposition)
+    expect(outB.dialogs).toBe(bLeg.dialogs)
+
+    // Out-of-reach: a-leg unchanged, call-level state unchanged.
+    expect(result.call.aLeg).toBe(call.aLeg)
+    expect(result.call.activePeer).toBe(call.activePeer)
+    expect(result.call.tagMap).toBe(call.tagMap)
+    expect(result.call.timers).toBe(call.timers)
+
+    // One outbound CANCEL envelope, no side-effects.
+    expect(result.outbound.length).toBe(1)
+    expect(result.outbound[0]!.label).toContain("CANCEL b-1")
+    expect(result.effects.length).toBe(0)
+  })
+
+  test("no-op on a confirmed leg (caller should use destroy-leg)", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")), state: "confirmed" }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "cancel-leg", legId: "b-1" }], ctx, "test-rule")
+
+    expect(result.call).toBe(call)
+    expect(result.outbound.length).toBe(0)
+  })
+
+  test("no-op on a terminated leg", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA"), state: "terminated" }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "cancel-leg", legId: "b-1" }], ctx, "test-rule")
+
+    expect(result.call).toBe(call)
+    expect(result.outbound.length).toBe(0)
+  })
+})
+
+// ── terminate-leg (primitive) ───────────────────────────────────────────────
+
+describe("terminate-leg reach", () => {
+  test("sets state → 'terminated' only; byeDisposition left unchanged when omitted", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "terminate-leg", legId: "b-1" }], ctx, "test-rule")
+    const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
+
+    expect(outB.state).toBe("terminated")
+    expect(outB.byeDisposition).toBe(bLeg.byeDisposition) // unchanged (undefined)
+    expect(outB.disposition).toBe(bLeg.disposition)
+    expect(outB.dialogs).toBe(bLeg.dialogs)
+
+    expect(result.call.aLeg).toBe(call.aLeg)
+    expect(result.call.activePeer).toBe(call.activePeer) // peer NOT cleared — terminate-leg is narrow
+    expect(result.call.state).toBe(call.state)
+    expect(result.call.timers).toBe(call.timers)
+    expect(result.outbound.length).toBe(0)
+    expect(result.effects.length).toBe(0)
+  })
+
+  test("sets state + byeDisposition when both are named", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions(
+      [{ type: "terminate-leg", legId: "b-1", byeDisposition: "bye_received" }],
+      ctx,
+      "test-rule",
+    )
+    const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
+    expect(outB.state).toBe("terminated")
+    expect(outB.byeDisposition).toBe("bye_received")
+
+    expect(result.call.activePeer).toBe(call.activePeer)
+    expect(result.outbound.length).toBe(0)
+  })
+})
+
+// ── merge (primitive) ───────────────────────────────────────────────────────
+
+describe("merge reach", () => {
+  test("sets call.activePeer = { legA, legB }; no leg-level mutation", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
+    // Start with activePeer = null to observe the merge.
+    const call: Call = { ...makeCall(aLeg, bLeg), activePeer: null }
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions(
+      [{ type: "merge", legA: "a", legB: "b-1" }],
+      ctx,
+      "test-rule",
+    )
+
+    expect(result.call.activePeer).toEqual({ legA: "a", legB: "b-1" })
+    // Out-of-reach: every leg, every leg field, every other call-level field
+    // is strict-equal to the input.
+    expect(result.call.aLeg).toBe(call.aLeg)
+    expect(result.call.bLegs).toBe(call.bLegs)
+    expect(result.call.tagMap).toBe(call.tagMap)
+    expect(result.call.timers).toBe(call.timers)
+    expect(result.call.state).toBe(call.state)
+
+    expect(result.outbound.length).toBe(0)
+    expect(result.effects.length).toBe(0)
+  })
+})
+
+// ── split (primitive) ───────────────────────────────────────────────────────
+
+describe("split reach", () => {
+  test("clears call.activePeer when the named leg is part of the pair", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
+    const call = makeCall(aLeg, bLeg) // activePeer = { legA: "a", legB: "b-1" }
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "split", legId: "b-1" }], ctx, "test-rule")
+
+    expect(result.call.activePeer).toBeNull()
+    // Out-of-reach: no leg state touched.
+    expect(result.call.aLeg).toBe(call.aLeg)
+    expect(result.call.bLegs).toBe(call.bLegs)
+    expect(result.call.tagMap).toBe(call.tagMap)
+    expect(result.call.timers).toBe(call.timers)
+
+    expect(result.outbound.length).toBe(0)
+    expect(result.effects.length).toBe(0)
+  })
+
+  test("no-op when splitting a leg that isn't part of the current pair", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "split", legId: "b-999" }], ctx, "test-rule")
+
+    expect(result.call).toBe(call)
+  })
+})
+
+// ── destroy-leg (composite — intentional scope) ─────────────────────────────
+
+describe("destroy-leg reach (composite)", () => {
+  test("confirmed branch: BYE outbound + byeDisposition='bye_sent' + state='terminated' + peer cleared", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg: Leg = {
+      ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")),
+      state: "confirmed",
+    }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "destroy-leg", legId: "b-1" }], ctx, "test-rule")
+    const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
+
+    expect(outB.state).toBe("terminated")
+    expect(outB.byeDisposition).toBe("bye_sent")
+    expect(outB.disposition).toBe(bLeg.disposition) // not touched on confirmed path
+    // Peer split because b-1 was part of the pair.
+    expect(result.call.activePeer).toBeNull()
+
+    // Out-of-reach: a-leg unchanged, no call-level state-field update, no timers.
+    expect(result.call.aLeg).toBe(call.aLeg)
+    expect(result.call.state).toBe(call.state)
+    expect(result.call.timers).toBe(call.timers)
+    expect(result.call.tagMap).toBe(call.tagMap)
+
+    // Exactly one BYE outbound, no side-effects.
+    expect(result.outbound.length).toBe(1)
+    expect(result.outbound[0]!.label).toBe("BYE b-1")
+    expect(result.effects.length).toBe(0)
+  })
+
+  test("cancelling branch: no outbound + byeDisposition='cancelled' + state='terminated'", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg: Leg = {
+      ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("")),
+      state: "early",
+      disposition: "cancelling", // cancel-leg already fired a CANCEL
+    }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "destroy-leg", legId: "b-1" }], ctx, "test-rule")
+    const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
+
+    expect(outB.state).toBe("terminated")
+    expect(outB.byeDisposition).toBe("cancelled")
+    // disposition NOT rewritten on this branch (already "cancelling").
+    expect(outB.disposition).toBe("cancelling")
+    expect(result.call.activePeer).toBeNull()
+
+    // No SIP emitted — CANCEL is already in flight from the earlier cancel-leg.
+    expect(result.outbound.length).toBe(0)
+  })
+
+  test("trying/early branch: CANCEL outbound + disposition='cancelling' + byeDisposition='cancelled' + state='terminated'", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("")) // state:"trying" by default
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "destroy-leg", legId: "b-1" }], ctx, "test-rule")
+    const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
+
+    expect(outB.state).toBe("terminated")
+    expect(outB.byeDisposition).toBe("cancelled")
+    expect(outB.disposition).toBe("cancelling")
+    expect(result.call.activePeer).toBeNull()
+
+    expect(result.outbound.length).toBe(1)
+    expect(result.outbound[0]!.label).toContain("CANCEL b-1")
+  })
+
+  test("already-terminated leg is a strict no-op (call reference-equal)", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA"), state: "terminated" }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "destroy-leg", legId: "b-1" }], ctx, "test-rule")
+
+    expect(result.call).toBe(call)
+    expect(result.outbound.length).toBe(0)
+  })
+})
+
+// ── begin-termination (composite — intentional scope) ──────────────────────
+
+describe("begin-termination reach (composite)", () => {
+  test("confirmed a-leg + confirmed b-leg: BYEs to both, call.state='terminating', activePeer preserved", () => {
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "confirmed" }
+    const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")), state: "confirmed" }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "begin-termination" }], ctx, "test-rule")
+
+    const outA = result.call.aLeg
+    const outB = result.call.bLegs[0]!
+    expect(outA.byeDisposition).toBe("bye_sent")
+    expect(outB.byeDisposition).toBe("bye_sent")
+    // state on legs stays 'confirmed' — they become 'terminated' only when BYE 200 comes back.
+    expect(outA.state).toBe("confirmed")
+    expect(outB.state).toBe("confirmed")
+
+    // call.state transitions to "terminating".
+    expect(result.call.state).toBe("terminating")
+    // activePeer deliberately preserved so the final BYE 200 relay still routes.
+    expect(result.call.activePeer).toEqual(call.activePeer)
+
+    // Safety timer appended to call.timers.
+    expect(result.call.timers.length).toBe(call.timers.length + 1)
+    const safety = result.call.timers[result.call.timers.length - 1]!
+    expect(safety.type).toBe("terminating_timeout")
+
+    // Effects: cancel-all-timers, schedule-timer, write-cdr, flush-redis.
+    const effectTypes = result.effects.map((e) => e.type)
+    expect(effectTypes).toEqual(["cancel-all-timers", "schedule-timer", "write-cdr", "flush-redis"])
+
+    // Two BYE envelopes.
+    const labels = result.outbound.map((o) => o.label)
+    expect(labels).toContain("BYE a (begin-termination)")
+    expect(labels).toContain("BYE b-1 (begin-termination)")
+  })
+
+  test("trying b-leg: CANCEL sent + byeDisposition='cancelled' + state='terminated'; a-leg not yet set → stays active but gets no SIP", () => {
+    // a-leg is in "trying" (pre-200) → no SIP emitted, byeDisposition='none'
+    const aLeg = makeLeg("a", "call-1", "tagA") // trying, no dialog
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("")) // trying
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, undefined, "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "begin-termination" }], ctx, "test-rule")
+
+    const outA = result.call.aLeg
+    const outB = result.call.bLegs[0]!
+    // a-leg trying → byeDisposition='none', no outbound
+    expect(outA.byeDisposition).toBe("none")
+    expect(outA.state).toBe("trying") // not auto-terminated
+
+    // b-leg trying → CANCEL + byeDisposition='cancelled' + state='terminated'
+    expect(outB.byeDisposition).toBe("cancelled")
+    expect(outB.state).toBe("terminated")
+
+    const labels = result.outbound.map((o) => o.label)
+    expect(labels).toContain("CANCEL b-1 (begin-termination)")
+    expect(labels).not.toContain("BYE a (begin-termination)")
+  })
+
+  test("skips legs already handled (byeDisposition set or disposition='cancelling')", () => {
+    const aLeg: Leg = {
+      ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")),
+      state: "confirmed",
+      byeDisposition: "bye_received", // already handled by the rule
+    }
+    const bLeg: Leg = {
+      ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("")),
+      disposition: "cancelling", // cancel-leg fired; must NOT re-BYE
+    }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "begin-termination" }], ctx, "test-rule")
+
+    // Neither leg gets a fresh SIP message from begin-termination.
+    expect(result.outbound.length).toBe(0)
+
+    // byeDisposition of already-marked legs preserved.
+    const outA = result.call.aLeg
+    const outB = result.call.bLegs[0]!
+    expect(outA.byeDisposition).toBe("bye_received")
+    expect(outB.byeDisposition).toBe(bLeg.byeDisposition)
+    expect(outB.disposition).toBe("cancelling")
+
+    // Call still transitions to "terminating".
+    expect(result.call.state).toBe("terminating")
+  })
+})
+
+// ── terminate-call (composite — intentional scope) ─────────────────────────
+
+describe("terminate-call reach (composite)", () => {
+  test("all legs → terminated, call.state='terminated', activePeer=null; BYE/CANCEL emitted per leg state", () => {
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "confirmed" }
+    const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("")), state: "trying" }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "terminate-call" }], ctx, "test-rule")
+
+    expect(result.call.state).toBe("terminated")
+    expect(result.call.activePeer).toBeNull()
+    expect(result.call.aLeg.state).toBe("terminated")
+    expect(result.call.bLegs[0]!.state).toBe("terminated")
+
+    const labels = result.outbound.map((o) => o.label)
+    // Confirmed a-leg → BYE.
+    expect(labels).toContain("BYE a (terminate)")
+    // Trying b-leg → CANCEL.
+    expect(labels.some((l) => l.startsWith("CANCEL b-1"))).toBe(true)
+  })
+
+  test("already-terminated leg skipped (no BYE/CANCEL re-emission)", () => {
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "terminated" }
+    const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA"), state: "terminated" }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "terminate-call" }], ctx, "test-rule")
+
+    expect(result.outbound.length).toBe(0)
+    expect(result.call.state).toBe("terminated")
+    expect(result.call.activePeer).toBeNull()
+  })
+
+  test("trying a-leg: no CANCEL emitted (a-leg is the UAS side); still marked terminated", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA") // trying, no dialog
+    const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")), state: "confirmed" }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, undefined, "from-a", make200InviteFromB("bob-tag"))
+    const result = executeActions([{ type: "terminate-call" }], ctx, "test-rule")
+
+    const labels = result.outbound.map((o) => o.label)
+    // Only the b-leg BYE is emitted; the a-leg in "trying" is not CANCELed
+    // (executeTerminateCall only CANCELs non-a trying/early legs).
+    expect(labels.some((l) => l.startsWith("CANCEL"))).toBe(false)
+    expect(labels).toContain("BYE b-1 (terminate)")
+
+    expect(result.call.aLeg.state).toBe("terminated")
+    expect(result.call.bLegs[0]!.state).toBe("terminated")
+    expect(result.call.state).toBe("terminated")
+    expect(result.call.activePeer).toBeNull()
   })
 })

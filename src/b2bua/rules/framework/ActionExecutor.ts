@@ -268,9 +268,15 @@ function executeAction(
       executeCancelLeg(action, ctx, state)
       break
     case "merge":
+      // Reach (Slice C audit — primitive): call.activePeer → { legA, legB }.
+      // Both legs are named in the action parameters; no leg-level mutation.
       state.call = mergeLeg(state.call, action.legA, action.legB)
       break
     case "split":
+      // Reach (Slice C audit — primitive): call.activePeer → null when the
+      // named leg was part of the current pair. Clearing `activePeer`
+      // structurally un-peers both sides — that is inherent to the singleton
+      // representation, not a hidden mutation of another leg's own state.
       state.call = splitLeg(state.call, action.legId)
       break
     case "schedule-timer":
@@ -291,6 +297,10 @@ function executeAction(
       executeBeginTermination(ctx, state)
       break
     case "terminate-leg":
+      // Reach (Slice C audit — primitive):
+      //   legs.{action.legId}.state          → "terminated"
+      //   legs.{action.legId}.byeDisposition → action.byeDisposition (when set)
+      // No call-level mutation, no peer touch, no outbound.
       state.call = setLegState(state.call, action.legId, "terminated")
       if (action.byeDisposition !== undefined) {
         state.call = setByeDisposition(state.call, action.legId, action.byeDisposition)
@@ -1144,8 +1154,27 @@ function executeCreateLeg(
   state.effects.push(...result.effects)
 }
 
-// ── destroy-leg ────────────────────────────────────────────────────────────
+// ── destroy-leg (composite) ───────────────────────────────────────────────
 
+/**
+ * Destroy a single leg: emit the appropriate teardown SIP message and mark
+ * the leg terminated, breaking any peer pairing.
+ *
+ * Reach (Slice C audit — intentional composite, scope declared in action contract):
+ *   legs.{action.legId}.state          → "terminated" (always)
+ *   legs.{action.legId}.byeDisposition → "bye_sent" | "cancelled"
+ *   legs.{action.legId}.disposition    → "cancelling" (only on trying/early path)
+ *   call.activePeer                    → null when the leg was part of the pair
+ *
+ * Behaviour by leg state:
+ *   - terminated          → no-op.
+ *   - confirmed           → BYE dialog[0]; byeDisposition = "bye_sent".
+ *   - cancelling          → no SIP (CANCEL already in flight); byeDisposition = "cancelled".
+ *   - trying / early      → CANCEL; disposition = "cancelling"; byeDisposition = "cancelled".
+ *
+ * Prefer `cancel-leg` over `destroy-leg` for trying/early legs when the leg
+ * must stay alive to resolve a CANCEL/200-crossing race (RFC 3261 §9.1).
+ */
 function executeDestroyLeg(
   action: Extract<RuleAction, { type: "destroy-leg" }>,
   _ctx: RuleContext,
@@ -1191,7 +1220,7 @@ function executeDestroyLeg(
   state.call = splitLeg(state.call, action.legId)
 }
 
-// ── cancel-leg ─────────────────────────────────────────────────────────────
+// ── cancel-leg (primitive) ────────────────────────────────────────────────
 
 /**
  * Send CANCEL for an outstanding early/trying b-leg INVITE but KEEP the leg
@@ -1199,6 +1228,14 @@ function executeDestroyLeg(
  * the leg when bob responds:
  *   - Final non-2xx (e.g. 487) → resolve-cancel-response terminates the leg.
  *   - Crossing 2xx → cancel-200-crossing ACKs and BYEs (RFC 3261 §9.1).
+ *
+ * Reach (Slice C audit — primitive, single named field):
+ *   legs.{action.legId}.disposition → "cancelling"
+ *
+ * No other state is mutated. `byeDisposition` is deliberately NOT set here —
+ * cancel-resolving rules decide whether the eventual outcome is "cancelled",
+ * a BYE exchange, or anything else. One outbound CANCEL envelope is pushed
+ * on success.
  *
  * Called only by handle-cancel. For confirmed legs, use destroy-leg (BYE).
  */
@@ -1235,11 +1272,24 @@ function executeScheduleTimer(
   state.effects.push({ type: "schedule-timer", timer })
 }
 
-// ── terminate-call ─────────────────────────────────────────────────────────
+// ── terminate-call (composite) ────────────────────────────────────────────
 
 /**
- * Terminate the entire call. Marks all legs terminated, sends BYE/CANCEL
- * to all peered legs. The InvariantEnforcer adds limiter/timer/CDR/removal.
+ * Terminate the entire call immediately. Marks all legs terminated, sends
+ * BYE/CANCEL to all peered legs, clears peering.
+ *
+ * Reach (Slice C audit — intentional call-scope composite):
+ *   Every leg.state       → "terminated"
+ *   call.state            → "terminated"
+ *   call.activePeer       → null
+ *   Outbound              → BYE for every confirmed leg (via dialog[0]),
+ *                            CANCEL for every trying/early b-leg. No wait
+ *                            for response — fire and forget.
+ *
+ * All production rules should prefer `begin-termination` so BYE/CANCEL
+ * responses are correlated through the normal terminating phase and the
+ * safety timer. `terminate-call` exists for onError:"terminate" fallout
+ * and `InvariantEnforcer` adds limiter/timer/CDR/removal automatically.
  */
 function executeTerminateCall(
   _ctx: RuleContext,
@@ -1282,26 +1332,34 @@ function executeTerminateCall(
   }
 }
 
-// ── begin-termination ─────────────────────────────────────────────────────
+// ── begin-termination (composite) ─────────────────────────────────────────
 
 /**
  * Graceful call termination — the standard teardown path for all rules.
  *
- * For each leg that doesn't already have a byeDisposition set:
- *   - confirmed → send BYE, set byeDisposition: "bye_sent" (await 200 OK)
- *   - trying/early b-leg → send CANCEL, set byeDisposition: "cancelled"
- *   - trying/early a-leg → set byeDisposition: "none" (nothing to send)
- *   - already terminated → skip
+ * Reach (Slice C audit — intentional call-scope composite):
+ *   For each leg not already resolved (not terminated, no byeDisposition,
+ *   not cancelling):
+ *     - confirmed           → send BYE; byeDisposition = "bye_sent"
+ *     - trying/early b-leg  → send CANCEL; byeDisposition = "cancelled";
+ *                              state = "terminated"
+ *     - trying/early a-leg  → byeDisposition = "none" (rule already
+ *                              sent the SIP reply)
+ *   call.state              → "terminating"
+ *   call.timers             → append `terminating_timeout-{callRef}` (64s)
+ *   effects                 → cancel-all-timers, schedule-timer (safety),
+ *                              write-cdr, flush-redis
  *
  * Rules MUST pre-mark legs they already handled (e.g., the leg that sent
  * us a BYE gets byeDisposition: "bye_received" via terminate-leg action)
  * before emitting begin-termination. This prevents duplicate BYE sends.
  *
- * After marking all legs, transitions to call.state = "terminating",
- * cancels active timers, schedules 64s safety timer, writes CDR, and
- * flushes to Redis. The framework (RuleExecutor) checks isFullyResolved()
- * after this — if all legs are already resolved, immediate transition to
- * "terminated" happens without waiting.
+ * The framework (RuleExecutor) checks isFullyResolved() after this — if
+ * all legs are already resolved, immediate transition to "terminated"
+ * happens without waiting. `call.activePeer` is NOT touched here: the
+ * terminating phase deliberately preserves the pairing so response relay
+ * (e.g. final BYE 200 OK from one side to the other) still routes
+ * correctly. Peering is cleared naturally as legs reach terminal state.
  */
 function executeBeginTermination(
   ctx: RuleContext,
