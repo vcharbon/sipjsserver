@@ -91,6 +91,26 @@ All SIP-domain attributes use the `sip.*` namespace. Standard OTel resource/netw
 | `route_decision` | `route.action`, `route.destination`, `route.reject_code`, `route.reject_reason` | After routing API response |
 | `overload_shed` | `shed.reason`, `shed.fractions.*` | When a call is shed by overload controller |
 
+## Rules for new code
+
+Follow these when adding or modifying handlers and SIP processing:
+
+1. **Every handler invocation runs inside a processing span.** `SipRouter.withCall` wraps handlers in `withProcessingSpan` automatically. Custom effects run outside `withCall` must create their own span.
+
+2. **Outbound messages must emit a send span.** `processResult` calls `tracing.emitSendSpan()` for every message in `HandlerResult.outbound`. Only needed manually if sending outside the normal flow.
+
+3. **Internal decisions go in `spanEvents`.** Add entries to `HandlerResult.spanEvents` for routing decisions, failover triggers, timer actions — anything that explains *why* a message was sent or not sent.
+
+4. **Use the `sip.*` attribute namespace.** Key attributes: `sip.method`, `sip.status_code`, `sip.direction`, `sip.raw_message`, `sip.call_id.a_leg`, `sip.call_id.b_leg`. See the attribute reference above.
+
+5. **Never access `TracingService` directly from handlers.** Handlers are pure — use `spanEvents` on `HandlerResult`. `SipRouter` owns all span lifecycle.
+
+6. **Gate large attributes on `call.sampled`.** Attributes like `sip.raw_message` must only be set when `call.sampled === true` to avoid payload overhead on non-sampled calls.
+
+7. **Tombstones are automatic.** Non-sampled calls get tombstone spans via `SipRouter` — no handler action needed.
+
+8. **OTel layer MUST use `Layer.provideMerge`, not `Layer.provide`.** `NodeSdk.layer` sets the `Tracer.Tracer` FiberRef (the OTel-backed tracer). If provided via `Layer.provide(OtelLayer)`, the FiberRef only reaches layer construction — runtime effects silently fall back to Effect's built-in `NativeSpan`, which is never exported to Tempo. Use `Layer.provideMerge(OtelLayer)` so the FiberRef propagates to the runtime fiber. **Symptom:** spans appear in Effect logs but are missing from Tempo; `ConsoleSpanExporter` shows other spans but not yours; diagnostic shows `NativeSpan` instead of `OtelSpan`. This applies to both `main.ts` (standalone) and `WorkerEntry.ts` (cluster).
+
 ## Sampling model
 
 ### Global sample rate

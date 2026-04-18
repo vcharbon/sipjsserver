@@ -219,6 +219,14 @@ export interface Scenario {
   readonly steps: readonly Step[]
   readonly sippCompliant: boolean
   readonly allowedExtras?: readonly AllowedExtraPattern[] | undefined
+  /**
+   * Human-readable description of what the scenario simulates.
+   * Emitted at the top of the generated text reports so a reviewer reading
+   * a .global.txt or per-agent .txt file can understand the intent of the
+   * test — particularly useful for scenarios that deliberately simulate
+   * misbehaving agents (retransmissions, bad tags, stalled HTTP, ...).
+   */
+  readonly description?: string | undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +278,7 @@ export interface TraceEntry {
 
 export interface ScenarioResult {
   readonly scenarioName: string
+  readonly scenarioDescription?: string | undefined
   readonly stepResults: readonly StepResult[]
   readonly trace: readonly TraceEntry[]
   readonly participants: readonly string[]

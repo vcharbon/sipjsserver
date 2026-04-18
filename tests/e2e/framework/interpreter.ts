@@ -237,6 +237,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
 
   const result: ScenarioResult = {
     scenarioName: scenario.name,
+    scenarioDescription: scenario.description,
     stepResults: state.results,
     trace: state.trace,
     participants,

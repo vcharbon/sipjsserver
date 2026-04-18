@@ -35,18 +35,42 @@ export class ComposableScenario {
      */
     readonly sippCompliant: boolean,
     /** Patterns for messages that may arrive but should not be flagged as unexpected. */
-    readonly allowedExtras: readonly AllowedExtraPattern[] = []
+    readonly allowedExtras: readonly AllowedExtraPattern[] = [],
+    /**
+     * Human-readable description of the scenario — surfaced at the top of
+     * every generated text report (global + per-agent) so a reviewer can
+     * see what the test simulates without re-reading the DSL source. Most
+     * useful for scenarios that deliberately simulate bad-actor agents.
+     */
+    readonly description: string | undefined = undefined
   ) {}
+
+  /** Attach a human-readable description. Returns a new immutable scenario. */
+  describe(description: string): ComposableScenario {
+    return new ComposableScenario(
+      this.name,
+      this.agents,
+      this.steps,
+      this.sippCompliant,
+      this.allowedExtras,
+      description
+    )
+  }
 
   /** Sequential composition — agents carry dialog state across the boundary. */
   andThen(other: ComposableScenario): ComposableScenario {
     const mergedAgents = { ...this.agents, ...other.agents }
+    const mergedDescription =
+      this.description !== undefined && other.description !== undefined
+        ? `${this.description}\n\nthen:\n\n${other.description}`
+        : this.description ?? other.description
     return new ComposableScenario(
       `${this.name}+${other.name}`,
       mergedAgents,
       [...this.steps, ...other.steps],
       this.sippCompliant && other.sippCompliant,
-      [...this.allowedExtras, ...other.allowedExtras]
+      [...this.allowedExtras, ...other.allowedExtras],
+      mergedDescription
     )
   }
 
@@ -70,7 +94,8 @@ export class ComposableScenario {
       renamedAgents,
       renamedSteps,
       this.sippCompliant,
-      renamedExtras
+      renamedExtras,
+      this.description
     )
   }
 
@@ -85,7 +110,8 @@ export class ComposableScenario {
       { ...this.agents, [agentName]: { ...agent, sutTarget } },
       this.steps,
       this.sippCompliant,
-      this.allowedExtras
+      this.allowedExtras,
+      this.description
     )
   }
 
@@ -97,6 +123,7 @@ export class ComposableScenario {
       steps: this.steps,
       sippCompliant: this.sippCompliant,
       allowedExtras: this.allowedExtras.length > 0 ? this.allowedExtras : undefined,
+      description: this.description,
     }
   }
 }

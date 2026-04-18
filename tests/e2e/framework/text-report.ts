@@ -89,15 +89,27 @@ function renderHeader(
 ): string {
   const statusLine = result.failed > 0 ? "FAIL" : "PASS"
   const stats = `${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped`
-  return [
+  const lines: string[] = [
     "=".repeat(SEPARATOR_WIDTH),
     `  SIP Exchange Report: ${scenarioName}`,
     `  View: ${viewLabel}`,
     `  Status: ${statusLine} (${stats})`,
     "=".repeat(SEPARATOR_WIDTH),
     "",
-    "",
-  ].join("\n")
+  ]
+  const description = result.scenarioDescription?.trim()
+  if (description) {
+    lines.push("Description:")
+    lines.push("")
+    for (const rawLine of description.split(/\r?\n/)) {
+      lines.push(rawLine.length > 0 ? `  ${rawLine}` : "")
+    }
+    lines.push("")
+    lines.push("-".repeat(SEPARATOR_WIDTH))
+    lines.push("")
+  }
+  lines.push("")
+  return lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
