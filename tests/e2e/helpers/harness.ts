@@ -88,7 +88,7 @@ export function createSimulatedRunner(opts?: {
   // TestClock, so adjusting it fires every pending Timer A/B/E/F/no-
   // answer/keepalive that should have elapsed.
   //
-  // Step in 10ms chunks rather than one large adjust so that forked
+  // Step in 100 chunks rather than one large adjust so that forked
   // fibers (notably the 15ms simulated-network delivery delay) observe
   // intermediate time values and get interleaved wakeups — a single
   // large adjust would fire all due timers atomically at the target
@@ -100,7 +100,7 @@ export function createSimulatedRunner(opts?: {
         Effect.gen(function* () {
           let remaining = ms
           while (remaining > 0) {
-            const step = remaining < 10 ? remaining : 10
+            const step = remaining < 100 ? remaining : 100
             yield* TestClock.adjust(`${step} millis`)
             remaining -= step
           }
