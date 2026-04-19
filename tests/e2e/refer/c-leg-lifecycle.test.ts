@@ -17,8 +17,8 @@ import {
   referAllowC603,
   referAllowCNoAnswer,
   referAllowCMultiple18x,
-} from "../scenarios/refer-allow.js"
-import { createSimulatedRunner, flushIndexReport } from "../helpers/harness.js"
+} from "../../scenarios/refer-allow.js"
+import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 

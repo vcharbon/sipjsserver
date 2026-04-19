@@ -5,7 +5,7 @@
  * consumed by pluggable backends (simulated, live UDP, SIPp export).
  */
 
-import type { Effect, Scope } from "effect"
+import type { Effect, Layer, Scope } from "effect"
 import { Data } from "effect"
 import type { SipHeader, SipMessage } from "../../../src/sip/types.js"
 import type { ValidationCheckName, ValidationOverrides } from "./validation.js"
@@ -313,6 +313,13 @@ export interface ScenarioResult {
  *   so the drain MUST use the non-blocking variant.
  */
 export interface TestTransport {
+  /**
+   * Optional layer to provide around the whole scenario (fake backend only).
+   * Applied at the outer scope so layer-scoped resources (UdpTransport's
+   * bound endpoint, forked router fibers) live for the test lifetime,
+   * not just for setup's lifetime. Live backend leaves this undefined.
+   */
+  readonly stackLayer?: Layer.Layer<never>
   readonly setup: (
     agents: Record<string, AgentConfig>,
     b2buaTarget: { host: string; port: number }

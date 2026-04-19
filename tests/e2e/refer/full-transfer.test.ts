@@ -14,8 +14,8 @@ import {
   referAllowFullAGlareReinvite,
   referAllowFullABye,
   referAllowFullATimeout,
-} from "../scenarios/refer-full-transfer.js"
-import { createSimulatedRunner, flushIndexReport } from "../helpers/harness.js"
+} from "../../scenarios/refer-full-transfer.js"
+import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 

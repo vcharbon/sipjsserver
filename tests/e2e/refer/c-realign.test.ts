@@ -15,8 +15,8 @@ import {
   referAllowCRealignCTimeout,
   referAllowCRealignCGlare,
   referAllowCRealignBNonBye,
-} from "../scenarios/refer-c-realign.js"
-import { createSimulatedRunner, flushIndexReport } from "../helpers/harness.js"
+} from "../../scenarios/refer-c-realign.js"
+import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 

@@ -13,35 +13,35 @@
 
 import { describe, it } from "@effect/vitest"
 import { afterAll } from "vitest"
-import { basicCall } from "./scenarios/basic-call.js"
-import { callReject } from "./scenarios/call-reject.js"
-import { cancelCall } from "./scenarios/cancel.js"
-import { prackCall } from "./scenarios/prack.js"
-import { prackForkingCall } from "./scenarios/prack-forking.js"
-import { cancelCrossing200Ok } from "./scenarios/cancel-200ok-crossing.js"
-import { callerHangup, calleeHangup } from "./scenarios/bye-directions.js"
-import { optionsKeepaliveTimeout } from "./scenarios/options-keepalive-timeout.js"
-import { limiterRejection } from "./scenarios/limiter-rejection.js"
-import { limiterCancel } from "./scenarios/limiter-cancel.js"
-import { failoverReroute } from "./scenarios/failover-reroute.js"
+import { basicCall } from "../scenarios/basic-call.js"
+import { callReject } from "../scenarios/call-reject.js"
+import { cancelCall } from "../scenarios/cancel.js"
+import { prackCall } from "../scenarios/prack.js"
+import { prackForkingCall } from "../scenarios/prack-forking.js"
+import { cancelCrossing200Ok } from "../scenarios/cancel-200ok-crossing.js"
+import { callerHangup, calleeHangup } from "../scenarios/bye-directions.js"
+import { optionsKeepaliveTimeout } from "../scenarios/options-keepalive-timeout.js"
+import { limiterRejection } from "../scenarios/limiter-rejection.js"
+import { limiterCancel } from "../scenarios/limiter-cancel.js"
+import { failoverReroute } from "../scenarios/failover-reroute.js"
 import {
   createSimulatedRunner,
   createLiveRunner,
   createPeerToPeerRunner,
   flushIndexReport,
-} from "./helpers/harness.js"
+} from "../support/harness.js"
 
 const OUTPUT_DIR = "test-results/real-clock"
 import {
   p2pDirectCall,
   ALICE_PORT as P2P_ALICE_PORT,
   BOB_PORT as P2P_BOB_PORT,
-} from "./scenarios/p2p-direct-call.js"
+} from "../scenarios/p2p-direct-call.js"
 import {
   p2pExtraMessage,
   ALICE_PORT as P2P_X_ALICE_PORT,
   BOB_PORT as P2P_X_BOB_PORT,
-} from "./scenarios/p2p-extra-message.js"
+} from "../scenarios/p2p-extra-message.js"
 
 afterAll(() => flushIndexReport(OUTPUT_DIR))
 

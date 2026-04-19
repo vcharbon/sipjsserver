@@ -1,39 +1,35 @@
 /**
  * Simulated backend — SignalingNetwork-driven in-process B2BUA, TestClock.
  *
- * Each test agent binds a real `UdpEndpoint` on the shared simulated
- * `SignalingNetwork` fabric at `{agentIp, agentPort}`. The B2BUA's own
- * `UdpTransport` facade binds at `{sipLocalIp, sipLocalPort}` on the same
- * fabric. Routing is purely by `dstIp:dstPort` — no Call-ID demux, no
+ * The service stack itself lives in [tests/support/fakeStack.ts] — this
+ * module is only the `TestTransport` shim that wires the scenario
+ * interpreter up to that stack: binds a per-agent `UdpEndpoint` on the
+ * shared fabric, forks `SipRouter.start`, and implements `send`/
+ * `receive`/`verifyCleanState` against the shared service instances.
+ *
+ * Routing is purely by `dstIp:dstPort` — no Call-ID demux, no
  * `X-Test-Agent` fallback; agents appear to the B2BUA exactly the way a
  * real UDP stack would expose them.
  */
 
-import { Effect, Layer } from "effect"
+import { Effect } from "effect"
 import type { AgentInfo, TestTransport } from "./types.js"
 import { TransportError } from "./types.js"
-import { UdpTransport } from "../../../src/sip/UdpTransport.js"
-import { SignalingNetwork, type UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
-import { OverloadController } from "../../../src/b2bua/OverloadController.js"
-import { MetricsRegistry } from "../../../src/observability/MetricsRegistry.js"
+import type { UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
+import { SignalingNetwork } from "../../../src/sip/SignalingNetwork.js"
 import { SipRouter } from "../../../src/sip/SipRouter.js"
-import { AppConfig, type AppConfigData } from "../../../src/config/AppConfig.js"
+import { type AppConfigData } from "../../../src/config/AppConfig.js"
 import { testAppConfigDefaults } from "../../support/testAppConfigDefaults.js"
 import { CallState } from "../../../src/call/CallState.js"
-import { CallStateCache } from "../../../src/call/CallStateCache.js"
-import { CallLimiter } from "../../../src/call/CallLimiter.js"
 import { TimerService } from "../../../src/call/TimerService.js"
-import { CdrWriter } from "../../../src/cdr/CdrWriter.js"
-import { RedisClient } from "../../../src/redis/RedisClient.js"
-import { TracingService } from "../../../src/tracing/TracingService.js"
-import { MockCallControlLayer } from "./MockCallControlLayer.js"
-import { buildHandlers, ruleRegistry, B2buaCoreLayer } from "../../../src/b2bua/B2buaCore.js"
+import { buildHandlers, ruleRegistry } from "../../../src/b2bua/B2buaCore.js"
 import {
   disableRule,
   transformRegistry,
   type RuleRegistry,
 } from "../../../src/b2bua/rules/framework/RuleRegistry.js"
 import { recordFiring } from "./rule-usage-collector.js"
+import { DEFAULT_TRANSIT_DELAY_MS, fakeStackLayer } from "../../support/fakeStack.js"
 
 // ---------------------------------------------------------------------------
 // Test rule registry: disable-on-env + handle-firing tracker
@@ -60,14 +56,6 @@ function buildTestHandlers() {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-/**
- * Simulated network propagation delay applied to every SIP message in
- * both directions. Read off the `SignalingNetwork` service at drain time
- * (see `networkDelayMs` below) so the trace renderer stays in sync with
- * whatever value the stack layer is configured with.
- */
-const DEFAULT_NETWORK_DELAY_MS = 15
 
 /**
  * Per-agent ingress queue capacity. Bounded by the `SignalingNetwork`
@@ -112,44 +100,6 @@ function testAppConfig(sipPort: number, httpPort: number, overrides?: Partial<Ap
 }
 
 // ---------------------------------------------------------------------------
-// No-op tracing layer
-// ---------------------------------------------------------------------------
-
-const NoOpTracingLayer = Layer.succeed(TracingService, {
-  decideSampling: () => false,
-  withRootSpan: <A, E, R>(opts: {
-    readonly name: string
-    readonly sampled: boolean
-    readonly attributes: Record<string, unknown>
-    readonly effect: Effect.Effect<A, E, R>
-  }): Effect.Effect<{ readonly result: A; readonly traceId: string; readonly spanId: string }, E, R> =>
-    Effect.map(opts.effect, (result) => ({ result, traceId: "", spanId: "" })),
-  withProcessingSpan: <A, E, R>(opts: {
-    readonly call: any
-    readonly name: string
-    readonly attributes: Record<string, unknown>
-    readonly effect: Effect.Effect<A, E, R>
-  }): Effect.Effect<A, E, R> => opts.effect,
-  emitSendSpan: () => Effect.void,
-  emitTombstone: () => Effect.void,
-  withErrorSpan: <A, E, R>(
-    _name: string,
-    _attributes: Record<string, unknown>,
-    effect: Effect.Effect<A, E, R>
-  ): Effect.Effect<A, E, R> => effect,
-  emitSpanEvents: () => Effect.void,
-  scrubMessage: (raw: string) => raw,
-})
-
-// ---------------------------------------------------------------------------
-// No-op CDR layer
-// ---------------------------------------------------------------------------
-
-const NoOpCdrLayer = Layer.succeed(CdrWriter, {
-  write: (_call: any) => Effect.void,
-})
-
-// ---------------------------------------------------------------------------
 // Simulated transport implementation
 // ---------------------------------------------------------------------------
 
@@ -168,6 +118,9 @@ export function createSimulatedTransport(opts?: {
   const httpPort = opts?.httpPort ?? 13002
   const clockSleep = opts?.clockSleep ?? ((ms: number) => Effect.sleep(`${ms} millis`))
 
+  const config = testAppConfig(sipPort, httpPort, opts?.configOverrides)
+  const StackLayer = fakeStackLayer({ config })
+
   const mockState: MockTransportState = {
     agents: new Map(),
     network: undefined,
@@ -176,18 +129,31 @@ export function createSimulatedTransport(opts?: {
   }
 
   return {
+    stackLayer: StackLayer,
     setup: (agentConfigs, _b2buaTarget) =>
       Effect.gen(function* () {
-        const config = testAppConfig(sipPort, httpPort, opts?.configOverrides)
-        const AppConfigLayer = Layer.succeed(AppConfig, config)
-
-        // Yield the simulated fabric once — we share the same instance
-        // between the B2BUA's UdpTransport and every per-agent endpoint
-        // by re-providing it as Layer.succeed(SignalingNetwork, network)
-        // when composing the B2BUA stack below.
+        // All services come out of the single FakeStackLayer, so the
+        // SignalingNetwork the agents bind on and the SignalingNetwork
+        // inside the B2BUA's UdpTransport are guaranteed to be the same
+        // instance. Ditto CallState / TimerService — we read the router's
+        // actual instances for verifyCleanState, not a disconnected
+        // second copy.
+        //
+        // StackLayer is provided at the *outer* scope by the runner (see
+        // `createSimulatedRunner`) — NOT via `.pipe(Effect.provide(...))`
+        // on this setup effect. Layer-scoped resources (UdpTransport's
+        // bound endpoint; the forked router) must outlive setup() itself;
+        // piping the provide here would finalize UdpTransport as soon as
+        // setup returns and every subsequent packet would bounce as
+        // undeliverable.
         const network = yield* SignalingNetwork
+        const callState = yield* CallState
+        const timerService = yield* TimerService
+        const router = yield* SipRouter
+
         mockState.network = network
-        const SharedNetworkLayer = Layer.succeed(SignalingNetwork, network)
+        mockState.callStateRef = callState
+        mockState.timerServiceRef = timerService
 
         // Bind every agent on the fabric at its {ip, port}. Default ip
         // is 127.0.0.1 (matches legacy behavior — many scenarios hardcode
@@ -225,64 +191,10 @@ export function createSimulatedTransport(opts?: {
           }
         }
 
-        // Build the in-process B2BUA stack. UdpTransport binds on the
-        // same fabric (via SharedNetworkLayer), so its ingress queue
-        // receives everything an agent sends to {sipLocalIp, sipLocalPort}.
-        const MetricsRegistryLayer = MetricsRegistry.layer
-
-        const UdpLayer = UdpTransport.layer.pipe(
-          Layer.provide(AppConfigLayer),
-          Layer.provide(MetricsRegistryLayer),
-          Layer.provide(SharedNetworkLayer)
-        )
-
-        const RedisLayer = RedisClient.layer.pipe(Layer.provide(AppConfigLayer))
-
-        const CallLimiterLayer = CallLimiter.redisLayer.pipe(
-          Layer.provide(AppConfigLayer),
-          Layer.provide(RedisLayer)
-        )
-
-        const CallStateCacheLayer = CallStateCache.redisLayer.pipe(
-          Layer.provide(RedisLayer)
-        )
-
-        const OverloadControllerLayer = OverloadController.layer.pipe(
-          Layer.provide(AppConfigLayer),
-          Layer.provide(MetricsRegistryLayer)
-        )
-
-        const SipLayer = B2buaCoreLayer.pipe(
-          Layer.provide(AppConfigLayer),
-          Layer.provide(UdpLayer),
-          Layer.provide(OverloadControllerLayer),
-          Layer.provide(CallStateCacheLayer),
-          Layer.provide(CallLimiterLayer),
-          Layer.provide(MockCallControlLayer),
-          Layer.provide(NoOpTracingLayer),
-          Layer.provide(NoOpCdrLayer),
-        )
-
-        // Capture service references for post-scenario state verification.
-        const CallStateLayer = CallState.layer.pipe(
-          Layer.provide(AppConfigLayer),
-          Layer.provide(CallStateCacheLayer)
-        )
-        mockState.callStateRef = yield* Effect.gen(function* () {
-          return yield* CallState
-        }).pipe(Effect.provide(CallStateLayer))
-        mockState.timerServiceRef = yield* Effect.gen(function* () {
-          return yield* TimerService
-        }).pipe(Effect.provide(TimerService.layer))
-
         // Fork SipRouter inside the surrounding scope so it's cancelled
         // automatically when the test scope closes.
         const testHandlers = buildTestHandlers()
-        const routerProgram = Effect.gen(function* () {
-          const router = yield* SipRouter
-          return yield* router.start(testHandlers)
-        }).pipe(Effect.provide(SipLayer))
-        yield* Effect.forkScoped(routerProgram)
+        yield* Effect.forkScoped(router.start(testHandlers))
 
         // Wait via real setTimeout (NOT Effect.sleep) so the SipRouter
         // stream wiring completes before the first test step — under
@@ -296,11 +208,13 @@ export function createSimulatedTransport(opts?: {
           Effect.sync(() => {
             mockState.agents.clear()
             mockState.network = undefined
+            mockState.callStateRef = undefined
+            mockState.timerServiceRef = undefined
           })
         )
 
         return agentInfos
-      }).pipe(Effect.provide(SignalingNetwork.simulated({ transitDelayMs: DEFAULT_NETWORK_DELAY_MS }))),
+      }),
 
     send: (agentName, buf, port, address) =>
       Effect.gen(function* () {
@@ -344,7 +258,18 @@ export function createSimulatedTransport(opts?: {
       // (notably TransactionLayer auto-ACK generation for non-2xx final
       // responses, which happens asynchronously after the response is
       // received) to complete before we sweep for unexpected messages.
+      //
+      // Under TestClock we additionally advance virtual time by a small
+      // amount so that post-final-response cleanup timers (e.g. the
+      // "terminating" state drop, non-INVITE transaction Timer K) can
+      // fire before `verifyCleanState` reads CallState/TimerService.
+      // 500ms is comfortably larger than any finalization timer in the
+      // pipeline while staying well below the smallest scenario pause.
       Effect.gen(function* () {
+        for (let i = 0; i < 20; i++) {
+          yield* Effect.yieldNow
+        }
+        yield* clockSleep(500)
         for (let i = 0; i < 20; i++) {
           yield* Effect.yieldNow
         }
@@ -395,7 +320,7 @@ export function createSimulatedTransport(opts?: {
     // swaps in a layer without a transit delay, we fall back to the
     // default so the trace renderer has a usable value.
     get networkDelayMs() {
-      return mockState.network?.transitDelayMs ?? DEFAULT_NETWORK_DELAY_MS
+      return mockState.network?.transitDelayMs ?? DEFAULT_TRANSIT_DELAY_MS
     },
   }
 }

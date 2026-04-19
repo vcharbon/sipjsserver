@@ -18,8 +18,8 @@ import {
   referReplacesRejected,
   referOutOfDialog,
   referSecondDuringAuthorizing,
-} from "../scenarios/refer-reject.js"
-import { createSimulatedRunner, flushIndexReport } from "../helpers/harness.js"
+} from "../../scenarios/refer-reject.js"
+import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 

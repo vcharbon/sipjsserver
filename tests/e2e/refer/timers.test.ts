@@ -11,8 +11,8 @@
 
 import { describe, it } from "@effect/vitest"
 import { afterAll } from "vitest"
-import { referOverallSafetyFires } from "../scenarios/refer-timers.js"
-import { createSimulatedRunner, flushIndexReport } from "../helpers/harness.js"
+import { referOverallSafetyFires } from "../../scenarios/refer-timers.js"
+import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 

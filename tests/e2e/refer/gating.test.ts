@@ -27,8 +27,8 @@ import {
   referGatingBInfoRefAuthorizing,
   referGatingSecondReferCRinging,
   referGatingSecondReferCRealigning,
-} from "../scenarios/refer-gating.js"
-import { createSimulatedRunner, flushIndexReport } from "../helpers/harness.js"
+} from "../../scenarios/refer-gating.js"
+import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 
