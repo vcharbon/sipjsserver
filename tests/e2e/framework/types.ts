@@ -223,6 +223,17 @@ export interface AllowedExtraPattern {
   readonly statusCode?: number | undefined
 }
 
+/**
+ * Scenario duration tier — budgets the real wall-clock time the scenario
+ * is expected to take on the live backend. Fake-clock runs ignore this
+ * (virtual time). Drives the `test:live:{short,medium,long}` npm scripts.
+ *
+ *   short  (default)  ≤ 2s    happy path, basic signaling, BYE. No retransmit reliance.
+ *   medium            ≤ 30s   first INVITE retransmit (T1=500ms), Timer E/F, one limiter window.
+ *   long              > 30s   Timer B/H (32s), noAnswerTimeoutSec, keepalive timeout.
+ */
+export type ScenarioTier = "short" | "medium" | "long"
+
 export interface Scenario {
   readonly name: string
   readonly agents: Record<string, AgentConfig>
@@ -237,6 +248,19 @@ export interface Scenario {
    * misbehaving agents (retransmissions, bad tags, stalled HTTP, ...).
    */
   readonly description?: string | undefined
+  /** Duration tier — defaults to "short" when omitted. */
+  readonly tier?: ScenarioTier | undefined
+  /**
+   * Opt out of the end-of-scenario 24h TestClock sweep and the
+   * subsequent `verifyCleanState` check. Use for scenarios that
+   * deliberately leave CallState/TimerService dirty (e.g. a test that
+   * simulates a caller walking away mid-dialog with no BYE).
+   *
+   * A scenario that simply forgot to send BYE should add `.bye()`
+   * instead — that's the default path. This flag exists for genuine
+   * "not our job to clean up" shapes.
+   */
+  readonly skipFinalSweep?: boolean | undefined
 }
 
 // ---------------------------------------------------------------------------

@@ -55,6 +55,10 @@ vitest.config.live.ts
 - `tests/live/**` cannot import `TestClock`, `MockCallControlLayer`,
   `memoryLayer` variants, or `fakeStack.ts`.
 
+> _Deferred:_ the project does not currently ship ESLint config; add this
+> rule only if/when ESLint is introduced. Without it the boundary is
+> enforced by directory layout + fake/live stack-layer selection only.
+
 **Scenario tiering (new metadata).** Add
 `readonly tier?: "short" | "medium" | "long"` to `Scenario` in
 [tests/e2e/framework/types.ts](../../tests/e2e/framework/types.ts).

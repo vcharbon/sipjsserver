@@ -46,4 +46,9 @@ export const optionsKeepaliveTimeout = scenario("options-keepalive-timeout", (s)
 
   const bobByeTxn = bobDialog.expect("BYE", { timeout: 10_000 })
   bobByeTxn.reply(200)
-})
+}).skipFinalSweep()
+// Alice is deliberately unresponsive for the keepalive sequence, so the
+// scenario ends with alice's dialog state still live on the B2BUA — no
+// alice-side BYE is ever sent. Opt out of the end-of-scenario sweep
+// rather than fabricating a fake cleanup; the real-world shape is "caller
+// walked away, B2BUA eventually times out its own leg".

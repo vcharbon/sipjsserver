@@ -191,15 +191,16 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
 
   // --- Check for unexpected messages ---
   // Settle any pending fibers (retransmits, deferred B2BUA sends,
-  // TransactionLayer auto-ACK-for-non-2xx) before draining. The transport's
-  // settle hook yields the fiber scheduler many times — required for
-  // deterministic detection of forgotten `allowExtra("ACK")` assertions.
-  // We deliberately do NOT call `Effect.sleep` here: under TestClock the
-  // drain runs against a suspended virtual clock with nothing to advance
-  // it, so a sleep would hang the test. The drain itself uses the
-  // non-blocking Queue.poll path (timeoutMs=0).
+  // TransactionLayer auto-ACK-for-non-2xx) and — under fake clock —
+  // advance virtual time 24h so every pending SIP timer, CallState
+  // "terminating" drop, and limiter window migration fires before
+  // drain-for-unexpected and verifyCleanState observe the stack.
+  //
+  // Scenarios marked `skipFinalSweep` opt out of both the sweep and
+  // verifyCleanState — used when the scenario deliberately leaves
+  // CallState dirty (no BYE) as part of its shape.
   yield* Effect.yieldNow
-  if (transport.settle !== undefined) {
+  if (!scenario.skipFinalSweep && transport.settle !== undefined) {
     yield* transport.settle()
   }
   yield* checkUnexpectedMessages(state, transport)
@@ -207,7 +208,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
   yield* checkDanglingOffers(state)
 
   // --- Verify internal state is clean (no leaked calls/timers) ---
-  if (transport.verifyCleanState) {
+  if (!scenario.skipFinalSweep && transport.verifyCleanState) {
     const stateErrors = yield* transport.verifyCleanState()
     for (const err of stateErrors) {
       state.results.push(makeStepResult({

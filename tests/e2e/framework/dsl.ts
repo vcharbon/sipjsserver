@@ -13,6 +13,7 @@ import type {
   AllowedExtraPattern,
   OrBranch,
   Scenario,
+  ScenarioTier,
   Step,
   SutTarget,
 } from "./types.js"
@@ -42,7 +43,11 @@ export class ComposableScenario {
      * see what the test simulates without re-reading the DSL source. Most
      * useful for scenarios that deliberately simulate bad-actor agents.
      */
-    readonly description: string | undefined = undefined
+    readonly description: string | undefined = undefined,
+    /** Duration tier — metadata for `test:live:{short,medium,long}` gating. */
+    readonly scenarioTier: ScenarioTier = "short",
+    /** Opt out of the end-of-scenario 24h TestClock sweep + verifyCleanState. */
+    readonly skipFinalSweepFlag: boolean = false
   ) {}
 
   /** Attach a human-readable description. Returns a new immutable scenario. */
@@ -53,7 +58,46 @@ export class ComposableScenario {
       this.steps,
       this.sippCompliant,
       this.allowedExtras,
-      description
+      description,
+      this.scenarioTier,
+      this.skipFinalSweepFlag
+    )
+  }
+
+  /**
+   * Set the scenario duration tier. Affects which `test:live:*` npm
+   * script runs this scenario. Has no runtime effect under fake-clock.
+   */
+  tier(t: ScenarioTier): ComposableScenario {
+    return new ComposableScenario(
+      this.name,
+      this.agents,
+      this.steps,
+      this.sippCompliant,
+      this.allowedExtras,
+      this.description,
+      t,
+      this.skipFinalSweepFlag
+    )
+  }
+
+  /**
+   * Opt out of the 24h TestClock sweep + verifyCleanState at scenario
+   * end. Use only for scenarios that deliberately leave CallState or
+   * TimerService dirty (e.g. simulating a caller walking off mid-call
+   * with no BYE). Normal scenarios that "forgot" to hang up should add
+   * `.bye()` instead.
+   */
+  skipFinalSweep(): ComposableScenario {
+    return new ComposableScenario(
+      this.name,
+      this.agents,
+      this.steps,
+      this.sippCompliant,
+      this.allowedExtras,
+      this.description,
+      this.scenarioTier,
+      true
     )
   }
 
@@ -64,13 +108,18 @@ export class ComposableScenario {
       this.description !== undefined && other.description !== undefined
         ? `${this.description}\n\nthen:\n\n${other.description}`
         : this.description ?? other.description
+    // Composed tier = max(self, other). If either side opts out of the
+    // final sweep, the composition does too (mid-call joins can't be
+    // cleaner than their loosest part).
     return new ComposableScenario(
       `${this.name}+${other.name}`,
       mergedAgents,
       [...this.steps, ...other.steps],
       this.sippCompliant && other.sippCompliant,
       [...this.allowedExtras, ...other.allowedExtras],
-      mergedDescription
+      mergedDescription,
+      maxTier(this.scenarioTier, other.scenarioTier),
+      this.skipFinalSweepFlag || other.skipFinalSweepFlag
     )
   }
 
@@ -95,7 +144,9 @@ export class ComposableScenario {
       renamedSteps,
       this.sippCompliant,
       renamedExtras,
-      this.description
+      this.description,
+      this.scenarioTier,
+      this.skipFinalSweepFlag
     )
   }
 
@@ -111,7 +162,9 @@ export class ComposableScenario {
       this.steps,
       this.sippCompliant,
       this.allowedExtras,
-      this.description
+      this.description,
+      this.scenarioTier,
+      this.skipFinalSweepFlag
     )
   }
 
@@ -124,8 +177,15 @@ export class ComposableScenario {
       sippCompliant: this.sippCompliant,
       allowedExtras: this.allowedExtras.length > 0 ? this.allowedExtras : undefined,
       description: this.description,
+      tier: this.scenarioTier,
+      skipFinalSweep: this.skipFinalSweepFlag || undefined,
     }
   }
+}
+
+function maxTier(a: ScenarioTier, b: ScenarioTier): ScenarioTier {
+  const rank = { short: 0, medium: 1, long: 2 } as const
+  return rank[a] >= rank[b] ? a : b
 }
 
 // ---------------------------------------------------------------------------
@@ -270,12 +330,22 @@ export function parallel(
     mergedExtras.push(...s.allowedExtras)
   }
 
+  // Composed tier = max across branches; composed skipFinalSweep = any.
+  const composedTier = scenarios.reduce<ScenarioTier>(
+    (acc, s) => maxTier(acc, s.scenarioTier),
+    "short"
+  )
+  const composedSkip = scenarios.some((s) => s.skipFinalSweepFlag)
+
   return new ComposableScenario(
     name,
     mergedAgents,
     allSteps,
     scenarios.every((s) => s.sippCompliant),
-    mergedExtras
+    mergedExtras,
+    undefined,
+    composedTier,
+    composedSkip
   )
 }
 

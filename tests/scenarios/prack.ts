@@ -79,4 +79,11 @@ export const prackCall = scenario("prack", (s) => {
 
   // Bob receives relayed ACK
   bobDialog.expect("ACK")
+
+  // Alice hangs up so the sweep finds a clean CallState
+  s.pause(1000)
+  const aliceByeTxn = aliceDialog.bye()
+  const bobByeTxn = bobDialog.expect("BYE")
+  bobByeTxn.reply(200)
+  aliceByeTxn.expect(200)
 })

@@ -13,6 +13,7 @@
  */
 
 import { Effect } from "effect"
+import * as TestClock from "effect/testing/TestClock"
 import type { AgentInfo, TestTransport } from "./types.js"
 import { TransportError } from "./types.js"
 import type { UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
@@ -113,6 +114,12 @@ export function createSimulatedTransport(opts?: {
    * aware variant so the simulated-network delivery fibers can wake up.
    */
   clockSleep?: (ms: number) => Effect.Effect<void>
+  /**
+   * True when the surrounding vitest runner is `it.live` (real clock +
+   * real UDP). Drives the end-of-scenario settle: fake tests get a 24h
+   * TestClock sweep; real tests get a short wall-clock sleep.
+   */
+  realClock?: boolean
 }): TestTransport {
   const sipPort = opts?.sipPort ?? 15060
   const httpPort = opts?.httpPort ?? 13002
@@ -254,22 +261,28 @@ export function createSimulatedTransport(opts?: {
       }),
 
     settle: () =>
-      // Yield the fiber scheduler enough times for any queued work
-      // (notably TransactionLayer auto-ACK generation for non-2xx final
-      // responses, which happens asynchronously after the response is
-      // received) to complete before we sweep for unexpected messages.
-      //
-      // Under TestClock we additionally advance virtual time by a small
-      // amount so that post-final-response cleanup timers (e.g. the
-      // "terminating" state drop, non-INVITE transaction Timer K) can
-      // fire before `verifyCleanState` reads CallState/TimerService.
-      // 500ms is comfortably larger than any finalization timer in the
-      // pipeline while staying well below the smallest scenario pause.
+      // End-of-scenario sweep. Three concerns:
+      //   1. Yield the scheduler so TransactionLayer's auto-ACK (for non-
+      //      2xx final responses) and other fiber-deferred work actually
+      //      run before drain-for-unexpected.
+      //   2. Advance time far enough to fire every pending SIP retransmit,
+      //      Timer B/H (32s), CallState "terminating" drop, limiter window
+      //      migration, and keepalive interval. 24 virtual hours under
+      //      TestClock covers every finalization timer in the pipeline
+      //      with margin to spare; under a real clock we only need a short
+      //      ingress-gap sleep (the live backend is NOT tasked with
+      //      retransmit-sweep detection — fake owns that responsibility).
+      //   3. Yield again so any messages produced by step 2 land in the
+      //      endpoint queues before drain.
       Effect.gen(function* () {
         for (let i = 0; i < 20; i++) {
           yield* Effect.yieldNow
         }
-        yield* clockSleep(500)
+        if (opts?.realClock) {
+          yield* Effect.sleep("100 millis")
+        } else {
+          yield* TestClock.adjust("24 hours")
+        }
         for (let i = 0; i < 20; i++) {
           yield* Effect.yieldNow
         }

@@ -106,10 +106,11 @@ export function createSimulatedRunner(opts?: {
           }
         })
 
+  const realClock = opts?.realClock === true
   const transportOpts: Parameters<typeof createSimulatedTransport>[0] =
     opts?.configOverrides !== undefined
-      ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep }
-      : { sipPort, httpPort, clockSleep }
+      ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep, realClock }
+      : { sipPort, httpPort, clockSleep, realClock }
   const transport = createSimulatedTransport(transportOpts)
   const target = { host: "127.0.0.1", port: sipPort }
 
