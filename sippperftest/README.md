@@ -58,7 +58,7 @@ npm run dev
 
 # Examples
 ./sipp-perf.sh              # defaults: 1000 calls, 10 concurrent, 50 cps
-./sipp-perf.sh 5000 50 200  # 5000 calls, 50 concurrent, 200 cps
+./sipp-perf.sh 500000 50000 100  # 5000 calls, 50 concurrent, 200 cps
 ```
 
 ### `overload.sh` — Interactive overload test
