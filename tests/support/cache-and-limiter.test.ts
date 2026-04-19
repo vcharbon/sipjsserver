@@ -41,10 +41,11 @@ const makeCall = (callId: string, fromTag: string): Call => ({
   cdrEvents: [],
   state: "active",
   createdAt: 0,
-  aLegVias: [],
-  aLegFrom: "",
-  aLegTo: "",
-  aLegInviteCSeq: 1,
+  aLegInvite: {
+    uri: "sip:test@example.com",
+    headers: [],
+    body: new Uint8Array(),
+  },
   tagMap: []
 })
 

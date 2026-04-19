@@ -18,6 +18,22 @@ npm run dev             # Start the server in development mode
 
 After every code change, run `npm run typecheck` and verify zero errors and zero warnings. Warnings and Effect TS messages must be fixed, not ignored. Only suppress a warning with a lint-disable comment as a last resort, always with an explanation.
 
+
+## Agent Strategy
+
+For complex multi-step tasks, prefer delegating independent implementation
+subtasks to subagents via the Task tool rather than executing inline.
+Reserve the main context for planning, coordination, and review.
+
+## Subagent Delegation
+
+When spawning subagents via Task(), always include in the task description:
+- Relevant file paths and their purpose
+- Conventions or patterns to follow
+- Acceptance criteria / expected output
+- Any prior decisions that affect this subtask
+- explicit instruction to 
+
 ## Commit policy
 
 Only create commits for complex tasks (multi-slice feature, architectural refactor, or when the user explicitly asks). For one-off edits, leave the changes uncommitted for user review. Commits land on the `main` branch with a clear message.
