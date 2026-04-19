@@ -10,8 +10,8 @@
  *   - begin-termination                — BYEs the responsive peer (alice)
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 const KEEPALIVE_INTERVAL_MS = 900_000
 

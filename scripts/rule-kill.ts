@@ -17,7 +17,7 @@ import { ruleRegistry } from "../src/b2bua/B2buaCore.js"
 
 const OUTPUT_DIR = "test-results"
 const REPORT_FILE = "rule-kill-report.txt"
-const TARGET_TEST = "tests/e2e/e2e-fake-clock.test.ts"
+const TARGET_TEST = "tests/fullcall/e2e-fake-clock.test.ts"
 
 interface Result {
   readonly id: string

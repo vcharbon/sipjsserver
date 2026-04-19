@@ -2,8 +2,8 @@
  * Basic call scenario: INVITE → 100 → 180 → 200 → ACK → pause → BYE → 200
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 import type { SipHeader } from "../../src/sip/types.js"
 
 function getHeaderValue(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {

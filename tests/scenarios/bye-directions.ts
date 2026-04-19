@@ -6,8 +6,8 @@
  *   callSetup.andThen(calleeBye)
  */
 
-import { sequence } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { sequence } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 /** Reusable: call setup through ACK. */
 export const callSetup = sequence("call-setup", (s) => {

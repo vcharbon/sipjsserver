@@ -60,7 +60,7 @@ export interface UdpPacket {
    *
    * Stamping here instead of at dequeue time is what lets the test harness
    * read straight off `endpoint` without the `Stream.runForEach` hop that
-   * used to live in `tests/e2e/framework/{live,simulated}-backend.ts`.
+   * used to live in `tests/fullcall/framework/{live,simulated}-backend.ts`.
    */
   readonly arrivalMs: number
 }

@@ -8,8 +8,8 @@
  *   - alice3 → INVITE (after cancel completes) → established (limiter slot available)
  */
 
-import { scenario, parallel } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario, parallel } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 const limiterInstruction = JSON.stringify({
   action: "route",

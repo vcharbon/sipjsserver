@@ -11,8 +11,8 @@
  *    not add its own — alice should see no Record-Route at all.
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 import type { SipHeader } from "../../src/sip/types.js"
 
 // ---------------------------------------------------------------------------

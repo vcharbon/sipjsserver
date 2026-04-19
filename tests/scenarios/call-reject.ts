@@ -5,8 +5,8 @@
  * returns action: "reject" with code 403.
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer } from "../fullcall/helpers/sdp.js"
 
 export const callReject = scenario("call-reject", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })

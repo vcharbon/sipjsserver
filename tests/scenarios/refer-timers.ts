@@ -16,8 +16,8 @@
  *     timer expires first while the call is stalled in `c-realigning`.
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 function decodeBody(body: Uint8Array | undefined): string {
   if (body === undefined || body.byteLength === 0) return ""

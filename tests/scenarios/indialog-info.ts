@@ -7,8 +7,8 @@
  * only dialog identifiers and Via rewritten per hop.
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 const dtmfFromAlice = new TextEncoder().encode("Signal=5\r\nDuration=160\r\n")
 const dtmfFromBob = new TextEncoder().encode("Signal=9\r\nDuration=160\r\n")

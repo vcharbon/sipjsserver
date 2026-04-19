@@ -11,8 +11,8 @@
  * "confirmed".
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 export const retransmit200 = scenario("retransmit-200", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })

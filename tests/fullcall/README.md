@@ -35,7 +35,7 @@ The scenario function does not execute SIP. It runs in **record mode**, producin
 ### File layout
 
 ```
-tests/e2e/
+tests/fullcall/
   framework/
     types.ts              Step AST, StepRef, MessageContext, AgentConfig, TestTransport
     dsl.ts                scenario(), sequence(), or(), andThen(), rename()
@@ -72,12 +72,12 @@ Runs the B2BUA in-process with a mock UDP transport. No real sockets, fast execu
 npm run test
 
 # Run only E2E tests
-npx vitest run tests/e2e/e2e.test.ts
+npx vitest run tests/fullcall/e2e.test.ts
 
 # Run a specific scenario
-npx vitest run tests/e2e/e2e.test.ts -t "basic call"
+npx vitest run tests/fullcall/e2e.test.ts -t "basic call"
 
-npx vitest run tests/e2e/e2e-fake-clock.test.ts 
+npx vitest run tests/fullcall/e2e-fake-clock.test.ts 
 ```
 
 ### Live UDP backend
@@ -90,10 +90,10 @@ npm run dev
 
 # Terminal 2: run live E2E tests
 export E2E_LIVE=1 
-npx vitest run tests/e2e/e2e.test.ts
+npx vitest run tests/fullcall/e2e.test.ts
 
 # Override B2BUA address
-E2E_LIVE=1 E2E_B2BUA_HOST=10.0.0.5 E2E_B2BUA_PORT=5060 npx vitest run tests/e2e/e2e.test.ts
+E2E_LIVE=1 E2E_B2BUA_HOST=10.0.0.5 E2E_B2BUA_PORT=5060 npx vitest run tests/fullcall/e2e.test.ts
 ```
 
 ## Writing scenarios

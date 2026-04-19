@@ -7,8 +7,8 @@
  * Flow: INVITE -> 180 -> 200 -> ACK -> BYE -> 200
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 export const ALICE_PORT = 25060
 export const BOB_PORT = 25061

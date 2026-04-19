@@ -10,8 +10,8 @@
  * identifiers that don't match any active call.
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 /**
  * A stranger sends BYE, INVITE (re-INVITE), and OPTIONS to the B2BUA

@@ -12,8 +12,8 @@
  *   5. referAllowFullATimeout        — A does not answer the a-realign re-INVITE (32s) → rollback
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 import type { SipMessage } from "../../src/sip/types.js"
 
 function decodeBody(body: Uint8Array | undefined): string {

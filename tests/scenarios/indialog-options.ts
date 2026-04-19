@@ -10,8 +10,8 @@
  * to verify payload transparency.
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 const aliceBody = new TextEncoder().encode("alice-options-payload\r\n")
 const bobBody = new TextEncoder().encode("bob-options-payload\r\n")

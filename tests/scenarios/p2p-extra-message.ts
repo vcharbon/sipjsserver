@@ -6,8 +6,8 @@
  * This scenario is expected to FAIL — the runner asserts that.
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 export const ALICE_PORT = 25062
 export const BOB_PORT = 25063

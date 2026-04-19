@@ -1,7 +1,7 @@
 /**
  * Shared AppConfigData factory for tests. Avoids the (M1) duplication that
  * used to live in both `tests/sip/UdpTransport-brake.test.ts` and
- * `tests/e2e/framework/simulated-backend.ts` — two independent copies of
+ * `tests/fullcall/framework/simulated-backend.ts` — two independent copies of
  * the same ~40 fields that drifted whenever a new AppConfig entry landed.
  *
  * Deliberately kept in `tests/support/`, not `src/`. Test fixtures don't

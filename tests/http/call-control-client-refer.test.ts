@@ -16,7 +16,7 @@ import {
 } from "../../src/http/CallControlSchemas.js"
 import { mockCallReferBehavior } from "../../src/http/MockCallControlServer.js"
 import { CallControlClient } from "../../src/http/CallControlClient.js"
-import { MockCallControlLayer } from "../e2e/framework/MockCallControlLayer.js"
+import { MockCallControlLayer } from "../fullcall/framework/MockCallControlLayer.js"
 
 // ── Schema roundtrip ─────────────────────────────────────────────────────────
 

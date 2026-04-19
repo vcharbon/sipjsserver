@@ -51,7 +51,7 @@ import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { TracingService } from "../../src/tracing/TracingService.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { B2buaCoreLayer } from "../../src/b2bua/B2buaCore.js"
-import { MockCallControlLayer } from "../e2e/framework/MockCallControlLayer.js"
+import { MockCallControlLayer } from "../fullcall/framework/MockCallControlLayer.js"
 
 /**
  * Default simulated-network transit delay — picked high enough to expose

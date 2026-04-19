@@ -8,8 +8,8 @@
  * Test 5: 100rel stripped — verify outbound INVITE has no 100rel in Supported
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 import type { SipMessage } from "../../src/sip/types.js"
 
 // ── Helpers ────────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@
 
 import { describe, it } from "@effect/vitest"
 import { afterAll } from "vitest"
+import type { ScenarioTier } from "./framework/types.js"
 import { basicCall } from "../scenarios/basic-call.js"
 import { callReject } from "../scenarios/call-reject.js"
 import { cancelCall } from "../scenarios/cancel.js"
@@ -46,10 +47,19 @@ import {
 afterAll(() => flushIndexReport(OUTPUT_DIR))
 
 // ---------------------------------------------------------------------------
+// Tier gating — see vitest.config.live.ts for the tier rank semantics.
+// ---------------------------------------------------------------------------
+
+const tierRank: Record<ScenarioTier, number> = { short: 0, medium: 1, long: 2 }
+const configuredTier = (process.env.TEST_TIER ?? "short") as ScenarioTier
+const includeTier = (t: ScenarioTier): boolean =>
+  tierRank[t] <= (tierRank[configuredTier] ?? 0)
+
+// ---------------------------------------------------------------------------
 // Simulated backend tests — short keepalive (separate B2BUA instance)
 // ---------------------------------------------------------------------------
 
-describe("E2E (real clock) — simulated backend (keepalive)", () => {
+describe.skipIf(!includeTier("medium"))("E2E (real clock) — simulated backend (keepalive)", () => {
   const run = createSimulatedRunner({
     sipPort: 15070,
     httpPort: 13012,

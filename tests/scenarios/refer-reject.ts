@@ -10,8 +10,8 @@
  *   - A second REFER while the first is still in refer-authorizing
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 

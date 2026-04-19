@@ -8,8 +8,8 @@
  * 4. CANCEL the B-leg INVITE to Bob
  */
 
-import { scenario } from "../e2e/framework/dsl.js"
-import { sdpOffer } from "../e2e/helpers/sdp.js"
+import { scenario } from "../fullcall/framework/dsl.js"
+import { sdpOffer } from "../fullcall/helpers/sdp.js"
 
 export const cancelCall = scenario("cancel", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })
