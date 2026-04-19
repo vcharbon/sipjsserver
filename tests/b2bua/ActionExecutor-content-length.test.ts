@@ -29,12 +29,39 @@ const rinfo: RemoteInfo = { address: "192.168.1.100", port: 5060 }
 
 function makeDialog(toTag: string, localCSeq = 1000): Dialog {
   return {
-    toTag,
-    contact: "<sip:peer@192.168.1.200:5060>",
-    localCSeq,
-    remoteCSeq: 1,
-    inboundPendingRequests: [],
-    routeSet: [],
+    sip: {
+      callId: "1-call-1",
+      localTag: "tagB2BUA",
+      remoteTag: toTag,
+      localUri: "<sip:b2bua@10.0.0.1>",
+      remoteUri: "<sip:bob@example.com>",
+      remoteTarget: "<sip:peer@192.168.1.200:5060>",
+      localCSeq,
+      routeSet: [],
+    },
+    ext: {
+      remoteCSeq: 1,
+      inboundPendingRequests: [],
+    },
+  }
+}
+
+function makeALegDialog(toTag: string, fromTag: string, localCSeq = 1000): Dialog {
+  return {
+    sip: {
+      callId: "call-1",
+      localTag: toTag,
+      remoteTag: fromTag,
+      localUri: "<sip:b2bua@10.0.0.1>",
+      remoteUri: "<sip:alice@example.com>",
+      remoteTarget: "<sip:alice@192.168.1.100:5060>",
+      localCSeq,
+      routeSet: [],
+    },
+    ext: {
+      remoteCSeq: 1,
+      inboundPendingRequests: [],
+    },
   }
 }
 
@@ -56,11 +83,18 @@ function makeCall(aLeg: Leg, bLeg: Leg): Call {
     aLeg,
     bLegs: [bLeg],
     activePeer: { legA: "a", legB: bLeg.legId },
-    aLegVias: ["SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig"],
-    aLegFrom: `<sip:alice@example.com>;tag=${aLeg.fromTag}`,
-    aLegTo: "<sip:bob@example.com>",
-    aLegInviteCSeq: 1,
-    tagMap: [{ aTag: "aFacing123", bLegId: bLeg.legId, bTag: bLeg.dialogs[0]?.toTag ?? "" }],
+    aLegInvite: {
+      uri: "sip:bob@example.com",
+      headers: [
+        { name: "Via", value: "SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig" },
+        { name: "From", value: `<sip:alice@example.com>;tag=${aLeg.fromTag}` },
+        { name: "To", value: "<sip:bob@example.com>" },
+        { name: "CSeq", value: "1 INVITE" },
+        { name: "Call-ID", value: aLeg.callId },
+      ],
+      body: new Uint8Array(),
+    },
+    tagMap: [{ aTag: "aFacing123", bLegId: bLeg.legId, bTag: bLeg.dialogs[0]?.sip.remoteTag ?? "" }],
     limiterEntries: [],
     timers: [],
     cdrEvents: [],
@@ -95,7 +129,7 @@ function makeCtx(
 describe("ActionExecutor Content-Length correctness", () => {
   describe("request relay body transforms", () => {
     // Setup: a-leg sends re-INVITE to b-leg, transform replaces body
-    const aDialog = makeDialog("alice-remote-tag", 100)
+    const aDialog = makeALegDialog("alice-remote-tag", "tagA", 100)
     const bDialog = makeDialog("bob-remote-tag", 1000)
     const aLeg = makeLeg("a", "call-1", "tagA", aDialog)
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bDialog)
@@ -151,7 +185,7 @@ describe("ActionExecutor Content-Length correctness", () => {
 
   describe("response relay body transforms", () => {
     // Setup: b-leg sends 183 with SDP to a-leg, transform strips body
-    const aDialog = makeDialog("alice-remote-tag", 100)
+    const aDialog = makeALegDialog("alice-remote-tag", "tagA", 100)
     const bDialog = makeDialog("bob-remote-tag", 1000)
     const aLeg = makeLeg("a", "call-1", "tagA", aDialog)
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bDialog)
@@ -211,7 +245,7 @@ describe("ActionExecutor Content-Length correctness", () => {
   })
 
   describe("send-request-to-leg body", () => {
-    const aDialog = makeDialog("alice-remote-tag", 100)
+    const aDialog = makeALegDialog("alice-remote-tag", "tagA", 100)
     const bDialog = makeDialog("bob-remote-tag", 1000)
     const aLeg = makeLeg("a", "call-1", "tagA", aDialog)
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bDialog)

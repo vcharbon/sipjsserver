@@ -269,7 +269,7 @@ export type RuleAction =
        * time and needs to align the a-leg dialog with it.
        *
        * Creates dialog[0] when the leg has no dialogs:
-       *   - legId === "a" → makeDialogFromIncoming(toTag, call.aLegInviteCSeq)
+       *   - legId === "a" → makeDialogFromIncoming(toTag, aLegInviteCSeqNum(call))
        *   - other legs    → makeEmptyDialog(toTag)
        *
        * Does not touch leg.state, leg.disposition, or tagMap.
@@ -288,7 +288,7 @@ export type RuleAction =
   | {
       readonly type: "create-leg"
       readonly destination: LegDestination
-      /** "snapshot" = use aLegInviteSnapshot; or provide a specific SipRequest. */
+      /** "snapshot" = use call.aLegInvite; or provide a specific SipRequest. */
       readonly fromInvite?: "snapshot" | SipRequest
       readonly noAnswerTimeoutSec?: number
       /** Propagate callback_context from failover response for subsequent failovers. */
@@ -478,7 +478,6 @@ export type RuleAction =
   //
   // Reach (Slice C audit — primitive, single named leg):
   //   legs.{legId}.dialogs[0].localCSeq     → +1
-  //   legs.{legId}.dialogs[0].lastInviteCSeq → new CSeq (so ACK-for-2xx echoes)
   //   legs.{legId}.dialogs[0].pendingRequests → add { method: "INVITE", ... }
   //
   // Used by REFER transfer rules (c-realign, a-realign). Not a general

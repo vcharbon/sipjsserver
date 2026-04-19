@@ -7,7 +7,7 @@
 import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
-import { getHeader, newTag } from "../../../sip/MessageFactory.js"
+import { getHeader, newTag } from "../../../sip/MessageHelpers.js"
 import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
 import { confirmBridgedCall } from "../framework/actions/composites.js"
 

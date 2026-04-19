@@ -26,7 +26,7 @@ import {
   bufferHasEmergencyMarker,
   isInviteRequestBuffer,
   jitteredRetryAfter,
-} from "./MessageFactory.js"
+} from "./MessageHelpers.js"
 import {
   PreIngressAction,
   SignalingNetwork,

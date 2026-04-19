@@ -21,6 +21,7 @@ import {
   diffCall,
   runActions,
   makeDialog,
+  makeALegDialog,
   makeLeg,
   makeCall,
   makeCtx,
@@ -34,7 +35,7 @@ function bridged(): {
   aLeg: Leg
   bLeg: Leg
 } {
-  const aDialog = makeDialog("alice-tag", 100)
+  const aDialog = makeALegDialog("alice-tag", "tagA", 100)
   const bDialog = makeDialog("bob-tag", 1000)
   const aLeg: Leg = {
     ...makeLeg("a", "call-1", "tagA", aDialog),
@@ -84,7 +85,8 @@ describe("stamp-dialog-to-tag reach-diff", () => {
       { type: "stamp-dialog-to-tag", legId: "a", toTag: "alice-new-tag" },
     ]
     const { after } = runActions(actions, ctx)
-    expect(diffCall(call, after)).toEqual(new Set(["legs.a.dialogs[0].toTag"]))
+    // a-leg dialog identity lives on sip.localTag.
+    expect(diffCall(call, after)).toEqual(new Set(["legs.a.dialogs[0].sip.localTag"]))
   })
 })
 
@@ -93,8 +95,8 @@ describe("stamp-dialog-to-tag reach-diff", () => {
 describe("confirm-dialog reach-diff", () => {
   test("names only the target leg's dialogs[0] fields — no leg-level or call-level state", () => {
     // Baseline with an empty placeholder dialog on b-1, so the action populates
-    // contact/toTag/localCSeq/lastInviteCSeq/routeSet in dialog[0].
-    const aDialog = makeDialog("alice-tag", 100)
+    // contact/toTag/localCSeq/routeSet in dialog[0].
+    const aDialog = makeALegDialog("alice-tag", "tagA", 100)
     const bPlaceholder = makeDialog("", 1000)
     const aLeg = makeLeg("a", "call-1", "tagA", aDialog)
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bPlaceholder)
@@ -111,10 +113,11 @@ describe("confirm-dialog reach-diff", () => {
     for (const path of diff) {
       expect(path.startsWith("legs.b-1.dialogs[0].")).toBe(true)
     }
-    // The observable changes: toTag, contact, routeSet, localCSeq, lastInviteCSeq.
-    expect(diff.has("legs.b-1.dialogs[0].toTag")).toBe(true)
-    expect(diff.has("legs.b-1.dialogs[0].contact")).toBe(true)
-    expect(diff.has("legs.b-1.dialogs[0].routeSet")).toBe(true)
+    // The observable changes: sip.remoteTag (b-leg identity), sip.remoteTarget,
+    // sip.routeSet, sip.localCSeq.
+    expect(diff.has("legs.b-1.dialogs[0].sip.remoteTag")).toBe(true)
+    expect(diff.has("legs.b-1.dialogs[0].sip.remoteTarget")).toBe(true)
+    expect(diff.has("legs.b-1.dialogs[0].sip.routeSet")).toBe(true)
   })
 })
 
@@ -136,7 +139,7 @@ describe("add-tag-mapping reach-diff", () => {
 
 describe("cancel-leg reach-diff", () => {
   test("names legs.{legId}.disposition only on a trying b-leg", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("")) // trying
     const call = makeCall(aLeg, bLeg)
     const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))

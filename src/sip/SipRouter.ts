@@ -4,25 +4,25 @@
  * Owns:
  * - Call resolution (callRef+leg from Contact URI params, Via cr/lg params, or callId+fromTag fallback)
  * - `withCall` wrapper: resolve -> checkout -> tracing span -> handler -> processResult -> release
- * - Via/Contact header stamping on outbound messages
- * - Effect execution in fixed order
+ * - Persist-before-send of handler results + side effect execution in fixed order
  *
  * Consumes TransactionEvent stream + timer events, delegates to handlers.
+ * Outbound messages arrive already fully formed — the stack generators build
+ * them at call-site time with real Via/Contact specs.
  */
 
 import { Clock, Effect, Layer, ServiceMap, Stream } from "effect"
-import type { RemoteInfo, SipHeader, SipMessage, SipRequest, SipResponse } from "./types.js"
+import type { RemoteInfo, SipMessage, SipRequest, SipResponse } from "./types.js"
 import { TransactionLayer } from "./TransactionLayer.js"
 import { UdpTransport } from "./UdpTransport.js"
 import { serialize, messageSummary } from "./Serializer.js"
 import {
-  buildRejectResponse,
   extractNameAddrUri,
   getHeader,
-  getHeaders,
   isEmergencyRequest,
-  newBranch,
-} from "./MessageFactory.js"
+  newTag,
+} from "./MessageHelpers.js"
+import { generateResponse } from "./generators.js"
 import { AppConfig, type AppConfigData } from "../config/AppConfig.js"
 import { CallState } from "../call/CallState.js"
 import { CallControlClient } from "../http/CallControlClient.js"
@@ -38,8 +38,6 @@ import {
   type TimerEntry,
   type TimerType,
   deriveCallRef,
-  updateDialog,
-  updateLeg,
 } from "../call/CallModel.js"
 
 // ---------------------------------------------------------------------------
@@ -158,74 +156,13 @@ export interface HandlerRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// Via/Contact encoding helpers
+// Resolution logic
 // ---------------------------------------------------------------------------
 
-/** URL-encode a value for safe embedding in SIP Via/Contact params. */
-function encodeParam(value: string): string {
-  return encodeURIComponent(value)
-}
-
-/** Decode a URL-encoded param value. */
+/** Decode a URL-encoded Via/Contact param value. */
 function decodeParam(value: string): string {
   return decodeURIComponent(value)
 }
-
-/** Build a Contact URI with callRef and leg encoded as URI parameters. */
-function buildContactUri(localIp: string, localPort: number, callRef: string, leg: string, isEmergency: boolean): string {
-  const base = `sip:b2bua@${localIp}:${localPort};callRef=${encodeParam(callRef)};leg=${encodeParam(leg)}`
-  return isEmergency ? `${base};emerg=1` : base
-}
-
-/** Build a Via header with cr/lg custom parameters and a concrete branch. */
-function buildVia(localIp: string, localPort: number, callRef: string, leg: string, isEmergency: boolean, branch: string): string {
-  const base = `SIP/2.0/UDP ${localIp}:${localPort};branch=${branch};cr=${encodeParam(callRef)};lg=${encodeParam(leg)}`
-  return isEmergency ? `${base};em=1` : base
-}
-
-/**
- * Stamp Via and Contact on an outbound message with callRef/leg params.
- * B2BUA does NOT insert Record-Route (RFC 3261 §16.6 — only proxies use Record-Route).
- * When `isEmergency` is true, also stamps the `;emerg=1` (URI) and `;em=1` (Via)
- * markers used by the dispatcher byte-classifier to route subsequent in-dialog
- * packets into the emergency priority queue.
- *
- * Returns the stamped message AND the Via branch that was embedded (either
- * `forceBranch` if provided, or a freshly generated one). Callers need the
- * branch to store on the Leg for CANCEL branch reuse (RFC 3261 §9.1).
- */
-function stampHeaders(
-  msg: SipRequest | SipResponse,
-  localIp: string,
-  localPort: number,
-  callRef: string,
-  leg: string,
-  isEmergency: boolean,
-  forceBranch?: string,
-): { message: SipRequest | SipResponse; branch: string | undefined } {
-  let stampedBranch: string | undefined
-  const headers: SipHeader[] = msg.headers.map((h) => {
-    const lower = h.name.toLowerCase()
-    if (lower === "via" && h.value === "__PLACEHOLDER__") {
-      const branch = forceBranch ?? newBranch()
-      stampedBranch = branch
-      return { name: h.name, value: buildVia(localIp, localPort, callRef, leg, isEmergency, branch) }
-    }
-    if (lower === "contact" && h.value === "__PLACEHOLDER__") {
-      return { name: h.name, value: `<${buildContactUri(localIp, localPort, callRef, leg, isEmergency)}>` }
-    }
-    return h
-  })
-
-  return {
-    message: { ...msg, headers } as SipRequest | SipResponse,
-    branch: stampedBranch,
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Resolution logic
-// ---------------------------------------------------------------------------
 
 interface ResolvedKey {
   readonly callRef: string
@@ -307,94 +244,36 @@ export class SipRouter extends ServiceMap.Service<
 
       const processResult = Effect.fn("SipRouter.processResult")(
         function* (callRef: string, result: HandlerResult, handlers: HandlerRegistry, nowMs: number) {
-          // ── Phase A: stamp outbound messages, capture INVITE branches ──
-          //
-          // We stamp all messages first so that the Via branch generated by
-          // stampHeaders can be persisted onto the b-leg BEFORE any message
-          // is sent. This preserves the "state updates before sending"
-          // invariant and enables CANCEL branch reuse (RFC 3261 §9.1) without
-          // having to regex-parse the Via back out of a sent message.
-          let workingCall = result.call
-          const stamped: Array<{
-            env: OutboundEnvelope
-            message: SipRequest | SipResponse
-            outLeg: string
-          }> = []
+          // Persist updated call state BEFORE sending any messages — upholds
+          // the "state updates before sending" invariant. Via/Contact stamping
+          // and INVITE/ACK branch capture now happen at generator call-sites
+          // in handlers, so no pre-send mutation is needed here.
+          yield* callState.update(callRef, () => result.call)
 
+          // Send outbound messages (pure output, no state mutation).
           for (const env of result.outbound) {
-            const outLeg = determineOutboundLeg(workingCall, env)
+            const msg = env.message
+            const isRequest = msg.type === "request"
 
-            // RFC 3261 §9.1: CANCEL must reuse the INVITE's Via branch.
-            // Look up stored inviteBranch when sending CANCEL for a b-leg.
-            let forceBranch: string | undefined
-            if (env.message.type === "request" && env.message.method === "CANCEL" && outLeg !== "a") {
-              const bLeg = workingCall.bLegs.find((l) => l.legId === outLeg)
-              forceBranch = bLeg?.inviteBranch
-            }
-
-            // RFC 3261 §13.2.2.4 / §17.1.1.2: replay the cached ACK branch on
-            // retransmit so the UAS can correlate the re-ACK with the original
-            // and stop retransmitting the 2xx.
-            if (env.message.type === "request" && env.message.method === "ACK") {
-              const leg = outLeg === "a" ? workingCall.aLeg : workingCall.bLegs.find((l) => l.legId === outLeg)
-              const cachedAckBranch = leg?.dialogs[0]?.ackBranch
-              if (cachedAckBranch !== undefined) forceBranch = cachedAckBranch
-            }
-
-            const { message: stampedMsg, branch } = stampHeaders(
-              env.message, transport.localAddress.ip, transport.localAddress.port, callRef, outLeg,
-              workingCall.emergency === true, forceBranch,
-            )
-
-            // RFC 3261 §9.1: Capture INVITE Via branch so CANCEL can reuse it.
-            if (branch !== undefined && stampedMsg.type === "request"
-                && stampedMsg.method === "INVITE" && outLeg !== "a") {
-              workingCall = updateLeg(workingCall, outLeg, (l) => ({ ...l, inviteBranch: branch }))
-            }
-
-            // Cache ACK branch on the dialog so retransmitted 2xx triggers a
-            // byte-identical re-ACK (RFC 3261 §13.2.2.4). Only capture when no
-            // forceBranch was applied (first emission).
-            if (branch !== undefined && stampedMsg.type === "request"
-                && stampedMsg.method === "ACK" && forceBranch === undefined) {
-              const leg = outLeg === "a" ? workingCall.aLeg : workingCall.bLegs.find((l) => l.legId === outLeg)
-              const toTag = leg?.dialogs[0]?.toTag
-              if (leg !== undefined && toTag !== undefined) {
-                workingCall = updateDialog(workingCall, outLeg, toTag, (d) => ({ ...d, ackBranch: branch }))
-              }
-            }
-
-            stamped.push({ env, message: stampedMsg, outLeg })
-          }
-
-          // 1. Persist updated call state (including any captured INVITE branches)
-          //    BEFORE sending any messages. This upholds the documented
-          //    "state updates before sending" invariant.
-          yield* callState.update(callRef, () => workingCall)
-
-          // ── Phase B: send stamped messages (pure output, no state mutation) ──
-          for (const { env, message: stampedMsg } of stamped) {
-            const isRequest = stampedMsg.type === "request"
-
-            yield* Effect.logDebug(`SIP OUT -> ${env.destination.host}:${env.destination.port} [${env.label}] ${messageSummary(stampedMsg)}`)
-            yield* Effect.logDebug(serialize(stampedMsg).toString('utf-8'))
+            yield* Effect.logDebug(`SIP OUT -> ${env.destination.host}:${env.destination.port} [${env.label}] ${messageSummary(msg)}`)
+            yield* Effect.logDebug(serialize(msg).toString('utf-8'))
 
             // Emit send span for tracing
-            if (workingCall.sampled === true) {
-              const sendName = stampedMsg.type === "request"
-                ? `sip.send.${(stampedMsg as SipRequest).method}`
-                : `sip.send.${(stampedMsg as SipResponse).status}`
+            if (result.call.sampled === true) {
+              const sendName = msg.type === "request"
+                ? `sip.send.${msg.method}`
+                : `sip.send.${msg.status}`
               const sendAttrs: Record<string, unknown> = {
                 "sip.call_ref": callRef,
                 "net.peer.addr": `${env.destination.host}:${env.destination.port}`,
-                "sip.raw_message": tracing.scrubMessage(serialize(stampedMsg).toString("utf-8")),
+                "sip.raw_message": tracing.scrubMessage(serialize(msg).toString("utf-8")),
               }
-              if (stampedMsg.type === "request") {
-                sendAttrs["sip.method"] = (stampedMsg as SipRequest).method
+              if (msg.type === "request") {
+                sendAttrs["sip.method"] = msg.method
               } else {
-                sendAttrs["sip.status_code"] = (stampedMsg as SipResponse).status
+                sendAttrs["sip.status_code"] = msg.status
               }
-              yield* tracing.emitSendSpan({ call: workingCall, name: sendName, attributes: sendAttrs })
+              yield* tracing.emitSendSpan({ call: result.call, name: sendName, attributes: sendAttrs })
             }
 
             // ACK for 2xx is a one-shot — no transaction management (RFC 3261 §17.1.1.2).
@@ -404,13 +283,13 @@ export class SipRouter extends ServiceMap.Service<
             // the peer's INVITE server transaction (or our no-answer timer) will time out
             // if the CANCEL is lost. The 200 OK / 487 responses are routed by CSeq method
             // in TransactionLayer.handleInboundResponse.
-            if (stampedMsg.type === "request" && (stampedMsg.method === "ACK" || stampedMsg.method === "CANCEL")) {
-              yield* txnLayer.sendRaw(serialize(stampedMsg), env.destination.port, env.destination.host)
+            if (isRequest && (msg.method === "ACK" || msg.method === "CANCEL")) {
+              yield* txnLayer.sendRaw(serialize(msg), env.destination.port, env.destination.host)
             } else {
               const txnType = isRequest
-                ? (stampedMsg.type === "request" && stampedMsg.method === "INVITE" ? "invite" as const : "non-invite" as const)
+                ? (msg.method === "INVITE" ? "invite" as const : "non-invite" as const)
                 : "response" as const
-              yield* txnLayer.send(stampedMsg, env.destination, txnType)
+              yield* txnLayer.send(msg, env.destination, txnType)
             }
           }
 
@@ -437,7 +316,7 @@ export class SipRouter extends ServiceMap.Service<
                 )
                 break
               case "write-cdr":
-                yield* cdr.write(workingCall).pipe(
+                yield* cdr.write(result.call).pipe(
                   Effect.catchCause((cause) =>
                     Effect.logError(`Failed to write CDR for ${callRef}`, cause)
                   )
@@ -452,11 +331,11 @@ export class SipRouter extends ServiceMap.Service<
                 break
               case "remove-call":
                 // Emit tombstone for non-sampled calls at teardown
-                if (workingCall.sampled !== true && workingCall.traceId !== undefined) {
+                if (result.call.sampled !== true && result.call.traceId !== undefined) {
                   yield* tracing.emitTombstone({
-                    call: workingCall,
-                    durationMs: nowMs - workingCall.createdAt,
-                    finalStatus: workingCall.state,
+                    call: result.call,
+                    durationMs: nowMs - result.call.createdAt,
+                    finalStatus: result.call.state,
                   })
                 }
                 yield* callState.remove(callRef).pipe(
@@ -467,9 +346,9 @@ export class SipRouter extends ServiceMap.Service<
                 break
               case "refer-async-http": {
                 // Fork /call/refer, then re-enter withCall with an internal-event
-                // carrying the HTTP outcome. State has already been persisted by
-                // Phase A (callState.update above), so the consuming rule sees
-                // the up-to-date transfer state when the result arrives.
+                // carrying the HTTP outcome. State was already persisted above,
+                // so the consuming rule sees the up-to-date transfer state when
+                // the result arrives.
                 const referReq = effect.request
                 const asyncCallRef = effect.callRef
                 yield* Effect.forkDetach(
@@ -498,24 +377,6 @@ export class SipRouter extends ServiceMap.Service<
           }
         }
       )
-
-      // ── Determine outbound leg for header stamping ──────────────────
-
-      function determineOutboundLeg(call: Call, env: OutboundEnvelope): string {
-        // Explicit legId — no heuristic needed
-        if (env.legId !== undefined) return env.legId
-        // If sending to a-leg source, stamp as a-leg
-        if (env.destination.host === call.aLeg.source.address &&
-            env.destination.port === call.aLeg.source.port) {
-          return "a"
-        }
-        // Otherwise find matching b-leg
-        for (const bLeg of call.bLegs) {
-          if (env.label.includes(bLeg.legId)) return bLeg.legId
-        }
-        // Default to first b-leg
-        return call.bLegs[0]?.legId ?? "b-1"
-      }
 
       // ── withCall: the unified processing wrapper ────────────────────
 
@@ -622,14 +483,13 @@ export class SipRouter extends ServiceMap.Service<
               // RFC 3261 §12.2.2 — reject unmatched in-dialog requests with 481
               // (ACK never gets a response; responses are silently dropped)
               if (msg.type === "request" && msg.method !== "ACK") {
-                const reject = buildRejectResponse(msg as SipRequest, 481, "Call/Transaction Does Not Exist")
-                // Replace Contact placeholder with concrete value (no call context for stamping)
-                const rejectHeaders = reject.headers.map(hdr =>
-                  hdr.value === "__PLACEHOLDER__"
-                    ? { name: hdr.name, value: `<sip:b2bua@${transport.localAddress.ip}:${transport.localAddress.port}>` }
-                    : hdr
-                )
-                const rejectMsg: SipResponse = { ...reject, headers: rejectHeaders }
+                // No call context available for leg/callref Contact params — emit
+                // a plain b2bua Contact directly. Tag fabricated for any incoming
+                // To missing one (generator only inserts when absent).
+                const rejectMsg = generateResponse(msg as SipRequest, 481, "Call/Transaction Does Not Exist", {
+                  toTag: newTag(),
+                  contact: { user: "b2bua", host: transport.localAddress.ip, port: transport.localAddress.port },
+                })
                 yield* txnLayer.send(rejectMsg, { host: event.rinfo.address, port: event.rinfo.port }, "response")
               }
             } else {
@@ -650,13 +510,10 @@ export class SipRouter extends ServiceMap.Service<
             yield* Effect.logWarning(`Call ${callRef} not found on checkout for ${summary}${legInfo} — rejecting`)
             // RFC 3261 §12.2.2 — reject requests for vanished calls with 481
             if (event.type === "sip" && event.message.type === "request" && event.message.method !== "ACK") {
-              const reject = buildRejectResponse(event.message as SipRequest, 481, "Call/Transaction Does Not Exist")
-              const rejectHeaders = reject.headers.map(hdr =>
-                hdr.value === "__PLACEHOLDER__"
-                  ? { name: hdr.name, value: `<sip:b2bua@${transport.localAddress.ip}:${transport.localAddress.port}>` }
-                  : hdr
-              )
-              const rejectMsg: SipResponse = { ...reject, headers: rejectHeaders }
+              const rejectMsg = generateResponse(event.message as SipRequest, 481, "Call/Transaction Does Not Exist", {
+                toTag: newTag(),
+                contact: { user: "b2bua", host: transport.localAddress.ip, port: transport.localAddress.port },
+              })
               yield* txnLayer.send(rejectMsg, { host: event.rinfo.address, port: event.rinfo.port }, "response")
             }
             return
@@ -746,12 +603,8 @@ export class SipRouter extends ServiceMap.Service<
             overrideRate !== undefined && !isNaN(overrideRate) ? overrideRate : undefined
           )
 
-          // Store original header values for relaying responses back to a-leg
-          const aLegVias = getHeaders(req.headers, "via")
-          const aLegFrom = fromHeader!
-          const aLegTo = getHeader(req.headers, "to") ?? req.uri
-          const aLegCSeqRaw = getHeader(req.headers, "cseq") ?? "1 INVITE"
-          const aLegCSeqNum = parseInt(aLegCSeqRaw, 10) || 1
+          const aLegFromForUri = fromHeader!
+          const aLegToForUri = getHeader(req.headers, "to") ?? req.uri
 
           // Create skeleton call with a-leg
           // RFC 3261 §12.2.1.1: track local/remote URIs for in-dialog header construction
@@ -765,8 +618,8 @@ export class SipRouter extends ServiceMap.Service<
             disposition: "bridged",
             dialogs: [],
             noAnswerTimeoutSec: undefined,
-            localUri: extractNameAddrUri(aLegTo),
-            remoteUri: extractNameAddrUri(aLegFrom),
+            localUri: extractNameAddrUri(aLegToForUri),
+            remoteUri: extractNameAddrUri(aLegFromForUri),
           }
 
           const isEmergency = isEmergencyRequest(req)
@@ -778,15 +631,15 @@ export class SipRouter extends ServiceMap.Service<
             bLegs: [],
             activePeer: null,
             callbackContext: undefined,
+            // Retain the full a-leg INVITE — source of truth for response
+            // relaying (Via/From/To/CSeq echo per RFC 3261 §8.2.6.2) and for
+            // failover b-leg reconstruction / transfer SDP lookups.
+            aLegInvite: { uri: req.uri, headers: req.headers, body: req.body },
             limiterEntries: [],
             timers: [],
             cdrEvents: [{ type: "invite_received", timestamp: nowMs, legId: "a" }],
             state: "active",
             createdAt: nowMs,
-            aLegVias,
-            aLegFrom,
-            aLegTo,
-            aLegInviteCSeq: aLegCSeqNum,
             tagMap: [],
             sampled,
             workerIndex: config.workerIndex >= 0 ? config.workerIndex : undefined,

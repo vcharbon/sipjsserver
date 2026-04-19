@@ -29,12 +29,20 @@ const aLeg: Leg = {
   disposition: "bridged",
   dialogs: [
     {
-      toTag: "b2bua-a-tag",
-      contact: "sip:b2bua@10.0.0.1:5060",
-      localCSeq: randomInitialCSeq(),
-      remoteCSeq: 101,
-      inboundPendingRequests: [],
-      routeSet: [],
+      sip: {
+        callId: "alice-call-id",
+        localTag: "b2bua-a-tag",
+        remoteTag: "alice-tag",
+        localUri: "<sip:b2bua@10.0.0.1>",
+        remoteUri: "<sip:alice@example.com>",
+        remoteTarget: "sip:b2bua@10.0.0.1:5060",
+        localCSeq: randomInitialCSeq(),
+        routeSet: [],
+      },
+      ext: {
+        remoteCSeq: 101,
+        inboundPendingRequests: [],
+      },
     },
   ],
 }
@@ -48,12 +56,20 @@ const bLeg: Leg = {
   disposition: "bridged",
   dialogs: [
     {
-      toTag: "bob-tag",
-      contact: "sip:bob@192.0.2.20:5060",
-      localCSeq: randomInitialCSeq(),
-      remoteCSeq: 1,
-      inboundPendingRequests: [],
-      routeSet: [],
+      sip: {
+        callId: "1-alice-call-id",
+        localTag: "b2bua-b-tag",
+        remoteTag: "bob-tag",
+        localUri: "<sip:b2bua@10.0.0.1>",
+        remoteUri: "<sip:target@example.com>",
+        remoteTarget: "sip:bob@192.0.2.20:5060",
+        localCSeq: randomInitialCSeq(),
+        routeSet: [],
+      },
+      ext: {
+        remoteCSeq: 1,
+        inboundPendingRequests: [],
+      },
     },
   ],
 }
@@ -69,10 +85,17 @@ function baseCall(): typeof Call.Type {
     cdrEvents: [],
     state: "active",
     createdAt: 1_700_000_000_000,
-    aLegVias: ["SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK.alice"],
-    aLegFrom: "<sip:alice@example.com>;tag=alice-tag",
-    aLegTo: "<sip:target@example.com>",
-    aLegInviteCSeq: 1,
+    aLegInvite: {
+      uri: "sip:target@example.com",
+      headers: [
+        { name: "Via", value: "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK.alice" },
+        { name: "From", value: "<sip:alice@example.com>;tag=alice-tag" },
+        { name: "To", value: "<sip:target@example.com>" },
+        { name: "CSeq", value: "1 INVITE" },
+        { name: "Call-ID", value: aLeg.callId },
+      ],
+      body: new Uint8Array(),
+    },
     tagMap: [{ aTag: "b2bua-a-tag", bLegId: "b-1", bTag: "bob-tag" }],
   }
 }

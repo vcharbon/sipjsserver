@@ -7,6 +7,31 @@
 
 import { Schema } from "effect"
 
+// ── INVITE client transaction handle (in-memory; opaque to JSON) ──────────
+//
+// B.2 introduces `pendingInviteTxn` on Leg (initial INVITE) and on
+// `B2buaDialogExt` (re-INVITE). The handle carries enough to reconstruct
+// the CANCEL / ACK-for-2xx wire format without consulting Call state:
+// branch (§9.1 CANCEL reuse), original INVITE (§13.2.2.4 ACK CSeq), and
+// destination.
+//
+// `originalInvite` is kept `Schema.Unknown` because `SipRequest` carries
+// `Buffer` / `Uint8Array` fields that aren't worth round-tripping — handles
+// live only in-memory and are best-effort through Redis. Consumers that
+// need the typed SipRequest cast the field at the call site.
+export const InviteTxnHandleSchema = Schema.Struct({
+  kind: Schema.Literal("invite"),
+  branch: Schema.String,
+  originalInvite: Schema.Unknown,
+  destination: Schema.Struct({
+    host: Schema.String,
+    port: Schema.Number,
+  }),
+})
+
+export type InviteTxnHandle = typeof InviteTxnHandleSchema.Type
+
+
 /**
  * Generate a random initial CSeq as a multiple of 1000 (1000–2_000_000).
  * RFC 3261 §8.1.1.5 recommends a random initial value.
@@ -56,17 +81,46 @@ export type PendingRequest = typeof PendingRequest.Type
 
 // ── Dialog ──────────────────────────────────────────────────────────────────
 
-export const Dialog = Schema.Struct({
-  toTag: Schema.String,
-  contact: Schema.String,
+/**
+ * RFC 3261 §12 dialog state, stack-owned. Mirrors the `StackDialog`
+ * interface exported from `src/sip/Dialog.ts`. The stack generators
+ * (`generateInDialogRequest`, `generateAckFor2xx`) consume exactly this
+ * shape — they don't know about `ext`.
+ *
+ * Tag convention (resolves the a/b-leg asymmetry that lived in the old
+ * `dialog.toTag` field):
+ *   - `localTag`  — B2BUA's tag on this leg. On the a-leg this is the tag
+ *                   the B2BUA pinned in its To response; on the b-leg it
+ *                   equals `leg.fromTag`.
+ *   - `remoteTag` — peer tag on this leg. On the a-leg this equals
+ *                   `leg.fromTag` (Alice's tag); on the b-leg it's the
+ *                   To-tag Bob returned in his 1xx/2xx.
+ *
+ * `callId`, `localUri`, `remoteUri` are denormalised from the enclosing
+ * leg so the generators can consume a dialog without any leg context.
+ */
+export const StackDialogSchema = Schema.Struct({
+  callId: Schema.String,
+  localTag: Schema.String,
+  remoteTag: Schema.String,
+  localUri: Schema.String,
+  remoteUri: Schema.String,
+  /** Peer Contact URI — Request-URI for in-dialog requests (§12.2.1.1). */
+  remoteTarget: Schema.String,
+  /** Last-sent CSeq on this dialog (§8.1.1.5). */
   localCSeq: Schema.Int,
-  /**
-   * CSeq of the most recently sent INVITE on this dialog (initial or re-INVITE).
-   * Used by ACK-for-2xx, which echoes the INVITE's CSeq (RFC 3261 §13.2.2.4).
-   * Distinct from localCSeq because intermediate PRACK/UPDATE may bump localCSeq
-   * between the INVITE and its 2xx response.
-   */
-  lastInviteCSeq: Schema.optional(Schema.Int),
+  /** Outbound route set, derived from Record-Route of the dialog-creating response (§12.1.2). */
+  routeSet: Schema.Array(Schema.String),
+})
+
+export type StackDialogSchemaType = typeof StackDialogSchema.Type
+
+/**
+ * B2BUA-only dialog extensions that never surface to the SIP stack.
+ * Kept separate from `sip` so the stack generators can consume just the
+ * §12 state without seeing B2BUA internals.
+ */
+export const B2buaDialogExtSchema = Schema.Struct({
   /** Remote party's highest CSeq. Null until first message received from remote. */
   remoteCSeq: Schema.NullOr(Schema.Int),
   /**
@@ -78,7 +132,6 @@ export const Dialog = Schema.Struct({
    * dialog where a new re-INVITE arrives FROM.
    */
   inboundPendingRequests: Schema.Array(PendingRequest),
-  routeSet: Schema.Array(Schema.String),
   /**
    * Via branch of the first ACK sent for this dialog's 2xx INVITE response.
    * RFC 3261 §13.2.2.4 / §17.1.1.2: ACK for 2xx is a one-shot. When a UAS
@@ -86,7 +139,33 @@ export const Dialog = Schema.Struct({
    * Via branch keeps the re-ACK byte-identical so the UAS can correlate it
    * with the original and suppress further 2xx retransmissions.
    */
-  ackBranch: Schema.optional(Schema.String)
+  ackBranch: Schema.optional(Schema.String),
+  /**
+   * Handle for an in-flight re-INVITE client transaction on this dialog.
+   * Set when the B2BUA sends a re-INVITE; cleared once the INVITE txn
+   * terminates (2xx+ACK, 3xx–6xx final, or 491 glare). Canonical source
+   * for ACK-for-2xx CSeq (§13.2.2.4).
+   */
+  pendingInviteTxn: Schema.optional(InviteTxnHandleSchema),
+})
+
+export type B2buaDialogExt = typeof B2buaDialogExtSchema.Type
+
+/**
+ * Composite Dialog = stack-level §12 state + B2BUA-only extensions.
+ *
+ * Callers migrating from the old flat shape:
+ *   - `dialog.toTag`          → `dialog.sip.localTag` (a-leg) or `dialog.sip.remoteTag` (b-leg)
+ *   - `dialog.contact`        → `dialog.sip.remoteTarget`
+ *   - `dialog.localCSeq`      → `dialog.sip.localCSeq`
+ *   - `dialog.routeSet`       → `dialog.sip.routeSet`
+ *   - `dialog.remoteCSeq`     → `dialog.ext.remoteCSeq`
+ *   - `dialog.inboundPending…`→ `dialog.ext.inboundPendingRequests`
+ *   - `dialog.ackBranch`      → `dialog.ext.ackBranch`
+ */
+export const Dialog = Schema.Struct({
+  sip: StackDialogSchema,
+  ext: B2buaDialogExtSchema,
 })
 
 export type Dialog = typeof Dialog.Type
@@ -185,22 +264,42 @@ export const Leg = Schema.Struct({
    */
   inviteRequestUri: Schema.optional(Schema.String),
   /**
-   * Via branch assigned to the outbound INVITE after SipRouter stamping.
-   * Needed for CANCEL — RFC 3261 §9.1: CANCEL Via must match the INVITE's top Via.
+   * Handle for the in-flight initial-INVITE client transaction on this leg.
+   * Set when the B2BUA sends the initial INVITE (before a dialog exists);
+   * cleared once the dialog is confirmed / ACK is sent. The canonical source
+   * for CANCEL branch reuse (§9.1) and ACK-for-2xx CSeq (§13.2.2.4).
    */
-  inviteBranch: Schema.optional(Schema.String),
+  pendingInviteTxn: Schema.optional(InviteTxnHandleSchema),
 })
 
 export type Leg = typeof Leg.Type
 
-/** Find a dialog by remote To-tag (for early-state forking). */
+/**
+ * Find a dialog by remote tag (for early-state forking on the b-leg).
+ * The caller passes Bob's tag from a 1xx/2xx; we match `sip.remoteTag`.
+ */
 export function findDialogByToTag(leg: Leg, toTag: string): Dialog | undefined {
-  return leg.dialogs.find((d) => d.toTag === toTag)
+  return leg.dialogs.find((d) => d.sip.remoteTag === toTag)
 }
 
 /** Get the single confirmed dialog (only valid when leg.state === "confirmed"). */
 export function confirmedDialog(leg: Leg): Dialog | undefined {
   return leg.dialogs[0]
+}
+
+/**
+ * Dialog-identity match — resolves the a/b-leg asymmetry.
+ *
+ * On the a-leg, the B2BUA pins its own tag as the dialog's local tag, so
+ * early-fork identity is keyed off `sip.localTag`. On the b-leg, Bob's tag
+ * (originally `dialog.toTag`) drives identity and lives in `sip.remoteTag`.
+ *
+ * Callers still pass a single "identity tag" — internally we route to the
+ * correct side. Kept local to this module so external callers don't
+ * accidentally use the wrong side.
+ */
+function matchDialogIdentity(legId: string, identityTag: string, d: Dialog): boolean {
+  return legId === "a" ? d.sip.localTag === identityTag : d.sip.remoteTag === identityTag
 }
 
 // ── Timer entry (serializable intent, not runtime fiber) ────────────────────
@@ -424,8 +523,15 @@ export const Call = Schema.Struct({
    */
   activePeer: Schema.NullOr(Schema.Struct({ legA: Schema.String, legB: Schema.String })),
   callbackContext: Schema.optional(Schema.String),
-  /** Snapshot of the original a-leg INVITE for failover b-leg reconstruction. */
-  aLegInviteSnapshot: Schema.optional(ALegInviteSnapshot),
+  /**
+   * Snapshot of the original a-leg INVITE. Source of truth for:
+   *   - failover b-leg reconstruction (createBLegFromRoute),
+   *   - relaying INVITE responses back to Alice (RFC 3261 §8.2.6.2: echo
+   *     Via/From/To/Call-ID/CSeq from the request),
+   *   - transfer scenarios that need Alice's SDP offer.
+   * Populated at call creation in SipRouter; never mutated.
+   */
+  aLegInvite: ALegInviteSnapshot,
   /**
    * Active limiter entries for this call.
    * Framework concern — InvariantEnforcer guarantees decrement on termination.
@@ -444,22 +550,10 @@ export const Call = Schema.Struct({
   cdrEvents: Schema.Array(CdrEvent),
   state: CallModelState,
   createdAt: Schema.Number,
-  /** Original Via header values from the a-leg INVITE (for relaying INVITE responses). */
-  aLegVias: Schema.Array(Schema.String),
   /** Via headers from the most recent non-INVITE a-leg request (PRACK, etc.) for response relay. */
   aLegPendingVias: Schema.optional(Schema.Array(Schema.String)),
   /** CSeq number of the most recent non-INVITE a-leg request (PRACK, etc.) — echoed on the response toward alice (RFC 3261 §8.1.3.3). */
   aLegPendingCSeq: Schema.optional(Schema.Int),
-  /** Original From header value from the a-leg INVITE (for relaying responses). */
-  aLegFrom: Schema.String,
-  /** Original To header value from the a-leg INVITE (for relaying responses). */
-  aLegTo: Schema.String,
-  /**
-   * CSeq number of the a-leg INVITE as received from Alice. Echoed on the
-   * final INVITE response back to her (RFC 3261 §8.1.3.3: response CSeq
-   * must equal request CSeq). A single per-call fact, not a dialog counter.
-   */
-  aLegInviteCSeq: Schema.Int,
   /** Maps B-leg remote To-tags to B2BUA-generated tags shown to Alice. */
   tagMap: Schema.Array(TagMapping),
   /** OpenTelemetry trace ID for this call (set at INVITE time). */
@@ -517,15 +611,32 @@ export function deriveCallRef(aLegCallId: string, aLegFromTag: string): string {
   return `${aLegCallId}|${aLegFromTag}`
 }
 
+/** Parameters the dialog constructors need from the enclosing leg. */
+export interface MakeDialogLegCtx {
+  readonly callId: string
+  readonly localUri: string
+  readonly remoteUri: string
+  readonly localTag: string
+  readonly remoteTag: string
+}
+
 /** Build the initial empty dialog stub with a random initial CSeq. */
-export function makeEmptyDialog(toTag: string): Dialog {
+export function makeEmptyDialog(leg: MakeDialogLegCtx): Dialog {
   return {
-    toTag,
-    contact: "",
-    localCSeq: randomInitialCSeq(),
-    remoteCSeq: null,
-    inboundPendingRequests: [],
-    routeSet: []
+    sip: {
+      callId: leg.callId,
+      localTag: leg.localTag,
+      remoteTag: leg.remoteTag,
+      localUri: leg.localUri,
+      remoteUri: leg.remoteUri,
+      remoteTarget: "",
+      localCSeq: randomInitialCSeq(),
+      routeSet: [],
+    },
+    ext: {
+      remoteCSeq: null,
+      inboundPendingRequests: [],
+    },
   }
 }
 
@@ -533,14 +644,22 @@ export function makeEmptyDialog(toTag: string): Dialog {
  * Build a dialog initialized from a received request's CSeq.
  * Used for the a-leg dialog where we know Alice's CSeq from her INVITE.
  */
-export function makeDialogFromIncoming(toTag: string, remoteCSeq: number): Dialog {
+export function makeDialogFromIncoming(leg: MakeDialogLegCtx, remoteCSeq: number): Dialog {
   return {
-    toTag,
-    contact: "",
-    localCSeq: randomInitialCSeq(),
-    remoteCSeq,
-    inboundPendingRequests: [],
-    routeSet: []
+    sip: {
+      callId: leg.callId,
+      localTag: leg.localTag,
+      remoteTag: leg.remoteTag,
+      localUri: leg.localUri,
+      remoteUri: leg.remoteUri,
+      remoteTarget: "",
+      localCSeq: randomInitialCSeq(),
+      routeSet: [],
+    },
+    ext: {
+      remoteCSeq,
+      inboundPendingRequests: [],
+    },
   }
 }
 
@@ -554,16 +673,22 @@ export function updateLeg(call: Call, legId: string, fn: (leg: Leg) => Leg): Cal
   return { ...call, bLegs: call.bLegs.map((l) => l.legId === legId ? fn(l) : l) }
 }
 
-/** Update a specific dialog within a leg. */
+/**
+ * Update a specific dialog within a leg, identified by its "identity tag".
+ *
+ * Identity tag semantics (see `matchDialogIdentity`):
+ *   - a-leg: the B2BUA's pinned tag → matches `sip.localTag`
+ *   - b-leg: the peer's tag (was `dialog.toTag`) → matches `sip.remoteTag`
+ */
 export function updateDialog(
   call: Call,
   legId: string,
-  toTag: string,
+  identityTag: string,
   fn: (dialog: Dialog) => Dialog
 ): Call {
   return updateLeg(call, legId, (leg) => ({
     ...leg,
-    dialogs: leg.dialogs.map((d) => d.toTag === toTag ? fn(d) : d)
+    dialogs: leg.dialogs.map((d) => matchDialogIdentity(legId, identityTag, d) ? fn(d) : d)
   }))
 }
 
@@ -630,15 +755,21 @@ export function findBLegByCallId(call: Call, callId: string): Leg | undefined {
  * Forked early dialogs each maintain an independent CSeq sequence from
  * the shared INVITE baseline, so this MUST NOT sync across sibling dialogs.
  */
-export function bumpLocalCSeq(call: Call, legId: string, toTag: string, delta: number = 1): Call {
-  return updateDialog(call, legId, toTag, (d) => ({ ...d, localCSeq: d.localCSeq + delta }))
+export function bumpLocalCSeq(call: Call, legId: string, identityTag: string, delta: number = 1): Call {
+  return updateDialog(call, legId, identityTag, (d) => ({
+    ...d,
+    sip: { ...d.sip, localCSeq: d.sip.localCSeq + delta },
+  }))
 }
 
 /**
  * Update the remoteCSeq on a dialog (track the other side's latest CSeq).
  */
-export function updateRemoteCSeq(call: Call, legId: string, toTag: string, remoteCSeq: number): Call {
-  return updateDialog(call, legId, toTag, (d) => ({ ...d, remoteCSeq }))
+export function updateRemoteCSeq(call: Call, legId: string, identityTag: string, remoteCSeq: number): Call {
+  return updateDialog(call, legId, identityTag, (d) => ({
+    ...d,
+    ext: { ...d.ext, remoteCSeq },
+  }))
 }
 
 /**
@@ -654,54 +785,51 @@ export function relayCSeqDelta(inboundCSeq: number, sourceRemoteCSeq: number | n
 // ── Pending transparent-relay request helpers ────────────────────────────
 
 /** Add a pending transparent-relay entry to a dialog. */
-export function addPendingRequest(call: Call, legId: string, toTag: string, entry: PendingRequest): Call {
-  return updateDialog(call, legId, toTag, (d) => ({
-    ...d, inboundPendingRequests: [...d.inboundPendingRequests, entry]
+export function addPendingRequest(call: Call, legId: string, identityTag: string, entry: PendingRequest): Call {
+  return updateDialog(call, legId, identityTag, (d) => ({
+    ...d,
+    ext: { ...d.ext, inboundPendingRequests: [...d.ext.inboundPendingRequests, entry] },
   }))
 }
 
 /** Find a pending transparent-relay entry by outbound CSeq. */
 export function findPendingRequest(dialog: Dialog, outboundCSeq: number): PendingRequest | undefined {
-  return dialog.inboundPendingRequests.find((p) => p.outboundCSeq === outboundCSeq)
+  return dialog.ext.inboundPendingRequests.find((p) => p.outboundCSeq === outboundCSeq)
 }
 
 /** Remove a pending transparent-relay entry after its response is handled. */
-export function removePendingRequest(call: Call, legId: string, toTag: string, outboundCSeq: number): Call {
-  return updateDialog(call, legId, toTag, (d) => ({
-    ...d, inboundPendingRequests: d.inboundPendingRequests.filter((p) => p.outboundCSeq !== outboundCSeq)
+export function removePendingRequest(call: Call, legId: string, identityTag: string, outboundCSeq: number): Call {
+  return updateDialog(call, legId, identityTag, (d) => ({
+    ...d,
+    ext: {
+      ...d.ext,
+      inboundPendingRequests: d.ext.inboundPendingRequests.filter((p) => p.outboundCSeq !== outboundCSeq),
+    },
   }))
 }
 
 // ── Leg tag helpers ───────────────────────────────────────────────────────
 //
-// On the a-leg, B2BUA is UAS: its tag lives in dialog.toTag, remote is fromTag.
-// On the b-leg, B2BUA is UAC: its tag lives in fromTag, remote is dialog.toTag.
-// These helpers hide that asymmetry.
+// After the StackDialog reshape, both sides of the asymmetry live on the
+// dialog itself (`sip.localTag` / `sip.remoteTag`). These helpers survive
+// as thin shortcuts over the first dialog.
 
-/**
- * Returns the B2BUA's own tag for a given leg.
- * - a-leg: B2BUA put its tag in To when responding → `dialog.toTag`
- * - b-leg: B2BUA put its tag in From when sending INVITE → `leg.fromTag`
- */
+/** Returns the B2BUA's own tag for a given leg (sip.localTag of dialogs[0]). */
 export function b2buaTag(call: Call, legId: string): string | undefined {
   if (legId === "a") {
-    return call.aLeg.dialogs[0]?.toTag
+    return call.aLeg.dialogs[0]?.sip.localTag
   }
   const bLeg = findBLeg(call, legId)
-  return bLeg?.fromTag
+  return bLeg?.dialogs[0]?.sip.localTag ?? bLeg?.fromTag
 }
 
-/**
- * Returns the remote party's tag for a given leg.
- * - a-leg: Alice put her tag in From when sending INVITE → `leg.fromTag`
- * - b-leg: Bob put his tag in To when responding → `dialog.toTag`
- */
+/** Returns the remote party's tag for a given leg (sip.remoteTag of dialogs[0]). */
 export function remoteTag(call: Call, legId: string): string | undefined {
   if (legId === "a") {
-    return call.aLeg.fromTag
+    return call.aLeg.dialogs[0]?.sip.remoteTag ?? call.aLeg.fromTag
   }
   const bLeg = findBLeg(call, legId)
-  return bLeg?.dialogs[0]?.toTag
+  return bLeg?.dialogs[0]?.sip.remoteTag
 }
 
 // ── Tag mapping helpers ───────────────────────────────────────────────────
@@ -793,4 +921,20 @@ export function deactivateRule(call: Call, ruleId: string): Call {
     r.id === ruleId ? { ...r, active: false } : r
   )
   return { ...call, activeRules: rules }
+}
+
+/**
+ * Extract the CSeq number from the retained a-leg INVITE.
+ * Responses and in-dialog requests targeting alice echo this number
+ * (RFC 3261 §8.1.3.3 / §13.2.2.4).
+ */
+export function aLegInviteCSeqNum(call: Call): number {
+  const headers = call.aLegInvite.headers
+  for (const h of headers) {
+    if (h.name.toLowerCase() === "cseq") {
+      const n = parseInt(h.value, 10)
+      if (Number.isFinite(n)) return n
+    }
+  }
+  return 1
 }

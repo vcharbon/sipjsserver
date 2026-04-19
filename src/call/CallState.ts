@@ -109,8 +109,9 @@ export class CallState extends ServiceMap.Service<
             MutableHashMap.set(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`, call.callRef)
             MutableHashMap.set(sipIndex, bLeg.callId, call.callRef)
             for (const dialog of bLeg.dialogs) {
-              if (dialog.toTag) {
-                MutableHashMap.set(sipIndex, `${bLeg.callId}|${dialog.toTag}`, call.callRef)
+              const bTag = dialog.sip.remoteTag
+              if (bTag) {
+                MutableHashMap.set(sipIndex, `${bLeg.callId}|${bTag}`, call.callRef)
               }
             }
           }
@@ -123,8 +124,9 @@ export class CallState extends ServiceMap.Service<
           yield* cache.putIndex(legKey(bLeg.callId, bLeg.fromTag), call.callRef, ttl)
           yield* cache.putIndex(legCallIdKey(bLeg.callId), call.callRef, ttl)
           for (const dialog of bLeg.dialogs) {
-            if (dialog.toTag) {
-              yield* cache.putIndex(legKey(bLeg.callId, dialog.toTag), call.callRef, ttl)
+            const bTag = dialog.sip.remoteTag
+            if (bTag) {
+              yield* cache.putIndex(legKey(bLeg.callId, bTag), call.callRef, ttl)
             }
           }
         }
@@ -140,8 +142,9 @@ export class CallState extends ServiceMap.Service<
           yield* cache.expireIndex(legKey(bLeg.callId, bLeg.fromTag), ttl)
           yield* cache.expireIndex(legCallIdKey(bLeg.callId), ttl)
           for (const dialog of bLeg.dialogs) {
-            if (dialog.toTag) {
-              yield* cache.expireIndex(legKey(bLeg.callId, dialog.toTag), ttl)
+            const bTag = dialog.sip.remoteTag
+            if (bTag) {
+              yield* cache.expireIndex(legKey(bLeg.callId, bTag), ttl)
             }
           }
         }
@@ -241,7 +244,8 @@ export class CallState extends ServiceMap.Service<
               MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`)
               MutableHashMap.remove(sipIndex, bLeg.callId)
               for (const dialog of bLeg.dialogs) {
-                if (dialog.toTag) MutableHashMap.remove(sipIndex, `${bLeg.callId}|${dialog.toTag}`)
+                const bTag = dialog.sip.remoteTag
+                if (bTag) MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bTag}`)
               }
             }
           }
@@ -259,7 +263,8 @@ export class CallState extends ServiceMap.Service<
             yield* cache.deleteIndex(legKey(bLeg.callId, bLeg.fromTag))
             yield* cache.deleteIndex(legCallIdKey(bLeg.callId))
             for (const dialog of bLeg.dialogs) {
-              if (dialog.toTag) yield* cache.deleteIndex(legKey(bLeg.callId, dialog.toTag))
+              const bTag = dialog.sip.remoteTag
+              if (bTag) yield* cache.deleteIndex(legKey(bLeg.callId, bTag))
             }
           }
           if (call.callbackContext !== undefined) {
@@ -358,7 +363,8 @@ export class CallState extends ServiceMap.Service<
               MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`)
               MutableHashMap.remove(sipIndex, bLeg.callId)
               for (const dialog of bLeg.dialogs) {
-                if (dialog.toTag) MutableHashMap.remove(sipIndex, `${bLeg.callId}|${dialog.toTag}`)
+                const bTag = dialog.sip.remoteTag
+                if (bTag) MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bTag}`)
               }
             }
             console.warn(`[CallState] Orphan sweep: removed ${call.state} call ${callRef}`)

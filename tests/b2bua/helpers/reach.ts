@@ -22,7 +22,7 @@ import { isDeepStrictEqual } from "node:util"
 import { executeActions } from "../../../src/b2bua/rules/framework/ActionExecutor.js"
 import type { HandlerResult } from "../../../src/sip/SipRouter.js"
 import type { RuleAction, RuleContext } from "../../../src/b2bua/rules/framework/RuleDefinition.js"
-import type { Call, Leg, Dialog } from "../../../src/call/CallModel.js"
+import type { Call, Leg, Dialog, StackDialogSchemaType, B2buaDialogExt, InviteTxnHandle } from "../../../src/call/CallModel.js"
 import type { SipHeader, SipRequest, SipResponse, RemoteInfo } from "../../../src/sip/types.js"
 import type { AppConfigData } from "../../../src/config/AppConfig.js"
 import type { CallControlClient } from "../../../src/http/CallControlClient.js"
@@ -34,18 +34,14 @@ import type { CallLimiter } from "../../../src/call/CallLimiter.js"
 const CALL_ATOMIC_KEYS = [
   "callRef",
   "callbackContext",
-  "aLegInviteSnapshot",
+  "aLegInvite",
   "limiterEntries",
   "timers",
   "cdrEvents",
   "state",
   "createdAt",
-  "aLegVias",
   "aLegPendingVias",
   "aLegPendingCSeq",
-  "aLegFrom",
-  "aLegTo",
-  "aLegInviteCSeq",
   "tagMap",
   "traceId",
   "rootSpanId",
@@ -70,19 +66,24 @@ const LEG_ATOMIC_KEYS = [
   "localUri",
   "remoteUri",
   "inviteRequestUri",
-  "inviteBranch",
 ] as const satisfies ReadonlyArray<keyof Leg>
 
-const DIALOG_ATOMIC_KEYS = [
-  "toTag",
-  "contact",
+const DIALOG_SIP_KEYS = [
+  "callId",
+  "localTag",
+  "remoteTag",
+  "localUri",
+  "remoteUri",
+  "remoteTarget",
   "localCSeq",
-  "remoteCSeq",
-  "lastInviteCSeq",
   "routeSet",
+] as const satisfies ReadonlyArray<keyof StackDialogSchemaType>
+
+const DIALOG_EXT_KEYS = [
+  "remoteCSeq",
   "inboundPendingRequests",
   "ackBranch",
-] as const satisfies ReadonlyArray<keyof Dialog>
+] as const satisfies ReadonlyArray<keyof B2buaDialogExt>
 
 function eq(a: unknown, b: unknown): boolean {
   return isDeepStrictEqual(a, b)
@@ -95,8 +96,11 @@ function diffDialog(
   after: Dialog,
   out: Set<string>,
 ): void {
-  for (const k of DIALOG_ATOMIC_KEYS) {
-    if (!eq(before[k], after[k])) out.add(`legs.${legId}.dialogs[${i}].${k}`)
+  for (const k of DIALOG_SIP_KEYS) {
+    if (!eq(before.sip[k], after.sip[k])) out.add(`legs.${legId}.dialogs[${i}].sip.${k}`)
+  }
+  for (const k of DIALOG_EXT_KEYS) {
+    if (!eq(before.ext[k], after.ext[k])) out.add(`legs.${legId}.dialogs[${i}].ext.${k}`)
   }
 }
 
@@ -179,14 +183,88 @@ export function runActions(
 const h = (name: string, value: string): SipHeader => ({ name, value })
 const DEFAULT_RINFO: RemoteInfo = { address: "192.168.1.100", port: 5060 }
 
+/**
+ * Build a b-leg-shaped Dialog — identity tag lives on `sip.remoteTag` (Bob's
+ * tag), matching how b-leg dialogs were keyed under the old flat shape
+ * (`dialog.toTag` → `dialog.sip.remoteTag` on the b-leg).
+ */
 export function makeDialog(toTag: string, localCSeq = 1000): Dialog {
   return {
-    toTag,
-    contact: "<sip:peer@192.168.1.200:5060>",
-    localCSeq,
-    remoteCSeq: 1,
-    inboundPendingRequests: [],
-    routeSet: [],
+    sip: {
+      callId: "1-call-1",
+      localTag: "tagB2BUA",
+      remoteTag: toTag,
+      localUri: "<sip:b2bua@10.0.0.1>",
+      remoteUri: "<sip:bob@example.com>",
+      remoteTarget: "<sip:peer@192.168.1.200:5060>",
+      localCSeq,
+      routeSet: [],
+    },
+    ext: {
+      remoteCSeq: 1,
+      inboundPendingRequests: [],
+    },
+  }
+}
+
+/**
+ * Build an a-leg-shaped Dialog — identity tag lives on `sip.localTag`
+ * (the B2BUA's tag pinned in 200 OK), matching how a-leg dialogs were keyed
+ * under the old flat shape (`dialog.toTag` → `dialog.sip.localTag` on the
+ * a-leg). Alice's tag (`fromTag` on the Leg) lands on `sip.remoteTag`.
+ */
+export function makeALegDialog(toTag: string, fromTag: string, localCSeq = 1000): Dialog {
+  return {
+    sip: {
+      callId: "call-1",
+      localTag: toTag,
+      remoteTag: fromTag,
+      localUri: "<sip:b2bua@10.0.0.1>",
+      remoteUri: "<sip:alice@example.com>",
+      remoteTarget: "<sip:alice@192.168.1.100:5060>",
+      localCSeq,
+      routeSet: [],
+    },
+    ext: {
+      remoteCSeq: 1,
+      inboundPendingRequests: [],
+    },
+  }
+}
+
+/**
+ * Build a stub InviteTxnHandle shaped enough to feed `generateCancel`.
+ * `generateCancel` reads Via/From/To/Call-ID/CSeq + Request-URI from the
+ * cached INVITE, so that's all the stub carries.
+ */
+function makeInviteTxnHandleStub(
+  legId: string,
+  callId: string,
+  fromTag: string,
+): InviteTxnHandle {
+  const branch = `z9hG4bK-${legId}-invite`
+  const invite: SipRequest = {
+    type: "request",
+    method: "INVITE",
+    uri: "sip:bob@192.168.1.200:5060",
+    version: "SIP/2.0",
+    headers: [
+      h("Via", `SIP/2.0/UDP 10.0.0.1:5060;branch=${branch}`),
+      h("Max-Forwards", "70"),
+      h("From", `<sip:b2bua@10.0.0.1>;tag=${fromTag}`),
+      h("To", "<sip:bob@example.com>"),
+      h("Call-ID", callId),
+      h("CSeq", "1 INVITE"),
+      h("Content-Length", "0"),
+    ],
+    body: new Uint8Array(0),
+    raw: Buffer.alloc(0),
+  }
+  return {
+    kind: "invite",
+    branch,
+    originalInvite: invite,
+    destination: { host: "192.168.1.200", port: 5060 },
   }
 }
 
@@ -196,6 +274,12 @@ export function makeLeg(
   fromTag: string,
   dialog?: Dialog,
 ): Leg {
+  // b-legs default to state "trying" with an outstanding INVITE, so populate
+  // `pendingInviteTxn` to match the production invariant (§9.1 CANCEL reuse).
+  // a-legs never carry a pendingInviteTxn — the B2BUA doesn't send INVITE up.
+  const pendingInviteTxn = legId === "a"
+    ? undefined
+    : makeInviteTxnHandleStub(legId, callId, fromTag)
   return {
     legId,
     callId,
@@ -204,6 +288,7 @@ export function makeLeg(
     state: "trying",
     disposition: "bridged",
     dialogs: dialog ? [dialog] : [],
+    ...(pendingInviteTxn !== undefined && { pendingInviteTxn }),
   }
 }
 
@@ -213,10 +298,17 @@ export function makeCall(aLeg: Leg, bLeg: Leg): Call {
     aLeg,
     bLegs: [bLeg],
     activePeer: { legA: "a", legB: bLeg.legId },
-    aLegVias: ["SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig"],
-    aLegFrom: `<sip:alice@example.com>;tag=${aLeg.fromTag}`,
-    aLegTo: "<sip:bob@example.com>",
-    aLegInviteCSeq: 42,
+    aLegInvite: {
+      uri: "sip:bob@example.com",
+      headers: [
+        { name: "Via", value: "SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig" },
+        { name: "From", value: `<sip:alice@example.com>;tag=${aLeg.fromTag}` },
+        { name: "To", value: "<sip:bob@example.com>" },
+        { name: "CSeq", value: "42 INVITE" },
+        { name: "Call-ID", value: aLeg.callId },
+      ],
+      body: new Uint8Array(),
+    },
     tagMap: [],
     limiterEntries: [],
     timers: [],

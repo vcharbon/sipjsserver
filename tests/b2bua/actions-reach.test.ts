@@ -26,13 +26,13 @@ import { executeActions } from "../../src/b2bua/rules/framework/ActionExecutor.j
 import type { RuleAction } from "../../src/b2bua/rules/framework/RuleDefinition.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
 import type { SipRequest } from "../../src/sip/types.js"
-import { diffCall, makeDialog, makeLeg, makeCall, makeCtx, make200InviteFromB } from "./helpers/reach.js"
+import { diffCall, makeDialog, makeALegDialog, makeLeg, makeCall, makeCtx, make200InviteFromB } from "./helpers/reach.js"
 
 // ── update-leg-state ────────────────────────────────────────────────────────
 
 describe("update-leg-state reach", () => {
   test("flips only the named leg's state + disposition; no other fields touched", () => {
-    const aDialog = makeDialog("alice-remote-tag", 100)
+    const aDialog = makeALegDialog("alice-remote-tag", "tagA", 100)
     const bDialog = makeDialog("", 1000) // placeholder dialog on b
     const aLeg = makeLeg("a", "call-1", "tagA", aDialog)
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bDialog)
@@ -67,7 +67,7 @@ describe("update-leg-state reach", () => {
   })
 
   test("omitting disposition leaves it unchanged", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
     const call = makeCall(aLeg, bLeg)
     const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
@@ -84,7 +84,7 @@ describe("update-leg-state reach", () => {
   })
 
   test("unknown legId is a no-op (call unchanged by reference)", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
     const call = makeCall(aLeg, bLeg)
     const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
@@ -102,7 +102,7 @@ describe("update-leg-state reach", () => {
 
 describe("stamp-dialog-to-tag reach", () => {
   test("rewrites only dialog[0].toTag when a dialog already exists", () => {
-    const aDialog = makeDialog("", 100) // placeholder
+    const aDialog = makeALegDialog("", "tagA", 100) // placeholder
     const bDialog = makeDialog("bob-tag", 1000)
     const aLeg = makeLeg("a", "call-1", "tagA", aDialog)
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bDialog)
@@ -117,13 +117,14 @@ describe("stamp-dialog-to-tag reach", () => {
 
     const outA = result.call.aLeg
     expect(outA.dialogs.length).toBe(1)
-    expect(outA.dialogs[0]!.toTag).toBe("aFacing-7")
+    // a-leg identity lives on sip.localTag (B2BUA's pinned tag toward Alice).
+    expect(outA.dialogs[0]!.sip.localTag).toBe("aFacing-7")
     // Every other dialog field preserved exactly.
-    expect(outA.dialogs[0]!.contact).toBe(aDialog.contact)
-    expect(outA.dialogs[0]!.localCSeq).toBe(aDialog.localCSeq)
-    expect(outA.dialogs[0]!.remoteCSeq).toBe(aDialog.remoteCSeq)
-    expect(outA.dialogs[0]!.routeSet).toBe(aDialog.routeSet)
-    expect(outA.dialogs[0]!.inboundPendingRequests).toBe(aDialog.inboundPendingRequests)
+    expect(outA.dialogs[0]!.sip.remoteTarget).toBe(aDialog.sip.remoteTarget)
+    expect(outA.dialogs[0]!.sip.localCSeq).toBe(aDialog.sip.localCSeq)
+    expect(outA.dialogs[0]!.ext.remoteCSeq).toBe(aDialog.ext.remoteCSeq)
+    expect(outA.dialogs[0]!.sip.routeSet).toBe(aDialog.sip.routeSet)
+    expect(outA.dialogs[0]!.ext.inboundPendingRequests).toBe(aDialog.ext.inboundPendingRequests)
 
     // Leg-level fields untouched.
     expect(outA.state).toBe(aLeg.state)
@@ -136,7 +137,7 @@ describe("stamp-dialog-to-tag reach", () => {
     expect(result.call.activePeer).toBe(call.activePeer)
   })
 
-  test("creates a fresh dialog[0] when the a-leg has none — seeds remoteCSeq from aLegInviteCSeq", () => {
+  test("creates a fresh dialog[0] when the a-leg has none — seeds remoteCSeq from aLegInvite CSeq", () => {
     const aLeg = makeLeg("a", "call-1", "tagA") // no dialog
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
     const call = makeCall(aLeg, bLeg)
@@ -150,13 +151,13 @@ describe("stamp-dialog-to-tag reach", () => {
 
     const outA = result.call.aLeg
     expect(outA.dialogs.length).toBe(1)
-    expect(outA.dialogs[0]!.toTag).toBe("aFacing-42")
-    // makeDialogFromIncoming: remoteCSeq preserved from aLegInviteCSeq.
-    expect(outA.dialogs[0]!.remoteCSeq).toBe(call.aLegInviteCSeq)
+    expect(outA.dialogs[0]!.sip.localTag).toBe("aFacing-42")
+    // makeDialogFromIncoming: remoteCSeq preserved from aLegInvite CSeq (42 in fixture).
+    expect(outA.dialogs[0]!.ext.remoteCSeq).toBe(42)
   })
 
   test("creates an empty dialog on a non-a leg when the leg has none", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA") // no dialog
     const call = makeCall(aLeg, bLeg)
 
@@ -169,8 +170,9 @@ describe("stamp-dialog-to-tag reach", () => {
 
     const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
     expect(outB.dialogs.length).toBe(1)
-    expect(outB.dialogs[0]!.toTag).toBe("c-facing")
-    expect(outB.dialogs[0]!.remoteCSeq).toBeNull() // makeEmptyDialog
+    // b-leg identity lives on sip.remoteTag (peer's tag).
+    expect(outB.dialogs[0]!.sip.remoteTag).toBe("c-facing")
+    expect(outB.dialogs[0]!.ext.remoteCSeq).toBeNull() // makeEmptyDialog
   })
 })
 
@@ -178,7 +180,7 @@ describe("stamp-dialog-to-tag reach", () => {
 
 describe("confirm-dialog reach", () => {
   test("populates dialog[0] from 200 OK response — touches only the named leg", () => {
-    const aDialog = makeDialog("alice-tag", 100)
+    const aDialog = makeALegDialog("alice-tag", "tagA", 100)
     const bDialog = makeDialog("", 1000) // placeholder
     const aLeg = makeLeg("a", "call-1", "tagA", aDialog)
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bDialog)
@@ -198,23 +200,20 @@ describe("confirm-dialog reach", () => {
 
     const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
     expect(outB.dialogs.length).toBe(1)
-    expect(outB.dialogs[0]!.toTag).toBe("bob-tag")
-    expect(outB.dialogs[0]!.contact).toBe("sip:bob@192.168.1.200:5060")
+    expect(outB.dialogs[0]!.sip.remoteTag).toBe("bob-tag")
+    expect(outB.dialogs[0]!.sip.remoteTarget).toBe("sip:bob@192.168.1.200:5060")
     // RFC 3261 §12.1.2: route set is Record-Route in reverse.
-    expect(outB.dialogs[0]!.routeSet).toEqual([
+    expect(outB.dialogs[0]!.sip.routeSet).toEqual([
       "<sip:proxy2@10.1.1.2;lr>",
       "<sip:proxy1@10.1.1.1;lr>",
     ])
-    // lastInviteCSeq captured from the response's CSeq.
-    expect(outB.dialogs[0]!.lastInviteCSeq).toBe(1000)
-
     // Leg-level state/disposition NOT touched — that belongs to update-leg-state.
     expect(outB.state).toBe(bLeg.state)
     expect(outB.disposition).toBe(bLeg.disposition)
 
     // a-leg dialog untouched — NO peer-sync in the narrow primitive.
     expect(result.call.aLeg.dialogs[0]).toBe(aDialog)
-    expect(result.call.aLeg.dialogs[0]!.toTag).toBe("alice-tag")
+    expect(result.call.aLeg.dialogs[0]!.sip.localTag).toBe("alice-tag")
 
     // Call-level state untouched.
     expect(result.call.tagMap).toBe(call.tagMap)
@@ -222,7 +221,7 @@ describe("confirm-dialog reach", () => {
   })
 
   test("no-op when the event is not a SIP response (call reference-equal)", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
     const call = makeCall(aLeg, bLeg)
 
@@ -250,7 +249,7 @@ describe("confirm-dialog reach", () => {
 
 describe("add-tag-mapping reach", () => {
   test("appends exactly one mapping; all other call state reference-equal", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
     const call = makeCall(aLeg, bLeg)
 
@@ -270,7 +269,7 @@ describe("add-tag-mapping reach", () => {
   })
 
   test("is idempotent by (bLegId, bTag) — second emit is a no-op", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
     const call = makeCall(aLeg, bLeg)
 
@@ -293,7 +292,7 @@ describe("add-tag-mapping reach", () => {
 
 describe("cancel-leg reach", () => {
   test("flips only disposition → 'cancelling' on a trying b-leg; emits one CANCEL", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
     const call = makeCall(aLeg, bLeg)
 
@@ -321,7 +320,7 @@ describe("cancel-leg reach", () => {
   })
 
   test("no-op on a confirmed leg (caller should use destroy-leg)", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")), state: "confirmed" }
     const call = makeCall(aLeg, bLeg)
 
@@ -333,7 +332,7 @@ describe("cancel-leg reach", () => {
   })
 
   test("no-op on a terminated leg", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA"), state: "terminated" }
     const call = makeCall(aLeg, bLeg)
 
@@ -349,7 +348,7 @@ describe("cancel-leg reach", () => {
 
 describe("terminate-leg reach", () => {
   test("sets state → 'terminated' only; byeDisposition left unchanged when omitted", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
     const call = makeCall(aLeg, bLeg)
 
@@ -371,7 +370,7 @@ describe("terminate-leg reach", () => {
   })
 
   test("sets state + byeDisposition when both are named", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
     const call = makeCall(aLeg, bLeg)
 
@@ -394,7 +393,7 @@ describe("terminate-leg reach", () => {
 
 describe("merge reach", () => {
   test("sets call.activePeer = { legA, legB }; no leg-level mutation", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
     // Start with activePeer = null to observe the merge.
     const call: Call = { ...makeCall(aLeg, bLeg), activePeer: null }
@@ -424,7 +423,7 @@ describe("merge reach", () => {
 
 describe("split reach", () => {
   test("clears call.activePeer when the named leg is part of the pair", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
     const call = makeCall(aLeg, bLeg) // activePeer = { legA: "a", legB: "b-1" }
 
@@ -443,7 +442,7 @@ describe("split reach", () => {
   })
 
   test("no-op when splitting a leg that isn't part of the current pair", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
     const call = makeCall(aLeg, bLeg)
 
@@ -458,7 +457,7 @@ describe("split reach", () => {
 
 describe("destroy-leg reach (composite)", () => {
   test("confirmed branch: BYE outbound + byeDisposition='bye_sent' + state='terminated' + peer cleared", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg: Leg = {
       ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")),
       state: "confirmed",
@@ -488,7 +487,7 @@ describe("destroy-leg reach (composite)", () => {
   })
 
   test("cancelling branch: no outbound + byeDisposition='cancelled' + state='terminated'", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg: Leg = {
       ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("")),
       state: "early",
@@ -511,7 +510,7 @@ describe("destroy-leg reach (composite)", () => {
   })
 
   test("trying/early branch: CANCEL outbound + disposition='cancelling' + byeDisposition='cancelled' + state='terminated'", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("")) // state:"trying" by default
     const call = makeCall(aLeg, bLeg)
 
@@ -529,7 +528,7 @@ describe("destroy-leg reach (composite)", () => {
   })
 
   test("already-terminated leg is a strict no-op (call reference-equal)", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA"), state: "terminated" }
     const call = makeCall(aLeg, bLeg)
 
@@ -545,7 +544,7 @@ describe("destroy-leg reach (composite)", () => {
 
 describe("begin-termination reach (composite)", () => {
   test("confirmed a-leg + confirmed b-leg: BYEs to both, call.state='terminating', activePeer preserved", () => {
-    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "confirmed" }
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA")), state: "confirmed" }
     const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")), state: "confirmed" }
     const call = makeCall(aLeg, bLeg)
 
@@ -606,7 +605,7 @@ describe("begin-termination reach (composite)", () => {
 
   test("skips legs already handled (byeDisposition set or disposition='cancelling')", () => {
     const aLeg: Leg = {
-      ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")),
+      ...makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA")),
       state: "confirmed",
       byeDisposition: "bye_received", // already handled by the rule
     }
@@ -638,7 +637,7 @@ describe("begin-termination reach (composite)", () => {
 
 describe("terminate-call reach (composite)", () => {
   test("all legs → terminated, call.state='terminated', activePeer=null; BYE/CANCEL emitted per leg state", () => {
-    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "confirmed" }
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA")), state: "confirmed" }
     const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("")), state: "trying" }
     const call = makeCall(aLeg, bLeg)
 
@@ -658,7 +657,7 @@ describe("terminate-call reach (composite)", () => {
   })
 
   test("already-terminated leg skipped (no BYE/CANCEL re-emission)", () => {
-    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "terminated" }
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA")), state: "terminated" }
     const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA"), state: "terminated" }
     const call = makeCall(aLeg, bLeg)
 
@@ -693,14 +692,14 @@ describe("terminate-call reach (composite)", () => {
 
 // ── send-reinvite ───────────────────────────────────────────────────────────
 //
-// Reach contract: legs.{legId}.dialogs[0].localCSeq (+1) and
-//                 legs.{legId}.dialogs[0].lastInviteCSeq (set to new CSeq).
-// Nothing else on the leg, no tagMap touch, no call-level mutation, no
-// activePeer change, and exactly one outbound re-INVITE whose body equals
-// the supplied `bodyUpdate.value`.
+// Reach contract: legs.{legId}.dialogs[0].localCSeq (+1). Nothing else on the
+// leg, no tagMap touch, no call-level mutation, no activePeer change, and
+// exactly one outbound re-INVITE whose body equals the supplied
+// `bodyUpdate.value`. The ACK-for-2xx CSeq source (`pendingInviteTxn`) is
+// captured by SipRouter.processResult — not touched by the action itself.
 describe("send-reinvite reach", () => {
-  test("emits one INVITE with the exact body and bumps dialog CSeq + lastInviteCSeq; no unrelated state touched", () => {
-    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "confirmed" }
+  test("emits one INVITE with the exact body and bumps dialog CSeq; no unrelated state touched", () => {
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA")), state: "confirmed" }
     const bLeg: Leg = {
       ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag", 1000)),
       state: "confirmed",
@@ -744,22 +743,20 @@ describe("send-reinvite reach", () => {
     const cseqHdr = req.headers.find((h) => h.name.toLowerCase() === "cseq")
     expect(cseqHdr?.value).toBe("1001 INVITE")
 
-    // Dialog state: localCSeq bumped, lastInviteCSeq set to the new CSeq.
+    // Dialog state: localCSeq bumped.
     const outB = result.call.bLegs.find((l) => l.legId === "b-1")!
     const outDialog = outB.dialogs[0]!
-    expect(outDialog.localCSeq).toBe(1001)
-    expect(outDialog.lastInviteCSeq).toBe(1001)
+    expect(outDialog.sip.localCSeq).toBe(1001)
 
-    // Reach: only the b-1 dialog[0] localCSeq + lastInviteCSeq moved.
+    // Reach: only the b-1 dialog[0] sip.localCSeq moved.
     const paths = diffCall(call, result.call)
     expect(paths).toEqual(new Set([
-      "legs.b-1.dialogs[0].localCSeq",
-      "legs.b-1.dialogs[0].lastInviteCSeq",
+      "legs.b-1.dialogs[0].sip.localCSeq",
     ]))
   })
 
   test("bodyUpdate omitted or drop → empty body, Content-Length: 0", () => {
-    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeDialog("alice-tag")), state: "confirmed" }
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA")), state: "confirmed" }
     const bLeg: Leg = {
       ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag", 50)),
       state: "confirmed",
@@ -781,7 +778,7 @@ describe("send-reinvite reach", () => {
   })
 
   test("unknown legId → no-op (call unchanged by reference, no outbound)", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag"))
     const call = makeCall(aLeg, bLeg)
     const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
@@ -796,7 +793,7 @@ describe("send-reinvite reach", () => {
   })
 
   test("terminated leg → no-op (no re-INVITE emitted)", () => {
-    const aLeg = makeLeg("a", "call-1", "tagA", makeDialog("alice-tag"))
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA"))
     const bLeg: Leg = {
       ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")),
       state: "terminated",

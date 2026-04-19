@@ -10,7 +10,7 @@
 import { Clock, Effect } from "effect"
 import type { SipMessage } from "../../../src/sip/types.js"
 import { SipParser } from "../../../src/sip/Parser.js"
-import { getHeaders } from "../../../src/sip/MessageFactory.js"
+import { getHeaders } from "../../../src/sip/MessageHelpers.js"
 import type {
   AgentConfig,
   AgentInfo,

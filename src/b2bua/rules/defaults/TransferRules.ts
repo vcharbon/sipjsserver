@@ -16,7 +16,7 @@
 import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction, RuleContext } from "../framework/RuleDefinition.js"
 import type { SipRequest } from "../../../sip/types.js"
-import { getHeader } from "../../../sip/MessageFactory.js"
+import { getHeader } from "../../../sip/MessageHelpers.js"
 import { headerUpdatesFromRecord, toBareUri } from "../framework/actions/factories.js"
 import { sipfragFromStatus } from "../../../sip/SipFragUtils.js"
 import { buildHeldSdpFromProfile, extractCodecProfile } from "../../../sip/SdpUtils.js"
@@ -46,7 +46,11 @@ function referToLacksReplaces(ctx: RuleContext): boolean {
 /** Dialog id string exposed to the backend — Call-ID;to-tag=…;from-tag=… (B-leg perspective). */
 function dialogIdFor(ctx: RuleContext): string {
   const leg = ctx.sourceLeg
-  const toTag = ctx.sourceDialog?.toTag ?? ""
+  // b-leg: dialog's "to-tag" is the peer (Bob) tag → sip.remoteTag.
+  // a-leg: dialog's "to-tag" is the B2BUA's tag → sip.localTag.
+  const toTag = leg.legId === "a"
+    ? ctx.sourceDialog?.sip.localTag ?? ""
+    : ctx.sourceDialog?.sip.remoteTag ?? ""
   return `${leg.callId};to-tag=${toTag};from-tag=${leg.fromTag}`
 }
 
@@ -377,8 +381,7 @@ export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
       const payload = ctx.event.payload as AllowPayload | undefined
       if (payload === undefined || payload.action !== "allow") return undefined
 
-      const snapshot = ctx.call.aLegInviteSnapshot
-      if (snapshot === undefined) return undefined
+      const snapshot = ctx.call.aLegInvite
 
       // Build the held SDP — preserves A's codec list, port 0, a=inactive.
       // If A's SDP has no parseable m=audio line, fall through: no body on
@@ -599,7 +602,7 @@ export const transferCLegAnswerRule: RuleDefinition<undefined, undefined> = {
 
       // A's SDP for the re-INVITE-C offer comes from the a-leg INVITE snapshot
       // (A hasn't re-INVITEd since; snapshot still reflects the live endpoint).
-      const aSdp = ctx.call.aLegInviteSnapshot?.body
+      const aSdp = ctx.call.aLegInvite.body
 
       const body = sipfragFromStatus(200, "OK")
       const actions: RuleAction[] = [

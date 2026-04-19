@@ -7,12 +7,12 @@
  *   2. Declarative overrides (HeaderOverrides)
  *   3. build(ctx) callback result
  *
- * Reuses MessageFactory helpers (newCallId, newTag, newBranch) and
+ * Reuses MessageHelpers helpers (newCallId, newTag, newBranch) and
  * Serializer.serialize() from the main codebase.
  */
 
 import type { SipHeader, SipMessage, SipRequest, SipResponse } from "../../../src/sip/types.js"
-import { newBranch, newTag, newCallId, getHeader, getHeaders } from "../../../src/sip/MessageFactory.js"
+import { newBranch, newTag, newCallId, getHeader, getHeaders } from "../../../src/sip/MessageHelpers.js"
 import { serialize } from "../../../src/sip/Serializer.js"
 import type {
   AgentInfo,

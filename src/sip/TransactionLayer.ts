@@ -19,14 +19,12 @@ import { SipParser } from "./Parser.js"
 import { UdpTransport } from "./UdpTransport.js"
 import { serialize, sipSummary } from "./Serializer.js"
 import {
-  build100Trying,
-  build200Ok,
-  build487,
   buildStatelessReject503Buffer,
   isEmergencyRequest,
   newBranch,
   newTag,
-} from "./MessageFactory.js"
+} from "./MessageHelpers.js"
+import { _generateAckForNon2xx, generateResponse } from "./generators.js"
 import { OverloadController } from "../b2bua/OverloadController.js"
 import { parseVia, parseNameAddr } from "./parsers/custom/structured-headers.js"
 
@@ -45,6 +43,37 @@ export type TransactionEvent =
       /** SIP method of the transaction that timed out (INVITE / BYE / OPTIONS / …). */
       readonly method: string | undefined
     }
+
+// ---------------------------------------------------------------------------
+// Client transaction handles (returned by sendRequest; consumed by generators)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handle to an outgoing INVITE client transaction.
+ *
+ * Persists the Via branch and the original INVITE so later messages sourced
+ * from the same transaction (CANCEL, ACK for 2xx) can reuse the identifiers
+ * RFC 3261 mandates — CANCEL's branch (§9.1) and ACK-for-2xx's CSeq number
+ * (§13.2.2.4) both come from here.
+ */
+export interface InviteClientTransactionHandle {
+  readonly kind: "invite"
+  readonly branch: string
+  readonly originalInvite: SipRequest
+  readonly destination: { readonly host: string; readonly port: number }
+}
+
+/** Handle to an outgoing non-INVITE client transaction (BYE, OPTIONS, …). */
+export interface NonInviteClientTransactionHandle {
+  readonly kind: "non-invite"
+  readonly branch: string
+  readonly originalRequest: SipRequest
+  readonly destination: { readonly host: string; readonly port: number }
+}
+
+export type ClientTransactionHandle =
+  | InviteClientTransactionHandle
+  | NonInviteClientTransactionHandle
 
 // ---------------------------------------------------------------------------
 // Internal transaction state
@@ -83,7 +112,7 @@ interface Transaction {
 // Header extraction helpers
 // ---------------------------------------------------------------------------
 // Messages from the wire have `parsed` fields (set by the custom parser).
-// Outbound messages built by MessageFactory do NOT — they need header string
+// Outbound messages built by the stack generators do NOT — they need header string
 // parsing as a fallback.
 
 function getHeaderValue(msg: SipMessage, name: string): string | undefined {
@@ -139,46 +168,6 @@ function extractToTag(msg: SipMessage): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Auto-ACK for non-2xx (RFC 3261 §17.1.1.3)
-// ---------------------------------------------------------------------------
-
-/**
- * Build an ACK for a non-2xx final response on a client INVITE transaction.
- * The ACK reuses the original INVITE's Via (with correct branch, cr/lg params),
- * and copies From/To/Call-ID from the response.
- */
-function buildAckForNon2xx(resp: SipResponse, originalInvite: SipRequest): Buffer | null {
-  const originalVia = getHeaderValue(originalInvite, "via")
-  if (!originalVia) return null
-
-  const from = getHeaderValue(resp, "from") ?? ""
-  const to = getHeaderValue(resp, "to") ?? ""
-  const callId = getHeaderValue(resp, "call-id") ?? ""
-  const cseqRaw = getHeaderValue(resp, "cseq") ?? "1 INVITE"
-  const cseqNum = parseInt(cseqRaw, 10) || 1
-
-  const ack: SipRequest = {
-    type: "request",
-    method: "ACK",
-    uri: originalInvite.uri,
-    version: "SIP/2.0",
-    headers: [
-      { name: "Via", value: originalVia },
-      { name: "Max-Forwards", value: "70" },
-      { name: "From", value: from },
-      { name: "To", value: to },
-      { name: "Call-ID", value: callId },
-      { name: "CSeq", value: `${cseqNum} ACK` },
-      { name: "Content-Length", value: "0" },
-    ],
-    body: new Uint8Array(0),
-    raw: Buffer.alloc(0),
-  }
-
-  return serialize(ack)
-}
-
-// ---------------------------------------------------------------------------
 // SIP timer constants (RFC 3261 §17)
 // ---------------------------------------------------------------------------
 
@@ -208,8 +197,26 @@ export class TransactionLayer extends ServiceMap.Service<
     /** Stream of deduplicated/processed events for SipRouter. */
     readonly events: Stream.Stream<TransactionEvent>
     /**
-     * Send a message through the transaction layer.
-     * The layer manages retransmission based on txnType.
+     * Send an outbound SIP request. Allocates a client transaction and
+     * returns a typed handle carrying the Via branch, the original request,
+     * and the destination — later messages sourced from the same transaction
+     * (CANCEL, ACK for 2xx) consume this handle instead of duplicating state
+     * on the dialog.
+     */
+    readonly sendRequest: (
+      msg: SipRequest,
+      destination: { host: string; port: number },
+      txnType: "invite" | "non-invite"
+    ) => Effect.Effect<ClientTransactionHandle>
+    /** Send an outbound SIP response through the server transaction. */
+    readonly sendResponse: (
+      msg: SipResponse,
+      destination: { host: string; port: number }
+    ) => Effect.Effect<void>
+    /**
+     * Legacy combined send. Prefer `sendRequest` / `sendResponse` in new
+     * code — this wrapper exists only so call sites can migrate
+     * incrementally and is slated for removal once migration completes.
      */
     readonly send: (
       msg: SipMessage,
@@ -415,13 +422,14 @@ export class TransactionLayer extends ServiceMap.Service<
               matchedTxn = { ...matchedTxn, uasToTag }
             }
 
-            // Send 200 OK to CANCEL (strip Contact placeholder — this bypasses SipRouter)
-            const cancelOkBase = build200Ok(req, uasToTag)
-            const cancelOk = { ...cancelOkBase, headers: cancelOkBase.headers.filter(h => h.name.toLowerCase() !== "contact") }
+            // Send 200 OK to CANCEL — generator omits Contact unless caller asks,
+            // so no placeholder to strip for this path (bypasses SipRouter).
+            const cancelOk = generateResponse(req, 200, "OK", uasToTag !== undefined ? { toTag: uasToTag } : {})
             yield* sendBuffer(serialize(cancelOk), { host: rinfo.address, port: rinfo.port })
 
             if (matchedBranch !== undefined && matchedTxn !== undefined && matchedTxn.originalRequest) {
-              const terminated = build487(matchedTxn.originalRequest, uasToTag)
+              const terminated = generateResponse(matchedTxn.originalRequest, 487, "Request Terminated",
+                uasToTag !== undefined ? { toTag: uasToTag } : {})
               const terminatedBuf = serialize(terminated)
               yield* sendBuffer(terminatedBuf, { host: rinfo.address, port: rinfo.port })
               yield* Effect.sync(() => {
@@ -508,7 +516,7 @@ export class TransactionLayer extends ServiceMap.Service<
 
           // For INVITE, immediately send 100 Trying
           if (req.method === "INVITE") {
-            const trying = build100Trying(req)
+            const trying = generateResponse(req, 100, "Trying")
             const tryingBuf = serialize(trying)
             yield* sendBuffer(tryingBuf, { host: rinfo.address, port: rinfo.port })
             yield* Effect.sync(() => {
@@ -560,11 +568,9 @@ export class TransactionLayer extends ServiceMap.Service<
                 // RFC 3261 §17.1.1.3: INVITE client transaction MUST generate ACK for 300-699.
                 // The ACK is a hop-by-hop transaction-layer concern — not emitted to the application.
                 if (existing.kind === "invite" && resp.status >= 300 && existing.originalRequest && existing.destination) {
-                  const ackBuf = buildAckForNon2xx(resp, existing.originalRequest)
-                  if (ackBuf !== null) {
-                    yield* sendBuffer(ackBuf, existing.destination)
-                    yield* Effect.logDebug(`Auto-ACK for ${resp.status} sent to ${existing.destination.host}:${existing.destination.port}`)
-                  }
+                  const ack = _generateAckForNon2xx(existing.originalRequest, resp)
+                  yield* sendBuffer(serialize(ack), existing.destination)
+                  yield* Effect.logDebug(`Auto-ACK for ${resp.status} sent to ${existing.destination.host}:${existing.destination.port}`)
                 }
 
                 yield* deleteTxn(branch)
@@ -631,60 +637,64 @@ export class TransactionLayer extends ServiceMap.Service<
       )
 
       // ── Outbound send API ───────────────────────────────────────────
+      //
+      // Split into sendRequest (returns a typed ClientTransactionHandle) and
+      // sendResponse (void). The legacy `send(msg, dest, txnType)` method is
+      // a thin wrapper kept for backward-compatibility until all call sites
+      // are migrated in later slices.
 
-      const send = Effect.fn("TransactionLayer.send")(
-        function* (msg: SipMessage, destination: { host: string; port: number }, txnType: "invite" | "non-invite" | "response") {
+      const sendResponse = Effect.fn("TransactionLayer.sendResponse")(
+        function* (msg: SipResponse, destination: { host: string; port: number }) {
           const buf = serialize(msg)
-
-          if (txnType === "response") {
-            // Server-side: cache response for retransmit, send directly
-            if (msg.type === "response") {
-              const branch = extractBranch(msg)
-              if (branch) {
-                const isFinal = msg.status >= 200
-                const outboundToTag = msg.status > 100 ? extractToTag(msg) : undefined
-                let completedKind: TxnKind | undefined
-                yield* Effect.sync(() => {
-                  const opt = MutableHashMap.get(txnMap, branch)
-                  if (Option.isSome(opt) && opt.value.role === "server") {
-                    if (isFinal) completedKind = opt.value.kind
-                    // RFC 3261 §17.2.1 / §12.1.1: pin the UAS To-tag on the
-                    // first >100 response so later auto-synthesized responses
-                    // (487 on CANCEL, etc.) reuse the same tag and the UAC
-                    // sees one coherent dialog identity.
-                    const uasToTag = opt.value.uasToTag ?? outboundToTag
-                    MutableHashMap.set(txnMap, branch, {
-                      ...opt.value,
-                      lastResponse: buf,
-                      lastResponseStatus: msg.status,
-                      state: isFinal ? "completed" : "proceeding",
-                      uasToTag,
-                      // Free memory on completion — only lastResponse needed for retransmit absorption
-                      originalRequest: isFinal ? undefined : opt.value.originalRequest,
-                      originalBuffer: isFinal ? undefined : opt.value.originalBuffer,
-                    })
-                  }
+          const branch = extractBranch(msg)
+          if (branch) {
+            const isFinal = msg.status >= 200
+            const outboundToTag = msg.status > 100 ? extractToTag(msg) : undefined
+            let completedKind: TxnKind | undefined
+            yield* Effect.sync(() => {
+              const opt = MutableHashMap.get(txnMap, branch)
+              if (Option.isSome(opt) && opt.value.role === "server") {
+                if (isFinal) completedKind = opt.value.kind
+                // RFC 3261 §17.2.1 / §12.1.1: pin the UAS To-tag on the
+                // first >100 response so later auto-synthesized responses
+                // (487 on CANCEL, etc.) reuse the same tag and the UAC
+                // sees one coherent dialog identity.
+                const uasToTag = opt.value.uasToTag ?? outboundToTag
+                MutableHashMap.set(txnMap, branch, {
+                  ...opt.value,
+                  lastResponse: buf,
+                  lastResponseStatus: msg.status,
+                  state: isFinal ? "completed" : "proceeding",
+                  uasToTag,
+                  // Free memory on completion — only lastResponse needed for retransmit absorption
+                  originalRequest: isFinal ? undefined : opt.value.originalRequest,
+                  originalBuffer: isFinal ? undefined : opt.value.originalBuffer,
                 })
-                // Schedule Timer H/J cleanup for completed server transactions.
-                // ACK arrival (for INVITE) or the sweep (safety net) may clean up earlier.
-                if (completedKind !== undefined) {
-                  const delay = completedKind === "invite" ? TIMER_H : TIMER_J
-                  yield* Effect.forkDetach(
-                    Effect.gen(function* () {
-                      yield* Effect.sleep(Duration.millis(delay))
-                      yield* deleteTxn(branch)
-                    })
-                  )
-                }
               }
+            })
+            // Schedule Timer H/J cleanup for completed server transactions.
+            // ACK arrival (for INVITE) or the sweep (safety net) may clean up earlier.
+            if (completedKind !== undefined) {
+              const delay = completedKind === "invite" ? TIMER_H : TIMER_J
+              yield* Effect.forkDetach(
+                Effect.gen(function* () {
+                  yield* Effect.sleep(Duration.millis(delay))
+                  yield* deleteTxn(branch)
+                })
+              )
             }
-            yield* sendBuffer(buf, destination)
-            return
           }
+          yield* sendBuffer(buf, destination)
+        }
+      )
 
-          // Client-side transaction
-          if (msg.type !== "request") return
-
+      const sendRequest = Effect.fn("TransactionLayer.sendRequest")(
+        function* (
+          msg: SipRequest,
+          destination: { host: string; port: number },
+          txnType: "invite" | "non-invite",
+        ) {
+          const buf = serialize(msg)
           const branch = extractBranch(msg) ?? newBranch()
           const callId = extractCallId(msg)
           const fromTag = extractFromTag(msg)
@@ -697,7 +707,7 @@ export class TransactionLayer extends ServiceMap.Service<
             callId,
             fromTag,
             // Store original INVITE for ACK generation on non-2xx (RFC 3261 §17.1.1.3)
-            originalRequest: txnType === "invite" ? (msg as SipRequest) : undefined,
+            originalRequest: txnType === "invite" ? msg : undefined,
             lastResponse: undefined,
             lastResponseStatus: undefined,
             state: "trying",
@@ -717,6 +727,29 @@ export class TransactionLayer extends ServiceMap.Service<
 
           // Start retransmission
           yield* startClientRetransmit(branch, buf, destination, txnType)
+
+          const handle: ClientTransactionHandle = txnType === "invite"
+            ? { kind: "invite", branch, originalInvite: msg, destination }
+            : { kind: "non-invite", branch, originalRequest: msg, destination }
+          return handle
+        }
+      )
+
+      /**
+       * Legacy combined send. Dispatches to sendRequest or sendResponse based
+       * on txnType and discards the client-transaction handle. Prefer the
+       * split methods in new code — this wrapper exists only so call sites
+       * can migrate incrementally.
+       */
+      const send = Effect.fn("TransactionLayer.send")(
+        function* (msg: SipMessage, destination: { host: string; port: number }, txnType: "invite" | "non-invite" | "response") {
+          if (txnType === "response") {
+            if (msg.type !== "response") return
+            yield* sendResponse(msg, destination)
+            return
+          }
+          if (msg.type !== "request") return
+          yield* sendRequest(msg, destination, txnType)
         }
       )
 
@@ -730,7 +763,7 @@ export class TransactionLayer extends ServiceMap.Service<
 
       const events = Stream.fromQueue(eventQueue)
 
-      return { events, send, sendRaw, metrics: txnMetrics }
+      return { events, sendRequest, sendResponse, send, sendRaw, metrics: txnMetrics }
     })
   )
 }

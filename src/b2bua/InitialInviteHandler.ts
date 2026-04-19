@@ -9,12 +9,14 @@ import { Effect } from "effect"
 import type { SipRequest } from "../sip/types.js"
 import type { HandlerResult, OutboundEnvelope, Handler } from "../sip/SipRouter.js"
 import {
-  buildRejectResponse,
   getHeader,
   getHeaders,
-} from "../sip/MessageFactory.js"
+  newTag,
+} from "../sip/MessageHelpers.js"
+import { generateResponse } from "../sip/generators.js"
 import { addCdrEvent } from "../call/CallModel.js"
 import { terminateCallEffects, createBLegFromRoute } from "./helpers.js"
+import { buildCallContact } from "./stack-identity.js"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -49,6 +51,16 @@ export const handleInitialInvite: Handler = (ctx) =>
     const req = event.message
     const rinfo = event.rinfo
 
+    // Contact for UAS responses we emit toward the a-leg peer.
+    // B2BUA a-leg identity: leg="a", callRef stamped for inbound routing.
+    const aLegContact = buildCallContact({
+      localIp: config.sipLocalIp,
+      localPort: config.sipLocalPort,
+      callRef,
+      leg: "a",
+      isEmergency: call.emergency === true,
+    })
+
     // Call external call control API for routing decision
     const newCallReq = {
       call_id: call.aLeg.callId,
@@ -71,7 +83,10 @@ export const handleInitialInvite: Handler = (ctx) =>
 
     // Call control unavailable — reject 503
     if (routing === undefined) {
-      const rejectResp = buildRejectResponse(req, 503, "Service Unavailable")
+      const rejectResp = generateResponse(req, 503, "Service Unavailable", {
+        toTag: newTag(),
+        contact: aLegContact,
+      })
       const outbound: OutboundEnvelope[] = [{
         message: rejectResp,
         destination: { host: rinfo.address, port: rinfo.port },
@@ -89,7 +104,10 @@ export const handleInitialInvite: Handler = (ctx) =>
       const code = routing.reject_code
       const reason = routing.reject_reason ?? "Rejected"
       yield* Effect.logDebug(`Call ${callRef} rejected by call control: ${code} ${reason}`)
-      const rejectResp = buildRejectResponse(req, code, reason)
+      const rejectResp = generateResponse(req, code, reason, {
+        toTag: newTag(),
+        contact: aLegContact,
+      })
       const outbound: OutboundEnvelope[] = [{
         message: rejectResp,
         destination: { host: rinfo.address, port: rinfo.port },
@@ -162,15 +180,15 @@ export const handleInitialInvite: Handler = (ctx) =>
             )
 
             if (failureResp !== undefined && failureResp.action === "failover") {
-              // Failover: skip this limiter and try a different route
-              const dest = failureResp.destination
-              const snapshot = { uri: req.uri, headers: [...req.headers], body: req.body }
-              let failoverCall = { ...call, aLegInviteSnapshot: snapshot, callbackContext: failureResp.callback_context ?? routing.callback_context }
+              // Failover: skip this limiter and try a different route.
+              // aLegInvite is already set at call creation (SipRouter) — we just
+              // need to thread the callback context through.
+              let failoverCall = { ...call, callbackContext: failureResp.callback_context ?? routing.callback_context }
               const bLegResult = createBLegFromRoute({
                 call: failoverCall,
                 baseInvite: req,
                 route: {
-                  destination: { host: dest.host, port: dest.port ?? 5060 },
+                  destination: { host: failureResp.destination.host, port: failureResp.destination.port ?? 5060 },
                   new_ruri: failureResp.new_ruri,
                   update_headers: failureResp.update_headers as Record<string, string | null> | undefined,
                   no_answer_timeout_sec: failureResp.no_answer_timeout_sec,
@@ -184,7 +202,10 @@ export const handleInitialInvite: Handler = (ctx) =>
             }
           }
 
-          const rejectResp = buildRejectResponse(req, 486, "Busy Here")
+          const rejectResp = generateResponse(req, 486, "Busy Here", {
+            toTag: newTag(),
+            contact: aLegContact,
+          })
           const rejected = addCdrEvent(call, { type: "reject", timestamp: nowMs, legId: "a", statusCode: 486, reason: "limiter" })
           return {
             call: rejected,
@@ -197,8 +218,7 @@ export const handleInitialInvite: Handler = (ctx) =>
       updated = { ...updated, limiterEntries }
     }
 
-    // Store a-leg INVITE snapshot for potential failover
-    updated = { ...updated, aLegInviteSnapshot: { uri: req.uri, headers: req.headers, body: req.body } }
+    // aLegInvite already populated at call creation (SipRouter) — no-op here.
 
     // Create b-leg using shared helper
     const bLegResult = createBLegFromRoute({

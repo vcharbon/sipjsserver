@@ -37,7 +37,7 @@ import {
   bufferHasToTag,
   isInviteRequestBuffer,
   jitteredRetryAfter,
-} from "../sip/MessageFactory.js"
+} from "../sip/MessageHelpers.js"
 
 // ---------------------------------------------------------------------------
 // Worker entry point path (resolved at import time)

@@ -16,7 +16,7 @@ import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import { definePolicyModule } from "../framework/PolicyModule.js"
 import type { SipResponse } from "../../../sip/types.js"
-import { getHeader, getHeaders, newTag } from "../../../sip/MessageFactory.js"
+import { getHeader, getHeaders, newTag } from "../../../sip/MessageHelpers.js"
 import { H, removeH } from "../framework/actions/factories.js"
 import type { HeaderName, HeaderUpdate } from "../framework/actions/types.js"
 

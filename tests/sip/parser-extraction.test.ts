@@ -21,7 +21,7 @@ import {
   parseViaParams,
   parseSipUri,
   parseUriParams,
-} from "../../src/sip/MessageFactory.js"
+} from "../../src/sip/MessageHelpers.js"
 import { sipMsg } from "./fixtures/rfc4475-valid.js"
 
 // ---------------------------------------------------------------------------

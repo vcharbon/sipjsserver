@@ -8,7 +8,7 @@
 import { Effect, Schema } from "effect"
 import type { RuleDefinition } from "../framework/RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
-import { getHeader, newTag } from "../../../sip/MessageFactory.js"
+import { getHeader, newTag } from "../../../sip/MessageHelpers.js"
 import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
 import { confirmBridgedCall } from "../framework/actions/composites.js"
 
@@ -134,7 +134,7 @@ export const reinviteGlareRule: RuleDefinition<undefined, undefined> = {
     method: "INVITE",
     filter: (ctx) =>
       ctx.sourceDialog !== undefined &&
-      ctx.sourceDialog.inboundPendingRequests.some((p) => p.method === "INVITE"),
+      ctx.sourceDialog.ext.inboundPendingRequests.some((p) => p.method === "INVITE"),
   },
 
   init: () => undefined,

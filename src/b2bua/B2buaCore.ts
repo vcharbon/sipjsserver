@@ -35,7 +35,9 @@ import { TransactionLayer } from "../sip/TransactionLayer.js"
 import { CallState } from "../call/CallState.js"
 import { TimerService } from "../call/TimerService.js"
 import { SipParser } from "../sip/Parser.js"
-import { buildRejectResponse } from "../sip/MessageFactory.js"
+import { newTag } from "../sip/MessageHelpers.js"
+import { generateResponse } from "../sip/generators.js"
+import { buildCallContact } from "./stack-identity.js"
 import { handleInitialInvite } from "./InitialInviteHandler.js"
 import { createRuleRegistry, type RuleRegistry } from "./rules/framework/RuleRegistry.js"
 import { executeRules } from "./rules/framework/RuleExecutor.js"
@@ -79,7 +81,17 @@ const noopFallback: HandlerRegistry["inDialog"] = (ctx) => Effect.gen(function* 
     return { call: ctx.call, outbound: [], effects: [] }
   }
 
-  const response = buildRejectResponse(msg, 501, "Not Implemented")
+  const contact = buildCallContact({
+    localIp: ctx.config.sipLocalIp,
+    localPort: ctx.config.sipLocalPort,
+    callRef: ctx.callRef,
+    leg: ctx.leg.legId,
+    isEmergency: ctx.call.emergency === true,
+  })
+  const response = generateResponse(msg, 501, "Not Implemented", {
+    toTag: newTag(),
+    contact,
+  })
   return {
     call: ctx.call,
     outbound: [{

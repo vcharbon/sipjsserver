@@ -13,7 +13,7 @@ import type { RuleAction, RuleContext, MessageTransform } from "./RuleDefinition
 import { applyBodyUpdate, applyHeaderUpdates } from "./actions/apply.js"
 import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
-import type { TimerEntry, Leg, Dialog, TransferState } from "../../../call/CallModel.js"
+import type { TimerEntry, Leg, Dialog, TransferState, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
 import {
   type Call,
   addCdrEvent,
@@ -41,28 +41,26 @@ import {
   addPendingRequest,
   findPendingRequest,
   removePendingRequest,
+  aLegInviteCSeqNum,
 } from "../../../call/CallModel.js"
 import {
-  buildAck,
-  buildBye,
-  buildCancel,
-  buildNotify,
-  buildOriginatedInvite,
-  buildRejectResponse,
-  buildRelayedAck,
-  buildRelayedBye,
-  buildPrack,
-  buildRelayedPrack,
-  buildRelayedRequest,
   extractHostPort,
   getHeader,
   getHeaders,
   newTag,
-  relayResponse,
   stripTag,
-  buildOptions,
-} from "../../../sip/MessageFactory.js"
+} from "../../../sip/MessageHelpers.js"
+import {
+  extractNonStructuralHeaders,
+  generateAckFor2xx,
+  generateCancel,
+  generateInDialogRequest,
+  generateRelayedResponse,
+  generateResponse,
+} from "../../../sip/generators.js"
+import type { InviteClientTransactionHandle } from "../../../sip/TransactionLayer.js"
 import { createBLegFromRoute } from "../../helpers.js"
+import { legStackIdentity } from "../../stack-identity.js"
 
 // ── Internal working state ─────────────────────────────────────────────────
 
@@ -78,11 +76,42 @@ interface ExecutionState {
 /** Resolve destination host:port for a leg (from dialog contact or source). */
 function legTarget(leg: Leg): { host: string; port: number } {
   const dialog = leg.dialogs[0]
-  if (dialog !== undefined && dialog.contact) {
-    const hp = extractHostPort(dialog.contact)
+  if (dialog !== undefined && dialog.sip.remoteTarget) {
+    const hp = extractHostPort(dialog.sip.remoteTarget)
     if (hp) return hp
   }
   return { host: leg.source.address, port: leg.source.port }
+}
+
+/**
+ * Returns the identity tag used to key a dialog for `updateDialog` /
+ * `bumpLocalCSeq` / `addPendingRequest` / … on a specific leg.
+ *
+ * a-leg: B2BUA's pinned tag (`sip.localTag`).
+ * b-leg: peer's tag (`sip.remoteTag`) — the old `dialog.toTag` value.
+ */
+function dialogIdentityTag(legId: string, dialog: Dialog): string {
+  return legId === "a" ? dialog.sip.localTag : dialog.sip.remoteTag
+}
+
+/**
+ * RFC 3261 §13.2.2.4: ACK for 2xx echoes the INVITE's CSeq. RFC 3262 §7.2:
+ * the middle token of RAck references the same INVITE CSeq. The canonical
+ * source is the pending INVITE client-transaction handle — `dialog.ext` for
+ * re-INVITEs (handle stored on the confirmed dialog), `leg.pendingInviteTxn`
+ * for the initial INVITE (handle stored on the leg before any dialog exists).
+ *
+ * Returns `undefined` when no handle is reachable — Redis-recovered calls
+ * that lost the handle in serialization fall back to `dialog.sip.localCSeq`
+ * at call sites.
+ */
+function inviteCSeqFromHandle(leg: Leg, dialog: Dialog | undefined): number | undefined {
+  const handle = dialog?.ext.pendingInviteTxn ?? leg.pendingInviteTxn
+  if (handle === undefined) return undefined
+  const invite = handle.originalInvite as SipRequest
+  const cseqHeader = getHeader(invite.headers, "cseq") ?? ""
+  const n = parseInt(cseqHeader, 10)
+  return Number.isFinite(n) ? n : undefined
 }
 
 /** Extract the bare URI from `<uri>` or `name <uri>` form. */
@@ -106,14 +135,14 @@ function applyRouteSet(
   dialog: Dialog | undefined,
   target: { host: string; port: number },
 ): { msg: SipRequest; target: { host: string; port: number } } {
-  if (dialog === undefined || dialog.routeSet.length === 0) return { msg, target }
+  if (dialog === undefined || dialog.sip.routeSet.length === 0) return { msg, target }
 
-  const firstRoute = dialog.routeSet[0]!
+  const firstRoute = dialog.sip.routeSet[0]!
   const firstUri = extractUriFromRoute(firstRoute)
   const isLoose = /;lr(?![a-zA-Z0-9_-])/i.test(firstUri)
   if (!isLoose) return { msg, target }
 
-  const routeHeaders: SipHeader[] = dialog.routeSet.map((uri) => ({ name: "Route", value: uri }))
+  const routeHeaders: SipHeader[] = dialog.sip.routeSet.map((uri: string) => ({ name: "Route", value: uri }))
   const without = msg.headers.filter((h) => h.name.toLowerCase() !== "route")
   const insertIdx = without.findIndex((h) => h.name.toLowerCase() === "content-length")
   const newHeaders = insertIdx >= 0
@@ -157,36 +186,29 @@ function directionalTags(
       toTag: remoteTag(call, "a") ?? "",
     }
   }
-  return { fromTag: targetLeg.fromTag, toTag: targetDialog.toTag }
+  return { fromTag: targetLeg.fromTag, toTag: targetDialog.sip.remoteTag }
 }
 
 /**
  * Build a CANCEL envelope for a b-leg's outstanding INVITE.
  *
- * RFC 3261 §9.1: CANCEL must copy Request-URI, CSeq number, and Via branch
- * from the original INVITE. Request-URI and CSeq are restored from the leg's
- * stored fields here; the Via branch is reused at stamp time by SipRouter
- * via the stored `inviteBranch`.
+ * RFC 3261 §9.1: CANCEL copies the INVITE's Request-URI, topmost Via
+ * (same branch — server transaction matching), From, To, Call-ID, and CSeq
+ * number. `generateCancel` reads them directly off the cached INVITE in
+ * `leg.pendingInviteTxn`, so no denormalised fields are needed here.
+ *
+ * Returns `undefined` when the leg has no pending INVITE transaction — the
+ * caller must skip the outbound (there is nothing to cancel).
  */
 function buildCancelEnvelope(
   leg: Leg,
-  target: { host: string; port: number },
   labelSuffix: string,
-): OutboundEnvelope {
-  // RFC 3261 §9.1: CANCEL CSeq number equals the INVITE's CSeq.
-  // Stored on the b-leg's placeholder/first dialog (seeded at leg creation
-  // with the INVITE's CSeq — see createBLegFromRoute).
-  const inviteCSeq = leg.dialogs[0]?.lastInviteCSeq ?? leg.dialogs[0]?.localCSeq ?? 1
+): OutboundEnvelope | undefined {
+  const handle = leg.pendingInviteTxn
+  if (handle === undefined) return undefined
   return {
-    message: buildCancel(
-      leg.callId,
-      leg.fromTag,
-      leg.inviteRequestUri ?? `sip:${target.host}:${target.port}`,
-      inviteCSeq,
-      leg.localUri,
-      leg.remoteUri,
-    ),
-    destination: target,
+    message: generateCancel(handle as unknown as InviteClientTransactionHandle),
+    destination: handle.destination,
     label: `CANCEL ${leg.legId}${labelSuffix}`,
     legId: leg.legId,
   }
@@ -336,7 +358,11 @@ function executeRespond(
   const msg = ctx.event.message
   if (msg.type !== "request") return
 
-  const response = buildRejectResponse(msg, status, reason ?? "")
+  const { contact } = legStackIdentity(state.call, ctx.sourceLeg.legId, ctx.config)
+  const response = generateResponse(msg, status, reason ?? "", {
+    toTag: newTag(),
+    contact,
+  })
   state.outbound.push({
     message: response,
     destination: { host: ctx.event.rinfo.address, port: ctx.event.rinfo.port },
@@ -423,7 +449,7 @@ function executeRelayToTarget(
   // When a specific dialog is indicated (e.g. forking — multiple early dialogs),
   // pick it by To-tag. Otherwise default to the first dialog.
   const targetDialog = targetToTag
-    ? targetLeg.dialogs.find((d) => d.toTag === targetToTag) ?? targetLeg.dialogs[0]
+    ? targetLeg.dialogs.find((d) => dialogIdentityTag(targetLeg.legId, d) === targetToTag) ?? targetLeg.dialogs[0]
     : targetLeg.dialogs[0]
   const target = legTarget(targetLeg)
 
@@ -453,32 +479,57 @@ function relayRequest(
   // ACK for 2xx reuses the INVITE CSeq and does NOT advance the dialog
   // sequence counter (RFC 3261 §13.2.2.4). Skip CSeq bookkeeping for ACK.
   const isAck = req.method === "ACK"
-  const delta = isAck ? 0 : relayCSeqDelta(inboundCSeq, sourceDialog?.remoteCSeq ?? null)
-  const outboundCSeq = targetDialog.localCSeq + delta
+  const delta = isAck ? 0 : relayCSeqDelta(inboundCSeq, sourceDialog?.ext.remoteCSeq ?? null)
+  const outboundCSeq = targetDialog.sip.localCSeq + delta
 
   if (!isAck) {
     // Update source leg's remoteCSeq
     if (sourceDialog) {
-      state.call = updateRemoteCSeq(state.call, ctx.sourceLeg.legId, sourceDialog.toTag, inboundCSeq)
+      state.call = updateRemoteCSeq(state.call, ctx.sourceLeg.legId, dialogIdentityTag(ctx.sourceLeg.legId, sourceDialog), inboundCSeq)
     }
     // Bump target leg's localCSeq
-    state.call = bumpLocalCSeq(state.call, targetLeg.legId, targetDialog.toTag, delta)
+    state.call = bumpLocalCSeq(state.call, targetLeg.legId, dialogIdentityTag(targetLeg.legId, targetDialog), delta)
   }
 
-  const targetUri = targetDialog.contact || `sip:${target.host}:${target.port}`
+  const targetUri = targetDialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
 
   let relayed: SipRequest | SipResponse
-  const { fromTag: dirFromTag, toTag: dirToTag } = directionalTags(state.call, targetLeg, targetDialog)
+
+  // Transparent-header copy for relays (RFC 3261 §16.6 — non-structural headers
+  // pass through unchanged; structural ones are owned by the generator).
+  const transparentHeaders = extractNonStructuralHeaders(req)
+  // Content-Type is structural, so it isn't in transparentHeaders; forward it
+  // explicitly so non-SDP payloads (e.g. application/dtmf-relay) survive relay.
+  const sourceContentType = getHeader(req.headers, "content-type")
 
   switch (req.method) {
     case "INVITE": {
-      relayed = buildRelayedRequest("INVITE", req, targetLeg.callId, dirFromTag, dirToTag, targetUri, outboundCSeq, targetLeg.localUri, targetLeg.remoteUri)
-      // Remember this INVITE's CSeq so the ACK-for-2xx can echo it.
-      state.call = updateDialog(state.call, targetLeg.legId, targetDialog.toTag, (d) => ({
-        ...d, lastInviteCSeq: outboundCSeq,
+      const { via, contact, branch } = legStackIdentity(state.call, targetLeg.legId, ctx.config)
+      const { request: r } = generateInDialogRequest("INVITE", targetDialog.sip, {
+        via,
+        contact,
+        requestUri: targetUri,
+        cseq: outboundCSeq,
+        body: req.body,
+        ...(sourceContentType !== undefined ? { contentType: sourceContentType } : {}),
+        extraHeaders: transparentHeaders,
+      })
+      relayed = r
+      // Capture the INVITE handle so ACK-for-2xx can read the CSeq
+      // (RFC 3261 §13.2.2.4) and CANCEL can reuse the branch (§9.1).
+      // Re-INVITE handle lives on the confirmed dialog, not the leg.
+      const inviteHandle: InviteTxnHandle = {
+        kind: "invite",
+        branch,
+        originalInvite: r,
+        destination: target,
+      }
+      state.call = updateDialog(state.call, targetLeg.legId, dialogIdentityTag(targetLeg.legId, targetDialog), (d) => ({
+        ...d,
+        ext: { ...d.ext, pendingInviteTxn: inviteHandle },
       }))
       // Track pending request for response correlation
-      state.call = addPendingRequest(state.call, targetLeg.legId, targetDialog.toTag, {
+      state.call = addPendingRequest(state.call, targetLeg.legId, dialogIdentityTag(targetLeg.legId, targetDialog), {
         method: "INVITE",
         outboundCSeq,
         inboundCSeq,
@@ -493,35 +544,66 @@ function relayRequest(
     case "ACK": {
       // RFC 3261 §13.2.2.4: ACK for 2xx echoes the INVITE's CSeq, regardless
       // of any intermediate in-dialog requests (PRACK, UPDATE) that bumped
-      // the dialog's localCSeq between the INVITE and the 2xx. lastInviteCSeq
-      // tracks the most recent INVITE's CSeq (initial or re-INVITE) — always
-      // populated at dialog creation (placeholder or forked 1xx).
-      const ackCSeq = targetDialog.lastInviteCSeq ?? targetDialog.localCSeq
-      relayed = buildRelayedAck(req, targetLeg.callId, dirFromTag, dirToTag, targetUri, ackCSeq, targetLeg.localUri, targetLeg.remoteUri)
+      // the dialog's localCSeq between the INVITE and the 2xx. The INVITE
+      // is cached on `pendingInviteTxn` (leg for initial, dialog for re-).
+      const handle = targetDialog.ext.pendingInviteTxn ?? targetLeg.pendingInviteTxn
+      const fallbackCSeq = inviteCSeqFromHandle(targetLeg, targetDialog) ?? targetDialog.sip.localCSeq
+      // RFC 3261 §17.1.1.2: ACK for 2xx is its own hop; reuse the cached
+      // branch on retransmit so the UAS correlates re-ACKs and stops
+      // retransmitting the 2xx.
+      const cachedBranch = targetDialog.ext.ackBranch
+      const { via, branch } = legStackIdentity(state.call, targetLeg.legId, ctx.config, cachedBranch)
+      relayed = generateAckFor2xx(handle as InviteClientTransactionHandle | undefined, targetDialog.sip, {
+        via,
+        cseq: fallbackCSeq,
+        requestUri: targetUri,
+        body: req.body,
+        ...(sourceContentType !== undefined ? { contentType: sourceContentType } : {}),
+        extraHeaders: transparentHeaders,
+      })
+      if (cachedBranch === undefined) {
+        state.call = updateDialog(state.call, targetLeg.legId, dialogIdentityTag(targetLeg.legId, targetDialog), (d) => ({
+          ...d,
+          ext: { ...d.ext, ackBranch: branch },
+        }))
+      }
       break
     }
     case "BYE": {
-      relayed = buildRelayedBye(
-        req, targetLeg.callId, dirFromTag, dirToTag, targetUri,
-        `${outboundCSeq} BYE`,
-        targetLeg.legId === "a" ? "b-to-a" : "a-to-b",
-        targetLeg.localUri, targetLeg.remoteUri,
-      )
+      const { via, contact } = legStackIdentity(state.call, targetLeg.legId, ctx.config)
+      const { request: r } = generateInDialogRequest("BYE", targetDialog.sip, {
+        via,
+        contact,
+        requestUri: targetUri,
+        cseq: outboundCSeq,
+        extraHeaders: transparentHeaders,
+      })
+      relayed = r
       break
     }
     case "PRACK": {
       // RFC 3262 §7.2: RAck's CSeq must reference the CSeq of the INVITE that
       // produced the reliable 1xx on this leg. Rewrite the middle token of
-      // "<RSeq> <CSeq> <Method>" to the target dialog's INVITE CSeq, tracked
-      // as lastInviteCSeq (seeded at dialog creation from the 1xx's CSeq,
-      // which echoes the INVITE's CSeq).
+      // "<RSeq> <CSeq> <Method>" to the target dialog's INVITE CSeq, sourced
+      // from `pendingInviteTxn`.
       const rackIn = getHeader(req.headers, "rack") ?? ""
       const rackParts = rackIn.split(/\s+/)
-      const targetInviteCSeq = targetDialog.lastInviteCSeq ?? targetDialog.localCSeq
+      const targetInviteCSeq = inviteCSeqFromHandle(targetLeg, targetDialog) ?? targetDialog.sip.localCSeq
       const rack = rackParts.length >= 3
         ? `${rackParts[0]} ${targetInviteCSeq} ${rackParts.slice(2).join(" ")}`
         : rackIn
-      relayed = buildRelayedPrack(req, targetLeg.callId, dirFromTag, dirToTag, targetUri, outboundCSeq, rack, targetLeg.localUri, targetLeg.remoteUri)
+      const { via, contact } = legStackIdentity(state.call, targetLeg.legId, ctx.config)
+      const { request: r } = generateInDialogRequest("PRACK", targetDialog.sip, {
+        via,
+        contact,
+        requestUri: targetUri,
+        cseq: outboundCSeq,
+        rack,
+        body: req.body,
+        ...(sourceContentType !== undefined ? { contentType: sourceContentType } : {}),
+        extraHeaders: transparentHeaders,
+      })
+      relayed = r
       // Save source leg's Vias + CSeq for response relay (RFC 3261 §8.1.3.3: response CSeq must echo request CSeq).
       if (ctx.sourceLeg.legId === "a") {
         state.call = {
@@ -539,11 +621,22 @@ function relayRequest(
       // (B2BUA owns the tag shown to the a-leg). A pending entry is recorded
       // so relayResponseMsg can rebuild the response using the original
       // inbound Vias/From/To/Call-ID/CSeq snapshot (RFC 3261 §8.1.3.3).
-      relayed = buildRelayedRequest(
-        req.method, req, targetLeg.callId, dirFromTag, dirToTag, targetUri,
-        outboundCSeq, targetLeg.localUri, targetLeg.remoteUri,
-      )
-      state.call = addPendingRequest(state.call, targetLeg.legId, targetDialog.toTag, {
+      if (req.method !== "OPTIONS" && req.method !== "INFO" && req.method !== "UPDATE"
+          && req.method !== "MESSAGE" && req.method !== "NOTIFY") {
+        return
+      }
+      const { via, contact } = legStackIdentity(state.call, targetLeg.legId, ctx.config)
+      const { request: r } = generateInDialogRequest(req.method, targetDialog.sip, {
+        via,
+        contact,
+        requestUri: targetUri,
+        cseq: outboundCSeq,
+        body: req.body,
+        ...(sourceContentType !== undefined ? { contentType: sourceContentType } : {}),
+        extraHeaders: transparentHeaders,
+      })
+      relayed = r
+      state.call = addPendingRequest(state.call, targetLeg.legId, dialogIdentityTag(targetLeg.legId, targetDialog), {
         method: req.method,
         outboundCSeq,
         inboundCSeq,
@@ -627,14 +720,20 @@ function relayResponseMsg(
     // Covers re-INVITE as well as OPTIONS, INFO, UPDATE, MESSAGE, and any
     // other in-dialog transparent method (RFC 3261 §8.1.3.3 — CSeq must echo
     // the request's CSeq/method).
-    relayed = relayResponse(
-      resp,
-      pending.sourceCallId,
-      pending.sourceVias,
-      pending.sourceFrom,
-      pending.sourceTo,
-      `${pending.inboundCSeq} ${cseqMethod}`,
-    )
+    const sourceContentType = getHeader(resp.headers, "content-type")
+    // RFC 3261 §20.10: Contact on 2xx target-refreshes the peer to the B2BUA.
+    const { contact: respContact } = legStackIdentity(state.call, targetLeg.legId, ctx.config)
+    relayed = generateRelayedResponse(resp.status, resp.reason, {
+      vias: pending.sourceVias,
+      from: pending.sourceFrom,
+      to: pending.sourceTo,
+      callId: pending.sourceCallId,
+      cseq: `${pending.inboundCSeq} ${cseqMethod}`,
+      body: resp.body,
+      transparentHeaders: extractNonStructuralHeaders(resp),
+      ...(sourceContentType !== undefined ? { contentType: sourceContentType } : {}),
+      contact: respContact,
+    })
   } else {
     // ── Default response relay path (initial INVITE, PRACK/UPDATE, INFO, etc.) ──
 
@@ -652,9 +751,13 @@ function relayResponseMsg(
     }
 
     // Determine which Vias/From/To to use for the relayed response
-    const viasForRelay = state.call.aLegPendingVias ?? state.call.aLegVias
+    const aLegInviteVias = getHeaders(state.call.aLegInvite.headers, "via")
+    const aLegInviteFrom = getHeader(state.call.aLegInvite.headers, "from") ?? ""
+    const aLegInviteTo = getHeader(state.call.aLegInvite.headers, "to") ?? ""
+    const aLegInviteCSeq = aLegInviteCSeqNum(state.call)
+    const viasForRelay = state.call.aLegPendingVias ?? aLegInviteVias
     const toWithTag = aFacingToTag
-      ? `${stripTag(state.call.aLegTo)};tag=${aFacingToTag}`
+      ? `${stripTag(aLegInviteTo)};tag=${aFacingToTag}`
       : undefined
 
     // Non-INVITE responses to a-leg must echo the inbound a-leg request's CSeq
@@ -662,11 +765,28 @@ function relayResponseMsg(
     // when the request was relayed to b-leg.
     const aLegCSeq = targetLeg.legId === "a"
       ? cseqMethod === "INVITE"
-        ? `${state.call.aLegInviteCSeq} INVITE`
-        : `${state.call.aLegPendingCSeq ?? state.call.aLegInviteCSeq} ${cseqMethod}`
+        ? `${aLegInviteCSeq} INVITE`
+        : `${state.call.aLegPendingCSeq ?? aLegInviteCSeq} ${cseqMethod}`
       : undefined
 
-    relayed = relayResponse(resp, targetLeg.callId, viasForRelay, state.call.aLegFrom, toWithTag, aLegCSeq)
+    // Preserve old relayResponse semantics: when aFacingToTag is undefined,
+    // carry resp's own To transparently (old code's skipExtra fallback).
+    const sourceContentType = getHeader(resp.headers, "content-type")
+    const defaultCseq = aLegCSeq ?? (getHeader(resp.headers, "cseq") ?? "")
+    const toHeader = toWithTag ?? getHeader(resp.headers, "to") ?? ""
+    // RFC 3261 §20.10: Contact on 2xx target-refreshes the peer to the B2BUA.
+    const { contact: respContact } = legStackIdentity(state.call, targetLeg.legId, ctx.config)
+    relayed = generateRelayedResponse(resp.status, resp.reason, {
+      vias: viasForRelay,
+      from: aLegInviteFrom,
+      to: toHeader,
+      callId: targetLeg.callId,
+      cseq: defaultCseq,
+      body: resp.body,
+      transparentHeaders: extractNonStructuralHeaders(resp),
+      ...(sourceContentType !== undefined ? { contentType: sourceContentType } : {}),
+      contact: respContact,
+    })
 
     // Track early dialog on source leg for provisional responses.
     // RFC 3261 §12.2.1.1: each forked early dialog maintains its own CSeq
@@ -674,19 +794,26 @@ function relayResponseMsg(
     // response echoes in its CSeq header).
     if (resp.status >= 100 && resp.status < 200 && toTag && ctx.sourceLeg.legId !== "a") {
       const sourceLeg = ctx.sourceLeg
-      if (!sourceLeg.dialogs.some((d) => d.toTag === toTag)) {
+      if (!sourceLeg.dialogs.some((d) => d.sip.remoteTag === toTag)) {
         const contact = resp.parsed?.contact?.uri ?? ""
         // The response's CSeq number equals the INVITE's CSeq (responses
         // echo the request's CSeq — RFC 3261 §8.1.3.3). Seed this new
         // forked dialog independently from any sibling fork's counter.
         const inviteCSeq = Number.isFinite(cseqNum) ? cseqNum : randomInitialCSeq()
-        const dialog = {
-          ...makeEmptyDialog(toTag), contact, localCSeq: inviteCSeq,
-          lastInviteCSeq: inviteCSeq,
+        const base = makeEmptyDialog({
+          callId: sourceLeg.callId,
+          localUri: sourceLeg.localUri ?? "",
+          remoteUri: sourceLeg.remoteUri ?? "",
+          localTag: sourceLeg.fromTag,
+          remoteTag: toTag,
+        })
+        const dialog: Dialog = {
+          sip: { ...base.sip, remoteTarget: contact, localCSeq: inviteCSeq },
+          ext: base.ext,
         }
-        // Drop any empty-toTag placeholder once the first real early
+        // Drop any empty-remoteTag placeholder once the first real early
         // dialog exists so it doesn't shadow dialogs[0] in downstream lookups.
-        const withoutPlaceholder = sourceLeg.dialogs.filter((d) => d.toTag !== "")
+        const withoutPlaceholder = sourceLeg.dialogs.filter((d) => d.sip.remoteTag !== "")
         state.call = updateLeg(state.call, sourceLeg.legId, (l) => ({
           ...l, state: "early" as const, dialogs: [...withoutPlaceholder, dialog],
         }))
@@ -695,8 +822,15 @@ function relayResponseMsg(
 
     // Ensure a-leg has a dialog when relaying provisional/answer
     if (targetLeg.legId === "a" && state.call.aLeg.dialogs.length === 0 && aFacingToTag) {
+      const aLegCtx: MakeDialogLegCtx = {
+        callId: state.call.aLeg.callId,
+        localUri: state.call.aLeg.localUri ?? "",
+        remoteUri: state.call.aLeg.remoteUri ?? "",
+        localTag: aFacingToTag!,
+        remoteTag: state.call.aLeg.fromTag,
+      }
       state.call = updateLeg(state.call, "a", (l) => ({
-        ...l, dialogs: [makeDialogFromIncoming(aFacingToTag!, state.call.aLegInviteCSeq)],
+        ...l, dialogs: [makeDialogFromIncoming(aLegCtx, aLegInviteCSeqNum(state.call))],
       }))
     }
 
@@ -735,15 +869,16 @@ function relayResponseMsg(
   //      (subsequent in-dialog requests must route to the refreshed target).
   // Any final (>= 200): remove the pending entry to avoid leaks.
   if (pending !== undefined && resp.status >= 200 && ctx.sourceDialog !== undefined) {
+    const sourceIdTag = dialogIdentityTag(ctx.sourceLeg.legId, ctx.sourceDialog)
     if (resp.status < 300) {
       const newContact = resp.parsed?.contact?.uri ?? ""
       if (newContact) {
-        state.call = updateDialog(state.call, ctx.sourceLeg.legId, ctx.sourceDialog.toTag, (d) => ({
-          ...d, contact: newContact,
+        state.call = updateDialog(state.call, ctx.sourceLeg.legId, sourceIdTag, (d) => ({
+          ...d, sip: { ...d.sip, remoteTarget: newContact },
         }))
       }
     }
-    state.call = removePendingRequest(state.call, ctx.sourceLeg.legId, ctx.sourceDialog.toTag, pending.outboundCSeq)
+    state.call = removePendingRequest(state.call, ctx.sourceLeg.legId, sourceIdTag, pending.outboundCSeq)
   }
 }
 
@@ -795,23 +930,43 @@ function executeConfirmDialog(
   // Confirm existing early dialog or create new one. The placeholder dialog
   // (toTag="") seeded at b-leg creation carries the INVITE CSeq; any existing
   // fork dialog carries the INVITE CSeq echoed from its 1xx. ACK for 2xx
-  // echoes the INVITE CSeq explicitly via lastInviteCSeq, so dialog.localCSeq
-  // only needs to be a floor for the next request we originate on this dialog.
-  const placeholder = leg.dialogs.find((d) => d.toTag === "")
+  // sources its CSeq from `pendingInviteTxn.originalInvite` (RFC 3261
+  // §13.2.2.4), so `dialog.sip.localCSeq` here only needs to be a floor for
+  // the next request we originate on this dialog.
+  // Identity-key side: a-leg → localTag; b-leg → remoteTag. Placeholder has
+  // empty identity tag in both directions, so we key off the correct side.
+  const isALeg = leg.legId === "a"
+  const placeholder = leg.dialogs.find((d) =>
+    isALeg ? d.sip.localTag === "" : d.sip.remoteTag === "")
   const respCSeqHeader = getHeader(resp.headers, "cseq") ?? ""
   const respCSeqNum = parseInt(respCSeqHeader, 10)
   const baseCSeq = Number.isFinite(respCSeqNum) && respCSeqNum > 0
     ? respCSeqNum
-    : placeholder?.lastInviteCSeq ?? placeholder?.localCSeq ?? randomInitialCSeq()
-  const existingDialog = leg.dialogs.find((d) => d.toTag === toTag)
+    : placeholder?.sip.localCSeq ?? randomInitialCSeq()
+  const existingDialog = leg.dialogs.find((d) =>
+    isALeg ? d.sip.localTag === toTag : d.sip.remoteTag === toTag)
   const nextCSeq = existingDialog !== undefined
-    ? Math.max(baseCSeq, existingDialog.localCSeq)
+    ? Math.max(baseCSeq, existingDialog.sip.localCSeq)
     : baseCSeq
-  const dialog = existingDialog
-    ? { ...existingDialog, contact: legContact, localCSeq: nextCSeq, routeSet,
-        lastInviteCSeq: existingDialog.lastInviteCSeq ?? baseCSeq }
-    : { ...makeEmptyDialog(toTag), contact: legContact, localCSeq: nextCSeq, routeSet,
-        lastInviteCSeq: baseCSeq }
+  const dialog: Dialog = existingDialog
+    ? {
+        sip: { ...existingDialog.sip, remoteTarget: legContact, localCSeq: nextCSeq, routeSet },
+        ext: existingDialog.ext,
+      }
+    : (() => {
+        const legCtx: MakeDialogLegCtx = {
+          callId: leg.callId,
+          localUri: leg.localUri ?? "",
+          remoteUri: leg.remoteUri ?? "",
+          localTag: isALeg ? toTag : leg.fromTag,
+          remoteTag: isALeg ? leg.fromTag : toTag,
+        }
+        const base = makeEmptyDialog(legCtx)
+        return {
+          sip: { ...base.sip, remoteTarget: legContact, localCSeq: nextCSeq, routeSet },
+          ext: base.ext,
+        }
+      })()
 
   state.call = updateLeg(state.call, leg.legId, (l) => ({
     ...l,
@@ -849,7 +1004,7 @@ function executeUpdateLegState(
  * to align the a-leg dialog with it.
  *
  * When the leg has no dialog yet:
- *   - legId === "a" → uses makeDialogFromIncoming(toTag, call.aLegInviteCSeq)
+ *   - legId === "a" → uses makeDialogFromIncoming(toTag, aLegInviteCSeqNum(call))
  *     so Alice's inbound CSeq floor is preserved.
  *   - other legs    → uses makeEmptyDialog(toTag).
  *
@@ -865,10 +1020,18 @@ function executeStampDialogToTag(
   const leg = findLeg(state.call, legId)
   if (leg === undefined) return
 
+  const isALeg = legId === "a"
   if (leg.dialogs.length === 0) {
-    const dialog = legId === "a"
-      ? makeDialogFromIncoming(toTag, state.call.aLegInviteCSeq)
-      : { ...makeEmptyDialog(toTag) }
+    const legCtx: MakeDialogLegCtx = {
+      callId: leg.callId,
+      localUri: leg.localUri ?? "",
+      remoteUri: leg.remoteUri ?? "",
+      localTag: isALeg ? toTag : leg.fromTag,
+      remoteTag: isALeg ? leg.fromTag : toTag,
+    }
+    const dialog = isALeg
+      ? makeDialogFromIncoming(legCtx, aLegInviteCSeqNum(state.call))
+      : makeEmptyDialog(legCtx)
     state.call = updateLeg(state.call, legId, (l) => ({
       ...l,
       dialogs: [dialog],
@@ -877,9 +1040,12 @@ function executeStampDialogToTag(
   }
 
   const existing = leg.dialogs[0]!
+  const stamped: Dialog = isALeg
+    ? { sip: { ...existing.sip, localTag: toTag }, ext: existing.ext }
+    : { sip: { ...existing.sip, remoteTag: toTag }, ext: existing.ext }
   state.call = updateLeg(state.call, legId, (l) => ({
     ...l,
-    dialogs: [{ ...existing, toTag }, ...l.dialogs.slice(1)],
+    dialogs: [stamped, ...l.dialogs.slice(1)],
   }))
 }
 
@@ -887,7 +1053,7 @@ function executeStampDialogToTag(
 
 function executeAckLeg(
   action: Extract<RuleAction, { type: "ack-leg" }>,
-  _ctx: RuleContext,
+  ctx: RuleContext,
   state: ExecutionState,
 ): void {
   const { type, legId } = action
@@ -899,18 +1065,34 @@ function executeAckLeg(
   if (dialog === undefined) return
 
   const target = legTarget(leg)
-  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
-  // RFC 3261 §13.2.2.4: ACK for 2xx echoes the INVITE's CSeq (tracked on
-  // the dialog as lastInviteCSeq).
-  const ackCSeq = dialog.lastInviteCSeq ?? dialog.localCSeq ?? 1
+  const targetUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
+  // RFC 3261 §13.2.2.4: ACK for 2xx echoes the INVITE's CSeq. The INVITE is
+  // cached on `pendingInviteTxn` (leg for initial, dialog for re-INVITE).
+  const handle = dialog.ext.pendingInviteTxn ?? leg.pendingInviteTxn
+  const fallbackCSeq = inviteCSeqFromHandle(leg, dialog) ?? dialog.sip.localCSeq ?? 1
 
-  // Dialog-leg asymmetry — directionalTags gives the correct From/To tags for
-  // an outbound request on either leg. A-leg: B2BUA is UAC on a re-INVITE,
-  // so From=b2bua (dialog.toTag), To=alice (leg.fromTag). B-leg: From=b2bua
-  // (leg.fromTag), To=bob (dialog.toTag) — the existing shape.
-  const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
+  // Dialog-leg asymmetry — B2BUA's outbound request needs the local/remote
+  // tags rendered as From/To correctly. For leg.legId === "a", the B2BUA's
+  // pinned localTag lives on dialog.sip.localTag already (and remoteTag is
+  // Alice's fromTag). For b-leg, same mapping — the generator uses
+  // dialog.sip.{localTag, remoteTag, localUri, remoteUri} directly.
+  void directionalTags // retained import for other paths
 
-  const ackMsg = buildAck(leg.callId, fromTag, toTag, targetUri, ackCSeq, leg.localUri, leg.remoteUri)
+  // RFC 3261 §17.1.1.2: ACK for 2xx is its own hop; reuse the cached branch
+  // on retransmit so the UAS correlates re-ACKs and stops retransmitting 2xx.
+  const cachedBranch = dialog.ext.ackBranch
+  const { via, branch } = legStackIdentity(state.call, legId, ctx.config, cachedBranch)
+  const ackMsg = generateAckFor2xx(handle as InviteClientTransactionHandle | undefined, dialog.sip, {
+    via,
+    cseq: fallbackCSeq,
+    requestUri: targetUri,
+  })
+  if (cachedBranch === undefined) {
+    state.call = updateDialog(state.call, legId, dialogIdentityTag(legId, dialog), (d) => ({
+      ...d,
+      ext: { ...d.ext, ackBranch: branch },
+    }))
+  }
   const routed = leg.legId !== "a" ? applyRouteSet(ackMsg, dialog, target) : { msg: ackMsg, target }
 
   state.outbound.push({
@@ -930,7 +1112,7 @@ function executeAckLeg(
  */
 function executeSendRequestToLeg(
   action: Extract<RuleAction, { type: "send-request-to-leg" }>,
-  _ctx: RuleContext,
+  ctx: RuleContext,
   state: ExecutionState,
 ): void {
   const { type, legId, method, body } = action
@@ -941,53 +1123,32 @@ function executeSendRequestToLeg(
   const dialog = leg.dialogs[0]
   if (dialog === undefined) return
 
-  const target = legTarget(leg)
-  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
-
-  // Bump CSeq for the new request
-  state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
-  const cseq = dialog.localCSeq + 1
-
-  // Build the request based on method
-  const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
-
-  if (method === "OPTIONS") {
-    const optMsg = buildOptions(leg.callId, fromTag, toTag, targetUri, cseq, leg.localUri, leg.remoteUri)
-    const routed = leg.legId !== "a" ? applyRouteSet(optMsg, dialog, target) : { msg: optMsg, target }
-    state.outbound.push({
-      message: routed.msg,
-      destination: routed.target,
-      label: `${method} to ${legId}`,
-      legId,
-    })
-  } else {
-    // Generic request construction for INFO, UPDATE, etc.
-    // Uses OPTIONS builder as base (no body by default) — can be extended
-    const msg = buildOptions(leg.callId, fromTag, toTag, targetUri, cseq, leg.localUri, leg.remoteUri)
-    // Override method and CSeq
-    const updatedMsg = {
-      ...msg,
-      method,
-      headers: msg.headers.map((h) =>
-        h.name.toLowerCase() === "cseq" ? { ...h, value: `${cseq} ${method}` } : h,
-      ),
-    }
-    if (body !== undefined) {
-      updatedMsg.body = body
-      updatedMsg.headers = updatedMsg.headers.map((hdr) =>
-        hdr.name.toLowerCase() === "content-length"
-          ? { name: hdr.name, value: String(body.byteLength) }
-          : hdr
-      )
-    }
-    const routed = leg.legId !== "a" ? applyRouteSet(updatedMsg, dialog, target) : { msg: updatedMsg, target }
-    state.outbound.push({
-      message: routed.msg,
-      destination: routed.target,
-      label: `${method} to ${legId}`,
-      legId,
-    })
+  // Only methods supported by the in-dialog generator; reject unknowns early
+  // so SIP semantics stay explicit and typed.
+  if (method !== "OPTIONS" && method !== "INFO" && method !== "UPDATE" && method !== "MESSAGE") {
+    return
   }
+
+  const target = legTarget(leg)
+  const requestUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
+  const { via, contact } = legStackIdentity(state.call, legId, ctx.config)
+  const { request, dialog: newSip } = generateInDialogRequest(
+    method,
+    dialog.sip,
+    { via, contact, requestUri, ...(body !== undefined ? { body } : {}) },
+  )
+  state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
+    ...d,
+    sip: newSip,
+  }))
+
+  const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
+  state.outbound.push({
+    message: routed.msg,
+    destination: routed.target,
+    label: `${method} to ${legId}`,
+    legId,
+  })
 }
 
 // ── send-prack-to-leg ─────────────────────────────────────────────────────
@@ -1005,7 +1166,7 @@ function executeSendRequestToLeg(
  */
 function executeSendPrackToLeg(
   action: Extract<RuleAction, { type: "send-prack-to-leg" }>,
-  _ctx: RuleContext,
+  ctx: RuleContext,
   state: ExecutionState,
 ): void {
   const { type, legId, rseq, inviteCSeq, bTag } = action
@@ -1013,28 +1174,25 @@ function executeSendPrackToLeg(
 
   const leg = findLeg(state.call, legId)
   if (leg === undefined || leg.state === "terminated") return
-  const dialog = leg.dialogs.find((d) => d.toTag === bTag) ?? leg.dialogs[0]
+  const dialog = leg.dialogs.find((d) => dialogIdentityTag(leg.legId, d) === bTag) ?? leg.dialogs[0]
   if (dialog === undefined) return
 
   const target = legTarget(leg)
-  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
-
-  state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
-  const cseq = dialog.localCSeq + 1
+  const requestUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
   const rack = `${rseq} ${inviteCSeq} INVITE`
 
-  const prack = buildPrack(
-    leg.callId,
-    leg.fromTag,
-    bTag,
-    targetUri,
-    cseq,
-    rack,
-    leg.localUri,
-    leg.remoteUri,
+  const { via, contact } = legStackIdentity(state.call, legId, ctx.config)
+  const { request, dialog: newSip } = generateInDialogRequest(
+    "PRACK",
+    dialog.sip,
+    { via, contact, rack, requestUri },
   )
+  state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
+    ...d,
+    sip: newSip,
+  }))
 
-  const routed = applyRouteSet(prack, dialog, target)
+  const routed = applyRouteSet(request, dialog, target)
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
@@ -1055,15 +1213,15 @@ function executeCreateLeg(
 
   // Resolve the base INVITE to clone.
   let baseInvite: SipRequest | undefined
-  if (fromInvite === "snapshot" && state.call.aLegInviteSnapshot) {
-    const snapshot = state.call.aLegInviteSnapshot
+  if (fromInvite === "snapshot") {
+    const snapshot = state.call.aLegInvite
     baseInvite = {
       type: "request", method: "INVITE", uri: snapshot.uri,
       version: "SIP/2.0",
       headers: snapshot.headers.map((h) => ({ name: h.name, value: h.value })),
       body: snapshot.body, raw: Buffer.from(snapshot.body),
     }
-  } else if (fromInvite !== undefined && fromInvite !== "snapshot") {
+  } else if (fromInvite !== undefined) {
     baseInvite = fromInvite
   }
 
@@ -1142,7 +1300,7 @@ function executeCreateLeg(
  */
 function executeDestroyLeg(
   action: Extract<RuleAction, { type: "destroy-leg" }>,
-  _ctx: RuleContext,
+  ctx: RuleContext,
   state: ExecutionState,
 ): void {
   const { type, legId } = action
@@ -1157,9 +1315,14 @@ function executeDestroyLeg(
     // BYE a confirmed leg
     const dialog = leg.dialogs[0]
     if (dialog !== undefined) {
-      const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
-      const byeMsg = buildBye(leg.callId, leg.fromTag, dialog.toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri)
-      const routed = leg.legId !== "a" ? applyRouteSet(byeMsg, dialog, target) : { msg: byeMsg, target }
+      const requestUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
+      const { via, contact } = legStackIdentity(state.call, legId, ctx.config)
+      const { request, dialog: newSip } = generateInDialogRequest("BYE", dialog.sip, { via, contact, requestUri })
+      state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
+        ...d,
+        sip: newSip,
+      }))
+      const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
       state.outbound.push({
         message: routed.msg,
         destination: routed.target,
@@ -1178,7 +1341,8 @@ function executeDestroyLeg(
     state.call = setByeDisposition(state.call, legId, "cancelled")
   } else {
     // CANCEL an early/trying leg
-    state.outbound.push(buildCancelEnvelope(leg, target, ""))
+    const env = buildCancelEnvelope(leg, "")
+    if (env !== undefined) state.outbound.push(env)
     state.call = setByeDisposition(state.call, legId, "cancelled")
     state.call = setLegDisposition(state.call, legId, "cancelling")
   }
@@ -1220,8 +1384,8 @@ function executeCancelLeg(
   if (leg.state === "terminated") return
   if (leg.state === "confirmed") return // caller should have used destroy-leg
 
-  const target = legTarget(leg)
-  state.outbound.push(buildCancelEnvelope(leg, target, ""))
+  const env = buildCancelEnvelope(leg, "")
+  if (env !== undefined) state.outbound.push(env)
   state.call = setLegDisposition(state.call, legId, "cancelling")
 }
 
@@ -1266,7 +1430,7 @@ function executeScheduleTimer(
  * and `InvariantEnforcer` adds limiter/timer/CDR/removal automatically.
  */
 function executeTerminateCall(
-  _ctx: RuleContext,
+  ctx: RuleContext,
   state: ExecutionState,
 ): void {
   // BYE or CANCEL all legs that are still alive and peered
@@ -1277,10 +1441,14 @@ function executeTerminateCall(
       const dialog = leg.dialogs[0]
       if (dialog !== undefined) {
         const target = legTarget(leg)
-        const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
-        const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
-        const byeMsg = buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri)
-        const routed = leg.legId !== "a" ? applyRouteSet(byeMsg, dialog, target) : { msg: byeMsg, target }
+        const requestUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
+        const { via, contact } = legStackIdentity(state.call, leg.legId, ctx.config)
+        const { request, dialog: newSip } = generateInDialogRequest("BYE", dialog.sip, { via, contact, requestUri })
+        state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
+          ...d,
+          sip: newSip,
+        }))
+        const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
         state.outbound.push({
           message: routed.msg,
           destination: routed.target,
@@ -1290,8 +1458,8 @@ function executeTerminateCall(
       }
     } else if (leg.state === "trying" || leg.state === "early") {
       if (leg.legId !== "a") {
-        const target = legTarget(leg)
-        state.outbound.push(buildCancelEnvelope(leg, target, " (terminate)"))
+        const env = buildCancelEnvelope(leg, " (terminate)")
+        if (env !== undefined) state.outbound.push(env)
       }
     }
   }
@@ -1353,10 +1521,14 @@ function executeBeginTermination(
       const dialog = leg.dialogs[0]
       if (dialog !== undefined) {
         const target = legTarget(leg)
-        const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
-        const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
-        const byeMsg = buildBye(leg.callId, fromTag, toTag, targetUri, dialog.localCSeq + 1, leg.localUri, leg.remoteUri)
-        const routed = leg.legId !== "a" ? applyRouteSet(byeMsg, dialog, target) : { msg: byeMsg, target }
+        const requestUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
+        const { via, contact } = legStackIdentity(state.call, leg.legId, ctx.config)
+        const { request, dialog: newSip } = generateInDialogRequest("BYE", dialog.sip, { via, contact, requestUri })
+        state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
+          ...d,
+          sip: newSip,
+        }))
+        const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
         state.outbound.push({
           message: routed.msg,
           destination: routed.target,
@@ -1368,8 +1540,8 @@ function executeBeginTermination(
     } else if (leg.state === "trying" || leg.state === "early") {
       if (leg.legId !== "a") {
         // CANCEL trying/early b-legs
-        const target = legTarget(leg)
-        state.outbound.push(buildCancelEnvelope(leg, target, " (begin-termination)"))
+        const env = buildCancelEnvelope(leg, " (begin-termination)")
+        if (env !== undefined) state.outbound.push(env)
         state.call = setByeDisposition(state.call, leg.legId, "cancelled")
         state.call = setLegState(state.call, leg.legId, "terminated")
       } else {
@@ -1411,7 +1583,7 @@ function executeBeginTermination(
  */
 function executeSendNotify(
   action: Extract<RuleAction, { type: "send-notify" }>,
-  _ctx: RuleContext,
+  ctx: RuleContext,
   state: ExecutionState,
 ): void {
   const { type, legId, event, subscriptionState, contentType, body } = action
@@ -1423,28 +1595,24 @@ function executeSendNotify(
   if (dialog === undefined) return
 
   const target = legTarget(leg)
-  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
+  const requestUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
 
-  state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
-  const cseq = dialog.localCSeq + 1
-
-  const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
-
-  const notifyMsg = buildNotify({
-    callId: leg.callId,
-    fromTag,
-    toTag,
-    requestUri: targetUri,
-    cseq,
-    ...(leg.localUri !== undefined ? { fromUri: leg.localUri } : {}),
-    ...(leg.remoteUri !== undefined ? { dialogToUri: leg.remoteUri } : {}),
+  const { via, contact } = legStackIdentity(state.call, legId, ctx.config)
+  const { request, dialog: newSip } = generateInDialogRequest("NOTIFY", dialog.sip, {
+    via,
+    contact,
+    requestUri,
     event,
     subscriptionState,
     ...(contentType !== undefined ? { contentType } : {}),
     ...(body !== undefined ? { body } : {}),
   })
+  state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
+    ...d,
+    sip: newSip,
+  }))
 
-  const routed = leg.legId !== "a" ? applyRouteSet(notifyMsg, dialog, target) : { msg: notifyMsg, target }
+  const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
@@ -1460,9 +1628,9 @@ function executeSendNotify(
  *
  * Used by the REFER transfer flow (c-realigning, a-realigning) to swap SDP
  * on an already-established leg. Framework bumps the dialog CSeq, stamps
- * Contact/Via placeholders via the standard SipRouter path, applies the
- * dialog route set, and updates `lastInviteCSeq` so the matching ACK (for
- * the 2xx) echoes the right CSeq (RFC 3261 §13.2.2.4).
+ * Contact/Via placeholders via the standard SipRouter path (which also
+ * captures the `pendingInviteTxn` handle the matching ACK will consult
+ * for CSeq — RFC 3261 §13.2.2.4), and applies the dialog route set.
  *
  * Body semantics:
  *   - `bodyUpdate: { kind: "set", value }` — carry the given SDP offer.
@@ -1472,7 +1640,6 @@ function executeSendNotify(
  *
  * Reach (Slice C audit — primitive, single named leg):
  *   legs.{legId}.dialogs[0].localCSeq     → +1
- *   legs.{legId}.dialogs[0].lastInviteCSeq → outbound CSeq
  *
  * No tagMap touch; no peer mutation. Responses are matched by transfer rules
  * via `direction` + `filter` and handled explicitly (no pending-request
@@ -1480,7 +1647,7 @@ function executeSendNotify(
  */
 function executeSendReinvite(
   action: Extract<RuleAction, { type: "send-reinvite" }>,
-  _ctx: RuleContext,
+  ctx: RuleContext,
   state: ExecutionState,
 ): void {
   const { type, legId, bodyUpdate, headerUpdates } = action
@@ -1492,12 +1659,7 @@ function executeSendReinvite(
   if (dialog === undefined) return
 
   const target = legTarget(leg)
-  const targetUri = dialog.contact || `sip:${target.host}:${target.port}`
-
-  state.call = bumpLocalCSeq(state.call, leg.legId, dialog.toTag)
-  const cseq = dialog.localCSeq + 1
-
-  const { fromTag, toTag } = directionalTags(state.call, leg, dialog)
+  const requestUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
 
   // `inherit` would normally copy the relayed message body, but send-reinvite
   // has no base body — collapse inherit to drop (empty body).
@@ -1505,25 +1667,29 @@ function executeSendReinvite(
     ? bodyUpdate.value
     : new Uint8Array(0)
 
-  let reinvite = buildOriginatedInvite({
-    callId: leg.callId,
-    fromTag,
-    toTag,
-    requestUri: targetUri,
-    cseq,
-    ...(leg.localUri !== undefined ? { fromUri: leg.localUri } : {}),
-    ...(leg.remoteUri !== undefined ? { dialogToUri: leg.remoteUri } : {}),
-    body,
-  })
-
+  const { via, contact, branch } = legStackIdentity(state.call, legId, ctx.config)
+  let { request: reinvite, dialog: newSip } = generateInDialogRequest(
+    "INVITE",
+    dialog.sip,
+    { via, contact, requestUri, body },
+  )
   if (headerUpdates !== undefined) {
     reinvite = applyHeaderUpdates(reinvite, headerUpdates)
   }
 
-  // Remember this INVITE's CSeq so the ACK-for-2xx echoes it (RFC 3261
-  // §13.2.2.4) — same bookkeeping `relayRequest` performs for relayed INVITEs.
-  state.call = updateDialog(state.call, leg.legId, dialog.toTag, (d) => ({
-    ...d, lastInviteCSeq: cseq,
+  // Capture the INVITE handle so ACK-for-2xx reads CSeq from here
+  // (RFC 3261 §13.2.2.4) and CANCEL can reuse the branch (§9.1). Re-INVITE
+  // handle lives on the confirmed dialog.
+  const reInviteHandle: InviteTxnHandle = {
+    kind: "invite",
+    branch,
+    originalInvite: reinvite,
+    destination: target,
+  }
+  state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
+    ...d,
+    sip: newSip,
+    ext: { ...d.ext, pendingInviteTxn: reInviteHandle },
   }))
 
   const routed = leg.legId !== "a" ? applyRouteSet(reinvite, dialog, target) : { msg: reinvite, target }
