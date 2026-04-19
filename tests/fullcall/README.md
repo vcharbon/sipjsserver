@@ -53,47 +53,61 @@ tests/fullcall/
     bye-directions.ts     Composed: callSetup.andThen(callerBye | calleeBye)
   helpers/
     sdp.ts                Default SDP offer/answer bodies
-    harness.ts            B2BUA lifecycle helpers
-  e2e.test.ts             vitest entry point
+  e2e-fake-clock.test.ts  vitest entry — TestClock (it.effect) scenarios
+  e2e-real-clock.test.ts  vitest entry — wall-clock (it.live) scenarios
 ```
 
 ## Running tests
 
-### Prerequisites
+Tests are split into two non-mixing modes — see the matching section in the repo-root [CLAUDE.md](../../CLAUDE.md) for the full rationale.
 
-- Redis running on `localhost:6379` (used by the B2BUA's CallState and CallLimiter)
+### Fake stack (default dev loop)
 
-### Simulated backend (default)
-
-Runs the B2BUA in-process with a mock UDP transport. No real sockets, fast execution.
+Uses `TestClock` + in-memory `CallStateCache`/`CallLimiter` + simulated `SignalingNetwork` + a mock HTTP call-control backend. No real sockets, no Redis, no wall clock. Driven by [vitest.config.fake.ts](../../vitest.config.fake.ts).
 
 ```bash
-# Run all E2E tests (simulated backend)
-npm run test
+# All fake-stack suites (unit tests + e2e-fake-clock)
+npm run test:fake
 
-# Run only E2E tests
-npx vitest run tests/fullcall/e2e.test.ts
-
-# Run a specific scenario
-npx vitest run tests/fullcall/e2e.test.ts -t "basic call"
-
-npx vitest run tests/fullcall/e2e-fake-clock.test.ts 
+# A single fake-clock scenario by test name
+npx vitest run -c vitest.config.fake.ts tests/fullcall/e2e-fake-clock.test.ts -t "basic call"
 ```
 
-### Live UDP backend
+### Live stack (real-clock e2e)
 
-Runs against a real B2BUA instance over real UDP sockets. Start the B2BUA first, then run with `E2E_LIVE=1`.
+Uses `it.live` + real `Effect.sleep` + real UDP against an in-process simulated B2BUA. Each describe block advertises a tier; `TEST_TIER=short|medium|long` gates which tiers run. Driven by [vitest.config.live.ts](../../vitest.config.live.ts).
+
+| Tier   | Budget       | What runs                                                     |
+|--------|--------------|----------------------------------------------------------------|
+| short  | ≤ 2s real    | peer-to-peer, limiter, failover                                |
+| medium | ≤ 30s real   | above + OPTIONS-keepalive timeout (≈ 5s wall)                  |
+| long   | > 30s real   | above + any future long-timer scenario                         |
 
 ```bash
-# Terminal 1: start the B2BUA
+npm run test:live:short    # TEST_TIER=short (default for npm test)
+npm run test:live:medium   # adds keepalive-timeout
+npm run test:live:long     # everything
+```
+
+The combined scripts run both sides:
+
+```bash
+npm run test          # test:fake + test:live:short  (dev loop)
+npm run test:ci       # test:fake + test:live:medium (CI)
+npm run test:nightly  # test:fake + test:live:long   (nightly)
+```
+
+### External live B2BUA (optional)
+
+The `describe.skipIf(!LIVE_ENABLED)` block in [e2e-real-clock.test.ts](e2e-real-clock.test.ts) talks to an externally-running B2BUA via real UDP. Opt in with `E2E_LIVE=1`; requires Redis on `localhost:6379` and a running B2BUA (`npm run dev` in a second terminal).
+
+```bash
+# Terminal 1
 npm run dev
 
-# Terminal 2: run live E2E tests
-export E2E_LIVE=1 
-npx vitest run tests/fullcall/e2e.test.ts
-
-# Override B2BUA address
-E2E_LIVE=1 E2E_B2BUA_HOST=10.0.0.5 E2E_B2BUA_PORT=5060 npx vitest run tests/fullcall/e2e.test.ts
+# Terminal 2
+E2E_LIVE=1 npm run test:live:short
+E2E_LIVE=1 E2E_B2BUA_HOST=10.0.0.5 E2E_B2BUA_PORT=5060 npm run test:live:short
 ```
 
 ## Writing scenarios
