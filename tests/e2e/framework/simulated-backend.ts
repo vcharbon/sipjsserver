@@ -9,11 +9,11 @@
  * real UDP stack would expose them.
  */
 
-import { Clock, Effect, Layer, Option, Queue, Stream } from "effect"
-import type { AgentInfo, ReceivedPacket, TestTransport } from "./types.js"
+import { Effect, Layer } from "effect"
+import type { AgentInfo, TestTransport } from "./types.js"
 import { TransportError } from "./types.js"
 import { UdpTransport } from "../../../src/sip/UdpTransport.js"
-import { SignalingNetwork, type UdpEndpoint, type UdpPacket } from "../../../src/sip/SignalingNetwork.js"
+import { SignalingNetwork, type UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
 import { OverloadController } from "../../../src/b2bua/OverloadController.js"
 import { MetricsRegistry } from "../../../src/observability/MetricsRegistry.js"
 import { SipRouter } from "../../../src/sip/SipRouter.js"
@@ -82,7 +82,6 @@ interface AgentRecord {
   readonly ip: string
   readonly port: number
   readonly endpoint: UdpEndpoint
-  readonly recvQueue: Queue.Queue<ReceivedPacket>
 }
 
 // ---------------------------------------------------------------------------
@@ -253,25 +252,10 @@ export function createSimulatedTransport(opts?: {
             )
           )
 
-          const recvQueue = yield* Queue.unbounded<ReceivedPacket>()
-
-          // Drain the endpoint's ingress stream into the per-agent
-          // ReceivedPacket queue, stamping arrivalMs at dequeue time.
-          // forkScoped so the drain fiber dies with the test scope.
-          yield* Effect.forkScoped(
-            Stream.runForEach(endpoint.messages, (pkt: UdpPacket) =>
-              Effect.gen(function* () {
-                const arrivalMs = yield* Clock.currentTimeMillis
-                Queue.offerUnsafe(recvQueue, {
-                  raw: pkt.raw,
-                  rinfo: pkt.rinfo,
-                  arrivalMs,
-                })
-              })
-            )
-          )
-
-          mockState.agents.set(name, { ip, port, endpoint, recvQueue })
+          // No per-agent ReceivedPacket queue: arrivalMs is stamped at
+          // ingress by SignalingNetwork, and the harness reads straight
+          // off endpoint.poll() / endpoint.take().
+          mockState.agents.set(name, { ip, port, endpoint })
           agentInfos[name] = {
             ip,
             port,
@@ -376,8 +360,7 @@ export function createSimulatedTransport(opts?: {
         }
 
         if (timeoutMs <= 0) {
-          const polled = yield* Queue.poll(agent.recvQueue)
-          return Option.getOrNull(polled)
+          return yield* agent.endpoint.poll()
         }
 
         // Poll in small clock-advancing steps. Under TestClock the
@@ -386,14 +369,13 @@ export function createSimulatedTransport(opts?: {
         // wall-clock `Effect.sleep`.
         let remaining = timeoutMs
         while (remaining > 0) {
-          const polled = yield* Queue.poll(agent.recvQueue)
-          if (Option.isSome(polled)) return polled.value
+          const polled = yield* agent.endpoint.poll()
+          if (polled !== null) return polled
           const step = remaining < 1 ? remaining : 1
           yield* clockSleep(step)
           remaining -= step
         }
-        const last = yield* Queue.poll(agent.recvQueue)
-        return Option.getOrNull(last)
+        return yield* agent.endpoint.poll()
       }),
 
     settle: () =>

@@ -53,6 +53,16 @@ import type { RemoteInfo } from "./types.js"
 export interface UdpPacket {
   readonly raw: Buffer
   readonly rinfo: RemoteInfo
+  /**
+   * Wall-clock (`Clock.currentTimeMillis`) captured at ingress — i.e. the
+   * instant SignalingNetwork observed the packet, before it lands on the
+   * endpoint queue. Under `TestClock` this is virtual time.
+   *
+   * Stamping here instead of at dequeue time is what lets the test harness
+   * read straight off `endpoint` without the `Stream.runForEach` hop that
+   * used to live in `tests/e2e/framework/{live,simulated}-backend.ts`.
+   */
+  readonly arrivalMs: number
 }
 
 /** Per-endpoint counters. Plain object; O(1) reads/writes. */
@@ -67,6 +77,18 @@ export interface UdpEndpoint {
   readonly localAddress: { readonly ip: string; readonly port: number }
   readonly send: (buf: Buffer, dstPort: number, dstAddress: string) => Effect.Effect<void, SendError>
   readonly messages: Stream.Stream<UdpPacket>
+  /**
+   * Non-blocking read. Returns the next enqueued packet, or `null` if the
+   * queue is empty. Exposed so the test harness can poll straight off the
+   * endpoint instead of forking a drain loop into a secondary queue.
+   */
+  readonly poll: () => Effect.Effect<UdpPacket | null>
+  /**
+   * Blocking read. Never returns until a packet arrives or the endpoint
+   * closes. Intended for the test harness — production code consumes the
+   * `messages` stream.
+   */
+  readonly take: () => Effect.Effect<UdpPacket>
   readonly queueDepth: () => number
   readonly queueMax: number
   readonly counters: UdpEndpointCounters
@@ -201,7 +223,8 @@ export class SignalingNetwork extends ServiceMap.Service<
                     return
                   }
                   case "accept": {
-                    if (!Queue.offerUnsafe(queue, { raw, rinfo: src })) {
+                    const arrivalMs = Date.now()
+                    if (!Queue.offerUnsafe(queue, { raw, rinfo: src, arrivalMs })) {
                       counters.tailDropped++
                       return
                     }
@@ -240,10 +263,16 @@ export class SignalingNetwork extends ServiceMap.Service<
               })
             })
 
+          const poll = () =>
+            Effect.map(Queue.poll(queue), (opt) => Option.getOrNull(opt))
+          const take = () => Queue.take(queue).pipe(Effect.orDie)
+
           const endpoint: UdpEndpoint = {
             localAddress,
             send,
             messages: Stream.fromQueue(queue),
+            poll,
+            take,
             queueDepth: () => Queue.sizeUnsafe(queue),
             queueMax: opts.queueMax,
             counters,
@@ -356,7 +385,8 @@ export class SignalingNetwork extends ServiceMap.Service<
                     return
                   }
                   case "accept": {
-                    if (!Queue.offerUnsafe(target.queue, { raw, rinfo: src })) {
+                    const arrivalMs = yield* Clock.currentTimeMillis
+                    if (!Queue.offerUnsafe(target.queue, { raw, rinfo: src, arrivalMs })) {
                       target.counters.tailDropped++
                       return
                     }
@@ -378,10 +408,16 @@ export class SignalingNetwork extends ServiceMap.Service<
                 )
               ).pipe(Effect.asVoid)
 
+            const poll = () =>
+              Effect.map(Queue.poll(queue), (opt) => Option.getOrNull(opt))
+            const take = () => Queue.take(queue).pipe(Effect.orDie)
+
             const endpoint: UdpEndpoint = {
               localAddress,
               send,
               messages: Stream.fromQueue(queue),
+              poll,
+              take,
               queueDepth: () => Queue.sizeUnsafe(queue),
               queueMax: bindOpts.queueMax,
               counters,

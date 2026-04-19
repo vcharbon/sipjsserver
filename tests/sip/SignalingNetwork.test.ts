@@ -80,6 +80,36 @@ describe("SignalingNetwork.simulated — send/receive", () => {
     }).pipe(Effect.provide(simulatedLayer))
   )
 
+  it.effect("stamps arrivalMs at ingress time (virtual clock under TestClock)", () =>
+    Effect.gen(function* () {
+      const net = yield* SignalingNetwork
+      const sender = yield* net.bindUdp({ ip: "10.0.0.1", port: 5060, queueMax: 16 })
+      const receiver = yield* net.bindUdp({ ip: "10.0.0.2", port: 5060, queueMax: 16 })
+
+      // Bump virtual time to a nonzero baseline so the stamp is
+      // distinguishable from the TestClock origin.
+      yield* TestClock.adjust("1000 millis")
+
+      yield* sender.send(Buffer.from("stamped"), 5060, "10.0.0.2")
+      yield* TestClock.adjust(`${TRANSIT} millis`)
+
+      const polled = yield* receiver.poll()
+      expect(polled).not.toBeNull()
+      // arrivalMs == base (1000ms) + transit (15ms). Stamped inside the
+      // simulated fabric, not at dequeue time.
+      expect(polled!.arrivalMs).toBe(1000 + TRANSIT)
+    }).pipe(Effect.provide(simulatedLayer))
+  )
+
+  it.effect("poll returns null when queue is empty", () =>
+    Effect.gen(function* () {
+      const net = yield* SignalingNetwork
+      const ep = yield* net.bindUdp({ ip: "10.0.0.1", port: 5060, queueMax: 16 })
+      const polled = yield* ep.poll()
+      expect(polled).toBeNull()
+    }).pipe(Effect.provide(simulatedLayer))
+  )
+
   it.effect("send to unbound destination records undeliverable (no error)", () =>
     Effect.gen(function* () {
       const net = yield* SignalingNetwork

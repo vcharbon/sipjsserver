@@ -7,24 +7,23 @@
  * for any scenario where the SUT or a peer needs to reach the agent at a
  * known address — e.g. peer-to-peer self-tests).
  *
+ * The harness reads straight off the endpoint (`poll` / `take`) — no
+ * intermediate per-agent queue. `arrivalMs` is stamped once at socket-
+ * recv time inside `SignalingNetwork.real`.
+ *
  * Endpoints are scoped resources: their underlying sockets are cleaned up
  * automatically when the surrounding test scope closes.
  */
 
-import { Clock, Effect, Option, Queue, Stream } from "effect"
-import type { AgentInfo, ReceivedPacket, TestTransport } from "./types.js"
+import { Effect } from "effect"
+import type { AgentInfo, TestTransport } from "./types.js"
 import { TransportError } from "./types.js"
-import {
-  SignalingNetwork,
-  type UdpEndpoint,
-  type UdpPacket,
-} from "../../../src/sip/SignalingNetwork.js"
+import { SignalingNetwork, type UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
 
 interface LiveAgent {
   readonly ip: string
   readonly port: number
   readonly endpoint: UdpEndpoint
-  readonly queue: Queue.Queue<ReceivedPacket>
 }
 
 /** Per-agent ingress queue capacity — see simulated-backend for rationale. */
@@ -62,25 +61,8 @@ export function createLiveTransport(opts?: {
             )
           )
 
-          const queue = yield* Queue.unbounded<ReceivedPacket>()
-
-          // Drain endpoint stream → per-agent ReceivedPacket queue.
-          // `arrivalMs` stamped here, at dequeue time.
-          yield* Effect.forkScoped(
-            Stream.runForEach(endpoint.messages, (pkt: UdpPacket) =>
-              Effect.gen(function* () {
-                const arrivalMs = yield* Clock.currentTimeMillis
-                Queue.offerUnsafe(queue, {
-                  raw: pkt.raw,
-                  rinfo: pkt.rinfo,
-                  arrivalMs,
-                })
-              })
-            )
-          )
-
           const { ip, port } = endpoint.localAddress
-          agents.set(name, { ip, port, endpoint, queue })
+          agents.set(name, { ip, port, endpoint })
           agentInfos[name] = {
             ip,
             port,
@@ -113,27 +95,12 @@ export function createLiveTransport(opts?: {
           return yield* new TransportError({ message: `Unknown agent "${agentName}"` })
         }
         if (timeoutMs <= 0) {
-          const polled = yield* Queue.poll(agent.queue)
-          return Option.getOrNull(polled)
+          return yield* agent.endpoint.poll()
         }
         return yield* Effect.race(
-          Queue.take(agent.queue),
+          agent.endpoint.take(),
           Effect.sleep(`${timeoutMs} millis`).pipe(Effect.as(null))
         )
-      }),
-
-    settle: () =>
-      // Real UDP + a Stream-based drain fork introduces two points of
-      // asynchrony between send-return and queue-arrival: the kernel
-      // delivering the packet to the socket, then the drain fork
-      // transferring it into the ReceivedPacket queue. A brief wall-clock
-      // wait + scheduler yields guarantees both have settled before the
-      // drain phase polls for unexpected messages.
-      Effect.gen(function* () {
-        yield* Effect.sleep("10 millis")
-        for (let i = 0; i < 20; i++) {
-          yield* Effect.yieldNow
-        }
       }),
   }
 }

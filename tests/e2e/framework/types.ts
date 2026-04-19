@@ -22,8 +22,11 @@ export class TransportError extends Data.TaggedError("TransportError")<{
 /**
  * A packet received by a test agent from the B2BUA (simulated or live backend).
  *
- * `arrivalMs` is stamped at enqueue time — i.e. the wall-clock instant the
- * packet arrived from the socket / mock transport — not at drain time.
+ * `arrivalMs` is stamped at ingress inside `SignalingNetwork` — i.e. the
+ * wall-clock (`Clock.currentTimeMillis`) instant the packet was observed,
+ * before it landed on the endpoint queue. Under TestClock this is virtual
+ * time. Structurally compatible with `UdpPacket` so backends can return
+ * endpoint packets directly.
  */
 export interface ReceivedPacket {
   readonly raw: Buffer
