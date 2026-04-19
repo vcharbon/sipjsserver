@@ -18,6 +18,7 @@ import { OverloadController } from "../../../src/b2bua/OverloadController.js"
 import { MetricsRegistry } from "../../../src/observability/MetricsRegistry.js"
 import { SipRouter } from "../../../src/sip/SipRouter.js"
 import { AppConfig, type AppConfigData } from "../../../src/config/AppConfig.js"
+import { testAppConfigDefaults } from "../../support/testAppConfigDefaults.js"
 import { CallState } from "../../../src/call/CallState.js"
 import { CallStateCache } from "../../../src/call/CallStateCache.js"
 import { CallLimiter } from "../../../src/call/CallLimiter.js"
@@ -62,10 +63,11 @@ function buildTestHandlers() {
 
 /**
  * Simulated network propagation delay applied to every SIP message in
- * both directions. Wired to `SignalingNetwork.simulated({ transitDelayMs })`
- * — every endpoint-to-endpoint hop honors this delay.
+ * both directions. Read off the `SignalingNetwork` service at drain time
+ * (see `networkDelayMs` below) so the trace renderer stays in sync with
+ * whatever value the stack layer is configured with.
  */
-const NETWORK_DELAY_MS = 15
+const DEFAULT_NETWORK_DELAY_MS = 15
 
 /**
  * Per-agent ingress queue capacity. Bounded by the `SignalingNetwork`
@@ -101,53 +103,12 @@ interface MockTransportState {
 // ---------------------------------------------------------------------------
 
 function testAppConfig(sipPort: number, httpPort: number, overrides?: Partial<AppConfigData>): AppConfigData {
-  return {
-    sipLocalIp: "127.0.0.1",
+  return testAppConfigDefaults({
     sipLocalPort: sipPort,
-    redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
-    redisKeyPrefix: `test-${Date.now()}`,
-    limiterWindowSeconds: 300,
-    limiterActiveWindows: 3,
-    limiterTtlSeconds: 1200,
-    noAnswerTimeoutSec: 30,
-    keepaliveIntervalSec: 900,
-    keepaliveTimeoutSec: 10,
-    callMaxDurationSec: 7200,
-    cdrFilePath: "/tmp/test-cdr.jsonl",
     httpStatusPort: httpPort,
     callControlUrl: `http://localhost:${httpPort}`,
-    redisFlushIdleMs: 2000,
-    traceSampleRate: 0,
-    otelTracesUrl: "http://localhost:4318/v1/traces",
-    clusterWorkers: 0,
-    workerIndex: -1,
-    callContextTtlSec: 1800,
-    callCleanupDelaySec: 0,
-    udpQueueMax: 100,
-    udpQueueTier1ThresholdPct: 70,
-    workerQueueEmergencyMax: 500,
-    workerQueueInDialogMax: 400,
-    workerQueueNewCallMax: 100,
-    workerInDialogFullKillAfterMs: 60000,
-    cpsBucketSize: 1000,
-    cpsBucketRate: 500,
-    overloadLoopLagSoftMs: 50,
-    overloadLoopLagHardMs: 200,
-    overloadRoutingNewCallSoftMs: 200,
-    overloadRoutingNewCallHardMs: 1000,
-    retryAfterBaseSec: 5,
-    retryAfterJitterSec: 5,
-    emergencyListenerEnabled: false,
-    emergencyListenerHost: "127.0.0.1",
-    emergencyListenerPort: 5070,
-    referSubscriptionExpirySec: 60,
-    referReinviteAnswerSec: 32,
-    referOverallSafetySec: 120,
-    otelMaxAttributeValueLength: 32768,
-    scrubHeaders: [],
-    traceTombstoneEnabled: false,
     ...overrides,
-  }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +300,7 @@ export function createSimulatedTransport(opts?: {
         )
 
         return agentInfos
-      }).pipe(Effect.provide(SignalingNetwork.simulated({ transitDelayMs: NETWORK_DELAY_MS }))),
+      }).pipe(Effect.provide(SignalingNetwork.simulated({ transitDelayMs: DEFAULT_NETWORK_DELAY_MS }))),
 
     send: (agentName, buf, port, address) =>
       Effect.gen(function* () {
@@ -429,6 +390,12 @@ export function createSimulatedTransport(opts?: {
         return errors
       }),
 
-    networkDelayMs: NETWORK_DELAY_MS,
+    // M3: read transit delay off the service instead of a file-local
+    // constant. The simulated layer always sets it; if someone later
+    // swaps in a layer without a transit delay, we fall back to the
+    // default so the trace renderer has a usable value.
+    get networkDelayMs() {
+      return mockState.network?.transitDelayMs ?? DEFAULT_NETWORK_DELAY_MS
+    },
   }
 }

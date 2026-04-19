@@ -20,6 +20,7 @@ import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../src/sip/SignalingNetwork.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
+import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
 
 const TRANSIT_MS = 15
 const QUEUE_MAX = 5
@@ -31,53 +32,18 @@ const FLOODER_IP = "10.0.0.1"
 const FLOODER_PORT = 5555
 
 function testConfig(overrides?: Partial<AppConfigData>): AppConfigData {
-  return {
+  return testAppConfigDefaults({
     sipLocalIp: B2BUA_IP,
     sipLocalPort: B2BUA_PORT,
-    redisUrl: "redis://localhost:6379",
     redisKeyPrefix: "test",
-    limiterWindowSeconds: 300,
-    limiterActiveWindows: 3,
-    limiterTtlSeconds: 1200,
-    noAnswerTimeoutSec: 30,
-    keepaliveIntervalSec: 900,
-    keepaliveTimeoutSec: 10,
-    callMaxDurationSec: 7200,
     cdrFilePath: "/tmp/cdr.jsonl",
     httpStatusPort: 3002,
     callControlUrl: "http://localhost:3002",
-    redisFlushIdleMs: 2000,
-    traceSampleRate: 0,
-    otelTracesUrl: "http://localhost:4318/v1/traces",
-    clusterWorkers: 0,
-    workerIndex: -1,
-    callContextTtlSec: 1800,
-    callCleanupDelaySec: 0,
     udpQueueMax: QUEUE_MAX,
     udpQueueTier1ThresholdPct: TIER1_PCT,
-    workerQueueEmergencyMax: 500,
-    workerQueueInDialogMax: 400,
-    workerQueueNewCallMax: 100,
-    workerInDialogFullKillAfterMs: 60000,
-    cpsBucketSize: 1000,
-    cpsBucketRate: 500,
-    overloadLoopLagSoftMs: 50,
-    overloadLoopLagHardMs: 200,
-    overloadRoutingNewCallSoftMs: 200,
-    overloadRoutingNewCallHardMs: 1000,
-    retryAfterBaseSec: 5,
     retryAfterJitterSec: 0,
-    emergencyListenerEnabled: false,
-    emergencyListenerHost: "127.0.0.1",
-    emergencyListenerPort: 5070,
-    referSubscriptionExpirySec: 60,
-    referReinviteAnswerSec: 32,
-    referOverallSafetySec: 120,
-    otelMaxAttributeValueLength: 32768,
-    scrubHeaders: [],
-    traceTombstoneEnabled: false,
     ...overrides,
-  }
+  })
 }
 
 /**

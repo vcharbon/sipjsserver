@@ -156,6 +156,14 @@ export class SignalingNetwork extends ServiceMap.Service<
      * and clears its buffer.
      */
     readonly drainUndeliverable: () => Effect.Effect<ReadonlyArray<UndeliveredPacket>>
+    /**
+     * Simulated: configured endpoint-to-endpoint transit delay (ms). The
+     * trace renderer reads this to compute the peer-side observation time
+     * from a single captured send/receive clock.
+     *
+     * Real: `undefined` — on real sockets each side stamps its own clock.
+     */
+    readonly transitDelayMs: number | undefined
   }
 >()("@sipjsserver/SignalingNetwork") {
   // -------------------------------------------------------------------------
@@ -281,6 +289,7 @@ export class SignalingNetwork extends ServiceMap.Service<
         }),
 
       drainUndeliverable: () => Effect.succeed([]),
+      transitDelayMs: undefined,
     }
   )
 
@@ -447,7 +456,7 @@ export class SignalingNetwork extends ServiceMap.Service<
             return drained as ReadonlyArray<UndeliveredPacket>
           })
 
-        return { bindUdp, drainUndeliverable }
+        return { bindUdp, drainUndeliverable, transitDelayMs: opts.transitDelayMs }
       })
     )
 }
