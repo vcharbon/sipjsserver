@@ -293,7 +293,7 @@ export function createSimulatedTransport(opts?: {
 
         const RedisLayer = RedisClient.layer.pipe(Layer.provide(AppConfigLayer))
 
-        const CallLimiterLayer = CallLimiter.layer.pipe(
+        const CallLimiterLayer = CallLimiter.redisLayer.pipe(
           Layer.provide(AppConfigLayer),
           Layer.provide(RedisLayer)
         )

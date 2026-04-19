@@ -1,5 +1,6 @@
 /**
- * Tests for the in-memory test layers (TestCallLimiter, TestCallStateCache).
+ * Tests for the in-memory service layer variants (`CallLimiter.memoryLayer`,
+ * `CallStateCache.memoryLayer`).
  *
  * These tests run under @effect/vitest's TestClock so window rollover and
  * cache TTL expiration can be advanced deterministically without sleeping.
@@ -10,14 +11,13 @@ import { Effect, Layer } from "effect"
 import { TestClock } from "effect/testing"
 import { AppConfig } from "../../src/config/AppConfig.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
+import { CallStateCache } from "../../src/call/CallStateCache.js"
 import { CallState } from "../../src/call/CallState.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
-import { TestCallLimiter } from "./TestCallLimiter.js"
-import { TestCallStateCache } from "./TestCallStateCache.js"
 
-const limiterLayer = TestCallLimiter.layer.pipe(Layer.provideMerge(AppConfig.layer))
+const limiterLayer = CallLimiter.memoryLayer.pipe(Layer.provideMerge(AppConfig.layer))
 const callStateLayer = CallState.layer.pipe(
-  Layer.provide(TestCallStateCache.layer),
+  Layer.provide(CallStateCache.memoryLayer),
   Layer.provideMerge(AppConfig.layer)
 )
 
@@ -48,7 +48,7 @@ const makeCall = (callId: string, fromTag: string): Call => ({
   tagMap: []
 })
 
-describe("TestCallLimiter", () => {
+describe("CallLimiter.memoryLayer", () => {
   it.effect("rejects after limit is hit and recovers after windows expire", () =>
     Effect.gen(function* () {
       const lim = yield* CallLimiter
@@ -94,7 +94,7 @@ describe("TestCallLimiter", () => {
   )
 })
 
-describe("TestCallStateCache via real CallState", () => {
+describe("CallStateCache.memoryLayer via real CallState", () => {
   it.effect("flushed call reloads via checkout from cache", () =>
     Effect.gen(function* () {
       const state = yield* CallState
