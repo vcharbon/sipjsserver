@@ -70,3 +70,49 @@ Existing instances:
 - `Dispatcher` worker-kill escalation timer ([src/cluster/Dispatcher.ts](../src/cluster/Dispatcher.ts))
 
 **Symptom of getting this wrong:** e2e tests hang at the 30s timeout because the sampler fiber is suspended on a virtual clock that nothing advances. If only `it.effect` cases hang while `it.live` cases pass, suspect a missed `setInterval`.
+
+## Provide scoped layers at the outermost effect
+
+Resources allocated inside a scope — including any layer whose build yields `Effect.acquireRelease` / `Effect.addFinalizer` or a scoped service — are torn down the moment the scoping effect returns.
+
+**Rule — full-application-lifetime layers:** layers meant to live for the whole app or whole test (UdpTransport, SignalingNetwork, AppConfig, MetricsRegistry, etc.) must be provided at the outermost effect, typically via `Layer.mergeAll(...)` at the test or app entrypoint. Providing them on a sub-effect binds their scope to that sub-effect's lifetime and the finalizers fire as soon as it returns — silently.
+
+Short-lived, intentionally scoped resources (e.g. a DB connection you want to release after a block) are the exception: providing those at the sub-effect level is *the* point.
+
+```ts
+// WRONG — scope closes when the inner gen returns; UdpTransport's
+// bindUdp finalizer fires before the test body ever sends a packet.
+const udp = yield* Effect.gen(function* () {
+  return yield* UdpTransport
+}).pipe(Effect.provide(UdpLayer))
+
+// CORRECT — one outer scope spans the whole test body.
+Effect.gen(function* () {
+  const udp = yield* UdpTransport
+  // ... use udp ...
+}).pipe(Effect.provide(Layer.mergeAll(UdpLayer, NetworkLayer, AppConfigLayer)))
+```
+
+**Symptom of getting this wrong:** counters read 0, routing-table lookups miss, `bindUdp` finalizers log teardown before the test asserts — indistinguishable on the surface from a metrics bug.
+
+## `Global 'Error' loses type safety`
+
+The Effect language-service surfaces this warning when an untyped `Error` reaches a code path that expects a typed failure:
+
+> Global 'Error' loses type safety. Consider using a tagged error with `Data.TaggedError` or `Schema.TaggedError`.
+
+The offender is usually a plain `throw new Error(...)` inside an `Effect.gen` or an `Effect.try` that returns `Effect<..., unknown>`. Replacing the throw with a `Data.TaggedError` makes the failure channel typed and satisfies the warning.
+
+When the error is genuinely infrastructure-level (socket gone, malformed test fixture, assertion failure) and the caller cannot meaningfully recover, use `Effect.orDie` instead — it promotes the error to a defect, removes it from the typed channel entirely, and silences the warning at the boundary:
+
+```ts
+// Before — typed channel includes `unknown`, warning fires
+const runScoped = <A, E>(eff: Effect.Effect<A, E, Scope.Scope>) =>
+  Effect.scoped(eff)
+
+// After — infrastructure errors become defects at the harness boundary
+const runScoped = <A, E>(eff: Effect.Effect<A, E, Scope.Scope>): Effect.Effect<A, never> =>
+  Effect.orDie(Effect.scoped(eff))
+```
+
+Pick `Data.TaggedError` when the caller needs to branch on the failure, `Effect.orDie` when they don't.

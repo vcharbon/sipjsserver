@@ -101,30 +101,15 @@ export class UdpTransport extends ServiceMap.Service<
         })
         .pipe(Effect.orDie)
 
-      // Prometheus-visible shape. `queueDepth` / `dropsTailDrop` are
-      // live-backed by the endpoint's counters so no polling loop is
-      // needed to keep them current.
-      const metrics = {
+      // Prometheus-visible shape. Every field is a live getter — both
+      // the scrape endpoint and test reads want the instantaneous value.
+      const metrics: UdpTransportMetrics = {
         queueMax,
-        dropsTier1Brake: 0,
-        tier1RejectSent: 0,
-      } as UdpTransportMetrics
-      Object.defineProperty(metrics, "queueDepth", {
-        get: () => endpoint.queueDepth(),
-        enumerable: true,
-      })
-      Object.defineProperty(metrics, "dropsTailDrop", {
-        get: () => endpoint.counters.tailDropped,
-        enumerable: true,
-      })
-      Object.defineProperty(metrics, "dropsTier1Brake", {
-        get: () => dropsTier1Brake,
-        enumerable: true,
-      })
-      Object.defineProperty(metrics, "tier1RejectSent", {
-        get: () => tier1RejectSent,
-        enumerable: true,
-      })
+        get queueDepth() { return endpoint.queueDepth() },
+        get dropsTailDrop() { return endpoint.counters.tailDropped },
+        get dropsTier1Brake() { return dropsTier1Brake },
+        get tier1RejectSent() { return tier1RejectSent },
+      }
       registry.udp = metrics
 
       yield* Effect.logInfo(

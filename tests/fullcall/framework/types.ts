@@ -363,6 +363,16 @@ export interface TestTransport {
    * (callsMap, limiter counters, timer fibers) is fully empty after the
    * scenario completes. Only implemented by the simulated backend.
    * Returns an array of error strings (empty = clean).
+   *
+   * Currently checked by the simulated backend:
+   *   - `CallState.stats()` → `concurrent === 0` (no live calls leaked)
+   *   - `TimerService.activeCount()` → `=== 0` (no pending timer fibers)
+   *   - `SignalingNetwork.drainUndeliverable()` → `length === 0`
+   *     (no packet sent to an unbound peer)
+   *
+   * To add a new check, push into `errors` inside the simulated-backend
+   * `verifyCleanState` implementation; the interpreter will surface every
+   * entry at once rather than short-circuiting on the first.
    */
   readonly verifyCleanState?: () => Effect.Effect<string[]>
   /**
