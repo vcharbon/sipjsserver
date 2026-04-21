@@ -11,7 +11,7 @@
  * them at call-site time with real Via/Contact specs.
  */
 
-import { Clock, Effect, Layer, ServiceMap, Stream } from "effect"
+import { Clock, Effect, Layer, ServiceMap, Stream, Tracer } from "effect"
 import type { RemoteInfo, SipMessage, SipRequest, SipResponse } from "./types.js"
 import { TransactionLayer } from "./TransactionLayer.js"
 import { UdpTransport } from "./UdpTransport.js"
@@ -237,12 +237,30 @@ export class SipRouter extends ServiceMap.Service<
         legId: string | undefined
       ): Effect.Effect<void> => {
         const event: CallEvent = { type: "timer" as const, timerType, callRef, legId }
-        return withCall(handlers, event)
+        return Effect.gen(function* () {
+          const call = yield* callState.peek(callRef)
+          const body = withCall(handlers, event)
+          if (call?.sampled === true && call.traceId !== undefined && call.rootSpanId !== undefined) {
+            const attrs: Record<string, string> = {
+              "sip.call_ref": callRef,
+              "sip.timer_type": timerType,
+            }
+            if (legId !== undefined) attrs["sip.leg_id"] = legId
+            yield* body.pipe(
+              Effect.withSpan("timer.fire", {
+                parent: Tracer.externalSpan({ traceId: call.traceId, spanId: call.rootSpanId, sampled: true }),
+                attributes: attrs,
+              })
+            )
+          } else {
+            yield* body
+          }
+        })
       }
 
       // ── processResult: execute handler output in fixed order ────────
 
-      const processResult = Effect.fn("SipRouter.processResult")(
+      const processResult = Effect.fnUntraced(
         function* (callRef: string, result: HandlerResult, handlers: HandlerRegistry, nowMs: number) {
           // Persist updated call state BEFORE sending any messages — upholds
           // the "state updates before sending" invariant. Via/Contact stamping
@@ -585,7 +603,7 @@ export class SipRouter extends ServiceMap.Service<
 
       // ── Initial INVITE handling ─────────────────────────────────────
 
-      const handleInitialInvite = Effect.fn("SipRouter.handleInitialInvite")(
+      const handleInitialInvite = Effect.fnUntraced(
         function* (handlers: HandlerRegistry, req: SipRequest, rinfo: RemoteInfo) {
           const callId = req.parsed?.callId
           const fromHeader = getHeader(req.headers, "from")
@@ -687,7 +705,7 @@ export class SipRouter extends ServiceMap.Service<
 
       // ── Start: consume TransactionEvent stream ──────────────────────
 
-      const start = Effect.fn("SipRouter.start")(function* (handlers: HandlerRegistry) {
+      const start = Effect.fnUntraced(function* (handlers: HandlerRegistry) {
         return yield* Stream.runForEach(txnLayer.events, (txnEvent) => {
           let event: CallEvent
 

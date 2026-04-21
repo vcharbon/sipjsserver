@@ -54,7 +54,7 @@ export class CallControlClient extends ServiceMap.Service<
       const overload = yield* OverloadController
       const baseUrl = config.callControlUrl
 
-      const newCall = Effect.fn("CallControlClient.newCall")(function* (req: NewCallRequestType) {
+      const newCall = Effect.fnUntraced(function* (req: NewCallRequestType) {
         const startedAt = yield* Clock.currentTimeMillis
         const request = HttpClientRequest.post(`${baseUrl}/call/new`).pipe(
           HttpClientRequest.bodyJsonUnsafe(req)
@@ -80,22 +80,14 @@ export class CallControlClient extends ServiceMap.Service<
           ),
           Effect.mapError((err) =>
             new CallControlError({ reason: `POST /call/new failed: ${err}` })
-          ),
-          Effect.withSpan("http.call_control.new_call", {
-            kind: "client",
-            attributes: {
-              "http.method": "POST",
-              "http.url": `${baseUrl}/call/new`,
-              "http.request.call_id": req.call_id
-            }
-          })
+          )
         )
         const endedAt = yield* Clock.currentTimeMillis
         overload.observeRoutingApiLatency("new_call", endedAt - startedAt)
         return response
       })
 
-      const callFailure = Effect.fn("CallControlClient.callFailure")(function* (req: CallFailureRequestType) {
+      const callFailure = Effect.fnUntraced(function* (req: CallFailureRequestType) {
         const startedAt = yield* Clock.currentTimeMillis
         const request = HttpClientRequest.post(`${baseUrl}/call/failure`).pipe(
           HttpClientRequest.bodyJsonUnsafe(req)
@@ -114,22 +106,14 @@ export class CallControlClient extends ServiceMap.Service<
           ),
           Effect.mapError((err) =>
             new CallControlError({ reason: `POST /call/failure failed: ${err}` })
-          ),
-          Effect.withSpan("http.call_control.failure", {
-            kind: "client",
-            attributes: {
-              "http.method": "POST",
-              "http.url": `${baseUrl}/call/failure`,
-              "http.request.call_id": req.call_id
-            }
-          })
+          )
         )
         const endedAt = yield* Clock.currentTimeMillis
         overload.observeRoutingApiLatency("in_dialog", endedAt - startedAt)
         return response
       })
 
-      const callRefer = Effect.fn("CallControlClient.callRefer")(function* (req: CallReferRequestType) {
+      const callRefer = Effect.fnUntraced(function* (req: CallReferRequestType) {
         const startedAt = yield* Clock.currentTimeMillis
         const request = HttpClientRequest.post(`${baseUrl}/call/refer`).pipe(
           HttpClientRequest.bodyJsonUnsafe(req)
@@ -155,17 +139,7 @@ export class CallControlClient extends ServiceMap.Service<
           ),
           Effect.mapError((err) =>
             new CallControlError({ reason: `POST /call/refer failed: ${err}` })
-          ),
-          Effect.withSpan("http.call_control.refer", {
-            kind: "client",
-            attributes: {
-              "http.method": "POST",
-              "http.url": `${baseUrl}/call/refer`,
-              "http.request.call_id": req.call_id,
-              "http.request.dialog_id": req.dialog_id,
-              "http.request.refer_to": req.refer_to
-            }
-          })
+          )
         )
         const endedAt = yield* Clock.currentTimeMillis
         overload.observeRoutingApiLatency("in_dialog", endedAt - startedAt)

@@ -60,7 +60,7 @@ export class CallStateCache extends ServiceMap.Service<
 
       const callKey = (callRef: string) => `call:${callRef}`
 
-      const putCall = Effect.fn("CallStateCache.putCall")(function* (
+      const putCall = Effect.fnUntraced(function* (
         callRef: string,
         json: string,
         ttlSec: number
@@ -68,22 +68,22 @@ export class CallStateCache extends ServiceMap.Service<
         yield* redis.setex(callKey(callRef), ttlSec, json)
       })
 
-      const getCall = Effect.fn("CallStateCache.getCall")(function* (callRef: string) {
+      const getCall = Effect.fnUntraced(function* (callRef: string) {
         return yield* redis.get(callKey(callRef))
       })
 
-      const expireCall = Effect.fn("CallStateCache.expireCall")(function* (
+      const expireCall = Effect.fnUntraced(function* (
         callRef: string,
         ttlSec: number
       ) {
         yield* redis.expire(callKey(callRef), ttlSec)
       })
 
-      const deleteCall = Effect.fn("CallStateCache.deleteCall")(function* (callRef: string) {
+      const deleteCall = Effect.fnUntraced(function* (callRef: string) {
         yield* redis.del(callKey(callRef))
       })
 
-      const putIndex = Effect.fn("CallStateCache.putIndex")(function* (
+      const putIndex = Effect.fnUntraced(function* (
         indexKey: string,
         callRef: string,
         ttlSec: number
@@ -91,22 +91,22 @@ export class CallStateCache extends ServiceMap.Service<
         yield* redis.setex(indexKey, ttlSec, callRef)
       })
 
-      const getIndex = Effect.fn("CallStateCache.getIndex")(function* (indexKey: string) {
+      const getIndex = Effect.fnUntraced(function* (indexKey: string) {
         return yield* redis.get(indexKey)
       })
 
-      const expireIndex = Effect.fn("CallStateCache.expireIndex")(function* (
+      const expireIndex = Effect.fnUntraced(function* (
         indexKey: string,
         ttlSec: number
       ) {
         yield* redis.expire(indexKey, ttlSec)
       })
 
-      const deleteIndex = Effect.fn("CallStateCache.deleteIndex")(function* (indexKey: string) {
+      const deleteIndex = Effect.fnUntraced(function* (indexKey: string) {
         yield* redis.del(indexKey)
       })
 
-      const scanCallRefs = Effect.fn("CallStateCache.scanCallRefs")(function* () {
+      const scanCallRefs = Effect.fnUntraced(function* () {
         const keys = yield* redis.scanKeys("call:*")
         return keys.map((k) => k.slice("call:".length))
       })
@@ -187,7 +187,7 @@ export class CallStateCache extends ServiceMap.Service<
         }
       }
 
-      const putCall = Effect.fn("CallStateCache.memory.putCall")(function* (
+      const putCall = Effect.fnUntraced(function* (
         callRef: string,
         json: string,
         ttlSec: number
@@ -196,7 +196,7 @@ export class CallStateCache extends ServiceMap.Service<
         yield* Effect.sync(() => put(calls, callRef, json, ttlSec, ms))
       })
 
-      const getCall = Effect.fn("CallStateCache.memory.getCall")(function* (callRef: string) {
+      const getCall = Effect.fnUntraced(function* (callRef: string) {
         const ms = yield* Clock.currentTimeMillis
         return yield* Effect.sync(() => {
           const opt = sweepKey(calls, callRef, ms)
@@ -204,7 +204,7 @@ export class CallStateCache extends ServiceMap.Service<
         })
       })
 
-      const expireCall = Effect.fn("CallStateCache.memory.expireCall")(function* (
+      const expireCall = Effect.fnUntraced(function* (
         callRef: string,
         ttlSec: number
       ) {
@@ -212,11 +212,11 @@ export class CallStateCache extends ServiceMap.Service<
         yield* Effect.sync(() => expireIn(calls, callRef, ttlSec, ms))
       })
 
-      const deleteCall = Effect.fn("CallStateCache.memory.deleteCall")(function* (callRef: string) {
+      const deleteCall = Effect.fnUntraced(function* (callRef: string) {
         yield* Effect.sync(() => MutableHashMap.remove(calls, callRef))
       })
 
-      const putIndex = Effect.fn("CallStateCache.memory.putIndex")(function* (
+      const putIndex = Effect.fnUntraced(function* (
         indexKey: string,
         callRef: string,
         ttlSec: number
@@ -225,7 +225,7 @@ export class CallStateCache extends ServiceMap.Service<
         yield* Effect.sync(() => put(indexes, indexKey, callRef, ttlSec, ms))
       })
 
-      const getIndex = Effect.fn("CallStateCache.memory.getIndex")(function* (indexKey: string) {
+      const getIndex = Effect.fnUntraced(function* (indexKey: string) {
         const ms = yield* Clock.currentTimeMillis
         return yield* Effect.sync(() => {
           const opt = sweepKey(indexes, indexKey, ms)
@@ -233,7 +233,7 @@ export class CallStateCache extends ServiceMap.Service<
         })
       })
 
-      const expireIndex = Effect.fn("CallStateCache.memory.expireIndex")(function* (
+      const expireIndex = Effect.fnUntraced(function* (
         indexKey: string,
         ttlSec: number
       ) {
@@ -241,11 +241,11 @@ export class CallStateCache extends ServiceMap.Service<
         yield* Effect.sync(() => expireIn(indexes, indexKey, ttlSec, ms))
       })
 
-      const deleteIndex = Effect.fn("CallStateCache.memory.deleteIndex")(function* (indexKey: string) {
+      const deleteIndex = Effect.fnUntraced(function* (indexKey: string) {
         yield* Effect.sync(() => MutableHashMap.remove(indexes, indexKey))
       })
 
-      const scanCallRefs = Effect.fn("CallStateCache.memory.scanCallRefs")(function* () {
+      const scanCallRefs = Effect.fnUntraced(function* () {
         const ms = yield* Clock.currentTimeMillis
         return yield* Effect.sync(() => {
           const live: string[] = []

@@ -105,7 +105,7 @@ export class CallLimiter extends ServiceMap.Service<
         return keys
       }
 
-      const checkAndIncrement = Effect.fn("CallLimiter.checkAndIncrement")(function* (
+      const checkAndIncrement = Effect.fnUntraced(function* (
         limiterId: string,
         limit: number
       ) {
@@ -117,7 +117,7 @@ export class CallLimiter extends ServiceMap.Service<
         return { allowed: count >= 0, currentWindow: currentWin }
       })
 
-      const decrement = Effect.fn("CallLimiter.decrement")(function* (
+      const decrement = Effect.fnUntraced(function* (
         limiterId: string,
         originWindow: number
       ) {
@@ -125,7 +125,7 @@ export class CallLimiter extends ServiceMap.Service<
         yield* redis.eval(DECREMENT_LUA, [key], [])
       })
 
-      const refresh = Effect.fn("CallLimiter.refresh")(function* (
+      const refresh = Effect.fnUntraced(function* (
         limiterId: string,
         originWindow: number
       ) {
@@ -192,7 +192,7 @@ export class CallLimiter extends ServiceMap.Service<
 
       const keyFor = (limiterId: string, window: number) => `limiter:${limiterId}:${window}`
 
-      const checkAndIncrement = Effect.fn("CallLimiter.memory.checkAndIncrement")(function* (
+      const checkAndIncrement = Effect.fnUntraced(function* (
         limiterId: string,
         limit: number
       ) {
@@ -222,7 +222,7 @@ export class CallLimiter extends ServiceMap.Service<
         })
       })
 
-      const decrement = Effect.fn("CallLimiter.memory.decrement")(function* (
+      const decrement = Effect.fnUntraced(function* (
         limiterId: string,
         originWindow: number
       ) {
@@ -238,7 +238,7 @@ export class CallLimiter extends ServiceMap.Service<
         })
       })
 
-      const refresh = Effect.fn("CallLimiter.memory.refresh")(function* (
+      const refresh = Effect.fnUntraced(function* (
         limiterId: string,
         originWindow: number
       ) {

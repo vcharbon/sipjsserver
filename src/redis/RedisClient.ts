@@ -67,35 +67,35 @@ export class RedisClient extends ServiceMap.Service<
       const wrapErr = (err: unknown): RedisError =>
         new RedisError({ reason: err instanceof Error ? err.message : String(err) })
 
-      const get = Effect.fn("RedisClient.get")(function* (key: string) {
+      const get = Effect.fnUntraced(function* (key: string) {
         return yield* Effect.tryPromise({
           try: () => client.get(pk(key)),
           catch: wrapErr
         })
       })
 
-      const set = Effect.fn("RedisClient.set")(function* (key: string, value: string) {
+      const set = Effect.fnUntraced(function* (key: string, value: string) {
         yield* Effect.tryPromise({
           try: () => client.set(pk(key), value),
           catch: wrapErr
         })
       })
 
-      const setex = Effect.fn("RedisClient.setex")(function* (key: string, ttl: number, value: string) {
+      const setex = Effect.fnUntraced(function* (key: string, ttl: number, value: string) {
         yield* Effect.tryPromise({
           try: () => client.setex(pk(key), ttl, value),
           catch: wrapErr
         })
       })
 
-      const del = Effect.fn("RedisClient.del")(function* (...keys: Array<string>) {
+      const del = Effect.fnUntraced(function* (...keys: Array<string>) {
         return yield* Effect.tryPromise({
           try: () => client.del(...keys.map(pk)),
           catch: wrapErr
         })
       })
 
-      const exists = Effect.fn("RedisClient.exists")(function* (key: string) {
+      const exists = Effect.fnUntraced(function* (key: string) {
         const result = yield* Effect.tryPromise({
           try: () => client.exists(pk(key)),
           catch: wrapErr
@@ -103,28 +103,28 @@ export class RedisClient extends ServiceMap.Service<
         return result === 1
       })
 
-      const incr = Effect.fn("RedisClient.incr")(function* (key: string) {
+      const incr = Effect.fnUntraced(function* (key: string) {
         return yield* Effect.tryPromise({
           try: () => client.incr(pk(key)),
           catch: wrapErr
         })
       })
 
-      const decr = Effect.fn("RedisClient.decr")(function* (key: string) {
+      const decr = Effect.fnUntraced(function* (key: string) {
         return yield* Effect.tryPromise({
           try: () => client.decr(pk(key)),
           catch: wrapErr
         })
       })
 
-      const expire = Effect.fn("RedisClient.expire")(function* (key: string, ttl: number) {
+      const expire = Effect.fnUntraced(function* (key: string, ttl: number) {
         yield* Effect.tryPromise({
           try: () => client.expire(pk(key), ttl),
           catch: wrapErr
         })
       })
 
-      const evalCmd = Effect.fn("RedisClient.eval")(function* (
+      const evalCmd = Effect.fnUntraced(function* (
         script: string,
         keys: Array<string>,
         args: Array<string | number>
@@ -135,7 +135,7 @@ export class RedisClient extends ServiceMap.Service<
         })
       })
 
-      const pipeline = Effect.fn("RedisClient.pipeline")(function* (
+      const pipeline = Effect.fnUntraced(function* (
         commands: Array<[string, ...Array<string | number>]>
       ) {
         const pipe = client.pipeline()
@@ -149,7 +149,7 @@ export class RedisClient extends ServiceMap.Service<
         return (results ?? []) as Array<[Error | null, unknown]>
       })
 
-      const scanKeys = Effect.fn("RedisClient.scanKeys")(function* (pattern: string) {
+      const scanKeys = Effect.fnUntraced(function* (pattern: string) {
         return yield* Effect.tryPromise({
           try: async () => {
             const keys: string[] = []

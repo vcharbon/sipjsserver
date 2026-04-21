@@ -120,7 +120,7 @@ export class UdpTransport extends ServiceMap.Service<
       // infrastructure-level (socket gone, kernel queue full) — surface as
       // defects so they're logged by the top-level runtime rather than
       // polluting the typed failure channel of every caller.
-      const send = Effect.fn("UdpTransport.send")(function* (
+      const send = Effect.fnUntraced(function* (
         msg: Buffer,
         port: number,
         address: string

@@ -43,13 +43,12 @@ export const IpcTransportLayer: Layer.Layer<UdpTransport, never, AppConfig> = La
       Effect.sync(() => {
         const onMessage = (msg: MainToWorkerMessage) => {
           if (msg.type === "packet") {
-            const raw = Buffer.from(msg.raw, "base64")
             // Stamp at IPC-arrival time — the dispatcher's original arrival
             // moment is not carried across the IPC boundary, so the worker
             // treats "IPC receive" as ingress. Real clock only; cluster mode
             // is never driven by TestClock.
             Queue.offerUnsafe(queue, {
-              raw,
+              raw: msg.raw,
               rinfo: { address: msg.address, port: msg.port },
               arrivalMs: Date.now()
             })
@@ -66,7 +65,7 @@ export const IpcTransportLayer: Layer.Layer<UdpTransport, never, AppConfig> = La
         })
     )
 
-    const send = Effect.fn("IpcTransport.send")(function* (
+    const send = Effect.fnUntraced(function* (
       msg: Buffer,
       port: number,
       address: string
@@ -74,7 +73,7 @@ export const IpcTransportLayer: Layer.Layer<UdpTransport, never, AppConfig> = La
       // Send outbound packet to dispatcher via IPC
       const ipcMsg: WorkerToMainMessage = {
         type: "send",
-        raw: msg.toString("base64"),
+        raw: msg,
         address,
         port
       }

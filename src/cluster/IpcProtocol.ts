@@ -3,7 +3,8 @@
  * child processes.
  *
  * Messages are exchanged via Node.js child_process IPC (`process.send` /
- * `process.on("message")`), which handles serialization automatically.
+ * `process.on("message")`) with `serialization: "advanced"` so Buffers
+ * travel as-is without a base64 round-trip.
  */
 
 // ---------------------------------------------------------------------------
@@ -13,7 +14,7 @@
 /** Raw UDP packet forwarded from the main process to a worker. */
 export interface IpcInboundPacket {
   readonly type: "packet"
-  readonly raw: string // base64-encoded buffer (IPC can't send Buffer directly)
+  readonly raw: Buffer
   readonly address: string
   readonly port: number
 }
@@ -50,7 +51,7 @@ export type MainToWorkerMessage = IpcInboundPacket | IpcShutdown | IpcForceGc | 
 /** Outbound UDP packet from worker to be sent by the main process. */
 export interface IpcOutboundPacket {
   readonly type: "send"
-  readonly raw: string // base64-encoded buffer
+  readonly raw: Buffer
   readonly address: string
   readonly port: number
 }

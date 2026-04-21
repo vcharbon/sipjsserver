@@ -283,7 +283,7 @@ export class TransactionLayer extends ServiceMap.Service<
 
       // ── Client retransmission ────────────────────────────────────────
 
-      const startClientRetransmit = Effect.fn("TransactionLayer.startClientRetransmit")(
+      const startClientRetransmit = Effect.fnUntraced(
         function* (branch: string, buf: Buffer, dest: { host: string; port: number }, kind: TxnKind) {
           const maxTimeout = kind === "invite" ? TIMER_B : TIMER_F
 
@@ -329,7 +329,7 @@ export class TransactionLayer extends ServiceMap.Service<
         }
       )
 
-      const stopTxnTimers = Effect.fn("TransactionLayer.stopTxnTimers")(
+      const stopTxnTimers = Effect.fnUntraced(
         function* (txn: Transaction) {
           if (txn.retransmitFiber) yield* Fiber.interrupt(txn.retransmitFiber)
           if (txn.timeoutFiber) yield* Fiber.interrupt(txn.timeoutFiber)
@@ -338,7 +338,7 @@ export class TransactionLayer extends ServiceMap.Service<
 
       // ── Inbound request processing ──────────────────────────────────
 
-      const handleInboundRequest = Effect.fn("TransactionLayer.handleInboundRequest")(
+      const handleInboundRequest = Effect.fnUntraced(
         function* (req: SipRequest, rinfo: RemoteInfo) {
           const branch = req.parsed?.via?.branch ?? ""
 
@@ -531,7 +531,7 @@ export class TransactionLayer extends ServiceMap.Service<
 
       // ── Inbound response processing ─────────────────────────────────
 
-      const handleInboundResponse = Effect.fn("TransactionLayer.handleInboundResponse")(
+      const handleInboundResponse = Effect.fnUntraced(
         function* (resp: SipResponse, rinfo: RemoteInfo) {
           const branch = resp.parsed?.via?.branch ?? ""
           const respCSeqMethod = resp.parsed?.cseq?.method?.toUpperCase()
@@ -588,9 +588,8 @@ export class TransactionLayer extends ServiceMap.Service<
       // ── Inbound packet processing ───────────────────────────────────
 
       // Disable auto-tracing for the packet processing loop.
-      // SipParser.parse, handleInboundRequest, handleInboundResponse all use Effect.fn
-      // which creates independent root spans per packet — noise. The meaningful work
-      // is already traced inside the call.lifecycle span hierarchy via SipRouter.
+      // Handlers inside are Effect.fnUntraced — the meaningful work is traced once
+      // per external event via SipRouter (withProcessingSpan / withRootSpan).
       // Parse errors still get an always-sampled error span (re-enables tracing).
       yield* Effect.forkDetach(
         Stream.runForEach(transport.messages, (packet) =>
@@ -643,7 +642,7 @@ export class TransactionLayer extends ServiceMap.Service<
       // a thin wrapper kept for backward-compatibility until all call sites
       // are migrated in later slices.
 
-      const sendResponse = Effect.fn("TransactionLayer.sendResponse")(
+      const sendResponse = Effect.fnUntraced(
         function* (msg: SipResponse, destination: { host: string; port: number }) {
           const buf = serialize(msg)
           const branch = extractBranch(msg)
@@ -688,7 +687,7 @@ export class TransactionLayer extends ServiceMap.Service<
         }
       )
 
-      const sendRequest = Effect.fn("TransactionLayer.sendRequest")(
+      const sendRequest = Effect.fnUntraced(
         function* (
           msg: SipRequest,
           destination: { host: string; port: number },
@@ -741,7 +740,7 @@ export class TransactionLayer extends ServiceMap.Service<
        * split methods in new code — this wrapper exists only so call sites
        * can migrate incrementally.
        */
-      const send = Effect.fn("TransactionLayer.send")(
+      const send = Effect.fnUntraced(
         function* (msg: SipMessage, destination: { host: string; port: number }, txnType: "invite" | "non-invite" | "response") {
           if (txnType === "response") {
             if (msg.type !== "response") return
@@ -753,7 +752,7 @@ export class TransactionLayer extends ServiceMap.Service<
         }
       )
 
-      const sendRaw = Effect.fn("TransactionLayer.sendRaw")(
+      const sendRaw = Effect.fnUntraced(
         function* (buf: Buffer, port: number, address: string) {
           yield* transport.send(buf, port, address).pipe(
             Effect.catchCause((cause) => Effect.logError(`TransactionLayer sendRaw error`, cause))

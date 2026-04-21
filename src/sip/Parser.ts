@@ -36,7 +36,7 @@ export class SipParser extends ServiceMap.Service<
   /** Build a layer from any pure parser implementation. */
   static fromImpl(impl: SipParserImpl) {
     return Layer.sync(SipParser, () => {
-      const parse = Effect.fn("SipParser.parse")(function* (raw: Buffer) {
+      const parse = Effect.fnUntraced(function* (raw: Buffer) {
         return yield* Effect.try({
           try: () => impl.parse(raw),
           catch: (err) =>

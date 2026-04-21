@@ -281,7 +281,7 @@ export const StatusServerLayer: Layer.Layer<never, never, CallState | AppConfig 
     const startedAt = yield* Clock.currentTimeMillis
 
     const routes = HttpRouter.use(
-      Effect.fn(function* (router) {
+      Effect.fnUntraced(function* (router) {
         yield* router.add(
           "GET",
           "/status",

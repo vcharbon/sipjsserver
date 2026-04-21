@@ -60,7 +60,7 @@ export class CdrWriter extends ServiceMap.Service<
 
       yield* Effect.logInfo(`CDR writer initialized → ${filePath}`)
 
-      const write = Effect.fn("CdrWriter.write")(function* (call: Call) {
+      const write = Effect.fnUntraced(function* (call: Call) {
         const terminatedAt = yield* Clock.currentTimeMillis
         const record = {
           callRef: call.callRef,

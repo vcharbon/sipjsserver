@@ -107,7 +107,7 @@ export class Dispatcher extends ServiceMap.Service<
       registry.dispatcher = metrics
       registry.workers = new Array(totalWorkers)
 
-      const startScoped = Effect.fn("Dispatcher.startScoped")(function* () {
+      const startScoped = Effect.fnUntraced(function* () {
         process.title = "sipb2bua-dispatcher"
         yield* Effect.logInfo(`Cluster mode: starting ${totalWorkers} workers`)
 
@@ -172,7 +172,7 @@ export class Dispatcher extends ServiceMap.Service<
               const pkt = queueArr.shift()!
               const msg: MainToWorkerMessage = {
                 type: "packet",
-                raw: pkt.raw.toString("base64"),
+                raw: pkt.raw,
                 address: pkt.address,
                 port: pkt.port,
               }
@@ -244,13 +244,13 @@ export class Dispatcher extends ServiceMap.Service<
               WORKER_INDEX: String(index),
               TOTAL_WORKERS: String(totalWorkers)
             },
-            serialization: "json",
+            serialization: "advanced",
             stdio: ["inherit", "inherit", "inherit", "ipc"]
           })
 
           child.on("message", (msg: WorkerToMainMessage) => {
             if (msg.type === "send") {
-              const buf = Buffer.from(msg.raw, "base64")
+              const buf = msg.raw
               socket.send(buf, 0, buf.length, msg.port, msg.address)
             } else if (msg.type === "metrics") {
               registry.workers[index] = msg.data
@@ -379,7 +379,7 @@ export class Dispatcher extends ServiceMap.Service<
         return yield* Effect.never
       })
 
-      const start = Effect.fn("Dispatcher.start")(function* () {
+      const start = Effect.fnUntraced(function* () {
         return yield* Effect.scoped(startScoped())
       })
 

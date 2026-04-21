@@ -100,7 +100,7 @@ WARMUP_CALLS=200 STRESS_CALLS=2000 RATE=50 ./memleak-test.sh
 ./memleak-test.sh --heap-dump
 
 # Custom configuration
-WARMUP_CALLS=1000 STRESS_CALLS=100000 RATE=300 CLUSTER_WORKERS=4 ./memleak-test.sh --heap-dump
+WARMUP_CALLS=1000 STRESS_CALLS=1000000 RATE=300 CLUSTER_WORKERS=4 ./memleak-test.sh --heap-dump
 ```
 
 #### Configuration

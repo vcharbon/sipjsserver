@@ -93,7 +93,7 @@ export class CallState extends ServiceMap.Service<
       // Plain mutable counter shadowing totalRef for sync reads (metrics interval).
       let totalSync = 0
 
-      const getSemaphore = Effect.fn("CallState.getSemaphore")(function* (callRef: string) {
+      const getSemaphore = Effect.fnUntraced(function* (callRef: string) {
         const existing = Option.getOrUndefined(MutableHashMap.get(semaphores, callRef))
         if (existing !== undefined) return existing
         const sem = yield* Semaphore.make(1)
@@ -118,7 +118,7 @@ export class CallState extends ServiceMap.Service<
         })
 
       /** Write all cache index keys for a call. */
-      const writeCacheIndexes = Effect.fn("CallState.writeCacheIndexes")(function* (call: Call) {
+      const writeCacheIndexes = Effect.fnUntraced(function* (call: Call) {
         yield* cache.putIndex(legKey(call.aLeg.callId, call.aLeg.fromTag), call.callRef, ttl)
         for (const bLeg of call.bLegs) {
           yield* cache.putIndex(legKey(bLeg.callId, bLeg.fromTag), call.callRef, ttl)
@@ -136,7 +136,7 @@ export class CallState extends ServiceMap.Service<
       })
 
       /** Refresh TTL on all cache index keys for a call. */
-      const refreshIndexTtl = Effect.fn("CallState.refreshIndexTtl")(function* (call: Call) {
+      const refreshIndexTtl = Effect.fnUntraced(function* (call: Call) {
         yield* cache.expireIndex(legKey(call.aLeg.callId, call.aLeg.fromTag), ttl)
         for (const bLeg of call.bLegs) {
           yield* cache.expireIndex(legKey(bLeg.callId, bLeg.fromTag), ttl)
@@ -153,7 +153,7 @@ export class CallState extends ServiceMap.Service<
         }
       })
 
-      const create = Effect.fn("CallState.create")(function* (call: Call) {
+      const create = Effect.fnUntraced(function* (call: Call) {
         yield* Effect.sync(() => MutableHashMap.set(callsMap, call.callRef, call))
         yield* indexCall(call)
         yield* Ref.update(totalRef, (n) => n + 1)
@@ -161,7 +161,7 @@ export class CallState extends ServiceMap.Service<
         return call.callRef
       })
 
-      const checkout = Effect.fn("CallState.checkout")(function* (callRef: string) {
+      const checkout = Effect.fnUntraced(function* (callRef: string) {
         const sem = yield* getSemaphore(callRef)
         yield* Semaphore.take(sem, 1)
 
@@ -196,7 +196,7 @@ export class CallState extends ServiceMap.Service<
         return decoded
       })
 
-      const update = Effect.fn("CallState.update")(function* (
+      const update = Effect.fnUntraced(function* (
         callRef: string,
         fn: (call: Call) => Call
       ) {
@@ -208,18 +208,18 @@ export class CallState extends ServiceMap.Service<
         })
       })
 
-      const peek = Effect.fn("CallState.peek")(function* (callRef: string) {
+      const peek = Effect.fnUntraced(function* (callRef: string) {
         return Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
       })
 
-      const release = Effect.fn("CallState.release")(function* (callRef: string) {
+      const release = Effect.fnUntraced(function* (callRef: string) {
         const sem = Option.getOrUndefined(MutableHashMap.get(semaphores, callRef))
         if (sem !== undefined) {
           yield* Semaphore.release(sem, 1)
         }
       })
 
-      const flushToRedis = Effect.fn("CallState.flushToRedis")(function* (callRef: string) {
+      const flushToRedis = Effect.fnUntraced(function* (callRef: string) {
         const call = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
         if (call === undefined) return
 
@@ -230,7 +230,7 @@ export class CallState extends ServiceMap.Service<
         yield* Effect.logDebug(`Flushed call ${callRef} to cache`)
       })
 
-      const remove = Effect.fn("CallState.remove")(function* (callRef: string) {
+      const remove = Effect.fnUntraced(function* (callRef: string) {
         const call = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
 
         // Clean memory + SIP index
@@ -275,7 +275,7 @@ export class CallState extends ServiceMap.Service<
         }
       })
 
-      const resolveFromSipKey = Effect.fn("CallState.resolveFromSipKey")(function* (
+      const resolveFromSipKey = Effect.fnUntraced(function* (
         callId: string,
         tag: string
       ) {
@@ -292,7 +292,7 @@ export class CallState extends ServiceMap.Service<
         return refById ?? undefined
       })
 
-      const stats = Effect.fn("CallState.stats")(function* () {
+      const stats = Effect.fnUntraced(function* () {
         const total = yield* Ref.get(totalRef)
         return { concurrent: MutableHashMap.size(callsMap), total }
       })
@@ -304,7 +304,7 @@ export class CallState extends ServiceMap.Service<
         semaphoresSize: MutableHashMap.size(semaphores),
       })
 
-      const loadOwnedCalls = Effect.fn("CallState.loadOwnedCalls")(function* (workerIndex: number) {
+      const loadOwnedCalls = Effect.fnUntraced(function* (workerIndex: number) {
         const refs = yield* cache.scanCallRefs()
         const loaded: Call[] = []
 
@@ -335,7 +335,7 @@ export class CallState extends ServiceMap.Service<
         return loaded
       })
 
-      const flushAllCalls = Effect.fn("CallState.flushAllCalls")(function* () {
+      const flushAllCalls = Effect.fnUntraced(function* () {
         let flushed = 0
         for (const [callRef, call] of callsMap) {
           const json = Schema.encodeSync(JsonCallSchema)(call)

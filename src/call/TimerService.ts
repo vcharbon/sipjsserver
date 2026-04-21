@@ -43,7 +43,11 @@ export class TimerService extends ServiceMap.Service<
       // Map timerId → { fiber, callRef }
       const fibersMap = MutableHashMap.empty<string, { fiber: Fiber.Fiber<void>; callRef: string }>()
 
-      const schedule = Effect.fn("TimerService.schedule")(function* (
+      const logTimerFailure = (timerId: string, timerType: TimerType, callRef: string) =>
+        (cause: import("effect").Cause.Cause<never>) =>
+          Effect.logError(`Timer ${timerId} (${timerType}) for call ${callRef} failed`, cause)
+
+      const schedule = Effect.fnUntraced(function* (
         callRef: string,
         entry: TimerEntry,
         handler: TimerHandler
@@ -54,29 +58,24 @@ export class TimerService extends ServiceMap.Service<
         const timerEffect = Effect.gen(function* () {
           yield* Effect.sleep(Duration.millis(delayMs))
           yield* handler(callRef, entry.type, entry.legId)
-          // Self-cleanup
-          yield* Effect.sync(() => MutableHashMap.remove(fibersMap, entry.id))
-        }).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logError(`Timer ${entry.id} (${entry.type}) for call ${callRef} failed`, cause)
-          )
-        )
+          MutableHashMap.remove(fibersMap, entry.id)
+        }).pipe(Effect.catchCause(logTimerFailure(entry.id, entry.type, callRef)))
 
         const fiber = yield* Effect.forkDetach(timerEffect)
-        yield* Effect.sync(() => MutableHashMap.set(fibersMap, entry.id, { fiber, callRef }))
+        MutableHashMap.set(fibersMap, entry.id, { fiber, callRef })
 
         return entry.id
       })
 
-      const cancel = Effect.fn("TimerService.cancel")(function* (timerId: string) {
+      const cancel = Effect.fnUntraced(function* (timerId: string) {
         const entry = Option.getOrUndefined(MutableHashMap.get(fibersMap, timerId))
         if (entry !== undefined) {
           yield* Fiber.interrupt(entry.fiber)
-          yield* Effect.sync(() => MutableHashMap.remove(fibersMap, timerId))
+          MutableHashMap.remove(fibersMap, timerId)
         }
       })
 
-      const cancelAll = Effect.fn("TimerService.cancelAll")(function* (callRef: string) {
+      const cancelAll = Effect.fnUntraced(function* (callRef: string) {
         const toCancel: string[] = []
         for (const [id, entry] of fibersMap) {
           if (entry.callRef === callRef) {
@@ -88,7 +87,7 @@ export class TimerService extends ServiceMap.Service<
         }
       })
 
-      const restoreFromEntries = Effect.fn("TimerService.restoreFromEntries")(function* (
+      const restoreFromEntries = Effect.fnUntraced(function* (
         callRef: string,
         entries: ReadonlyArray<TimerEntry>,
         handler: TimerHandler
@@ -103,7 +102,7 @@ export class TimerService extends ServiceMap.Service<
         }
       })
 
-      const activeCount = Effect.fn("TimerService.activeCount")(function* () {
+      const activeCount = Effect.fnUntraced(function* () {
         return MutableHashMap.size(fibersMap)
       })
 
