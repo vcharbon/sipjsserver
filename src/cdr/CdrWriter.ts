@@ -86,7 +86,10 @@ export class CdrWriter extends ServiceMap.Service<
           events: call.cdrEvents,
           ...(call.billingContext !== undefined ? { billingContext: call.billingContext } : {}),
         }
-        const line = Schema.encodeSync(JsonCdrRecord)(record) + "\n"
+        const encoded = yield* Schema.encodeEffect(JsonCdrRecord)(record).pipe(
+          Effect.orDie,
+        )
+        const line = encoded + "\n"
         yield* Effect.callback<void>((resume) => {
           fs.appendFile(filePath, line, "utf8", (err) => {
             resume(err ? Effect.die(err) : Effect.void)

@@ -26,6 +26,7 @@
  */
 
 import { randomBytes } from "node:crypto"
+import { Schema } from "effect"
 import type { BodyPart, BodyIntentMultipart } from "../schemas/body.js"
 
 const CRLF = "\r\n"
@@ -47,11 +48,12 @@ export interface AssembledMultipart {
   readonly boundary: string
 }
 
-export class MultipartAssemblyError extends Error {
-  readonly _tag = "MultipartAssemblyError"
-  constructor(reason: string) {
-    super(`multipart assembly failed: ${reason}`)
-    this.name = "MultipartAssemblyError"
+export class MultipartAssemblyError extends Schema.TaggedErrorClass<MultipartAssemblyError>()(
+  "MultipartAssemblyError",
+  { reason: Schema.String },
+) {
+  override get message(): string {
+    return `multipart assembly failed: ${this.reason}`
   }
 }
 
@@ -62,7 +64,7 @@ export function assembleMultipart(
   ctx: IncomingBodyContext,
 ): AssembledMultipart {
   if (intent.parts.length === 0) {
-    throw new MultipartAssemblyError("multipart must contain at least one part")
+    throw new MultipartAssemblyError({ reason: "multipart must contain at least one part" })
   }
 
   const materialized = intent.parts.map((p) => materializePart(p, ctx))
@@ -97,9 +99,9 @@ function generateBoundary(partBytes: ReadonlyArray<Uint8Array>): string {
     const collides = partBytes.some((b) => indexOfBuffer(b, probe) >= 0)
     if (!collides) return candidate
   }
-  throw new MultipartAssemblyError(
-    "failed to generate collision-free multipart boundary after 3 attempts",
-  )
+  throw new MultipartAssemblyError({
+    reason: "failed to generate collision-free multipart boundary after 3 attempts",
+  })
 }
 
 function indexOfBuffer(hay: Uint8Array, needle: Uint8Array): number {
@@ -122,7 +124,7 @@ function materializePart(part: BodyPart, ctx: IncomingBodyContext): Materialized
     // Content-ID values are wrapped in angle brackets per RFC 2045 §7.
     const cid = part.contentId.trim()
     if (cid.length === 0) {
-      throw new MultipartAssemblyError("part contentId must be non-empty")
+      throw new MultipartAssemblyError({ reason: "part contentId must be non-empty" })
     }
     headers.push(["Content-ID", wrapContentId(cid)])
   }
@@ -138,9 +140,9 @@ function materializePartBody(part: BodyPart, ctx: IncomingBodyContext): Uint8Arr
       return part.body.value
     case "incoming-sdp":
       if (ctx.sdp === undefined) {
-        throw new MultipartAssemblyError(
-          "part references incoming-sdp but no SDP segment available in incoming body",
-        )
+        throw new MultipartAssemblyError({
+          reason: "part references incoming-sdp but no SDP segment available in incoming body",
+        })
       }
       return ctx.sdp
     case "incoming-body":

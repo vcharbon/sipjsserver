@@ -174,7 +174,9 @@ export class CallState extends ServiceMap.Service<
           return undefined
         }
 
-        const decoded = Schema.decodeUnknownSync(JsonCallSchema)(json)
+        const decoded = yield* Schema.decodeUnknownEffect(JsonCallSchema)(json).pipe(
+          Effect.orDie,
+        )
 
         // Don't reload terminated/terminating calls into memory from cache.
         // "terminated": lingered in cache for retransmission safety but must
@@ -223,7 +225,7 @@ export class CallState extends ServiceMap.Service<
         const call = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
         if (call === undefined) return
 
-        const json = Schema.encodeSync(JsonCallSchema)(call)
+        const json = yield* Schema.encodeEffect(JsonCallSchema)(call).pipe(Effect.orDie)
         yield* cache.putCall(callRef, json, ttl)
         yield* refreshIndexTtl(call)
 
@@ -312,7 +314,9 @@ export class CallState extends ServiceMap.Service<
           const json = yield* cache.getCall(ref)
           if (json === null) continue
 
-          const decoded = Schema.decodeUnknownSync(JsonCallSchema)(json)
+          const decoded = yield* Schema.decodeUnknownEffect(JsonCallSchema)(json).pipe(
+            Effect.orDie,
+          )
           if (decoded.workerIndex !== workerIndex) continue
 
           // Skip terminating calls on recovery — they were mid-teardown when
@@ -338,7 +342,7 @@ export class CallState extends ServiceMap.Service<
       const flushAllCalls = Effect.fnUntraced(function* () {
         let flushed = 0
         for (const [callRef, call] of callsMap) {
-          const json = Schema.encodeSync(JsonCallSchema)(call)
+          const json = yield* Schema.encodeEffect(JsonCallSchema)(call).pipe(Effect.orDie)
           yield* cache.putCall(callRef, json, ttl)
           yield* writeCacheIndexes(call)
           flushed++

@@ -10,7 +10,7 @@
  *   - HTTP 5xx                                            → kind: "http-5xx"
  *   - HTTP 4xx                                            → kind: "http-4xx"
  *   - Response body fails schema decode (or empty body)   → kind: "schema-violation"
- *   - Uncategorised failure                               → kind: "defect"
+ *   - `update_headers` names a forbidden / partial header → kind: "semantic-violation"
  *
  * Transient tier (timeout/network/http-5xx) → WARN + adapter_error_transient.
  * Permanent tier                            → ERROR + adapter_error_permanent.
@@ -18,11 +18,19 @@
  * Per-call latency observation is still forwarded to OverloadController
  * (Tier 3 routing-API signal). Stack-level retries are intentionally absent;
  * retry / circuit-breaker logic is the adapter's responsibility.
+ *
+ * Note: the engine methods use `Effect.fnUntraced` deliberately — per-call
+ * span creation is measured pressure under overload. The `CallDecisionError`
+ * kind `"defect"` remains reserved in the ADT for call sites that need to
+ * classify a failure as an adapter bug outside this pipeline; the typed
+ * catchTags chain below is exhaustive over this adapter's known error union,
+ * so true runtime defects propagate as Effect defects (a crash).
  */
 
-import { Clock, Effect, Layer } from "effect"
+import { Clock, Effect, Layer, Schema } from "effect"
 import {
   HttpClient,
+  HttpClientError,
   HttpClientRequest,
   HttpClientResponse,
 } from "effect/unstable/http"
@@ -33,10 +41,9 @@ import { CallDecisionEngine } from "../../CallDecisionEngine.js"
 import {
   CallDecisionError,
   isTransient,
-  type CallDecisionErrorKind,
   type CallDecisionMethod,
 } from "../../schemas/errors.js"
-import { validateUpdateHeaders } from "../../validators/forbiddenHeaders.js"
+import { validateUpdateHeadersEffect } from "../../validators/forbiddenHeaders.js"
 import {
   WireCallFailureResponse,
   WireCallReferResponse,
@@ -56,107 +63,66 @@ import {
 
 const ADAPTER_NAME = "http-reference"
 
-interface TimeoutMarker {
-  readonly _tag: "AdapterTimeout"
-  readonly timeoutMs: number
-}
+/**
+ * Tagged error emitted by {@link withTimeout} on expiry. Lives as a proper
+ * `Schema.TaggedErrorClass` so the catchTags pipeline below can narrow it.
+ */
+class AdapterTimeout extends Schema.TaggedErrorClass<AdapterTimeout>()(
+  "AdapterTimeout",
+  { timeoutMs: Schema.Number },
+) {}
 
 /**
- * Classify an underlying failure into one of the CallDecisionErrorKinds.
- *
- * HttpClientError (v4 umbrella) carries `.reason` with a discriminator tag:
- *   StatusCodeError → 4xx/5xx split by response.status
- *   DecodeError / EmptyBodyError → schema-violation
- *   TransportError / EncodeError / InvalidUrlError → network
- *
- * SchemaError (from `schemaBodyJson`) → schema-violation.
- * TimeoutMarker (from withTimeout below) → timeout.
+ * Map an HttpClientError's inner `reason._tag` onto the adapter's typed ADT.
+ * Uses the library-provided types from `effect/unstable/http` instead of
+ * hand-written structural assertions.
  */
-function classifyError(method: CallDecisionMethod, err: unknown): CallDecisionError {
-  const tag = typeof err === "object" && err !== null ? (err as { _tag?: string })._tag : undefined
-
-  if (tag === "AdapterTimeout") {
-    const t = err as TimeoutMarker
+function fromHttpClientError(
+  method: CallDecisionMethod,
+  err: HttpClientError.HttpClientError,
+): CallDecisionError {
+  const reason = err.reason
+  if (reason._tag === "StatusCodeError") {
+    const status = reason.response.status
     return new CallDecisionError({
-      kind: "timeout",
+      kind: status >= 500 ? "http-5xx" : "http-4xx",
       adapterName: ADAPTER_NAME,
       method,
-      detail: `timed out after ${t.timeoutMs}ms`,
+      detail: `HTTP ${status}`,
       cause: err,
     })
   }
-
-  if (tag === "HttpClientError") {
-    const httpErr = err as {
-      readonly reason: {
-        readonly _tag: string
-        readonly response?: { readonly status: number }
-        readonly request?: { readonly url: string }
-      }
-    }
-    const reason = httpErr.reason
-    if (reason._tag === "StatusCodeError") {
-      const status = reason.response?.status ?? 0
-      const kind: CallDecisionErrorKind = status >= 500 ? "http-5xx" : "http-4xx"
-      return new CallDecisionError({
-        kind,
-        adapterName: ADAPTER_NAME,
-        method,
-        detail: `HTTP ${status}`,
-        cause: err,
-      })
-    }
-    if (reason._tag === "DecodeError" || reason._tag === "EmptyBodyError") {
-      return new CallDecisionError({
-        kind: "schema-violation",
-        adapterName: ADAPTER_NAME,
-        method,
-        detail: `response body failed to decode (${reason._tag})`,
-        cause: err,
-      })
-    }
-    // TransportError / EncodeError / InvalidUrlError
-    return new CallDecisionError({
-      kind: "network",
-      adapterName: ADAPTER_NAME,
-      method,
-      detail: `request failed (${reason._tag})`,
-      cause: err,
-    })
-  }
-
-  if (tag === "SchemaError" || tag === "ParseError") {
+  if (reason._tag === "DecodeError" || reason._tag === "EmptyBodyError") {
     return new CallDecisionError({
       kind: "schema-violation",
       adapterName: ADAPTER_NAME,
       method,
-      detail: `response body failed schema validation`,
+      detail: `response body failed to decode (${reason._tag})`,
       cause: err,
     })
   }
-
+  // TransportError | EncodeError | InvalidUrlError
   return new CallDecisionError({
-    kind: "defect",
+    kind: "network",
     adapterName: ADAPTER_NAME,
     method,
-    detail: `unexpected error: ${String(err)}`,
+    detail: `request failed (${reason._tag})`,
     cause: err,
   })
 }
 
 /**
  * Per-method hard timeout. On expiry the inner effect is abandoned and we
- * fail with a tagged marker that `classifyError` converts into
+ * fail with {@link AdapterTimeout}, which the catchTags chain converts into
  * `CallDecisionError(kind: "timeout")`.
  */
 function withTimeout<A, E, R>(
   effect: Effect.Effect<A, E, R>,
   timeoutMs: number,
-): Effect.Effect<A, E | TimeoutMarker, R> {
+): Effect.Effect<A, E | AdapterTimeout, R> {
   return Effect.timeoutOrElse(effect, {
     duration: `${timeoutMs} millis`,
-    orElse: (): Effect.Effect<never, TimeoutMarker> =>
-      Effect.fail({ _tag: "AdapterTimeout", timeoutMs }),
+    orElse: () => Effect.fail(new AdapterTimeout({ timeoutMs })),
   })
 }
 
@@ -170,19 +136,23 @@ export const HttpReferenceAdapterLayer = Layer.effect(
     const baseUrl = config.callControlUrl
 
     /**
-     * Record the error in the dual-tier counter, log at the right level,
-     * then re-fail with the classified error so callers see the ADT.
+     * Observe a `CallDecisionError`: bump the right counter and emit a log
+     * line at the tier-appropriate level. Pure side effect — does NOT re-fail
+     * so callers attach it via `Effect.tapError` and let the error keep
+     * flowing through the channel.
      */
-    const recordAndLog = (err: CallDecisionError): Effect.Effect<never, CallDecisionError> => {
-      const transient = isTransient(err)
-      const counters = transient
-        ? metrics.adapterErrors.transient
-        : metrics.adapterErrors.permanent
-      counters[err.method]++
-      const logLine = `[adapter=${err.adapterName}] ${err.method} failed — kind=${err.kind}: ${err.detail}`
-      const log = transient ? Effect.logWarning(logLine) : Effect.logError(logLine)
-      return Effect.flatMap(log, () => Effect.fail(err))
-    }
+    const recordAndLog = (err: CallDecisionError): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const transient = isTransient(err)
+        const counters = transient
+          ? metrics.adapterErrors.transient
+          : metrics.adapterErrors.permanent
+        yield* Effect.sync(() => {
+          counters[err.method]++
+        })
+        const line = `[adapter=${err.adapterName}] ${err.method} failed — kind=${err.kind}: ${err.detail}`
+        yield* transient ? Effect.logWarning(line) : Effect.logError(line)
+      })
 
     /**
      * Execute a single lifecycle HTTP call. Callers decode with a wire
@@ -195,7 +165,9 @@ export const HttpReferenceAdapterLayer = Layer.effect(
       timeoutMs: number,
       body: unknown,
       path: string,
-      decoder: (resp: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, unknown>,
+      decoder: (
+        resp: HttpClientResponse.HttpClientResponse,
+      ) => Effect.Effect<A, HttpClientError.HttpClientError | Schema.SchemaError>,
     ): Effect.Effect<A, CallDecisionError> =>
       Effect.gen(function* () {
         const startedAt = yield* Clock.currentTimeMillis
@@ -206,8 +178,29 @@ export const HttpReferenceAdapterLayer = Layer.effect(
           Effect.flatMap(client.execute(request), decoder),
           timeoutMs,
         ).pipe(
-          Effect.mapError((err) => classifyError(method, err)),
-          Effect.catchTag("CallDecisionError", recordAndLog),
+          Effect.catchTags({
+            AdapterTimeout: (e) =>
+              Effect.fail(
+                new CallDecisionError({
+                  kind: "timeout",
+                  adapterName: ADAPTER_NAME,
+                  method,
+                  detail: `timed out after ${e.timeoutMs}ms`,
+                  cause: e,
+                }),
+              ),
+            HttpClientError: (e) => Effect.fail(fromHttpClientError(method, e)),
+            SchemaError: (e) =>
+              Effect.fail(
+                new CallDecisionError({
+                  kind: "schema-violation",
+                  adapterName: ADAPTER_NAME,
+                  method,
+                  detail: `response body failed schema validation`,
+                  cause: e,
+                }),
+              ),
+          }),
         )
         const endedAt = yield* Clock.currentTimeMillis
         overload.observeRoutingApiLatency(stage, endedAt - startedAt)
@@ -215,65 +208,77 @@ export const HttpReferenceAdapterLayer = Layer.effect(
       })
 
     /** Screen `update_headers` on any response shape that carries the field. */
-    const validateNewCall = (resp: NewCallResponseType): CallDecisionError | null =>
+    const validateNewCall = (
+      resp: NewCallResponseType,
+    ): Effect.Effect<void, CallDecisionError> =>
       resp.action === "route"
-        ? validateUpdateHeaders(ADAPTER_NAME, "newCall", resp.update_headers)
-        : null
+        ? validateUpdateHeadersEffect(ADAPTER_NAME, "newCall", resp.update_headers)
+        : Effect.void
 
-    const validateCallFailure = (resp: CallFailureResponseType): CallDecisionError | null =>
+    const validateCallFailure = (
+      resp: CallFailureResponseType,
+    ): Effect.Effect<void, CallDecisionError> =>
       resp.action === "failover"
-        ? validateUpdateHeaders(ADAPTER_NAME, "callFailure", resp.update_headers)
-        : null
+        ? validateUpdateHeadersEffect(ADAPTER_NAME, "callFailure", resp.update_headers)
+        : Effect.void
 
-    const validateCallRefer = (resp: CallReferResponseType): CallDecisionError | null =>
+    const validateCallRefer = (
+      resp: CallReferResponseType,
+    ): Effect.Effect<void, CallDecisionError> =>
       resp.action === "allow"
-        ? validateUpdateHeaders(ADAPTER_NAME, "callRefer", resp.update_headers)
-        : null
+        ? validateUpdateHeadersEffect(ADAPTER_NAME, "callRefer", resp.update_headers)
+        : Effect.void
 
-    const newCall = Effect.fnUntraced(function* (req: NewCallRequestType) {
-      const wire = yield* runRequest(
-        "newCall",
-        "new_call",
-        config.callControlNewCallTimeoutMs,
-        req,
-        "/call/new",
-        HttpClientResponse.schemaBodyJson(WireNewCallResponse),
-      )
-      const canonical = translateNewCallResponse(wire, config)
-      const violation = validateNewCall(canonical)
-      if (violation !== null) return yield* recordAndLog(violation)
-      return canonical
-    })
+    const newCall = Effect.fnUntraced(
+      function* (req: NewCallRequestType) {
+        const wire = yield* runRequest(
+          "newCall",
+          "new_call",
+          config.callControlNewCallTimeoutMs,
+          req,
+          "/call/new",
+          HttpClientResponse.schemaBodyJson(WireNewCallResponse),
+        )
+        const canonical = translateNewCallResponse(wire, config)
+        yield* validateNewCall(canonical)
+        return canonical
+      },
+      Effect.tapError(recordAndLog),
+    )
 
-    const callFailure = Effect.fnUntraced(function* (req: CallFailureRequestType) {
-      const wire = yield* runRequest(
-        "callFailure",
-        "in_dialog",
-        config.callControlFailureTimeoutMs,
-        req,
-        "/call/failure",
-        HttpClientResponse.schemaBodyJson(WireCallFailureResponse),
-      )
-      const canonical = translateCallFailureResponse(wire, config)
-      const violation = validateCallFailure(canonical)
-      if (violation !== null) return yield* recordAndLog(violation)
-      return canonical
-    })
+    const callFailure = Effect.fnUntraced(
+      function* (req: CallFailureRequestType) {
+        const wire = yield* runRequest(
+          "callFailure",
+          "in_dialog",
+          config.callControlFailureTimeoutMs,
+          req,
+          "/call/failure",
+          HttpClientResponse.schemaBodyJson(WireCallFailureResponse),
+        )
+        const canonical = translateCallFailureResponse(wire, config)
+        yield* validateCallFailure(canonical)
+        return canonical
+      },
+      Effect.tapError(recordAndLog),
+    )
 
-    const callRefer = Effect.fnUntraced(function* (req: CallReferRequestType) {
-      const wire = yield* runRequest(
-        "callRefer",
-        "in_dialog",
-        config.callControlReferTimeoutMs,
-        req,
-        "/call/refer",
-        HttpClientResponse.schemaBodyJson(WireCallReferResponse),
-      )
-      const canonical = translateCallReferResponse(wire, config)
-      const violation = validateCallRefer(canonical)
-      if (violation !== null) return yield* recordAndLog(violation)
-      return canonical
-    })
+    const callRefer = Effect.fnUntraced(
+      function* (req: CallReferRequestType) {
+        const wire = yield* runRequest(
+          "callRefer",
+          "in_dialog",
+          config.callControlReferTimeoutMs,
+          req,
+          "/call/refer",
+          HttpClientResponse.schemaBodyJson(WireCallReferResponse),
+        )
+        const canonical = translateCallReferResponse(wire, config)
+        yield* validateCallRefer(canonical)
+        return canonical
+      },
+      Effect.tapError(recordAndLog),
+    )
 
     return { newCall, callFailure, callRefer }
   }),

@@ -290,9 +290,8 @@ export class TracingService extends ServiceMap.Service<
       ): Effect.Effect<void> => {
         if (events.length === 0) return Effect.void
         return Effect.gen(function* () {
-          const span = yield* Effect.catch(
-            Effect.map(Effect.currentSpan, (s): Tracer.Span | undefined => s),
-            (): Effect.Effect<Tracer.Span | undefined> => Effect.void as Effect.Effect<Tracer.Span | undefined>
+          const span = yield* Effect.currentSpan.pipe(
+            Effect.orElseSucceed((): Tracer.Span | undefined => undefined),
           )
           if (span === undefined) return
           const now = BigInt(Date.now()) * 1_000_000n // ns

@@ -30,6 +30,7 @@
  * it just has a slightly different reason string for diagnostic clarity.
  */
 
+import { Effect } from "effect"
 import type { KnownHeader, HeaderName } from "../../b2bua/rules/framework/actions/types.js"
 import {
   CallDecisionError,
@@ -152,6 +153,21 @@ export function validateUpdateHeaders(
     })
   }
   return null
+}
+
+/**
+ * Effect-returning sibling of {@link validateUpdateHeaders}. Succeeds with
+ * `void` when the map is clean, fails with the typed `CallDecisionError` on
+ * the first violation. Use this from adapter call sites that already thread
+ * errors through the Effect channel.
+ */
+export function validateUpdateHeadersEffect(
+  adapterName: string,
+  method: CallDecisionMethod,
+  updateHeaders: ReadonlyMap<string, unknown> | Readonly<Record<string, unknown>> | undefined,
+): Effect.Effect<void, CallDecisionError> {
+  const violation = validateUpdateHeaders(adapterName, method, updateHeaders)
+  return violation === null ? Effect.void : Effect.fail(violation)
 }
 
 // ── Narrowing helper (for callers holding a structured HeaderName) ────────
