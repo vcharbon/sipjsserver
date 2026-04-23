@@ -1,0 +1,168 @@
+/**
+ * Header-partition validator (SplitServiceLogic.md §D3).
+ *
+ * Adapters MUST NOT set FORBIDDEN or PARTIAL headers via `update_headers`:
+ *
+ *   FORBIDDEN (stack-only)
+ *     Call-ID, Content-Length, Via, CSeq, Max-Forwards,
+ *     Record-Route, Route, Contact
+ *
+ *   PARTIAL (structured slots own these)
+ *     From, To
+ *
+ * Enforcement is belt + suspenders:
+ *
+ *   1. Compile-time — `AdapterHeaderName` excludes these names from the
+ *      `HeaderName` union so the structured ADT used by B.2+ code cannot
+ *      even mention them. Used to key `AdapterHeaderUpdates`.
+ *
+ *   2. Runtime — the legacy `update_headers: Record<string, string | null>`
+ *      wire shape still lets an adapter smuggle a forbidden name through as
+ *      a raw string. `validateUpdateHeaders` screens every key
+ *      case-insensitively and returns a `CallDecisionError(kind:
+ *      "semantic-violation")` on the first violation.
+ *
+ * The case-insensitive match subsumes the Content-Type and Content-Disposition
+ * slots even though those two belong in the structured body model (§D4) — no
+ * header-update path should ever set them either.
+ *
+ * Both lists overlap: violating a PARTIAL name is still a semantic violation,
+ * it just has a slightly different reason string for diagnostic clarity.
+ */
+
+import type { KnownHeader, HeaderName } from "../../b2bua/rules/framework/actions/types.js"
+import {
+  CallDecisionError,
+  type CallDecisionMethod,
+} from "../schemas/errors.js"
+
+// ── Partition membership ──────────────────────────────────────────────────
+
+/**
+ * Stack-only headers the adapter must never set via `update_headers`. The
+ * `Contact` entry covers accepted calls; 3xx rejects use the structured
+ * `contact: BareSipUri[]` slot (§D3 exception).
+ */
+export type ForbiddenHeaderName =
+  | "Call-ID"
+  | "Content-Length"
+  | "Via"
+  | "CSeq"
+  | "Max-Forwards"
+  | "Record-Route"
+  | "Route"
+  | "Contact"
+
+/** Owned by the `fromUri`/`toUri`/`fromDisplayName`/`toDisplayName` slots. */
+export type PartialHeaderName = "From" | "To"
+
+const FORBIDDEN: ReadonlyArray<ForbiddenHeaderName> = [
+  "Call-ID",
+  "Content-Length",
+  "Via",
+  "CSeq",
+  "Max-Forwards",
+  "Record-Route",
+  "Route",
+  "Contact",
+]
+
+const PARTIAL: ReadonlyArray<PartialHeaderName> = ["From", "To"]
+
+/** Content-* slots belong to the structured body model, never to update_headers. */
+const BODY_SLOT_HEADERS: ReadonlyArray<string> = [
+  "Content-Type",
+  "Content-Length",
+  "Content-Disposition",
+  "Content-ID",
+  "MIME-Version",
+]
+
+const FORBIDDEN_LOWER: ReadonlySet<string> = new Set(
+  FORBIDDEN.map((h) => h.toLowerCase()),
+)
+
+const PARTIAL_LOWER: ReadonlySet<string> = new Set(
+  PARTIAL.map((h) => h.toLowerCase()),
+)
+
+const BODY_SLOT_LOWER: ReadonlySet<string> = new Set(
+  BODY_SLOT_HEADERS.map((h) => h.toLowerCase()),
+)
+
+// ── Compile-time exclusion (for B.2+ structured HeaderUpdates) ────────────
+
+/** KnownHeaders an adapter is allowed to mention via structured updates. */
+export type AdapterKnownHeader = Exclude<
+  KnownHeader,
+  ForbiddenHeaderName | PartialHeaderName
+>
+
+/**
+ * `HeaderName` variant usable in adapter-provided structured updates. The
+ * `well-known` arm drops the FORBIDDEN and PARTIAL names; the `proprietary`
+ * arm is untouched because `custom()` already throws on well-known names
+ * (including FORBIDDEN / PARTIAL).
+ */
+export type AdapterHeaderName =
+  | { readonly kind: "well-known"; readonly name: AdapterKnownHeader }
+  | { readonly kind: "proprietary"; readonly name: string }
+
+// ── Runtime check ─────────────────────────────────────────────────────────
+
+/** Classify a raw header key against the partition tiers. */
+export function classifyHeader(name: string): "forbidden" | "partial" | "body-slot" | "ok" {
+  const lower = name.trim().toLowerCase()
+  if (FORBIDDEN_LOWER.has(lower)) return "forbidden"
+  if (PARTIAL_LOWER.has(lower)) return "partial"
+  if (BODY_SLOT_LOWER.has(lower)) return "body-slot"
+  return "ok"
+}
+
+/**
+ * Validate a wire-shape `update_headers` map. Returns null when every key is
+ * acceptable, a `CallDecisionError(kind: "semantic-violation")` otherwise.
+ *
+ * The first violation short-circuits — the adapter has already broken the
+ * contract so we don't need an exhaustive list to emit a 500.
+ */
+export function validateUpdateHeaders(
+  adapterName: string,
+  method: CallDecisionMethod,
+  updateHeaders: ReadonlyMap<string, unknown> | Readonly<Record<string, unknown>> | undefined,
+): CallDecisionError | null {
+  if (updateHeaders === undefined) return null
+  const entries = updateHeaders instanceof Map
+    ? Array.from(updateHeaders.keys())
+    : Object.keys(updateHeaders)
+  for (const key of entries) {
+    const tier = classifyHeader(key)
+    if (tier === "ok") continue
+    const detail = tier === "forbidden"
+      ? `forbidden header "${key}" — stack-owned, adapter must not set it`
+      : tier === "partial"
+        ? `partial header "${key}" — use the structured from/to slots instead`
+        : `body-slot header "${key}" — belongs in the structured body model`
+    return new CallDecisionError({
+      kind: "semantic-violation",
+      adapterName,
+      method,
+      detail,
+      cause: { header: key, tier },
+    })
+  }
+  return null
+}
+
+// ── Narrowing helper (for callers holding a structured HeaderName) ────────
+
+/**
+ * True when the given `HeaderName` is safe to appear in an adapter-sourced
+ * structured `HeaderUpdates`. Used by call sites that still receive the
+ * wider `HeaderName` (e.g., test helpers) and want to guard at runtime.
+ */
+export function isAdapterHeaderName(name: HeaderName): name is AdapterHeaderName {
+  if (name.kind === "proprietary") return true
+  const lower = name.name.toLowerCase()
+  return !FORBIDDEN_LOWER.has(lower) && !PARTIAL_LOWER.has(lower)
+}

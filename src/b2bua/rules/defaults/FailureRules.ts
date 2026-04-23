@@ -61,11 +61,7 @@ export const routeFailureRule: RuleDefinition<undefined, undefined> = {
             sip_reason: resp.reason,
           },
         }).pipe(
-          Effect.catchTag("CallControlError", (e) =>
-            Effect.logError(`/call/failure failed: ${e.reason}`).pipe(
-              Effect.as(undefined),
-            ),
-          ),
+          Effect.catchTag("CallDecisionError", () => Effect.void),
         )
 
         if (failureResp !== undefined && failureResp.action === "failover") {
@@ -134,11 +130,7 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
           callback_context: ctx.call.callbackContext,
           failure: { origin: "no_answer_timeout" as const },
         }).pipe(
-          Effect.catchTag("CallControlError", (e) =>
-            Effect.logError(`/call/failure failed: ${e.reason}`).pipe(
-              Effect.as(undefined),
-            ),
-          ),
+          Effect.catchTag("CallDecisionError", () => Effect.void),
         )
 
         if (failureResp !== undefined && failureResp.action === "failover") {

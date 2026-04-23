@@ -120,16 +120,17 @@ export function fakeStackLayer(opts: {
   const MetricsLayer = MetricsRegistry.layer
 
   // Leaves with no cross-dependencies — merged once; all consumers that
-  // need any of these pull from this single bundle.
+  // need any of these pull from this single bundle. MockCallControlLayer
+  // depends on AppConfig (B.7 translate step); provideMerge wires that
+  // dep while still re-exposing AppConfig outward.
   const Leaves = Layer.mergeAll(
-    AppConfigLayer,
     NetworkLayer,
     MetricsLayer,
     CallStateCache.memoryLayer,
     MockCallControlLayer,
     NoOpTracingLayer,
     NoOpCdrLayer
-  )
+  ).pipe(Layer.provideMerge(AppConfigLayer))
 
   // Mid-level services — each depends on some subset of the leaves.
   // `provideMerge(Leaves)` both satisfies those deps and exposes the

@@ -6,6 +6,7 @@
  */
 
 import { Schema } from "effect"
+import { FeatureActivations } from "../decision/schemas/features.js"
 
 // ── INVITE client transaction handle (in-memory; opaque to JSON) ──────────
 //
@@ -400,14 +401,12 @@ export const ALegInviteSnapshot = Schema.Struct({
 
 export type ALegInviteSnapshot = typeof ALegInviteSnapshot.Type
 
-// ── Policy flags (set by HTTP routing response, checked by PolicyModule guards) ─
-
-/** Policy flags set by the HTTP routing response. PolicyModule guards check these. */
-export const CallPolicies = Schema.Struct({
-  /** Transform first 18x to bare 180, suppress subsequent, force tag consistency across failover. */
-  relayFirst18xTo180: Schema.optional(Schema.Boolean),
-})
-export type CallPolicies = typeof CallPolicies.Type
+// ── Feature activations (structured closed union from the decision engine) ─
+//
+// Canonical `FeatureActivations` imported from `src/decision/schemas/features.ts`.
+// PolicyModule guards key on presence (`features.X !== undefined`) rather
+// than boolean truthiness, so absence means "explicitly disabled" per
+// SplitServiceLogic.md §D5.
 
 // ── Transfer state (REFER-driven blind transfer) ──────────────────────────
 //
@@ -524,6 +523,13 @@ export const Call = Schema.Struct({
   activePeer: Schema.NullOr(Schema.Struct({ legA: Schema.String, legB: Schema.String })),
   callbackContext: Schema.optional(Schema.String),
   /**
+   * Opaque adapter-owned attribution blob. Threaded by the CallDecisionEngine
+   * adapter through lifecycle responses (Route / RejectA / ReferAllow) and
+   * emitted once into the terminal CDR record. Latest-wins across lifecycle
+   * overrides. Stack has zero opinions about its shape (see SplitServiceLogic.md §D9).
+   */
+  billingContext: Schema.optional(Schema.NullOr(Schema.String)),
+  /**
    * Snapshot of the original a-leg INVITE. Source of truth for:
    *   - failover b-leg reconstruction (createBLegFromRoute),
    *   - relaying INVITE responses back to Alice (RFC 3261 §8.2.6.2: echo
@@ -572,13 +578,20 @@ export const Call = Schema.Struct({
    * the emergency priority queue without parsing.
    */
   emergency: Schema.optional(Schema.Boolean),
-  /** Policy flags set by HTTP routing response. PolicyModule guards check these. */
-  policies: Schema.optional(CallPolicies),
   /**
-   * Header overrides derived from policy flags, applied to all b-leg INVITEs
-   * (including failover). Set during initial INVITE handling.
-   * `createBLegFromRoute` applies them when building the outbound INVITE, and
-   * per-action `headerUpdates` layer on top afterwards in ActionExecutor.
+   * Feature activations decoded from the CallDecisionEngine adapter response
+   * (SplitServiceLogic.md §D5). Present on every Route / RejectA / ReferAllow
+   * decision once B.7 lands; currently synthesised from the legacy flat-field
+   * shape by the handler. PolicyModule guards check `features.X !== undefined`.
+   */
+  features: Schema.optional(FeatureActivations),
+  /**
+   * Header overrides derived from active features (e.g. the
+   * `relayFirst18xTo180` activation strips `100rel` from `Supported`),
+   * applied to all b-leg INVITEs including failover. Set during initial
+   * INVITE handling. `createBLegFromRoute` applies them when building the
+   * outbound INVITE, and per-action `headerUpdates` layer on top afterwards
+   * in ActionExecutor.
    */
   policyUpdateHeaders: Schema.optional(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
   /**

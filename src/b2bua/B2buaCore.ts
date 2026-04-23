@@ -21,10 +21,10 @@
  * **Requires (caller must provide):**
  *   - AppConfig
  *   - UdpTransport (real UDP / IPC / mock queue)
- *   - OverloadController (shared with CallControlClient and UdpTransport)
+ *   - OverloadController (shared with CallDecisionEngine adapters and UdpTransport)
  *   - CallStateCache (Redis / in-memory)
  *   - CallLimiter (Redis / mock)
- *   - CallControlClient (HTTP / mock)
+ *   - CallDecisionEngine (HTTP reference adapter / mock)
  *   - TracingService (OTel / noop)
  *   - CdrWriter (file / noop)
  */

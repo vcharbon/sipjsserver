@@ -25,8 +25,8 @@ import {
 import { generateResponse } from "./generators.js"
 import { AppConfig, type AppConfigData } from "../config/AppConfig.js"
 import { CallState } from "../call/CallState.js"
-import { CallControlClient } from "../http/CallControlClient.js"
-import type { CallReferRequest as CallReferRequestType } from "../http/CallControlSchemas.js"
+import { CallDecisionEngine } from "../decision/CallDecisionEngine.js"
+import type { CallReferRequest as CallReferRequestType } from "../decision/schemas/requests.js"
 import { CallLimiter } from "../call/CallLimiter.js"
 import { TimerService } from "../call/TimerService.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
@@ -104,7 +104,7 @@ export interface ResolvedContext {
   readonly direction: "from-a" | "from-b"
   readonly event: CallEvent
   readonly config: AppConfigData
-  readonly callControl: CallControlClient["Service"]
+  readonly callControl: CallDecisionEngine["Service"]
   readonly limiter: CallLimiter["Service"]
   /** Wall-clock-equivalent timestamp captured at message receive time. Sourced from
    *  Effect's Clock so it advances under TestClock in tests. Use this for any
@@ -222,7 +222,7 @@ export class SipRouter extends ServiceMap.Service<
       const txnLayer = yield* TransactionLayer
       const transport = yield* UdpTransport
       const callState = yield* CallState
-      const callControl = yield* CallControlClient
+      const callControl = yield* CallDecisionEngine
       const limiter = yield* CallLimiter
       const timers = yield* TimerService
       const cdr = yield* CdrWriter
@@ -373,8 +373,8 @@ export class SipRouter extends ServiceMap.Service<
                   Effect.gen(function* () {
                     const resp = yield* callControl.callRefer(referReq).pipe(
                       Effect.map((r) => ({ ok: true as const, resp: r })),
-                      Effect.catchTag("CallControlError", (e) =>
-                        Effect.succeed({ ok: false as const, reason: e.reason })
+                      Effect.catchTag("CallDecisionError", (e) =>
+                        Effect.succeed({ ok: false as const, reason: e.detail })
                       )
                     )
                     const outcome = resp.ok ? resp.resp.action : "error"

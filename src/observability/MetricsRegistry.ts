@@ -25,6 +25,23 @@ export interface DispatcherMetrics {
   droppedNoCallIdTotal: number
 }
 
+/**
+ * CallDecisionEngine adapter error counters, split by tier.
+ *
+ *   - transient — infra hiccup (timeout / network / http-5xx). WARN tier,
+ *     the stack synthesizes a 503/terminate/sipfrag as appropriate.
+ *   - permanent — adapter contract violation (http-4xx / schema / semantic /
+ *     defect). ERROR tier.
+ *
+ * Keyed by (tier, method). `adapter` dimension is a single string (today
+ * "http-reference") — we don't split the counter per adapter since only
+ * one runs at a time.
+ */
+export interface AdapterErrorMetrics {
+  transient: { newCall: number; callFailure: number; callRefer: number }
+  permanent: { newCall: number; callFailure: number; callRefer: number }
+}
+
 export interface MetricsRegistryState {
   udp: UdpTransportMetrics | undefined
   overload: OverloadControllerMetrics | undefined
@@ -33,6 +50,8 @@ export interface MetricsRegistryState {
   workers: WorkerMetricsSnapshot[]
   /** Broadcast an IPC message to all workers (set by Dispatcher in cluster mode). */
   broadcastToWorkers: ((msg: MainToWorkerMessage) => void) | undefined
+  /** CallDecisionEngine adapter error counters (dual-tier). */
+  adapterErrors: AdapterErrorMetrics
 }
 
 export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, MetricsRegistryState>()(
@@ -44,5 +63,9 @@ export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, Metrics
     dispatcher: undefined,
     workers: [],
     broadcastToWorkers: undefined,
+    adapterErrors: {
+      transient: { newCall: 0, callFailure: 0, callRefer: 0 },
+      permanent: { newCall: 0, callFailure: 0, callRefer: 0 },
+    },
   }))
 }

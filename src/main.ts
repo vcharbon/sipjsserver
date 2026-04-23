@@ -25,7 +25,7 @@ import { RedisClient } from "./redis/RedisClient.js"
 import { UdpTransport } from "./sip/UdpTransport.js"
 import { SignalingNetwork } from "./sip/SignalingNetwork.js"
 import { StatusServerLayer } from "./http/StatusServer.js"
-import { CallControlClient } from "./http/CallControlClient.js"
+import { HttpReferenceAdapterLayer } from "./decision/adapters/http-reference/HttpReferenceAdapter.js"
 import { TracingService } from "./tracing/TracingService.js"
 import { FetchHttpClient } from "effect/unstable/http"
 import { handlers, B2buaCoreLayer } from "./b2bua/B2buaCore.js"
@@ -62,10 +62,11 @@ const OverloadControllerLayer = OverloadController.layer.pipe(
   Layer.provide(MetricsRegistryLayer)
 )
 
-const CallControlLayer = CallControlClient.layer.pipe(
+const CallControlLayer = HttpReferenceAdapterLayer.pipe(
   Layer.provide(AppConfigLayer),
   Layer.provide(FetchHttpClient.layer),
-  Layer.provide(OverloadControllerLayer)
+  Layer.provide(OverloadControllerLayer),
+  Layer.provide(MetricsRegistryLayer)
 )
 
 const TracingLayer = TracingService.layer.pipe(

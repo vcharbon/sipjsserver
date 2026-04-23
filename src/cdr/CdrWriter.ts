@@ -24,7 +24,13 @@ const CdrRecord = Schema.Struct({
     state: LegState,
     disposition: LegDisposition
   })),
-  events: Schema.Array(CdrEvent)
+  events: Schema.Array(CdrEvent),
+  /**
+   * Adapter-owned attribution blob (SplitServiceLogic.md §D9). Populated from
+   * the latest-wins `Call.billingContext` set by Route / RejectA / ReferAllow
+   * responses. Omitted from the record when the adapter never supplied one.
+   */
+  billingContext: Schema.optional(Schema.NullOr(Schema.String)),
 })
 
 const JsonCdrRecord = Schema.fromJsonString(CdrRecord)
@@ -77,7 +83,8 @@ export class CdrWriter extends ServiceMap.Service<
             state: leg.state,
             disposition: leg.disposition
           })),
-          events: call.cdrEvents
+          events: call.cdrEvents,
+          ...(call.billingContext !== undefined ? { billingContext: call.billingContext } : {}),
         }
         const line = Schema.encodeSync(JsonCdrRecord)(record) + "\n"
         yield* Effect.callback<void>((resume) => {

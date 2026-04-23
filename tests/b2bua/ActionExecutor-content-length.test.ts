@@ -11,7 +11,7 @@ import type { RuleAction, RuleContext } from "../../src/b2bua/rules/framework/Ru
 import type { Call, Leg, Dialog } from "../../src/call/CallModel.js"
 import type { SipRequest, SipResponse, SipHeader, RemoteInfo } from "../../src/sip/types.js"
 import type { AppConfigData } from "../../src/config/AppConfig.js"
-import type { CallControlClient } from "../../src/http/CallControlClient.js"
+import type { CallDecisionEngine } from "../../src/decision/CallDecisionEngine.js"
 import type { CallLimiter } from "../../src/call/CallLimiter.js"
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function makeCtx(
     sourceDialog,
     direction,
     config: { sipLocalIp: "10.0.0.1", sipLocalPort: 5060, noAnswerTimeoutSec: 60 } as AppConfigData,
-    callControl: {} as CallControlClient["Service"],
+    callControl: {} as CallDecisionEngine["Service"],
     limiter: {} as CallLimiter["Service"],
     nowMs: Date.now(),
   }

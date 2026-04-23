@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { writeHeapSnapshot } from "node:v8"
 import { CallState } from "../call/CallState.js"
 import { AppConfig } from "../config/AppConfig.js"
-import { addCallControlRoutes } from "./MockCallControlServer.js"
+import { addCallControlRoutes } from "../decision/adapters/http-reference/MockServer.js"
 import { MetricsRegistry, type MetricsRegistryState } from "../observability/MetricsRegistry.js"
 
 

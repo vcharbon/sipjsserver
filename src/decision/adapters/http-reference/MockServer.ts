@@ -1,8 +1,8 @@
 /**
  * Mock Call Control HTTP route handlers (test infrastructure).
  *
- * This is NOT production routing logic — it is a mock/stub server used by
- * E2E tests to drive B2BUA behavior via the X-Api-Call SIP header.
+ * Mock backend for the HTTP Reference Adapter — drives B2BUA behavior in
+ * e2e tests via an X-Api-Call SIP header. NOT production routing logic.
  *
  * Registers three endpoints on the supplied HttpRouter:
  *   POST /call/new      → routing decision for inbound INVITEs
@@ -31,13 +31,13 @@ import {
   CallFailureRequest,
   CallReferRequest,
   NewCallRequest,
-  type NewCallRequest as NewCallRequestType,
-  type NewCallResponse as NewCallResponseType,
-  type CallFailureRequest as CallFailureRequestType,
-  type CallFailureResponse as CallFailureResponseType,
-  type CallReferRequest as CallReferRequestType,
-  type CallReferResponse as CallReferResponseType
-} from "./CallControlSchemas.js"
+  type NewCallRequestType,
+  type NewCallResponseType,
+  type CallFailureRequestType,
+  type CallFailureResponseType,
+  type CallReferRequestType,
+  type CallReferResponseType,
+} from "./schemas.js"
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 

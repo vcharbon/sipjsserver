@@ -11,9 +11,9 @@ import type { SipRequest, SipResponse, RemoteInfo } from "../../../sip/types.js"
 import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType, TransferPhase, TransferState } from "../../../call/CallModel.js"
 import type { AppConfigData } from "../../../config/AppConfig.js"
 import type { CallEvent } from "../../../sip/SipRouter.js"
-import type { CallControlClient } from "../../../http/CallControlClient.js"
+import type { CallDecisionEngine } from "../../../decision/CallDecisionEngine.js"
 import type { CallLimiter } from "../../../call/CallLimiter.js"
-import type { CallReferRequest as CallReferRequestType } from "../../../http/CallControlSchemas.js"
+import type { CallReferRequest as CallReferRequestType } from "../../../decision/schemas/requests.js"
 import type { BodyUpdate, HeaderUpdates, RuriOp } from "./actions/types.js"
 
 // ── Declarative match schema (reified predicates) ─────────────────────────
@@ -166,8 +166,8 @@ export interface RuleContext {
   readonly direction: "from-a" | "from-b"
   /** App configuration. */
   readonly config: AppConfigData
-  /** HTTP call control client for routing decisions. */
-  readonly callControl: CallControlClient["Service"]
+  /** Canonical call-decision engine for routing / failure / refer decisions. */
+  readonly callControl: CallDecisionEngine["Service"]
   /** Call limiter service. */
   readonly limiter: CallLimiter["Service"]
   /** Wall-clock-equivalent timestamp (from Effect Clock). */

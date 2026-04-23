@@ -1,22 +1,26 @@
 /**
- * Tests for the /call/refer HTTP contract:
+ * Tests for the /call/refer contract exposed by CallDecisionEngine:
  * - Schema roundtrip for CallReferRequest / CallReferResponse.
  * - X-Api-Call driven mock behaviour (reject-403, http-500, http-timeout).
- * - CallControlClient.callRefer wired through the in-process mock layer.
+ * - CallDecisionEngine.callRefer wired through the in-process mock layer.
  */
 
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Exit, Schema } from "effect"
+import { Effect, Exit, Layer, Schema } from "effect"
+import {
+  CallReferRequest,
+  type CallReferRequest as CallReferRequestType,
+} from "../../src/decision/schemas/requests.js"
 import {
   CallReferAllowResponse,
   CallReferRejectResponse,
-  CallReferRequest,
   CallReferResponse,
-  type CallReferRequest as CallReferRequestType,
-} from "../../src/http/CallControlSchemas.js"
-import { mockCallReferBehavior } from "../../src/http/MockCallControlServer.js"
-import { CallControlClient } from "../../src/http/CallControlClient.js"
+} from "../../src/decision/schemas/responses.js"
+import { mockCallReferBehavior } from "../../src/decision/adapters/http-reference/MockServer.js"
+import { CallDecisionEngine } from "../../src/decision/CallDecisionEngine.js"
 import { MockCallControlLayer } from "../fullcall/framework/MockCallControlLayer.js"
+import { AppConfig } from "../../src/config/AppConfig.js"
+import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
 
 // ── Schema roundtrip ─────────────────────────────────────────────────────────
 
@@ -175,14 +179,16 @@ describe("mockCallReferBehavior", () => {
   })
 })
 
-// ── CallControlClient.callRefer through the in-process mock layer ────────────
+// ── CallDecisionEngine.callRefer through the in-process mock layer ────────────
 
-const layer = MockCallControlLayer
+const layer = MockCallControlLayer.pipe(
+  Layer.provide(Layer.succeed(AppConfig, testAppConfigDefaults())),
+)
 
-describe("CallControlClient.callRefer (mock layer)", () => {
+describe("CallDecisionEngine.callRefer (mock layer)", () => {
   it.effect("returns the reject response for refer-reject-403", () =>
     Effect.gen(function* () {
-      const client = yield* CallControlClient
+      const client = yield* CallDecisionEngine
       const resp = yield* client.callRefer(withApiCall({ refer_key: "refer-reject-403" }))
       expect(resp).toEqual({
         action: "reject",
@@ -192,9 +198,9 @@ describe("CallControlClient.callRefer (mock layer)", () => {
     }).pipe(Effect.provide(layer))
   )
 
-  it.effect("fails with CallControlError for refer-http-500", () =>
+  it.effect("fails with CallDecisionError for refer-http-500", () =>
     Effect.gen(function* () {
-      const client = yield* CallControlClient
+      const client = yield* CallDecisionEngine
       const exit = yield* Effect.exit(
         client.callRefer(withApiCall({ refer_key: "refer-http-500" }))
       )
@@ -204,7 +210,7 @@ describe("CallControlClient.callRefer (mock layer)", () => {
 
   it.live("hangs indefinitely for refer-http-timeout (live clock)", () =>
     Effect.gen(function* () {
-      const client = yield* CallControlClient
+      const client = yield* CallDecisionEngine
       const result = yield* client
         .callRefer(withApiCall({ refer_key: "refer-http-timeout" }))
         .pipe(Effect.timeoutOption("50 millis"))
@@ -214,7 +220,7 @@ describe("CallControlClient.callRefer (mock layer)", () => {
 
   it.effect("default (no X-Api-Call) → reject 603", () =>
     Effect.gen(function* () {
-      const client = yield* CallControlClient
+      const client = yield* CallDecisionEngine
       const resp = yield* client.callRefer(baseReq)
       expect(resp).toEqual({
         action: "reject",

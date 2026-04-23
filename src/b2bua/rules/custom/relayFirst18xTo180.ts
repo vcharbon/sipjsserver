@@ -220,6 +220,6 @@ const absorbPrack200: RuleDefinition<PolicyState, undefined> = {
 
 export const relayFirst18xTo180 = definePolicyModule({
   id: "relayFirst18x_to_180",
-  guard: (ctx) => ctx.call.policies?.relayFirst18xTo180 === true,
+  guard: (ctx) => ctx.call.features?.relayFirst18xTo180 !== undefined,
   rules: [suppress18x, forceTagConsistency, absorbPrack200],
 })

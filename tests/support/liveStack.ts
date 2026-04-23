@@ -7,7 +7,7 @@
  *   - `SignalingNetwork.real`             (replaces the simulated fabric)
  *   - `CallStateCache.redisLayer`         (replaces `memoryLayer`)
  *   - `CallLimiter.redisLayer`            (replaces `memoryLayer`)
- *   - `CallControlClient.layer`           (real HTTP, replaces Mock)
+ *   - `HttpReferenceAdapterLayer`         (real HTTP, replaces Mock)
  *   - `TracingService.layer`              (real OTel, replaces NoOp)
  *   - `CdrWriter.layer`                   (real file writer, replaces NoOp)
  *
@@ -23,7 +23,7 @@
 import { Layer } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
-import { CallControlClient } from "../../src/http/CallControlClient.js"
+import { HttpReferenceAdapterLayer } from "../../src/decision/adapters/http-reference/HttpReferenceAdapter.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
 import { CallStateCache } from "../../src/call/CallStateCache.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
@@ -68,7 +68,7 @@ export function liveStackLayer(opts: {
     Layer.provide(MetricsLayer)
   )
 
-  const CallControlLayer = CallControlClient.layer.pipe(
+  const CallControlLayer = HttpReferenceAdapterLayer.pipe(
     Layer.provide(AppConfigLayer),
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(OverloadLayer)

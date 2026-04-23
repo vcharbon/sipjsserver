@@ -7,7 +7,7 @@
  *       * event-loop lag (EWMA, sampled via setImmediate drift)
  *       * active-call count (gauge — set by callers)
  *       * in-dialog queue depth (gauge — set by callers)
- *       * routing-API new-call latency p95 (EWMA — fed by CallControlClient)
+ *       * routing-API new-call latency p95 (EWMA — fed by CallDecisionEngine adapters)
  *
  * Usage:
  *   const decision = controller.shouldAdmit({ isEmergency })
@@ -176,7 +176,7 @@ export interface OverloadControllerApi {
   /** Update the in-dialog worker queue depth gauge (read by the shedder). */
   readonly setInDialogQueueDepth: (depth: number, bound: number) => void
 
-  /** Feed a routing-API latency observation (CallControlClient calls this). */
+  /** Feed a routing-API latency observation (CallDecisionEngine adapters call this). */
   readonly observeRoutingApiLatency: (stage: "new_call" | "in_dialog", ms: number) => void
 
   /** Snapshot of metrics for /status and Prometheus. */

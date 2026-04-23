@@ -25,7 +25,7 @@ import type { RuleAction, RuleContext } from "../../../src/b2bua/rules/framework
 import type { Call, Leg, Dialog, StackDialogSchemaType, B2buaDialogExt, InviteTxnHandle } from "../../../src/call/CallModel.js"
 import type { SipHeader, SipRequest, SipResponse, RemoteInfo } from "../../../src/sip/types.js"
 import type { AppConfigData } from "../../../src/config/AppConfig.js"
-import type { CallControlClient } from "../../../src/http/CallControlClient.js"
+import type { CallDecisionEngine } from "../../../src/decision/CallDecisionEngine.js"
 import type { CallLimiter } from "../../../src/call/CallLimiter.js"
 
 // ── Scalar / atomic-collection keys ────────────────────────────────────────
@@ -338,7 +338,7 @@ export function makeCtx(
       sipLocalPort: 5060,
       noAnswerTimeoutSec: 60,
     } as AppConfigData,
-    callControl: {} as CallControlClient["Service"],
+    callControl: {} as CallDecisionEngine["Service"],
     limiter: {} as CallLimiter["Service"],
     nowMs,
   }
