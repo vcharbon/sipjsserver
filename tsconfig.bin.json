@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Effect-TS/language-service/refs/heads/main/schema.json",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist-bin",
+    "incremental": false
+  },
+  "include": ["bin/**/*", "src/**/*"]
+}

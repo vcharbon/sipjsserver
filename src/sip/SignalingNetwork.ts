@@ -125,6 +125,19 @@ export interface BindUdpOpts {
   readonly port: number
   readonly queueMax: number
   readonly preIngress?: PreIngressHook
+  /**
+   * Set `SO_REUSEPORT` on the underlying UDP socket. Multiple processes can
+   * bind the same `(ip, port)` and the kernel load-balances incoming packets
+   * across them. Used by the SIP front proxy (see
+   * `docs/todos/SIP-Front-Proxy.md`, D6/D7) so multiple proxy processes can
+   * share an ingress port without an in-pod supervisor.
+   *
+   * Real impl: forwarded to `dgram.createSocket({ reusePort })`.
+   * Simulated impl: accepted and ignored (single-process in-memory fabric).
+   *
+   * Defaults to `false` to preserve existing behavior for B2BUA workers.
+   */
+  readonly reusePort?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +198,10 @@ export class SignalingNetwork extends ServiceMap.Service<
 
           const socket = yield* Effect.acquireRelease(
             Effect.callback<dgram.Socket, BindError>((resume) => {
-              const sock = dgram.createSocket("udp4")
+              const sock = dgram.createSocket({
+                type: "udp4",
+                reusePort: opts.reusePort ?? false,
+              })
               sock.once("listening", () => resume(Effect.succeed(sock)))
               sock.once("error", (err: Error) =>
                 resume(

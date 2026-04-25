@@ -1,199 +1,290 @@
-Plan 1 — SIP Front Proxy (UDP-only, Phase 1)
+# SIP Front Proxy — Implementation Plan
 
-1. Purpose and Scope
+## Context
 
-Build a stateless SIP front proxy that distributes calls to a pool of B2BUA workers, with deterministic routing, dialog stickiness, and graceful handling of worker failures. Phase 1 is UDP-only; TLS, TCP, and WSS support are explicitly deferred to Phase 2+.
-Out of scope for Phase 1:
+Replace the in-process Node `cluster.fork()` master/worker model (`src/cluster/Dispatcher.ts` + `WorkerEntry.ts`) with a standalone, stateless **SIP front proxy** that distributes calls to a pool of B2BUA workers running as a Kubernetes StatefulSet. Reference spec: [docs/todos/SIP-Front-Proxy.md](../../sipjsserver/docs/todos/SIP-Front-Proxy.md).
 
-TLS/TCP/WSS transports
-SIP Outbound (RFC 5626) — not needed without persistent connections
-Path header (RFC 3327) — Phase 2 with TLS
-Registrar functionality (proxy is purely transit)
-Media handling (RTP flows direct UA-to-UA or via separate media relay, out of scope)
-Authentication (handled by workers or downstream)
+The change unbundles two roles that are currently fused: (a) UDP packet ingress + dispatch, (b) B2BUA call processing. After the change, K8s schedules and supervises both, and the proxy's "load-balance to workers" behavior is just one routing strategy among a small family — a SIPp-tester-fanout strategy is one swap away.
 
-2. Functional Requirements
-2.1 Routing
+### Architectural constraints (user-imposed)
 
-FR-1 Route initial INVITE to a worker via consistent hashing on Call-ID.
-FR-2 Insert a single Record-Route header on every initial dialog-creating request (INVITE, SUBSCRIBE, REFER out-of-dialog), containing:
+1. **Dependency isolation.** `src/sip-front-proxy/` may only cross-reference the rest of the codebase through:
+   - the **network layer** (`SignalingNetwork`)
+   - the **SIP stack** (parser, generators, transaction primitives)
 
-Loose routing parameter (;lr)
-Worker assignment cookie (;w=<worker_id>)
-Cookie version (;v=1)
-HMAC signature (;sig=<truncated_hmac>) over (call_id || worker_id || version)
+   No imports of `CallStateCache`, `CallLimiter`, `CallDecisionEngine`, rules framework, `OverloadController`, `UdpTransport`, etc. Enforced by ESLint `no-restricted-imports`.
 
+2. **Don't re-implement the SIP stack inside the proxy.** Header parsing, message generation, Via/Route manipulation, retransmits — the proxy *uses* the stack, never re-implements it.
 
-FR-3 Route in-dialog requests (ACK on 2xx, BYE, re-INVITE, UPDATE, INFO, REFER, NOTIFY) by reading the top Route header:
+3. **Effect-Layer-first from day one.** Every swappable concern is its own `Layer` so simulated end-to-end tests over `SignalingNetwork.simulated()` are trivial — including single-process composition of `proxy + N workers + UAC + UAS + TestClock`.
 
-Verify HMAC; reject with 403 on mismatch
-Extract w= parameter, forward to that worker
-Strip the top Route from the message before forwarding (loose routing per RFC 3261 §16.4)
+4. **Pluggable routing strategy.** The proxy core takes a `RoutingStrategy` Layer; `LoadBalancer` is one impl, `ForwardAll` (test/dev), `SippFanout` (future), etc.
 
+5. **B2BUA impact is minimal:** correct Route / Record-Route handling and a new `DrainingState` service. Rules/decision logic untouched.
 
-FR-4 On worker assignment failure (worker dead per health check), fall back to consistent hash ring excluding dead workers, and forward; the new worker hydrates dialog state from Redis if needed.
-FR-5 Handle ACK on non-2xx responses via standard transaction layer (hop-by-hop, follows INVITE path).
+6. **`SO_REUSEPORT`** as the multi-process scaling primitive (not Node `cluster.fork` IPC).
 
-2.2 CANCEL Handling
+7. **Routing path is non-blocking.** Worker crashes / K8s LAN issues never delay or lock; ongoing-transaction loss on crash is acceptable.
 
-FR-6 Maintain a local LRU cache of (branch parameter → worker_id) for in-flight INVITE transactions, TTL 64 × T1 (default 32s).
-FR-7 On CANCEL, look up branch in LRU; if found, forward to same worker; if not found, drop with 481 Call/Transaction Does Not Exist.
+---
 
-2.3 Cluster Behavior
+## Architecture Decisions
 
-FR-8 Multiple proxy instances run active/active. Each instance must produce identical routing decisions for the same input message (pure function of message + shared config).
-FR-9 Worker membership (alive/dead) is sourced from a shared registry (etcd, Consul, or Kubernetes API watch). Update propagation target: <5s across all proxies.
-FR-10 HMAC signing key is shared across all proxy instances, distributed via Kubernetes Secret.
+### D1 — Package shape
+New top-level dir `src/sip-front-proxy/`, own `bin/proxy.ts` entry. One `package.json`, one Docker base image with two CMDs (`bin/main.js` for worker, `bin/proxy.js` for proxy). Workspace split deferred until a second consumer of the SIP stack exists.
 
-- the clustering behavior must be absrtacted in a effect layer (must cluster the 'worker to worker id' mapping)
+### D2 — `RoutingStrategy` seam (Split B: fat core, narrow strategy)
+The proxy core owns all SIP mechanics (classify, top-Route inspect/strip via stack helpers, Via push/pop via stack helpers, CANCEL branch→target LRU, forward via `SignalingNetwork`). The strategy never touches message bytes; the core never makes a routing policy decision.
 
-2.4 Health and Liveness
+```ts
+interface RoutingStrategy {
+  readonly name: string
+  selectForNewDialog(msg: ParsedSipMessage): Effect<SocketAddr, NoTargetAvailable>
+  decodeStickiness(routeParam: RouteParams, msg: ParsedSipMessage): Effect<DecodeResult, never>
+  encodeStickiness(target: SocketAddr, msg: ParsedSipMessage): Option<RouteParams>
+}
+type DecodeResult =
+  | { kind: 'forward'; target: SocketAddr }
+  | { kind: 'reject'; status: 403; reason: string }
+  | { kind: 'unknown' }
+```
 
-FR-11 Active health checks toward each worker via SIP OPTIONS keepalive every 2s. Three consecutive failures (configurable) mark worker as dead.
-FR-12 Expose Prometheus metrics endpoint on a separate HTTP port (not on SIP port).
-FR-13 Expose readiness and liveness endpoints for Kubernetes probes.
+Three strategies in Phase 1: `LoadBalancer`, `ForwardAll`, `SippFanout` (future). `WorkerRegistry`, `HealthProbe`, `HmacKeyProvider` are separate Layers that individual strategies depend on as needed.
 
-- strategy to maintain worker list as an independant layer
+### D3 — Worker identity & `WorkerRegistry`
 
-2.5 Resharding
+- **Identity:** `worker_id = K8s pod name`. Workers run as **StatefulSet** with headless Service for per-pod DNS. Cookie carries `w=<pod-name>`.
+- **Interface** — strictly non-suspending reads on the routing path:
+  ```ts
+  class WorkerRegistry extends Effect.Service<WorkerRegistry>()(...) {
+    snapshot: Effect.Effect<ReadonlyArray<WorkerEntry>>           // Ref.get
+    resolve: (id: WorkerId) => Effect.Effect<Option<WorkerEntry>> // Ref.get + HashMap
+    changes: Stream.Stream<RegistryEvent>                         // SubscriptionRef.changes
+  }
+  type WorkerEntry = {
+    id: WorkerId; address: SocketAddr
+    health: 'alive' | 'draining' | 'dead'
+    drainingSince?: Instant
+  }
+  ```
+- **Three implementations:** `kubernetesStatefulSet` (production, K8s API watch), `static` (env-driven, dev/local), `simulated` (test-controllable).
+- **Per-proxy local health view** in Phase 1 (no shared health store across proxy fleet).
 
-FR-14 When a worker is added or removed, the consistent hash ring updates atomically. Existing dialogs continue to be routed via their Record-Route cookie (no impact). Only new dialogs are affected by ring change.
-FR-15 Use a hash ring algorithm with bounded redistribution: rendezvous hashing or a Ketama-style ring (~150 vnodes per worker).
+### D4 — Routing-path non-blocking invariant
 
+1. All routing-path I/O is fire-and-forget UDP `sendto`.
+2. Registry & health state lives in `Ref`/`SubscriptionRef`; routing path reads synchronously.
+3. Background fibers (K8s watch, HealthProbe) update state in isolation; their failures cannot propagate to the request path.
+4. Forward errors are counted as a metric and dropped. UA retransmissions are the recovery mechanism.
 
-3. Non-Functional Requirements
-3.1 Performance
+### D5 — Draining model (OPTIONS-as-canonical, K8s as accelerant)
 
-NFR-1 P99 latency for routing decision and forward: <2 ms per message under steady load.
-NFR-2 Throughput per instance: ≥10,000 SIP messages/second on 4 vCPU.
-NFR-3 Memory footprint per instance: <512 MB at 100k concurrent dialogs.
-NFR-4 Cold start time: <3s from process start to ready.
+**Detection.** Worker's OPTIONS handler returns `200 OK` while serving, `503 Service Unavailable` + `Retry-After: 0` while draining. Proxy `HealthProbe` interprets `200`→`alive`, `503`→`draining` (sets `drainingSince`), timeout×threshold→`dead`. K8s watcher additionally treats `pod.metadata.deletionTimestamp != null` as immediate `draining` (shaves up to 2s). **Most-restrictive wins** if sources disagree.
 
-3.2 Reliability
+**Two-stage proxy behavior** (in `LoadBalancerStrategy`):
+- Initial INVITEs (`selectForNewDialog`): exclude `draining`+`dead` immediately.
+- In-dialog requests (`decodeStickiness`): forward to draining worker for `drainGraceMs` (default 5s); after grace, fall back via `selectForNewDialog` → new worker hydrates from Redis (best-effort).
+- ACK on 2xx and CANCEL: **always forward to original worker** (closing handshakes; only that worker has the INVITE transaction).
 
-NFR-5 No single point of failure. Minimum 2 proxy instances behind a VIP (keepalived) or DNS SRV with multiple records.
-NFR-6 Loss of one proxy instance must not drop in-flight calls (other instances handle equivalent routing via stateless function).
-NFR-7 Loss of one worker drops only that worker's dialogs; recovery via Redis hydration on reassigned worker is best-effort.
+**Worker-side change in B2BUA.** New service `src/b2bua/DrainingState.ts`: SIGTERM handler flips a `Ref<'serving'|'draining'>`. OPTIONS handler reads it. Worker keeps SIP stack alive through entire grace period (silence would mark it `dead`, not `draining`). `setTimeout(process.exit, ...)` exits before K8s `SIGKILL`.
 
-3.3 Security
+### D6 — Process model & scaling
 
-NFR-8 HMAC truncated to 12 characters (96 bits), SHA-256 base. Rotation supported with overlap window (accept old + new key for 1 hour).
-NFR-9 Reject malformed SIP messages early (parse-time validation), no propagation to workers.
-NFR-10 Source IP allowlist optional (configurable), enforced at proxy level.
-NFR-11 Maximum message size 10 KB; reject larger with 513 Message Too Large.
+- One process per pod, scale by K8s replicas. The "instance" in FR-8 = the pod.
+- `SO_REUSEPORT` set defensively on the bind call (multi-process per pod is a future config toggle, not a refactor).
+- No in-pod supervisor. K8s probes drive lifecycle.
+- CANCEL LRU cross-pod split: mitigated at upstream LB (consistent-hash VIP on src_ip, or DNS-SRV with client affinity). Documented as topology assumption.
 
-3.4 Observability
+### D7 — UDP bind path
 
-NFR-12 Structured logging (JSON), with correlation by Call-ID.
-NFR-13 Per-message tracing (OpenTelemetry) with sampling configurable (default 1%).
-NFR-14 Metrics exposed:
+- Proxy depends on `SignalingNetwork` via Effect Layer injection — never references `SignalingNetwork.real` directly. Production wiring provides `.real`; fake-stack tests provide `.simulated`. **This is what enables single-process `proxy + B2BUA + UAC + UAS + TestClock` composition.**
+- Proxy bypasses [`src/sip/UdpTransport.ts`](../../sipjsserver/src/sip/UdpTransport.ts) (which injects B2BUA's `OverloadController`). Proxy gets its own thin ingress with no overload brake in Phase 1.
+- Add `reusePort?: boolean` to `BindUdpOpts` in [`src/sip/SignalingNetwork.ts`](../../sipjsserver/src/sip/SignalingNetwork.ts) and plumb to `dgram.createSocket(...)`. Simulated path: no-op.
 
-sip_messages_total{method,direction,response_code}
-sip_routing_duration_seconds (histogram)
-sip_routing_decision_total{source="cookie|hash|fallback"}
-sip_routing_hmac_failure_total
-sip_worker_health{worker_id,state}
-sip_cancel_lookup_total{result="hit|miss"}
-sip_active_dialogs_estimate (best-effort gauge)
+### D8 — `SignalingNetwork` K8s fidelity
 
+No production-path changes needed. Pod-IP rotation is modeled at the `WorkerRegistry` layer (id stable, address mutable). Source-IP preservation, kube-proxy NAT, MTU are operational concerns (Service config, `externalTrafficPolicy: Local`). Verify during PR2 that simulated fabric supports rebinding a logical id to a new fake IP.
 
+### D9 — Layer composition shape (layered, not mega-layer)
 
-4. Technical Constraints
+```
+ProxyCoreLayer  : requires SignalingNetwork, RoutingStrategy, BindConfig
+LoadBalancerStrategyLive : Layer<RoutingStrategy>  requires WorkerRegistry, HmacKeyProvider
+ForwardAllStrategyLive   : Layer<RoutingStrategy>  requires nothing
 
-TC-1 Implementation language: Node.js or Bun (consistent with existing worker stack).
-TC-3 UDP socket: dgram module, single socket bound per instance with SO_REUSEPORT for multi-process scaling.
-TC-4 No persistent storage on the proxy; all state is either local-ephemeral (LRU for branches) or derived from message content.
-TC-5 Configuration via environment variables and Kubernetes ConfigMap; HMAC key via Secret.
+ProxyProductionLayer = ProxyCore + LoadBalancer + WorkerRegistry.k8s
+                                 + HealthProbe.optionsKeepalive
+                                 + HmacKeyProvider.k8sSecret
+                                 + SignalingNetwork.real
 
-5. Message Flow Specifications
-5.1 Initial INVITE (UAC → Worker)
-1. Receive INVITE on UDP port
-2. Parse top Via, Call-ID, Request-URI
-3. If Top Via has rport=, record source IP/port for response routing
-4. Compute worker = hash_ring.get(call_id), excluding dead workers
-5. Build cookie: w=<id>;v=1;sig=<hmac>
-6. Prepend Record-Route: <sip:<proxy_host>:<port>;lr;<cookie>>
-7. Add own Via header (top), with branch starting "z9hG4bK"
-8. Forward UDP datagram to worker:port
-5.2 In-Dialog Request (e.g., BYE)
-1. Receive BYE on UDP port
-2. Parse top Route header
-3. Validate Route hostname/port matches own identity
-4. Verify HMAC signature
-5. Extract w=<worker_id>
-6. Remove top Route from message
-7. Add own Via header (top)
-8. Forward to worker:port (worker may be different instance from initial; that's fine)
-5.3 Response (e.g., 200 OK)
-1. Receive 200 OK on UDP port from worker
-2. Parse Via list; top Via should be the proxy's own
-3. Pop top Via
-4. Forward UDP datagram to next Via's sent-by (with rport handling)
-5. No Route/Record-Route processing on responses
-5.4 CANCEL
-1. Receive CANCEL on UDP port
-2. Extract branch from top Via
-3. Lookup LRU: branch → worker_id
-4. If hit: forward to worker (same as the INVITE's worker)
-5. If miss: respond 481 Call/Transaction Does Not Exist
-6. Configuration Schema
-yamlproxy:
-  bind:
-    address: 0.0.0.0
-    port: 5060
-  identity:
-    advertised_host: proxy.example.com
-    advertised_port: 5060
-  workers:
-    discovery: kubernetes  # or static, etcd
-    namespace: sip
-    selector: app=b2bua-worker
-    health_check:
-      method: OPTIONS
-      interval_seconds: 2
-      failure_threshold: 3
-  hash_ring:
-    algorithm: rendezvous
-  hmac:
-    key_secret_ref: sip-proxy-hmac-key
-    truncate_chars: 12
-    rotation_overlap_seconds: 3600
-  cancel_cache:
-    max_entries: 100000
-    ttl_seconds: 32
-  observability:
-    metrics_port: 9090
-    log_level: info
-    tracing_sample_rate: 0.01
-7. Acceptance Criteria
+ProxyTestLayer (fixture) = ProxyCore + <strategy> + WorkerRegistry.simulated
+                                     + HealthProbe.manual
+                                     + HmacKeyProvider.static
+                                     + SignalingNetwork.simulated  (shared)
+```
 
-AC-1 End-to-end call establishment and teardown via SIPp scenarios (UAC + UAS) succeed at 100 calls/sec sustained for 10 minutes, 0 drops.
-AC-2 Killing one proxy instance during load test causes 0 dropped calls (other instance(s) absorb traffic).
-AC-3 Killing one worker during load test drops only calls assigned to that worker (≤1/N of active calls); recovered calls via Redis hydration: ≥95% within 10s.
-AC-4 HMAC tampering test: forged top Route with invalid sig is rejected with 403, no forwarding occurs, metric increments.
-AC-5 Resharding test: adding a new worker mid-load does not affect existing dialogs; new dialogs distribute across enlarged pool within 5s.
-AC-6 P99 routing latency under 2 ms at 5,000 messages/sec, measured by sip_routing_duration_seconds.
-AC-7 Memory stable (no leak) over 24-hour soak test at 1,000 calls/sec.
+Wiring lives in `bin/proxy.ts` (production) and `tests/support/proxy-fakeStack.ts` (tests). Core never changes between them.
 
-8. Phase 2+ Deferred Items (Reference)
-These are explicitly not in Phase 1 but should not be designed against:
+### D10 — Three test suites
 
-TLS termination and persistent connection management
-SIP Outbound (RFC 5626): flow-token, +sip.instance, reg-id
-Path header (RFC 3327) for registrar interaction
-Multiple Record-Route (RFC 5658) for transport transition
-TCP transport (RFC 3261 §18.1.1 large-message fallback)
-WebSocket transport (RFC 7118)
-mTLS client cert authentication
-NAT traversal (rport, force-rport) — minimal handling only in Phase 1
+1. **`tests/sip-front-proxy/transit-only/*.test.ts`** — Alice → Proxy(ForwardAll) → Bob. No B2BUA. Validates pure transit mechanics (Record-Route insert, Route strip per RFC 3261 §16.4, Via push/pop, CANCEL branch correlation, response routing by Via, malformed-message rejection). Used to localize proxy bugs without B2BUA noise.
+2. **`tests/sip-front-proxy/load-balancer/*.test.ts`** — Alice → Proxy(LoadBalancer → N workers). Strategy-specific behavior: distribution, HMAC, draining, fallback, hydration.
+3. **`tests/sip-front-proxy/transparency/*.test.ts`** — topology-parameterized (`topologyTest(name, body)` runs each scenario through `[direct, withProxy]`). Asserts behavior, not byte-exact bytes. Phase 1 ships 5–10 happy-path scenarios; existing `tests/fullcall/` are NOT mass-migrated (lazy rollout).
 
-9. Risks and Mitigations
-RiskImpactMitigationHash ring inconsistency across proxies during membership changeMisrouted messagesAtomic ring updates from single source (etcd/K8s watch); cookie absorbs in-flight transitionsHMAC key rotation desyncRouting failuresOverlap window with dual-key acceptanceUDP packet loss (no retransmit at proxy)Higher RTX from UAsWorkers handle SIP retransmissions; proxy is stateless transitLRU cache full under burst CANCEL loadCANCELs misroutedSize cache for 10× peak INVITE rate; metric on eviction rateProxy hostname in Record-Route resolves to wrong IPIn-dialog routing breaksUse IP literal or strict DNS; document advertised_host requirement
-10. Deliverables
+### D11 — `ForwardAllStrategy` (third built-in)
 
-D-1 Proxy implementation (Node.js/Bun) with unit and integration tests
-D-2 Helm chart for Kubernetes deployment
-D-3 SIPp test scenarios (initial call, re-INVITE, CANCEL, BYE)
-D-4 Grafana dashboard with metrics from §3.4
-D-5 Runbook (rotation of HMAC key, worker pool scaling, troubleshooting)
-D-6 Architecture decision record (ADR) documenting key choices
+Trivial alongside `LoadBalancer` and (future) `SippFanout`. `selectForNewDialog`→static target; `encodeStickiness`→`;target=<addr>` cookie (no HMAC); `decodeStickiness`→parse and forward. ~30 LOC. Used by the transit-only test suite and as a dev/local default.
+
+### D12 — B2BUA worker-side verification (transparency prerequisite)
+
+For `withProxy` topology to pass transparently, audit & patch as needed on the worker side:
+1. UAS-side mirrors `Record-Route` in 2xx responses to inbound INVITE (RFC 3261 §12.1.1).
+2. UAS-side honors `Route` headers in inbound in-dialog requests (RFC 3261 §12.2.2).
+3. Worker-originated A-leg in-dialog requests build `Route` sets including the proxy's `Record-Route` (RFC 3261 §12.2.1.1).
+4. **New**: OPTIONS handler reads `DrainingState.mode` → `200` vs `503 + Retry-After: 0`.
+
+The transparency suite is the verification harness — gaps surface as failures and are patched.
+
+### D13 — Hash ring algorithm
+**Rendezvous (HRW)**. ~150ns/lookup, no virtual-node bookkeeping, 1/N keys move on membership change. Implemented as a pure function over `(callId, ReadonlyArray<WorkerEntry>) → WorkerEntry`.
+
+### D14 — HMAC key source & rotation
+K8s Secret mounted as file. `HmacKeyProvider.kubernetesSecret` uses **fs-watch on the mount path** to reload on Secret update — no pod restart. NFR-8 overlap window via a second mounted file `HMAC_KEY_PREVIOUS`; provider exposes `verify(input, sig) → boolean` checking against both, `sign(input)` always uses current.
+
+### D15 — Production cutover
+**Blue-green at K8s namespace level.** Deploy proxy + new-style worker StatefulSet in a separate namespace. Drain traffic via DNS SRV weight or VIP redirect. Rollback is instant. Slower full cut but lowest risk given untested call-state hydration paths.
+
+---
+
+## Resilience Architecture Document (D-RES, Phase 1 deliverable)
+
+`docs/sip-front-proxy/resilience-model.md` — must cover:
+
+1. **Per-message-type behavior matrix** for worker states `alive` / `draining-pre-grace` / `draining-post-grace` / `dead`.
+2. **Timing assumptions table:**
+
+   | Parameter | Value | Why |
+   |---|---|---|
+   | K8s `terminationGracePeriodSeconds` | ≥ 200s (180s + safety) | RFC 3261 Timer C: max INVITE establishment is 3 min. CANCELs to in-flight INVITEs must reach the original worker for the entire window. |
+   | `drainGraceMs` (proxy) | 5s default | Bound for in-dialog re-INVITE/UPDATE/INFO/REFER fallback. ACK/CANCEL exempt. |
+   | `HealthProbe` interval × threshold | 2s × 3 = 6s | Worst-case detection lag for hard crash without K8s signal. |
+   | HMAC overlap window | 1h (NFR-8) | Key rotation across proxy fleet. |
+
+3. **Failure modes NOT mitigated:** UDP loss in proxy→worker hop, K8s watch outage (graceful degradation only), multi-pod CANCEL LRU split (relies on upstream LB src-IP affinity).
+4. **Recovery flow** when fallback happens: proxy → new worker → Redis hydration → 481 if hydration miss.
+
+---
+
+## PR Slicing (seven PRs, each independently mergeable)
+
+### PR 1 — Foundation ✅ DONE (2026-04-25)
+**Scope:** create `src/sip-front-proxy/` skeleton + `bin/proxy.ts` that binds UDP and echoes. ESLint `no-restricted-imports` rule scoped to `src/sip-front-proxy/**` banning `src/{b2bua,call,decision,redis,cdr,cluster,http,observability}/**`. Add `reusePort?: boolean` to `BindUdpOpts` in `src/sip/SignalingNetwork.ts`, plumb to `dgram`.
+**Critical files:** `src/sip/SignalingNetwork.ts`, `bin/proxy.ts` (new), `src/sip-front-proxy/index.ts` (new), `eslint.config.*`.
+**Verification:** unit test that binds and echoes; CI test that introduces a forbidden import and asserts the lint rule fails the build.
+**Status:** Implemented. New files: `bin/proxy.ts`, `src/sip-front-proxy/index.ts`, `eslint.config.js` (flat), `tsconfig.bin.json`, `tests/sip-front-proxy/transit-only/bind-echo.test.ts`, `tests/sip-front-proxy/lint-negative/{forbidden-import.fixture.ts,forbidden-import.test.ts}`. Modified: `src/sip/SignalingNetwork.ts` (`reusePort?` plumbed to `dgram.createSocket`), `package.json` (`proxy:dev`, `lint`, expanded `build`/`typecheck`), `.gitignore` (`dist-bin/`). `npm run typecheck` clean; full `npm run test:fake` 602 passed / 1 skipped, no regressions. Carry-forward: future `bin/*.ts` should reuse `tsconfig.bin.json`; ESLint install pulled vulns to revisit in PR6.
+
+### PR 2 — `ProxyCoreLayer` + `ForwardAllStrategy` + transit-only test suite ✅ DONE (2026-04-25)
+**Scope:** `RoutingStrategy` interface; `ProxyCoreLayer` (classify / top-Route inspect+strip / Via push+pop / CANCEL LRU / forward) — using stack helpers from `src/sip/`; `ForwardAllStrategy`; `proxyOnlyFakeStack` fixture.
+**Critical files:** `src/sip-front-proxy/RoutingStrategy.ts` (new), `src/sip-front-proxy/ProxyCore.ts` (new), `src/sip-front-proxy/strategies/ForwardAll.ts` (new), `src/sip-front-proxy/CancelBranchLru.ts` (new), `tests/support/proxy-only-fakeStack.ts` (new), `tests/sip-front-proxy/transit-only/*.test.ts` (new).
+**Verification:** Alice → Proxy(ForwardAll) → Bob full INVITE/200/ACK/BYE; CANCEL during ringing; re-INVITE in-dialog; malformed messages rejected; response routing by Via.
+**Status:** Implemented. RFC 3261 §16.3, §16.4, §16.6.4, §16.6.5, §16.7.3, §16.10/§17.2.3 honoured; Max-Forwards decrement; stateless (no retransmits). 7 transit-only tests pass; full fake suite 609 passed (was 602; +7). `bin/proxy.ts` now drives a real `ForwardAll` proxy via `PROXY_FORWARD_TARGET=host:port`. **Carry-forward for PR3b:** `CancelBranchLru` is currently keyed on the proxy's outbound branch but at CANCEL time the upstream UAC's branch is what's on top — `ForwardAll` papers over this via fallback to `selectForNewDialog`; `LoadBalancer` must re-key the LRU on upstream branch (or Call-ID+CSeq). Local header helpers (`removeFirstHeader`, `prependHeader`, `upsertHeader`, `buildRecordRouteValue`) live in `ProxyCore.ts` — promote to `src/sip/MessageHelpers.ts` if B2BUA needs them in PR4. ESLint flat config now uses `tseslint.parser` for the proxy block (default parser can't read `import type`).
+
+### PR 3a — `WorkerRegistry` + `HmacKeyProvider` ✅ DONE (2026-04-25)
+**Scope:** `WorkerRegistry` interface; `static` and `simulated` implementations. `HmacKeyProvider` interface; `static` impl with rotation overlap. No strategy yet.
+**Critical files:** `src/sip-front-proxy/registry/WorkerRegistry.ts` (new), `src/sip-front-proxy/registry/static.ts` (new), `src/sip-front-proxy/registry/simulated.ts` (new), `src/sip-front-proxy/security/HmacKeyProvider.ts` (new), tests for each.
+**Verification:** unit tests on registry snapshot/resolve/changes semantics; simulated registry add/remove/health-flip; HMAC sign/verify; rotation overlap (verify accepts both keys, sign uses current).
+**Status:** Implemented. Followed project's `ServiceMap.Service` convention (not `Effect.Service` as plan suggested). `WorkerRegistry.snapshot/resolve` are pure `Ref.get` (D4 invariant) — kept a plain `Ref<HashMap>` + `PubSub<RegistryEvent>` rather than `SubscriptionRef` (which emits whole-state, not deltas). HMAC uses HMAC-SHA256 + `crypto.timingSafeEqual`; rotation accepts current OR previous kid. Tests: 38 passed across registry + security; full fake suite 645 passed. **Carry-forward for PR3b:** `Stream.fromPubSub` only emits post-subscription events — load-balancer tests must subscribe before publishing if they assert on `changes`. `Effect.fork` is dead in v4 — use `Effect.forkChild`. `Layer.scoped` → `Layer.effect`; `Layer.scopedDiscard` → `Layer.effectDiscard`; no `Layer.scopedContext` (use `Layer.effectServices`). `drainingSince` is plain epoch-ms `number` (matches `CancelBranchLru.Entry.expiresAtMs`), not Effect's `Instant`.
+
+### PR 3b — `LoadBalancerStrategy` + load-balancer test suite
+**Scope:** `LoadBalancerStrategy` (rendezvous HRW selection, HMAC signed cookie, fallback via own `selectForNewDialog`); canonical `proxyFakeStack` fixture; load-balancer test suite.
+**Critical files:** `src/sip-front-proxy/strategies/LoadBalancer.ts` (new), `src/sip-front-proxy/strategies/RendezvousHash.ts` (new), `tests/support/proxy-fakeStack.ts` (new), `tests/sip-front-proxy/load-balancer/*.test.ts` (new).
+**Verification:** distribution across N workers (chi-square ish); HMAC tampering rejected with 403; unresolvable id falls back via hash ring; simulated worker add/remove resharding affects only new dialogs.
+
+### PR 4 — `DrainingState` + `HealthProbe` + draining behavior + transparency suite
+**Scope:** B2BUA-side: `src/b2bua/DrainingState.ts` + OPTIONS handler integration. Proxy-side: `HealthProbe` interface + `optionsKeepalive` + `manual` impls, registry health annotation. Audit B2BUA worker for D12 items 1–3 and patch any gaps surfaced. Transparency test suite. **Ship `docs/sip-front-proxy/resilience-model.md` (D-RES).**
+**Critical files:** `src/b2bua/DrainingState.ts` (new), worker SIP OPTIONS handler (existing, locate and modify), `src/sip-front-proxy/health/HealthProbe.ts` (new), `tests/support/topologies.ts` (new), `tests/sip-front-proxy/transparency/*.test.ts` (new), `docs/sip-front-proxy/resilience-model.md` (new).
+**Verification:** draining worker stops new INVITEs within one probe interval; in-dialog flows continue for `drainGraceMs` then fall back; CANCEL still reaches draining worker; transparency scenarios pass under both `[direct, withProxy]` topologies.
+
+### PR 5 — Kubernetes integration
+**Scope:** `WorkerRegistry.kubernetesStatefulSet` impl using `@kubernetes/client-node` watch on Pods. Deletion-timestamp accelerant for draining. Helm chart: proxy `Deployment`, worker `StatefulSet`, headless `Service`, `ServiceAccount` + RBAC for proxy to watch Pods, `Secret` for HMAC, `ConfigMap` for non-secret config.
+**Critical files:** `src/sip-front-proxy/registry/kubernetes.ts` (new), `deploy/helm/sip-front-proxy/*` (new), `deploy/helm/b2bua-worker/*` (new or update).
+**Verification:** deploy to local `kind` cluster in CI; SIPp scenario through `LoadBalancer` Service; `kubectl delete pod` triggers `draining` annotation before OPTIONS reflects it.
+
+### PR 6 — Observability + cutover + retire `src/cluster/`
+**Scope:** all metrics from spec §3.4 (`sip_messages_total`, `sip_routing_duration_seconds`, `sip_routing_decision_total`, `sip_routing_hmac_failure_total`, `sip_worker_health`, `sip_cancel_lookup_total`, `sip_active_dialogs_estimate`); OpenTelemetry tracing with sample rate; structured JSON logging with Call-ID correlation; **blue-green cutover plan + runbook**; delete `src/cluster/{Dispatcher,WorkerEntry,IpcProtocol,IpcTransport}.ts` once cutover succeeds.
+**Critical files:** `src/sip-front-proxy/observability/*` (new), `docs/sip-front-proxy/cutover-runbook.md` (new), `docs/sip-front-proxy/hmac-rotation-runbook.md` (new), deletions from `src/cluster/`.
+**Verification:** Grafana dashboard renders all metrics under load (`AC-6` P99 routing latency <2 ms at 5K msg/s); 24-hour soak test (`AC-7` no leak); blue-green dry run on staging.
+
+---
+
+## Critical Files Touched
+
+### New (proxy)
+- `bin/proxy.ts`
+- `src/sip-front-proxy/{index,ProxyCore,RoutingStrategy,CancelBranchLru}.ts`
+- `src/sip-front-proxy/strategies/{ForwardAll,LoadBalancer,RendezvousHash}.ts`
+- `src/sip-front-proxy/registry/{WorkerRegistry,static,simulated,kubernetes}.ts`
+- `src/sip-front-proxy/health/HealthProbe.ts`
+- `src/sip-front-proxy/security/HmacKeyProvider.ts`
+- `src/sip-front-proxy/observability/*`
+
+### Modified (existing)
+- `src/sip/SignalingNetwork.ts` — add `reusePort?: boolean` to `BindUdpOpts`, plumb to `dgram`.
+- B2BUA worker OPTIONS handler — read `DrainingState.mode`.
+- B2BUA worker UAS code — verify Record-Route mirroring; verify Route-set construction on worker-originated A-leg in-dialog requests.
+- `eslint.config.*` — add `no-restricted-imports` rule for `src/sip-front-proxy/**`.
+- `package.json` / `Dockerfile` — add `bin/proxy.js` build target and CMD.
+
+### New (B2BUA worker)
+- `src/b2bua/DrainingState.ts`
+
+### New (tests)
+- `tests/support/{proxy-only-fakeStack,proxy-fakeStack,topologies}.ts`
+- `tests/sip-front-proxy/{transit-only,load-balancer,transparency}/*.test.ts`
+
+### New (deploy)
+- `deploy/helm/sip-front-proxy/*`
+- `deploy/helm/b2bua-worker/*` (StatefulSet conversion if needed)
+
+### New (docs)
+- `docs/sip-front-proxy/resilience-model.md` (D-RES, hard prereq for PR4)
+- `docs/sip-front-proxy/cutover-runbook.md`
+- `docs/sip-front-proxy/hmac-rotation-runbook.md`
+
+### Deleted (PR6)
+- `src/cluster/{Dispatcher,WorkerEntry,IpcProtocol,IpcTransport,HashUtils}.ts`
+
+---
+
+## Reused (do NOT reimplement)
+
+- **SIP parser:** `src/sip/Parser.ts` — proxy uses for inbound message parsing.
+- **Generators:** `src/sip/generators.ts` — proxy uses for any message it constructs (synthesized 503/481 responses, OPTIONS keepalive in HealthProbe). Also, the existing Via push/pop and Record-Route helpers.
+- **Message helpers:** `src/sip/MessageHelpers.ts` — for header inspection.
+- **Serializer:** `src/sip/Serializer.ts` — for outbound bytes.
+- **`SignalingNetwork`:** `src/sip/SignalingNetwork.ts` — production `.real` and test `.simulated` variants. Proxy depends on the interface.
+
+The CANCEL branch LRU is ~30 LOC of `Effect-friendly map with TTL` and is a proxy-specific concern (RFC 3261 §16.10 client-transaction-side correlation that the existing `TransactionLayer` does not expose since it's worker-side). Implement in `src/sip-front-proxy/CancelBranchLru.ts` rather than extending the existing transaction layer.
+
+---
+
+## Verification Strategy (end-to-end)
+
+### Per-PR
+Each PR ships its own test suite (see "Verification" line per PR above). All tests run under `vitest.config.fake.ts` (TestClock, simulated network) — no real cluster needed for PR1–PR4.
+
+### Phase 1 acceptance (after PR6)
+- `npm run test:fake` — full transit-only + load-balancer + transparency suites pass.
+- `npm run test:ci` — same plus medium-tier live tests including SIPp scenarios from spec §10 D-3.
+- `kind`-based integration test in CI: full call through deployed proxy + worker StatefulSet; `kubectl delete pod` mid-load; verify proxy health annotation flips and call drops are bounded.
+- Spec acceptance criteria (`AC-1` through `AC-7` from `docs/todos/SIP-Front-Proxy.md`) — explicit pass/fail per criterion in the PR6 verification report.
+
+### Continuous after Phase 1
+- `tests/sip-front-proxy/transparency/*` runs on every PR touching B2BUA or proxy → guards the transparency claim against regressions.
+- Existing `tests/fullcall/*` continues to test B2BUA logic without proxy noise.
+
+---
+
+## Phase 2+ Deferred (Reference)
+
+Per spec §8, explicitly NOT designed against in Phase 1: TLS/TCP/WSS, SIP Outbound (RFC 5626), Path header (RFC 3327), multiple Record-Route (RFC 5658), mTLS, full NAT traversal. Additionally deferred from this plan: shared cross-proxy health view, multi-process-per-pod via `SO_REUSEPORT` (config toggle exists, not exploited), `SippFanoutStrategy`, mass migration of existing `tests/fullcall/` to topology-parameterized form (opportunistic in 1.5+).

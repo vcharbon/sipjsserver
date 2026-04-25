@@ -4,9 +4,11 @@
   "type": "module",
   "scripts": {
     "dev": "CHOKIDAR_USEPOLLING=true tsx --env-file=.env --watch src/main.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "proxy:dev": "tsx bin/proxy.ts",
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.bin.json",
     "start": "node --env-file=.env dist/main.js",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.bin.json",
+    "lint": "eslint",
     "test": "npm run test:fake && npm run test:live:short",
     "test:ci": "npm run test:fake && npm run test:live:medium",
     "test:nightly": "npm run test:fake && npm run test:live:long",
@@ -38,11 +40,14 @@
   "devDependencies": {
     "@effect/language-service": "latest",
     "@effect/vitest": "^4.0.0-beta.43",
+    "@types/eslint": "^9.6.1",
     "@types/ioredis": "^4.28.10",
     "@types/node": "^22.0.0",
+    "eslint": "^10.2.1",
     "sip-parser": "^1.5.1",
     "tsx": "^4.0.0",
     "typescript": "^5.8.0",
+    "typescript-eslint": "^8.59.0",
     "vitest": "^4.1.2"
   }
 }
