@@ -23,10 +23,8 @@ import { TestClock } from "effect/testing"
 import { customParser } from "../../../src/sip/parsers/custom/index.js"
 import { SignalingNetwork } from "../../../src/sip/SignalingNetwork.js"
 import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
-import {
-  bindUdpEndpoint,
-  proxyOnlyFakeStackLayer,
-} from "../../support/proxy-only-fakeStack.js"
+import { proxyOnlyFakeStackLayer } from "../../support/proxy-only-fakeStack.js"
+import { bindRecordedEndpoint, runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -83,10 +81,18 @@ const buildInvite = () =>
 
 describe("sip-front-proxy/transit-only — INVITE / 200 / ACK / BYE", () => {
   it.effect("happy-path call traverses the proxy in both directions", () =>
-    Effect.gen(function* () {
+    runProxyScenario(
+      {
+        name: "transit-only.invite-200-ack-bye",
+        description:
+          "Alice → Proxy(ForwardAll) → Bob. Full INVITE/200/ACK/BYE round-trip;\n" +
+          "asserts Record-Route insertion (§16.6.5), Via push/pop (§16.6.4 / §16.7.3),\n" +
+          "Route stripping on in-dialog (§16.4), and a clean ending state.",
+      },
+      Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* bindUdpEndpoint(ALICE)
-      const bob = yield* bindUdpEndpoint(BOB)
+      const alice = yield* bindRecordedEndpoint("alice", ALICE)
+      const bob = yield* bindRecordedEndpoint("bob", BOB)
 
       // ── 1. Alice → Proxy: INVITE ────────────────────────────────────
       yield* alice.send(buildInvite(), proxy.localAddress.port, proxy.localAddress.ip)
@@ -258,6 +264,7 @@ describe("sip-front-proxy/transit-only — INVITE / 200 / ACK / BYE", () => {
       const net = yield* SignalingNetwork
       const undelivered = yield* net.drainUndeliverable()
       expect(undelivered.length).toBe(0)
-    }).pipe(Effect.provide(layer))
+      })
+    ).pipe(Effect.provide(layer))
   )
 })

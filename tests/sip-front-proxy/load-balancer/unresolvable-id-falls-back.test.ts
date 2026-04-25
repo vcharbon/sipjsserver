@@ -29,6 +29,7 @@ import {
   WorkerId,
 } from "../../../src/sip-front-proxy/index.js"
 import { proxyFakeStack, pumpFor } from "../../support/proxy-fakeStack.js"
+import { runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -67,13 +68,22 @@ describe("sip-front-proxy/load-balancer — unresolvable id falls back", () => {
   it.effect(
     "in-dialog BYE after target worker removal lands on the surviving live worker",
     () =>
-      Effect.gen(function* () {
+      runProxyScenario(
+        {
+          name: "load-balancer.unresolvable-id-falls-back",
+          description:
+            "INVITE pinned to A round-trips so Alice has the RR cookie; A is then\n" +
+            "removed from the registry; in-dialog BYE with intact cookie verifies but\n" +
+            "resolve(A) returns none, so the proxy falls back via selectForNewDialog\n" +
+            "to B (the only surviving live worker) — no 403, no drop.",
+        },
+        Effect.gen(function* () {
         const proxy = yield* ProxyCore
         const callId = findCallIdMappingTo(W_A)
 
-        const alice = yield* fx.bindUac(ALICE)
-        const aEp = yield* fx.bindUasFor(W_A)
-        const bEp = yield* fx.bindUasFor(W_B)
+        const alice = yield* fx.bindRecordedUac("alice", ALICE)
+        const aEp = yield* fx.bindRecordedUasFor("worker-a", W_A)
+        const bEp = yield* fx.bindRecordedUasFor("worker-b", W_B)
 
         // ── 1. INVITE → A ────────────────────────────────────────────
         const invite = Buffer.from(
@@ -169,6 +179,7 @@ describe("sip-front-proxy/load-balancer — unresolvable id falls back", () => {
         const byeParsed = parse(byeAtB!.raw)
         if (byeParsed.type !== "request") throw new Error("expected request")
         expect(byeParsed.method).toBe("BYE")
-      }).pipe(Effect.provide(fx.layer))
+        })
+      ).pipe(Effect.provide(fx.layer))
   )
 })

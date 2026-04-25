@@ -19,10 +19,8 @@ import { Effect } from "effect"
 import { TestClock } from "effect/testing"
 import { customParser } from "../../../src/sip/parsers/custom/index.js"
 import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
-import {
-  bindUdpEndpoint,
-  proxyOnlyFakeStackLayer,
-} from "../../support/proxy-only-fakeStack.js"
+import { proxyOnlyFakeStackLayer } from "../../support/proxy-only-fakeStack.js"
+import { bindRecordedEndpoint, runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -57,10 +55,18 @@ const parse = (raw: Buffer) => {
 
 describe("sip-front-proxy/transit-only — in-dialog re-INVITE Route stripping", () => {
   it.effect("re-INVITE with Route pointing at proxy: Route stripped, forwarded to decoded target", () =>
-    Effect.gen(function* () {
+    runProxyScenario(
+      {
+        name: "transit-only.reinvite-in-dialog",
+        description:
+          "Mid-dialog re-INVITE from Alice carrying Route: <proxy;target=bob;lr>;\n" +
+          "asserts Route stripping (§16.4), Via push, fresh Record-Route insertion,\n" +
+          "and that decodeStickiness drives the request to Bob.",
+      },
+      Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* bindUdpEndpoint(ALICE)
-      const bob = yield* bindUdpEndpoint(BOB)
+      const alice = yield* bindRecordedEndpoint("alice", ALICE)
+      const bob = yield* bindRecordedEndpoint("bob", BOB)
 
       // Simulated mid-dialog re-INVITE. The dialog's existing route set
       // (built from the proxy's earlier Record-Route on the original
@@ -105,6 +111,7 @@ describe("sip-front-proxy/transit-only — in-dialog re-INVITE Route stripping",
       const rrHeader = parsed.headers.find((h) => h.name.toLowerCase() === "record-route")
       expect(rrHeader).toBeDefined()
       expect(rrHeader!.value).toContain(`target=${BOB.host}:${BOB.port}`)
-    }).pipe(Effect.provide(layer))
+      })
+    ).pipe(Effect.provide(layer))
   )
 })

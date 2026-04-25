@@ -42,6 +42,7 @@ import {
   WorkerId,
 } from "../../../src/sip-front-proxy/index.js"
 import { proxyFakeStack, pumpFor } from "../../support/proxy-fakeStack.js"
+import { runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -84,15 +85,23 @@ const parse = (raw: Buffer) => {
 
 describe("sip-front-proxy/load-balancer — CANCEL keyed by (Call-ID, CSeq)", () => {
   it.effect("CANCEL reaches the original worker even after registry change", () =>
-    Effect.gen(function* () {
+    runProxyScenario(
+      {
+        name: "load-balancer.cancel-keyed-by-callid-cseq",
+        description:
+          "Two workers (A, B) initially. INVITE to A; add worker C; CANCEL with the\n" +
+          "same (Call-ID, CSeq) and the upstream branch reaches A — not B, not C —\n" +
+          "proving the LRU is keyed on (Call-ID, CSeq) per RFC 3261 §9.1.",
+      },
+      Effect.gen(function* () {
       const proxy = yield* ProxyCore
 
       // Pick a Call-ID that hashes to A under the initial 2-worker set.
       const callId = findCallIdMappingTo(W_A)
 
-      const alice = yield* fx.bindUac(ALICE)
-      const aEp = yield* fx.bindUasFor(W_A)
-      const bEp = yield* fx.bindUasFor(W_B)
+      const alice = yield* fx.bindRecordedUac("alice", ALICE)
+      const aEp = yield* fx.bindRecordedUasFor("worker-a", W_A)
+      const bEp = yield* fx.bindRecordedUasFor("worker-b", W_B)
 
       // ── 1. INVITE → must reach A ─────────────────────────────────────
       const inviteBranch = "z9hG4bK-alice-inv"
@@ -124,7 +133,7 @@ describe("sip-front-proxy/load-balancer — CANCEL keyed by (Call-ID, CSeq)", ()
 
       // ── 2. Add worker C — would shift rendezvous winner for some keys ─
       yield* fx.addSimulatedWorker(W_C, ADDR_C)
-      const cEp = yield* fx.bindUasFor(W_C)
+      const cEp = yield* fx.bindRecordedUasFor("worker-c", W_C)
 
       // ── 3. CANCEL with the same Call-ID + CSeq, upstream branch ──────
       // RFC 3261 §9.1 — UAC reuses the INVITE's top-Via branch on CANCEL.
@@ -157,6 +166,7 @@ describe("sip-front-proxy/load-balancer — CANCEL keyed by (Call-ID, CSeq)", ()
       const cm = parse(cancelAtA!.raw)
       if (cm.type !== "request") throw new Error("expected CANCEL request")
       expect(cm.method).toBe("CANCEL")
-    }).pipe(Effect.provide(fx.layer))
+      })
+    ).pipe(Effect.provide(fx.layer))
   )
 })

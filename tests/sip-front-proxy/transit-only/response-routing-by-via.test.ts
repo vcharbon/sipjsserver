@@ -13,10 +13,8 @@ import { Effect } from "effect"
 import { TestClock } from "effect/testing"
 import { customParser } from "../../../src/sip/parsers/custom/index.js"
 import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
-import {
-  bindUdpEndpoint,
-  proxyOnlyFakeStackLayer,
-} from "../../support/proxy-only-fakeStack.js"
+import { proxyOnlyFakeStackLayer } from "../../support/proxy-only-fakeStack.js"
+import { bindRecordedEndpoint, runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -48,10 +46,18 @@ const parse = (raw: Buffer) => {
 
 describe("sip-front-proxy/transit-only — response routing by Via", () => {
   it.effect("200 OK with our Via on top is forwarded to the next-Via address", () =>
-    Effect.gen(function* () {
+    runProxyScenario(
+      {
+        name: "transit-only.response-routing-by-via.our-via-on-top-forwards",
+        description:
+          "Bob sends a 200 OK whose top Via is the proxy's own; the proxy verifies\n" +
+          "the sent-by host:port match, pops the top Via, and forwards to the\n" +
+          "next-Via address per RFC 3261 §16.7.3.",
+      },
+      Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* bindUdpEndpoint(ALICE)
-      const bob = yield* bindUdpEndpoint(BOB)
+      const alice = yield* bindRecordedEndpoint("alice", ALICE)
+      const bob = yield* bindRecordedEndpoint("bob", BOB)
 
       // Synthesize a 200 OK as Bob would send it: top Via is the proxy
       // (would be popped), second Via is Alice. We construct it directly
@@ -81,14 +87,22 @@ describe("sip-front-proxy/transit-only — response routing by Via", () => {
       expect(parsed.status).toBe(200)
       expect(parsed.parsed.vias.length).toBe(1)
       expect(parsed.parsed.vias[0]!.host).toBe(ALICE.host)
-    }).pipe(Effect.provide(layer))
+      })
+    ).pipe(Effect.provide(layer))
   )
 
   it.effect("response with foreign top Via (not us) is dropped", () =>
-    Effect.gen(function* () {
+    runProxyScenario(
+      {
+        name: "transit-only.response-routing-by-via.foreign-top-via-dropped",
+        description:
+          "Bob sends a 200 OK whose top Via belongs to neither us nor anyone we\n" +
+          "stamped; the proxy refuses to relay (RFC 3261 §16.7.3 sent-by check).",
+      },
+      Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* bindUdpEndpoint(ALICE)
-      const bob = yield* bindUdpEndpoint(BOB)
+      const alice = yield* bindRecordedEndpoint("alice", ALICE)
+      const bob = yield* bindRecordedEndpoint("bob", BOB)
 
       const okBuf = Buffer.from(
         [
@@ -110,6 +124,7 @@ describe("sip-front-proxy/transit-only — response routing by Via", () => {
 
       // Alice gets nothing — proxy refused to relay.
       expect(yield* alice.poll()).toBeNull()
-    }).pipe(Effect.provide(layer))
+      })
+    ).pipe(Effect.provide(layer))
   )
 })

@@ -12,10 +12,8 @@ import { Effect } from "effect"
 import { TestClock } from "effect/testing"
 import { customParser } from "../../../src/sip/parsers/custom/index.js"
 import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
-import {
-  bindUdpEndpoint,
-  proxyOnlyFakeStackLayer,
-} from "../../support/proxy-only-fakeStack.js"
+import { proxyOnlyFakeStackLayer } from "../../support/proxy-only-fakeStack.js"
+import { bindRecordedEndpoint, runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -47,10 +45,17 @@ const parse = (raw: Buffer) => {
 
 describe("sip-front-proxy/transit-only — malformed-message handling", () => {
   it.effect("garbage payload is dropped silently — no reply, no crash", () =>
-    Effect.gen(function* () {
+    runProxyScenario(
+      {
+        name: "transit-only.malformed-message-rejected.garbage-payload-dropped",
+        description:
+          "Alice sends an unparseable UDP payload to the proxy; the parser fails\n" +
+          "and the proxy drops silently per RFC 3261 §16.3 — no reply, no crash.",
+      },
+      Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* bindUdpEndpoint(ALICE)
-      const bob = yield* bindUdpEndpoint(BOB)
+      const alice = yield* bindRecordedEndpoint("alice", ALICE)
+      const bob = yield* bindRecordedEndpoint("bob", BOB)
 
       yield* alice.send(
         Buffer.from("THIS IS NOT A SIP MESSAGE\r\n\r\n"),
@@ -62,14 +67,22 @@ describe("sip-front-proxy/transit-only — malformed-message handling", () => {
       // Neither side observed anything.
       expect(yield* alice.poll()).toBeNull()
       expect(yield* bob.poll()).toBeNull()
-    }).pipe(Effect.provide(layer))
+      })
+    ).pipe(Effect.provide(layer))
   )
 
   it.effect("INVITE with Max-Forwards: 0 is rejected with 483 to the source", () =>
-    Effect.gen(function* () {
+    runProxyScenario(
+      {
+        name: "transit-only.malformed-message-rejected.max-forwards-zero-rejected",
+        description:
+          "Alice sends an INVITE with Max-Forwards: 0; the proxy synthesizes a\n" +
+          "483 Too Many Hops response back to the source per RFC 3261 §16.3.",
+      },
+      Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* bindUdpEndpoint(ALICE)
-      const bob = yield* bindUdpEndpoint(BOB)
+      const alice = yield* bindRecordedEndpoint("alice", ALICE)
+      const bob = yield* bindRecordedEndpoint("bob", BOB)
 
       const invite = Buffer.from(
         [
@@ -101,6 +114,7 @@ describe("sip-front-proxy/transit-only — malformed-message handling", () => {
       expect(reply.status).toBe(483)
       // Source got back her own Via.
       expect(reply.parsed.vias[0]!.host).toBe(ALICE.host)
-    }).pipe(Effect.provide(layer))
+      })
+    ).pipe(Effect.provide(layer))
   )
 })

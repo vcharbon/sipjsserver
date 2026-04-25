@@ -22,6 +22,7 @@ import { Effect } from "effect"
 import { customParser } from "../../../src/sip/parsers/custom/index.js"
 import { ProxyCore, WorkerId } from "../../../src/sip-front-proxy/index.js"
 import { proxyFakeStack, pumpFor } from "../../support/proxy-fakeStack.js"
+import { runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -54,10 +55,19 @@ const tamperSig = (rr: string): string => {
 
 describe("sip-front-proxy/load-balancer — HMAC tampering rejected", () => {
   it.effect("BYE with flipped sig is rejected with 403", () =>
-    Effect.gen(function* () {
+    runProxyScenario(
+      {
+        name: "load-balancer.hmac-tampering-rejected",
+        description:
+          "INVITE through proxy stamps RR with HMAC stickiness cookie; round-trip 200\n" +
+          "OK to Alice; Alice sends BYE with one bit of `sig=` flipped. Proxy must\n" +
+          "reject with 403 — BYE never reaches the worker (RFC 3261 §16.4 +\n" +
+          "decodeStickiness reject path).",
+      },
+      Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* fx.bindUac(ALICE)
-      const aEp = yield* fx.bindUasFor(W_A)
+      const alice = yield* fx.bindRecordedUac("alice", ALICE)
+      const aEp = yield* fx.bindRecordedUasFor("worker-a", W_A)
 
       const callId = "tamper-call@alice"
 
@@ -152,6 +162,7 @@ describe("sip-front-proxy/load-balancer — HMAC tampering rejected", () => {
       expect(replyParsed.status).toBe(403)
       const byeAtA = yield* aEp.poll()
       expect(byeAtA).toBeNull()
-    }).pipe(Effect.provide(fx.layer))
+      })
+    ).pipe(Effect.provide(fx.layer))
   )
 })

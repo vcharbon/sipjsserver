@@ -20,6 +20,7 @@ import {
   WorkerId,
 } from "../../../src/sip-front-proxy/index.js"
 import { proxyFakeStack, pumpFor } from "../../support/proxy-fakeStack.js"
+import { runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -78,14 +79,22 @@ describe("sip-front-proxy/load-balancer — distribution", () => {
   it.effect(
     `${N_INVITES} INVITEs land within ±${TOLERANCE * 100}% of the per-worker mean`,
     () =>
-      Effect.gen(function* () {
+      runProxyScenario(
+        {
+          name: "load-balancer.distribution",
+          description:
+            `8 workers, ${N_INVITES} INVITEs with PRNG-derived Call-IDs;\n` +
+            `asserts each worker handles within ±${TOLERANCE * 100}% of the per-worker\n` +
+            "mean (rendezvous-hash distribution sanity).",
+        },
+        Effect.gen(function* () {
         const proxy = yield* ProxyCore
-        const alice = yield* fx.bindUac(ALICE, /* queueMax */ 8)
+        const alice = yield* fx.bindRecordedUac("alice", ALICE, /* queueMax */ 8)
         // Bind a UAS endpoint at every worker's address. We don't reply to
         // the INVITEs — the proxy is fire-and-forget — but we drain the
         // queue per worker to count receipts.
         const uases = yield* Effect.all(
-          workerIds.map((id) => fx.bindUasFor(id, /* queueMax */ N_INVITES))
+          workerIds.map((id) => fx.bindRecordedUasFor(id, id, /* queueMax */ N_INVITES))
         )
 
         const rng = makeRng(0xfeed_face)
@@ -126,6 +135,7 @@ describe("sip-front-proxy/load-balancer — distribution", () => {
           expect(counts[w]).toBeGreaterThanOrEqual(lo)
           expect(counts[w]).toBeLessThanOrEqual(hi)
         }
-      }).pipe(Effect.provide(fx.layer))
+        })
+      ).pipe(Effect.provide(fx.layer))
   )
 })

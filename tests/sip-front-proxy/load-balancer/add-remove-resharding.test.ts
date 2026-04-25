@@ -27,6 +27,7 @@ import {
   WorkerId,
 } from "../../../src/sip-front-proxy/index.js"
 import { proxyFakeStack, pumpFor } from "../../support/proxy-fakeStack.js"
+import { runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -87,11 +88,20 @@ describe("sip-front-proxy/load-balancer — add/remove resharding", () => {
   it.effect(
     "stickiness on existing dialog wins; new dialogs see the new winner",
     () =>
-      Effect.gen(function* () {
+      runProxyScenario(
+        {
+          name: "load-balancer.add-remove-resharding",
+          description:
+            "Two workers (A, B) initially. INVITE for cid1 lands on A; round-trip 200\n" +
+            "OK; add worker C; in-dialog BYE on cid1 must still hit A (stickiness wins\n" +
+            "over re-shard); a fresh INVITE on a re-shard-affected Call-ID lands on the\n" +
+            "post-add winner (proxy reads live registry for new dialogs).",
+        },
+        Effect.gen(function* () {
         const proxy = yield* ProxyCore
-        const alice = yield* fx.bindUac(ALICE)
-        const aEp = yield* fx.bindUasFor(W_A)
-        const bEp = yield* fx.bindUasFor(W_B)
+        const alice = yield* fx.bindRecordedUac("alice", ALICE)
+        const aEp = yield* fx.bindRecordedUasFor("worker-a", W_A)
+        const bEp = yield* fx.bindRecordedUasFor("worker-b", W_B)
 
         // ── 1. INVITE for cid1 → A ────────────────────────────────────
         const cid1 = findCallIdMappingTo(W_A)
@@ -148,7 +158,7 @@ describe("sip-front-proxy/load-balancer — add/remove resharding", () => {
 
         // ── 2. Add C ──────────────────────────────────────────────────
         yield* fx.addSimulatedWorker(W_C, ADDR_C)
-        const cEp = yield* fx.bindUasFor(W_C)
+        const cEp = yield* fx.bindRecordedUasFor("worker-c", W_C)
 
         // ── 3. In-dialog BYE on cid1 — must still hit A (stickiness) ──
         const rrInner = rr.value.replace(/^</, "").replace(/>$/, "")
@@ -211,6 +221,7 @@ describe("sip-front-proxy/load-balancer — add/remove resharding", () => {
         const inv2AtB = yield* bEp.poll()
         expect(inv2AtA).toBeNull()
         expect(inv2AtB).toBeNull()
-      }).pipe(Effect.provide(fx.layer))
+        })
+      ).pipe(Effect.provide(fx.layer))
   )
 })

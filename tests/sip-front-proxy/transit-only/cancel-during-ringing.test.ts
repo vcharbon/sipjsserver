@@ -24,10 +24,8 @@ import { Effect } from "effect"
 import { TestClock } from "effect/testing"
 import { customParser } from "../../../src/sip/parsers/custom/index.js"
 import { CancelBranchLru, ProxyCore } from "../../../src/sip-front-proxy/index.js"
-import {
-  bindUdpEndpoint,
-  proxyOnlyFakeStackLayer,
-} from "../../support/proxy-only-fakeStack.js"
+import { proxyOnlyFakeStackLayer } from "../../support/proxy-only-fakeStack.js"
+import { bindRecordedEndpoint, runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -59,11 +57,19 @@ const parse = (raw: Buffer) => {
 
 describe("sip-front-proxy/transit-only — CANCEL during ringing", () => {
   it.effect("CANCEL traverses to the same downstream as the INVITE", () =>
-    Effect.gen(function* () {
+    runProxyScenario(
+      {
+        name: "transit-only.cancel-during-ringing",
+        description:
+          "Alice → Proxy(ForwardAll) → Bob. INVITE/180/CANCEL/487/ACK round-trip;\n" +
+          "asserts CANCEL keyed by (Call-ID, CSeq) reaches the same downstream as the\n" +
+          "matching INVITE (RFC 3261 §16.10 / §9.1).",
+      },
+      Effect.gen(function* () {
       const proxy = yield* ProxyCore
       const lru = yield* CancelBranchLru
-      const alice = yield* bindUdpEndpoint(ALICE)
-      const bob = yield* bindUdpEndpoint(BOB)
+      const alice = yield* bindRecordedEndpoint("alice", ALICE)
+      const bob = yield* bindRecordedEndpoint("bob", BOB)
 
       const aliceBranch = "z9hG4bK-alice-INV"
 
@@ -207,6 +213,7 @@ describe("sip-front-proxy/transit-only — CANCEL during ringing", () => {
       const ackParsed = parse(ackAtBob!.raw)
       if (ackParsed.type !== "request") throw new Error("expected request")
       expect(ackParsed.method).toBe("ACK")
-    }).pipe(Effect.provide(layer))
+      })
+    ).pipe(Effect.provide(layer))
   )
 })

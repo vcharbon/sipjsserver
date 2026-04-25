@@ -62,6 +62,10 @@ import {
   workerRegistrySimulatedLayer,
 } from "../../src/sip-front-proxy/index.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../src/sip/SignalingNetwork.js"
+import {
+  bindRecordedEndpoint,
+  ProxyRecorder,
+} from "../sip-front-proxy/_report/runner.js"
 
 /** Default simulated transit delay — same as the proxy-only fake stack. */
 export const DEFAULT_TRANSIT_DELAY_MS = 5
@@ -141,6 +145,32 @@ export interface ProxyFakeStack {
     id: WorkerId,
     queueMax?: number
   ) => Effect.Effect<UdpEndpoint, UnknownWorkerForBind, SignalingNetwork | Scope.Scope>
+
+  /**
+   * Recording variant of {@link bindUac}: routes traffic through the
+   * `ProxyRecorder` so the test runner can dump per-scenario reports.
+   * The `name` is the participant label that appears in the reports
+   * (e.g. `"alice"`).
+   */
+  readonly bindRecordedUac: (
+    name: string,
+    addr: SocketAddr,
+    queueMax?: number
+  ) => Effect.Effect<UdpEndpoint, never, SignalingNetwork | ProxyRecorder | Scope.Scope>
+  /**
+   * Recording variant of {@link bindUasFor}: routes traffic through the
+   * `ProxyRecorder` so the test runner can dump per-scenario reports.
+   * `name` is the participant label (e.g. `"w-0"`).
+   */
+  readonly bindRecordedUasFor: (
+    name: string,
+    id: WorkerId,
+    queueMax?: number
+  ) => Effect.Effect<
+    UdpEndpoint,
+    UnknownWorkerForBind,
+    SignalingNetwork | ProxyRecorder | Scope.Scope
+  >
 }
 
 /** Internal — bind requested for a worker that was never registered. */
@@ -243,6 +273,17 @@ export function proxyFakeStack(opts: ProxyFakeStackOpts): ProxyFakeStack {
         .pipe(Effect.orDie)
     })
 
+  // Recording variants — delegate to `bindRecordedEndpoint` so every
+  // send/receive is captured by the scenario `ProxyRecorder`.
+  const bindRecordedUac = (name: string, addr: SocketAddr, queueMax = 64) =>
+    bindRecordedEndpoint(name, addr, queueMax)
+  const bindRecordedUasFor = (name: string, id: WorkerId, queueMax = 64) =>
+    Effect.gen(function* () {
+      const addr = workerAddresses.get(id)
+      if (addr === undefined) return yield* new UnknownWorkerForBind({ id })
+      return yield* bindRecordedEndpoint(name, addr, queueMax)
+    })
+
   return {
     layer,
     proxyAddr: opts.proxyAddr,
@@ -253,6 +294,8 @@ export function proxyFakeStack(opts: ProxyFakeStackOpts): ProxyFakeStack {
     setWorkerHealth,
     bindUac,
     bindUasFor,
+    bindRecordedUac,
+    bindRecordedUasFor,
   }
 }
 
