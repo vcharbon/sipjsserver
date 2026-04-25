@@ -25,12 +25,13 @@ import { matchAccepts } from "../../src/b2bua/rules/framework/Matcher.js"
 function makeRule(opts: {
   readonly id: string
   readonly handleReturns?: "undefined" | "result"
+  readonly overrides?: string
 }): AnyRuleDefinition {
   return {
     id: opts.id,
     name: opts.id,
     alwaysActive: true,
-    defaultPriority: 500,
+    overrides: opts.overrides,
     stateSchema: Schema.Undefined as Schema.Schema<unknown>,
     paramsSchema: Schema.Unknown as Schema.Schema<unknown>,
     match: { kind: "cancelled" },
@@ -55,7 +56,7 @@ describe("transformRegistry", () => {
   test("wrapHandle observes non-undefined outcomes and preserves undefined passthrough", async () => {
     const registry = createRuleRegistry([
       makeRule({ id: "acts", handleReturns: "result" }),
-      makeRule({ id: "declines", handleReturns: "undefined" }),
+      makeRule({ id: "declines", handleReturns: "undefined", overrides: "acts" }),
     ])
 
     const fired: string[] = []
@@ -88,7 +89,7 @@ describe("disableRule", () => {
   test("forces the rule's match to reject the event", () => {
     const registry = createRuleRegistry([
       makeRule({ id: "keep" }),
-      makeRule({ id: "drop" }),
+      makeRule({ id: "drop", overrides: "keep" }),
     ])
     const wrapped = disableRule(registry, "drop")
     const keep = wrapped.definitions.get("keep")!

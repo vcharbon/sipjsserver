@@ -57,7 +57,7 @@ type PolicyState = typeof PolicyState.Type
 
 const STATE_KEY = "relayFirst18x_to_180"
 
-// ── suppress-18x (module-private, priority 850) ──────────────────────────
+// ── suppress-18x (module-private) ──────────────────────────
 //
 // Runs BEFORE relay-provisional (900). On first 18x: pre-generate a-facing
 // tag, seed tag mapping, relay as bare 180. On subsequent 18x: suppress
@@ -67,7 +67,6 @@ const suppress18x = defineRule({
   id: "suppress-18x",
   name: "Suppress 18x -> 180",
   alwaysActive: true,
-  defaultPriority: 850,
   stateKey: STATE_KEY,
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
@@ -138,7 +137,7 @@ const suppress18x = defineRule({
   },
 })
 
-// ── force-tag-consistency (module-private, priority 851) ─────────────────
+// ── force-tag-consistency (module-private) ─────────────────
 //
 // Composes with confirm-dialog (903). On 200 OK INVITE from b-leg:
 // pre-seeds the tag mapping with the stored a-facing tag so that
@@ -149,7 +148,6 @@ const forceTagConsistency = defineRule({
   id: "force-tag-consistency",
   name: "Force Tag Consistency on 200 OK",
   alwaysActive: true,
-  defaultPriority: 851,
   stateKey: STATE_KEY,
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
@@ -184,7 +182,7 @@ const forceTagConsistency = defineRule({
   },
 })
 
-// ── absorb-prack-200 (module-private, priority 920) ──────────────────────
+// ── absorb-prack-200 (module-private) ──────────────────────
 //
 // Runs BEFORE relay-non-invite-200 (927). The B2BUA synthesizes PRACK toward
 // the b-leg when it absorbs a reliable 1xx (alice never saw it, so alice
@@ -195,7 +193,6 @@ const absorbPrack200 = defineRule({
   id: "absorb-prack-200",
   name: "Absorb 200 OK for B2BUA-synthesized PRACK",
   alwaysActive: true,
-  defaultPriority: 920,
   stateKey: STATE_KEY,
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,

@@ -399,7 +399,6 @@ export function writeIndexReport(
 interface RuleCoverageRow {
   readonly id: string
   readonly name: string
-  readonly priority: number
   readonly scenarios: string[]
 }
 
@@ -411,16 +410,14 @@ function renderRuleCoverage(): string {
     rows.push({
       id,
       name: rule.name,
-      priority: rule.defaultPriority ?? 900,
       scenarios: scenarios ? [...scenarios].sort() : [],
     })
   }
-  // Never-fired rules first; then by priority ascending; then by id.
+  // Never-fired rules first; then by id.
   rows.sort((a, b) => {
     const aFired = a.scenarios.length === 0 ? 0 : 1
     const bFired = b.scenarios.length === 0 ? 0 : 1
     if (aFired !== bFired) return aFired - bFired
-    if (a.priority !== b.priority) return a.priority - b.priority
     return a.id.localeCompare(b.id)
   })
 
@@ -444,7 +441,6 @@ function renderRuleCoverage(): string {
     return `<tr${cls}>
       <td><code>${escapeHtml(r.id)}</code></td>
       <td>${escapeHtml(r.name)}</td>
-      <td class="priority-band">${r.priority}</td>
       <td>${badge}</td>
       <td>${scenarioList}</td>
     </tr>`
@@ -456,7 +452,7 @@ function renderRuleCoverage(): string {
   <div class="coverage-summary">${fired}/${total} rules fired \u2014 ${uncovered} never fired in any scenario</div>
   <table class="coverage-table">
     <thead>
-      <tr><th>Rule id</th><th>Name</th><th>Priority</th><th>Scenarios</th><th>Exercised by</th></tr>
+      <tr><th>Rule id</th><th>Name</th><th>Scenarios</th><th>Exercised by</th></tr>
     </thead>
     <tbody>
       ${rowHtml.join("\n      ")}

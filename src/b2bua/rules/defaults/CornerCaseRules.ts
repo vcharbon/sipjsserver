@@ -2,8 +2,9 @@
  * Corner case rules — cancel-200-crossing, retransmit-200, reinvite-glare,
  * relay-reinvite-response.
  *
- * These run at priority 850, before default rules at 900, to catch
- * edge cases that would otherwise be mishandled by the normal path.
+ * These outrank default rules by carrying narrower match descriptors
+ * (legState, filter on pending-request snapshot, etc.) so they catch edge
+ * cases that would otherwise be mishandled by the normal path.
  *
  * Each rule uses `defineRule({...})`, so handler bodies see a `ctx` whose
  * event/message are already narrowed by the match — no defensive
@@ -19,7 +20,7 @@ import { newTag } from "../../../sip/MessageHelpers.js"
 import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
 import { confirmBridgedCall } from "../framework/actions/composites.js"
 
-// ── cancel-200-crossing (priority 850) ────────────────────────────────────
+// ── cancel-200-crossing ────────────────────────────────────
 
 /**
  * CANCEL/200 OK crossing: 200 OK INVITE arrives on a b-leg that is
@@ -41,7 +42,6 @@ export const cancel200CrossingRule = defineRule({
   id: "cancel-200-crossing",
   name: "CANCEL/200 Crossing",
   alwaysActive: true,
-  defaultPriority: 860,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -79,7 +79,7 @@ export const cancel200CrossingRule = defineRule({
   },
 })
 
-// ── retransmit-200 (priority 855) ─────────────────────────────────────────
+// ── retransmit-200 ─────────────────────────────────────────
 
 /**
  * Retransmitted 200 OK on an already-confirmed b-leg — re-ACK only.
@@ -89,7 +89,6 @@ export const retransmit200Rule = defineRule({
   id: "retransmit-200",
   name: "Retransmit 200 OK",
   alwaysActive: true,
-  defaultPriority: 855,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -119,7 +118,7 @@ export const retransmit200Rule = defineRule({
     }),
 })
 
-// ── reinvite-glare (priority 890) ─────────────────────────────────────────
+// ── reinvite-glare ─────────────────────────────────────────
 
 /**
  * Re-INVITE glare detection: reject with 491 if there's already a
@@ -129,7 +128,6 @@ export const reinviteGlareRule = defineRule({
   id: "reinvite-glare",
   name: "Re-INVITE Glare Detection",
   alwaysActive: true,
-  defaultPriority: 890,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -153,7 +151,7 @@ export const reinviteGlareRule = defineRule({
     }),
 })
 
-// ── relay-reinvite-response (priority 845) ────────────────────────────────
+// ── relay-reinvite-response ────────────────────────────────
 
 /**
  * Relay re-INVITE response (provisional, 2xx, error) back to the
@@ -167,7 +165,6 @@ export const relayReinviteResponseRule = defineRule({
   id: "relay-reinvite-response",
   name: "Relay re-INVITE Response",
   alwaysActive: true,
-  defaultPriority: 845,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 

@@ -93,7 +93,6 @@ const myRule = defineRule({
   id: "my-rule",
   name: "My Rule Description",
   alwaysActive: true,
-  defaultPriority: 850,  // see Priority Bands below
   stateKey: STATE_KEY,
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
@@ -198,16 +197,15 @@ const myPreProcessor = defineRule({
 
 **When `handle()` returns undefined:** the base rule runs alone, as if the composing rule didn't exist.
 
-## Priority Bands
+## Resolving overlap with default rules
 
-| Priority | Band | Rules |
-|----------|------|-------|
-| 100-199 | Corner cases | cancel-200-crossing, retransmit-200, reinvite-glare |
-| 200-299 | Re-INVITE responses | relay-reinvite-response |
-| 840-860 | **Policy rules** | suppress-18x (850), force-tag-consistency (851) |
-| 900-909 | Standard handlers | relay-provisional, confirm-dialog, relay-bye, etc. |
+A new rule can collide with an existing rule when their `match` descriptors overlap and score the same specificity. The registry validator throws at startup in that case — you must declare the relationship explicitly:
 
-Policy rules should use priorities in the 840-860 band to run before the standard relay/confirm rules they augment.
+- **`overrides: "<base-id>"`** — the new rule replaces the base in the candidate set whenever its own `match` accepts the event. Used by `suppress-18x` (overrides `relay-provisional`) and by transfer rules (e.g. `transfer-c-realign-200` overrides `retransmit-200`).
+- **`composesWith: "<base-id>"`** — the new rule runs additively before the base; the base's actions are appended after. Used by `force-tag-consistency` to pre-seed tag mappings before `confirm-dialog`.
+- **Narrow the match** — add a column the existing rule doesn't set (e.g. `legState`, `legDisposition`, `transferPhase`), or replace `statusClass` with an exact `status`. The narrower rule wins by specificity, no override needed.
+
+If you don't pick one of these, `createRuleRegistry` throws with the conflicting pair listed.
 
 ## Action Types
 

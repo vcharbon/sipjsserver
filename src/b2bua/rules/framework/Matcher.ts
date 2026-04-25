@@ -247,8 +247,8 @@ export function specificityScore(m: Match): number {
  * 2. `overrides` is applied first: if rule X declares `overrides: Y` and
  *    X is in the candidate set, Y is removed from the candidate set.
  * 3. Among remaining candidates, the one with the highest specificity
- *    score wins. Ties fall back to `defaultPriority` (lower = earlier,
- *    matching legacy convention).
+ *    score wins. Specificity ties on overlapping match sets are a
+ *    registration error — the registry validator throws at startup.
  *
  * Caller is responsible for filtering the input list to rules that are
  * active for THIS call (always-active + per-call actives), exactly as
@@ -263,15 +263,14 @@ export function pick(
 }
 
 /**
- * Return all candidate rules for an event, ordered by [specificity desc,
- * priority asc]. Consumers iterate this list to implement handle()
- * passthrough semantics — when a winning rule's `handle` returns undefined
- * the executor moves on to the next candidate.
+ * Return all candidate rules for an event, ordered by specificity desc.
+ * Consumers iterate this list to implement handle() passthrough semantics —
+ * when a winning rule's `handle` returns undefined the executor moves on
+ * to the next candidate.
  */
 export function pickRanked(
   rules: ReadonlyArray<AnyRuleDefinition>,
   ctx: RuleContext,
-  priorityOf: (rule: AnyRuleDefinition) => number = (r) => r.defaultPriority ?? 900,
 ): AnyRuleDefinition[] {
   if (rules.length === 0) return []
 
@@ -290,12 +289,7 @@ export function pickRanked(
     accepted.push(rule)
   }
 
-  accepted.sort((a, b) => {
-    const sa = specificityScore(a.match)
-    const sb = specificityScore(b.match)
-    if (sa !== sb) return sb - sa
-    return priorityOf(a) - priorityOf(b)
-  })
+  accepted.sort((a, b) => specificityScore(b.match) - specificityScore(a.match))
 
   return accepted
 }

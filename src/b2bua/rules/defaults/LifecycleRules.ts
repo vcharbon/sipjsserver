@@ -7,14 +7,13 @@
 import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 
-// ── handle-timeout (priority 930) ─────────────────────────────────────────
+// ── handle-timeout ─────────────────────────────────────────
 
 /** Terminate call on transaction timeout. */
 export const handleTimeoutRule: RuleDefinition<undefined, undefined> = {
   id: "handle-timeout",
   name: "Handle Transaction Timeout",
   alwaysActive: true,
-  defaultPriority: 930,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -29,14 +28,13 @@ export const handleTimeoutRule: RuleDefinition<undefined, undefined> = {
     }),
 }
 
-// ── handle-cancel (priority 933) ──────────────────────────────────────────
+// ── handle-cancel ──────────────────────────────────────────
 
 /** Handle CANCEL from a-leg: destroy all b-legs, begin termination. */
 export const handleCancelRule: RuleDefinition<undefined, undefined> = {
   id: "handle-cancel",
   name: "Handle CANCEL",
   alwaysActive: true,
-  defaultPriority: 933,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -68,7 +66,7 @@ export const handleCancelRule: RuleDefinition<undefined, undefined> = {
   },
 }
 
-// ── resolve-cancel-response (priority 820) ───────────────────────────────
+// ── resolve-cancel-response ───────────────────────────────
 
 /**
  * Resolve a non-2xx final response (typically 487 Request Terminated) for a
@@ -83,7 +81,7 @@ export const resolveCancelResponseRule: RuleDefinition<undefined, undefined> = {
   id: "resolve-cancel-response",
   name: "Resolve CANCEL Response",
   alwaysActive: true,
-  defaultPriority: 820,
+  overrides: "absorb-stale-failure",
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -108,21 +106,21 @@ export const resolveCancelResponseRule: RuleDefinition<undefined, undefined> = {
   },
 }
 
-// ── handle-481 (priority 850) ────────────────────────────────────────────
+// ── handle-481 ────────────────────────────────────────────
 
 /**
  * Handle 481 "Call/Transaction Does Not Exist" response on any method.
  * The remote side has lost the dialog — this leg is dead. Mark it
  * terminated and begin call teardown.
  *
- * Future: an IVR-forward rule at higher priority can intercept this
- * and create a replacement leg instead of terminating the call.
+ * Future: an IVR-forward rule with a narrower match (or `overrides:
+ * "handle-481"`) can intercept this and create a replacement leg instead
+ * of terminating the call.
  */
 export const handle481Rule: RuleDefinition<undefined, undefined> = {
   id: "handle-481",
   name: "Handle 481 Dialog Not Exist",
   alwaysActive: true,
-  defaultPriority: 840,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 

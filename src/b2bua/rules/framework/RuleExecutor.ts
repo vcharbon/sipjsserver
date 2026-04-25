@@ -3,7 +3,7 @@
  *
  * For each event, builds a merged list of rules active for the call
  * (per-call activated + always-active built-ins), then lets the Matcher
- * pick the candidates ordered by [specificity desc, priority asc].
+ * pick the candidates ordered by specificity desc.
  *
  * Iteration contract:
  * 1. First candidate whose handle() returns non-undefined wins
@@ -48,18 +48,16 @@ function toRuleContext(ctx: ResolvedContext): RuleContext {
 // ── Per-call entry bookkeeping ────────────────────────────────────────────
 
 interface RuleActivation {
-  readonly priority: number
   readonly params: unknown
 }
 
 /**
  * Collect activations for this call: per-call rules (from HTTP activation)
- * take priority & params from ActiveRule; always-active rules use their
- * defaultPriority and empty params.
+ * carry params from ActiveRule; always-active rules use empty params.
  *
  * Returns:
  *   - `defs`: every active rule definition (for the Matcher input list)
- *   - `activations`: id → { priority, params } override map
+ *   - `activations`: id → { params } override map
  */
 function collectActivations(
   call: Call,
@@ -74,7 +72,7 @@ function collectActivations(
       const def = registry.definitions.get(ar.id)
       if (def === undefined) continue
       defs.push(def)
-      activations.set(ar.id, { priority: ar.priority, params: ar.params ?? {} })
+      activations.set(ar.id, { params: ar.params ?? {} })
     }
   }
 
@@ -82,7 +80,7 @@ function collectActivations(
     if (activations.has(id)) continue
     if (!def.alwaysActive) continue
     defs.push(def)
-    activations.set(id, { priority: def.defaultPriority ?? 900, params: {} })
+    activations.set(id, { params: {} })
   }
 
   return { defs, activations }
@@ -137,11 +135,7 @@ export function executeRules(
 
       const ruleCtx = toRuleContext(ctx)
 
-      const candidates = pickRanked(
-        defs,
-        ruleCtx,
-        (rule) => activations.get(rule.id)?.priority ?? rule.defaultPriority ?? 900,
-      )
+      const candidates = pickRanked(defs, ruleCtx)
 
       if (candidates.length === 0) {
         return yield* defaultHandler(ctx)

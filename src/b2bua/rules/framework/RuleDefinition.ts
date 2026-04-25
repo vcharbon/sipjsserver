@@ -674,9 +674,6 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
    */
   readonly alwaysActive?: boolean
 
-  /** Default priority for always-active rules. Per-call rules use ActiveRule.priority. */
-  readonly defaultPriority?: number
-
   /** Display name for logging and tracing. */
   readonly name: string
 
@@ -818,7 +815,6 @@ export function defineRule<
       params: TParams,
     ) => Effect.Effect<RuleHandleResult<NoInfer<TState>> | undefined | void, never, never>
     readonly alwaysActive?: boolean
-    readonly defaultPriority?: number
     readonly stateKey?: string
     readonly composesWith?: string
     readonly overrides?: string

@@ -114,10 +114,10 @@ Expected outcomes:
 
 A surviving rule is not automatically dead code. Valid cases:
 - **Defensive / safety rule** — fires on pathological inputs the suite does not yet reproduce. Either add a scenario or document it as intentionally uncovered.
-- **Structurally unreachable** — an earlier-priority rule always claims the same events. Review the priority band.
+- **Structurally unreachable** — a more specific rule always claims the same events. Review whether the rule is shadowed by another rule's narrower `match` descriptor or `overrides:` declaration.
 - **Actually unused** — remove the rule, or add the missing test.
 
-`SURVIVED` should always lead to one of: add a scenario, lower the rule's priority, or delete the rule.
+`SURVIVED` should always lead to one of: add a scenario, narrow/widen the rule's match descriptor, or delete the rule.
 
 ---
 

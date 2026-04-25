@@ -34,7 +34,6 @@ function makeRule(opts: {
     id: opts.id,
     name: opts.id,
     alwaysActive: true,
-    defaultPriority: 500,
     stateSchema: Schema.Undefined as Schema.Schema<unknown>,
     paramsSchema: Schema.Unknown as Schema.Schema<unknown>,
     match: {

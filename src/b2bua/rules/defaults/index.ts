@@ -18,11 +18,6 @@ import {
   resolveByeResponseRule,
   resolveCrossByeRule,
   terminatingSafetyTimeoutRule,
-  terminatingDropRequestRule,
-  terminatingDropResponseRule,
-  terminatingDropTimerRule,
-  terminatingDropTimeoutRule,
-  terminatingDropCancelledRule,
 } from "./TerminatingRules.js"
 
 // Dialog rules
@@ -53,21 +48,24 @@ import {
 // Failure rules
 import { routeFailureRule, noAnswerFailoverRule, absorbStaleFailureRule } from "./FailureRules.js"
 
-// Transfer rules (REFER — custom priority band 100-199)
+// Transfer rules (REFER-driven blind transfer)
 import { transferRules } from "./TransferRules.js"
 
-/** All default rules in registration order. Priority is set on each rule definition. */
+/**
+ * All default rules. Order does not matter — the Matcher selects winners
+ * by specificity score (with `overrides` removing displaced rules).
+ */
 export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
-  // Transfer rules (100-199 band) — REFER-driven blind transfer
+  // REFER-driven blind transfer
   ...transferRules,
 
-  // Terminating-state rules (800 band) — intercept events during teardown
+  // Terminating-state intercept
   resolveByeResponseRule,
   resolveCrossByeRule,
   terminatingSafetyTimeoutRule,
   resolveCancelResponseRule,
 
-  // Corner cases (830-860 band) — must match before default rules
+  // Corner cases — narrower matches that take precedence over default rules
   cancel200CrossingRule,
   retransmit200Rule,
   relayReinviteResponseRule,
@@ -75,11 +73,9 @@ export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
   absorbNotify200Rule,
   absorbOptions200Rule,
   handle481Rule,
-
-  // Glare detection (priority 890) — before relay-reinvite
   reinviteGlareRule,
 
-  // Default relay and lifecycle rules (900 band)
+  // Default relay and lifecycle
   relayOptionsRule,
   relayInfoRule,
   relayByeRule,
@@ -97,11 +93,4 @@ export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
   absorbStaleFailureRule,
   routeFailureRule,
   noAnswerFailoverRule,
-
-  // Terminating catch-alls (priority 999) — absorb anything else during teardown
-  terminatingDropRequestRule,
-  terminatingDropResponseRule,
-  terminatingDropTimerRule,
-  terminatingDropTimeoutRule,
-  terminatingDropCancelledRule,
 ]

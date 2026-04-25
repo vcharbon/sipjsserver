@@ -19,13 +19,12 @@ import type { RuleDefinition, SipMethod } from "../framework/RuleDefinition.js"
 
 export function makeTransparentRelayRule(
   method: SipMethod,
-  opts: { id: string; name: string; priority: number },
+  opts: { id: string; name: string },
 ): RuleDefinition<undefined, undefined> {
   return {
     id: opts.id,
     name: opts.name,
     alwaysActive: true,
-    defaultPriority: opts.priority,
     stateSchema: Schema.Undefined,
     paramsSchema: Schema.Undefined,
 
@@ -41,34 +40,31 @@ export function makeTransparentRelayRule(
   }
 }
 
-// ── relay-options (priority 924) ──────────────────────────────────────────
+// ── relay-options ─────────────────────────────────────────────────────────
 
 /** Relay in-dialog OPTIONS end-to-end (payload-transparent). */
 export const relayOptionsRule: RuleDefinition<undefined, undefined> =
   makeTransparentRelayRule("OPTIONS", {
     id: "relay-options",
     name: "Relay OPTIONS",
-    priority: 924,
   })
 
-// ── relay-info (priority 925) ─────────────────────────────────────────────
+// ── relay-info ────────────────────────────────────────────────────────────
 
 /** Relay in-dialog INFO end-to-end (payload-transparent). */
 export const relayInfoRule: RuleDefinition<undefined, undefined> =
   makeTransparentRelayRule("INFO", {
     id: "relay-info",
     name: "Relay INFO",
-    priority: 925,
   })
 
-// ── relay-bye (priority 912) ──────────────────────────────────────────────
+// ── relay-bye ──────────────────────────────────────────────
 
 /** Respond 200 to BYE sender, relay BYE to peer, terminate call. */
 export const relayByeRule: RuleDefinition<undefined, undefined> = {
   id: "relay-bye",
   name: "Relay BYE",
   alwaysActive: true,
-  defaultPriority: 912,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -88,14 +84,13 @@ export const relayByeRule: RuleDefinition<undefined, undefined> = {
     }),
 }
 
-// ── relay-ack (priority 915) ──────────────────────────────────────────────
+// ── relay-ack ──────────────────────────────────────────────
 
 /** Relay ACK to peer leg. */
 export const relayAckRule: RuleDefinition<undefined, undefined> = {
   id: "relay-ack",
   name: "Relay ACK",
   alwaysActive: true,
-  defaultPriority: 915,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -111,22 +106,20 @@ export const relayAckRule: RuleDefinition<undefined, undefined> = {
     }),
 }
 
-// ── relay-reinvite (priority 918) ─────────────────────────────────────────
+// ── relay-reinvite ────────────────────────────────────────────────────────
 
 /** Relay re-INVITE to peer leg. */
 export const relayReinviteRule: RuleDefinition<undefined, undefined> =
   makeTransparentRelayRule("INVITE", {
     id: "relay-reinvite",
     name: "Relay re-INVITE",
-    priority: 918,
   })
 
-// ── relay-prack (priority 921) ────────────────────────────────────────────
+// ── relay-prack ───────────────────────────────────────────────────────────
 
 /** Relay PRACK to peer leg. */
 export const relayPrackRule: RuleDefinition<undefined, undefined> =
   makeTransparentRelayRule("PRACK", {
     id: "relay-prack",
     name: "Relay PRACK",
-    priority: 921,
   })

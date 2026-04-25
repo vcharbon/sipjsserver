@@ -17,7 +17,7 @@ TransactionLayer events
        the Matcher for the ranked candidate list:
          1. drop any rule whose id is overridden by an active override rule
          2. keep rules whose declarative `match` descriptor accepts the event
-         3. sort by [specificity score desc, priority asc]
+         3. sort by specificity score desc
        walks the ranked candidates:
          first one whose handle() returns non-undefined wins
            -> ActionExecutor (CSeq, tags, dialog, message construction)
@@ -29,9 +29,9 @@ TransactionLayer events
 
 ### Specificity-based selection
 
-Every rule carries a declarative `match: Match` descriptor — a discriminated union on event `kind` (`request` / `response` / `timer` / `timeout` / `cancelled`). The Matcher scores each candidate: a singleton column (e.g. `method: "INVITE"`) scores higher than an array column (e.g. `statusClass: ["3xx","4xx"]`), exact `status` beats `statusClass`, and a `filter` adds one more point. The highest-scoring rule whose `match` accepts the event wins.
+Every rule carries a declarative `match: Match` descriptor — a discriminated union on event `kind` (`request` / `response` / `timer` / `timeout` / `cancelled` / `internal-event`). The Matcher scores each candidate: a singleton column (e.g. `method: "INVITE"`) scores higher than an array column (e.g. `statusClass: ["3xx","4xx"]`), exact `status` beats `statusClass`, and a `filter` adds one more point. The highest-scoring rule whose `match` accepts the event wins.
 
-Priority is only a tiebreaker when two rules have identical specificity scores. Overrides are explicit: a rule declaring `overrides: "some-other-id"` removes the named base from the candidate set whenever the overriding rule's `match` accepts the event (used by policy modules — see `suppress-18x`). `composesWith: "base-id"` layers a rule additively before the base (see `force-tag-consistency`).
+Specificity ties on overlapping match sets are a registration error — the registry validator throws at startup unless one rule declares `overrides:` or `composesWith:` against the other. Overrides are explicit: a rule declaring `overrides: "some-other-id"` removes the named base from the candidate set whenever the overriding rule's `match` accepts the event (used by policy modules — see `suppress-18x` — and by transfer rules to displace corner-case rules like `retransmit-200`). `composesWith: "base-id"` layers a rule additively before the base (see `force-tag-consistency`).
 
 ## INAP Mapping
 
@@ -93,7 +93,6 @@ interface RuleDefinition<TState, TParams> {
   id: string                    // unique identifier
   name: string                  // display name for logging
   alwaysActive?: boolean        // true = runs on every call (built-in rules)
-  defaultPriority?: number      // tiebreaker when two rules have identical specificity
   stateKey?: string             // rules sharing a stateKey share persisted state
   composesWith?: string         // run additively BEFORE this base rule's id
   overrides?: string            // replace this base rule's id in the candidate set
@@ -208,20 +207,13 @@ interface MessageTransform {
 }
 ```
 
-## Priority Bands
-
-Priority only decides ties when two rules have identical specificity scores. Day-to-day rules rarely need to set it; the `match` descriptor already disambiguates most pairs. Registered bands remain useful as readable hints of intent:
-
-| Range | Purpose | Examples |
-|---|---|---|
-| 0-99 | Framework-level | Overload, emergency bypass |
-| 100-199 | Custom rules | REFER, MRF, 183-to-200 |
-| 800-899 | Corner cases | cancel-200-crossing, retransmit-200, reinvite-glare, absorb-bye-200 |
-| 900-999 | Default B2BUA | relay-bye, confirm-dialog, route-failure, keepalive |
-
 ## Default Rules (Built-In, Always-Active)
 
-### Corner Cases (priority 850)
+Selection ordering is purely by specificity (and explicit `overrides`). The `match` descriptor on each rule disambiguates pairs; specificity ties on overlapping matches throw at registry construction.
+
+### Corner Cases
+
+Narrower-than-default rules that intercept edge cases (legState columns, filter on pending-request snapshot, etc.) so they outrank the generic relay rules.
 
 | Rule | Matches | Actions |
 |---|---|---|
@@ -231,13 +223,13 @@ Priority only decides ties when two rules have identical specificity scores. Day
 | `absorb-bye-200` | 200 OK for BYE/CANCEL | noop (absorb) |
 | `absorb-options-200` | 200 OK for keepalive OPTIONS (no pending relay snapshot) | cancel keepalive-timeout |
 
-### Glare Detection (priority 890)
+### Glare Detection
 
 | Rule | Matches | Actions |
 |---|---|---|
 | `reinvite-glare` | re-INVITE when sourceDialog has pending outbound re-INVITE | respond 491 |
 
-### Default Relay/Lifecycle (priority 900)
+### Default Relay/Lifecycle
 
 | Rule | Matches | Actions |
 |---|---|---|
@@ -258,14 +250,15 @@ Priority only decides ties when two rules have identical specificity scores. Day
 | `route-failure` | 3xx-6xx INVITE from b-leg | CDR, HTTP failover or begin-termination |
 | `no-answer-failover` | no_answer timer | destroy leg, HTTP failover or begin-termination |
 
-### Terminating-State Rules (priority 900)
+### Terminating-State Rules
+
+Each rule narrows on `callState: "terminating"` so it outranks the active-state relay rules (relay-bye, etc.) by specificity whenever both can match. Events during teardown that no rule claims fall through to the framework's `noopFallback` (silent for ACK/responses; 501 Not Implemented for other unhandled requests).
 
 | Rule | Matches | Actions |
 |---|---|---|
 | `resolve-bye-response` | Final response (>=200) with CSeq=BYE, `call.state === "terminating"` | terminate-leg (framework auto-checks isFullyResolved) |
 | `resolve-cross-bye` | BYE request, `call.state === "terminating"` | respond 200, terminate-leg |
 | `terminating-safety-timeout` | Timer `terminating_timeout` | Force all unresolved legs to `byeDisposition: "bye_timeout"` |
-| `terminating-drop-{request,response,timer,timeout,cancelled}` | Any event of the given kind, `call.state === "terminating"` (catch-all, one per kind) | noop (absorb silently) |
 
 ## Framework vs Rule Boundary
 
@@ -304,20 +297,20 @@ Custom rules are activated per-call via the HTTP `/call/new` response:
 ```json
 {
   "rules": [
-    { "id": "refer", "priority": 100, "params": { ... } }
+    { "id": "refer", "active": true, "params": { ... } }
   ]
 }
 ```
 
-Per-call rules with the same ID as a built-in rule override the built-in. Rules can `deactivate-rule` mid-call to return to normal B2BUA behavior.
+Per-call rules reuse the registered `RuleDefinition` for their `id`; the activation entry only carries `params` and an `active` flag (used for mid-call deactivation). Selection ordering is determined by the rule's `match` descriptor, not the activation entry.
 
 ### Planned Custom Rules
 
-**REFER** (priority 100) — Intercepts REFER request, calls HTTP for authorization, creates C-leg, manages transfer via merge/split.
+**REFER** — Intercepts REFER request, calls HTTP for authorization, creates C-leg, manages transfer via merge/split.
 
-**183-to-200** (priority 100) — Transforms 183 SDP to 200 OK via `relay-to-peer` with `transform: { status: 200 }`. Framework runs normal dialog confirmation. Absorbs real 200 OK when it arrives.
+**183-to-200** — Transforms 183 SDP to 200 OK via `relay-to-peer` with `transform: { status: 200 }`. Framework runs normal dialog confirmation. Absorbs real 200 OK when it arrives.
 
-**MRF** (priority 100) — Inserts media server leg for pre-call announcement or custom ringback. Uses create-leg + merge for MRF, split + merge to transfer to real B-leg when complete.
+**MRF** — Inserts media server leg for pre-call announcement or custom ringback. Uses create-leg + merge for MRF, split + merge to transfer to real B-leg when complete.
 
 ## Limitations and Not Yet Implemented
 

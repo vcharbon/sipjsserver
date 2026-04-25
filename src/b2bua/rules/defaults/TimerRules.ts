@@ -9,14 +9,13 @@ import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import { allPeeredLegs } from "../../../call/CallModel.js"
 
-// ── max-duration (priority 936) ───────────────────────────────────────────
+// ── max-duration ───────────────────────────────────────────
 
 /** Terminate call when global duration timer fires. */
 export const maxDurationRule: RuleDefinition<undefined, undefined> = {
   id: "max-duration",
   name: "Max Duration Timeout",
   alwaysActive: true,
-  defaultPriority: 936,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -34,7 +33,7 @@ export const maxDurationRule: RuleDefinition<undefined, undefined> = {
     }),
 }
 
-// ── keepalive (priority 939) ──────────────────────────────────────────────
+// ── keepalive ──────────────────────────────────────────────
 
 /**
  * Send OPTIONS keepalive to all peered legs, schedule timeout timers
@@ -47,7 +46,6 @@ export const keepaliveRule: RuleDefinition<undefined, undefined> = {
   id: "keepalive",
   name: "Keepalive Timer",
   alwaysActive: true,
-  defaultPriority: 939,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -101,14 +99,13 @@ export const keepaliveRule: RuleDefinition<undefined, undefined> = {
   },
 }
 
-// ── keepalive-timeout (priority 942) ──────────────────────────────────────
+// ── keepalive-timeout ──────────────────────────────────────
 
 /** Terminate call when a keepalive timeout fires. */
 export const keepaliveTimeoutRule: RuleDefinition<undefined, undefined> = {
   id: "keepalive-timeout",
   name: "Keepalive Timeout",
   alwaysActive: true,
-  defaultPriority: 942,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 

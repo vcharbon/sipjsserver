@@ -7,14 +7,14 @@
  * byeDisposition values. The framework (RuleExecutor) checks isFullyResolved()
  * after each rule — when all legs are resolved, it auto-promotes to "terminated".
  *
- * Priority 800: runs before default rules (900) to intercept events that
- * would otherwise be handled by active-state rules (relay-bye, etc.).
+ * Each rule narrows on `callState: "terminating"`, so they outrank active-state
+ * relay rules (relay-bye, etc.) by specificity whenever both can match.
  */
 
 import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 
-// ── resolve-bye-response (priority 800) ──────────────────────────────────
+// ── resolve-bye-response ──────────────────────────────────
 
 /**
  * Handle any final response (>=200) to a BYE we sent during termination.
@@ -25,7 +25,6 @@ export const resolveByeResponseRule: RuleDefinition<undefined, undefined> = {
   id: "resolve-bye-response",
   name: "Resolve BYE Response",
   alwaysActive: true,
-  defaultPriority: 800,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -49,7 +48,7 @@ export const resolveByeResponseRule: RuleDefinition<undefined, undefined> = {
   },
 }
 
-// ── resolve-cross-bye (priority 805) ─────────────────────────────────────
+// ── resolve-cross-bye ─────────────────────────────────────
 
 /**
  * Handle BYE request arriving while we're already terminating (cross-BYE
@@ -59,7 +58,6 @@ export const resolveCrossByeRule: RuleDefinition<undefined, undefined> = {
   id: "resolve-cross-bye",
   name: "Resolve Cross-BYE",
   alwaysActive: true,
-  defaultPriority: 805,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -83,7 +81,7 @@ export const resolveCrossByeRule: RuleDefinition<undefined, undefined> = {
   },
 }
 
-// ── terminating-safety-timeout (priority 810) ────────────────────────────
+// ── terminating-safety-timeout ────────────────────────────
 
 /**
  * Safety net: force all unresolved legs to bye_timeout when the 64s
@@ -94,7 +92,6 @@ export const terminatingSafetyTimeoutRule: RuleDefinition<undefined, undefined> 
   id: "terminating-safety-timeout",
   name: "Terminating Safety Timeout",
   alwaysActive: true,
-  defaultPriority: 810,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -122,75 +119,3 @@ export const terminatingSafetyTimeoutRule: RuleDefinition<undefined, undefined> 
   },
 }
 
-// ── terminating-drop (priority 999) ──────────────────────────────────────
-
-/**
- * Catch-all absorbers for events during `terminating` state that no other
- * rule handles. Split per event kind so each carries a concrete Match
- * descriptor; all five share the same id stem and drop silently.
- *
- * During teardown only BYE responses, cross-BYE, and the safety timeout
- * matter — everything else is noise. Priority 999 (lowest) keeps these
- * below all active-state rules.
- */
-const dropHandle = () => Effect.succeed({ actions: [], state: undefined })
-
-export const terminatingDropRequestRule: RuleDefinition<undefined, undefined> = {
-  id: "terminating-drop-request",
-  name: "Terminating Drop (request)",
-  alwaysActive: true,
-  defaultPriority: 999,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
-  match: { kind: "request", callState: "terminating" },
-  init: () => undefined,
-  handle: dropHandle,
-}
-
-export const terminatingDropResponseRule: RuleDefinition<undefined, undefined> = {
-  id: "terminating-drop-response",
-  name: "Terminating Drop (response)",
-  alwaysActive: true,
-  defaultPriority: 999,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
-  match: { kind: "response", callState: "terminating" },
-  init: () => undefined,
-  handle: dropHandle,
-}
-
-export const terminatingDropTimerRule: RuleDefinition<undefined, undefined> = {
-  id: "terminating-drop-timer",
-  name: "Terminating Drop (timer)",
-  alwaysActive: true,
-  defaultPriority: 999,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
-  match: { kind: "timer", callState: "terminating" },
-  init: () => undefined,
-  handle: dropHandle,
-}
-
-export const terminatingDropTimeoutRule: RuleDefinition<undefined, undefined> = {
-  id: "terminating-drop-timeout",
-  name: "Terminating Drop (timeout)",
-  alwaysActive: true,
-  defaultPriority: 999,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
-  match: { kind: "timeout", callState: "terminating" },
-  init: () => undefined,
-  handle: dropHandle,
-}
-
-export const terminatingDropCancelledRule: RuleDefinition<undefined, undefined> = {
-  id: "terminating-drop-cancelled",
-  name: "Terminating Drop (cancelled)",
-  alwaysActive: true,
-  defaultPriority: 999,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
-  match: { kind: "cancelled", callState: "terminating" },
-  init: () => undefined,
-  handle: dropHandle,
-}

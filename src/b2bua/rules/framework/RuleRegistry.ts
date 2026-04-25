@@ -53,72 +53,12 @@ export function createRuleRegistry(
     map.set(rule.id, rule)
   }
 
-  // Warn on alwaysActive rules sharing a priority.
-  // Same-priority rules are tie-broken by registration order, which is fragile
-  // and has caused real bugs (e.g. retransmit-200 consuming re-INVITE responses).
-  // This is a warning rather than fatal because some priority bands (e.g. 900)
-  // contain many rules with non-overlapping match criteria where ordering is safe.
-  const priorityToIds = new Map<number, string[]>()
-  for (const rule of allRules) {
-    if (!rule.alwaysActive) continue
-    const p = rule.defaultPriority ?? 900
-    const ids = priorityToIds.get(p)
-    if (ids !== undefined) {
-      ids.push(rule.id)
-    } else {
-      priorityToIds.set(p, [rule.id])
-    }
-  }
-  for (const [priority, ids] of priorityToIds) {
-    if (ids.length > 1) {
-      console.warn(
-        `[RuleRegistry] Priority collision: alwaysActive rules [${ids.join(", ")}] share priority ${priority}. ` +
-        `If these rules can match the same event, assign distinct priorities.`
-      )
-    }
-  }
-
   validateMatchSchemas(allRules)
 
   return { definitions: map }
 }
 
 // ── Match schema validation (shadow / reachability) ───────────────────────
-
-/**
- * Structural signature of a Match: same kind + same set of columns that
- * are set + same filter-presence. Two rules sharing a signature are
- * shadow-candidates and must either have disjoint value domains or
- * declare explicit priority/overrides/composesWith.
- */
-function matchSignature(m: Match): string {
-  const filter = m.filter !== undefined ? "+f" : "-f"
-  switch (m.kind) {
-    case "request":
-      return `req|${cols([m.method, m.callState, m.legState, m.legDisposition, m.direction])}|${filter}`
-    case "response":
-      return `resp|${cols([
-        m.cseqMethod,
-        m.status !== undefined ? "status" : m.statusClass,
-        m.callState,
-        m.legState,
-        m.legDisposition,
-        m.direction,
-      ])}|${filter}`
-    case "timer":
-      return `tmr|${cols([m.timerType, m.callState])}|${filter}`
-    case "timeout":
-      return `to|${cols([m.method, m.callState])}|${filter}`
-    case "cancelled":
-      return `canc|${cols([m.callState])}|${filter}`
-    case "internal-event":
-      return `internal|${cols([m.topic, m.outcome, m.callState])}|${filter}`
-  }
-}
-
-function cols(vs: ReadonlyArray<unknown>): string {
-  return vs.map((v) => (v === undefined ? "_" : "X")).join(",")
-}
 
 /** Do two column values share any concrete value? */
 function valuesOverlap(a: unknown, b: unknown): boolean {
@@ -140,7 +80,8 @@ function matchesOverlap(a: Match, b: Match): boolean {
         valuesOverlap(a.callState, bb.callState) &&
         valuesOverlap(a.legState, bb.legState) &&
         valuesOverlap(a.legDisposition, bb.legDisposition) &&
-        valuesOverlap(a.direction, bb.direction)
+        valuesOverlap(a.direction, bb.direction) &&
+        valuesOverlap(a.transferPhase, bb.transferPhase)
       )
     }
     case "response": {
@@ -163,67 +104,85 @@ function matchesOverlap(a: Match, b: Match): boolean {
         valuesOverlap(a.callState, bb.callState) &&
         valuesOverlap(a.legState, bb.legState) &&
         valuesOverlap(a.legDisposition, bb.legDisposition) &&
-        valuesOverlap(a.direction, bb.direction)
+        valuesOverlap(a.direction, bb.direction) &&
+        valuesOverlap(a.transferPhase, bb.transferPhase)
       )
     }
     case "timer": {
       const bb = b as typeof a
-      return valuesOverlap(a.timerType, bb.timerType) && valuesOverlap(a.callState, bb.callState)
+      return (
+        valuesOverlap(a.timerType, bb.timerType) &&
+        valuesOverlap(a.callState, bb.callState) &&
+        valuesOverlap(a.transferPhase, bb.transferPhase)
+      )
     }
     case "timeout": {
       const bb = b as typeof a
-      return valuesOverlap(a.method, bb.method) && valuesOverlap(a.callState, bb.callState)
+      return (
+        valuesOverlap(a.method, bb.method) &&
+        valuesOverlap(a.callState, bb.callState) &&
+        valuesOverlap(a.transferPhase, bb.transferPhase)
+      )
     }
     case "cancelled": {
       const bb = b as typeof a
-      return valuesOverlap(a.callState, bb.callState)
+      return (
+        valuesOverlap(a.callState, bb.callState) &&
+        valuesOverlap(a.transferPhase, bb.transferPhase)
+      )
     }
     case "internal-event": {
       const bb = b as typeof a
       return (
         valuesOverlap(a.topic, bb.topic) &&
         valuesOverlap(a.outcome, bb.outcome) &&
-        valuesOverlap(a.callState, bb.callState)
+        valuesOverlap(a.callState, bb.callState) &&
+        valuesOverlap(a.transferPhase, bb.transferPhase)
       )
     }
   }
 }
 
 /**
- * Warn if two rules have overlapping match sets + equal specificity score +
- * no explicit ordering (priority differs OR overrides/composesWith declared).
+ * Throw if any two rules have overlapping match sets at equal specificity
+ * with no explicit ordering. Each such pair would have ambiguous winner
+ * selection at runtime — the only deterministic resolutions are:
+ *   - declare `overrides: <other-id>` on one rule
+ *   - declare `composesWith: <other-id>` on one rule
+ *   - narrow one rule's match descriptor to disambiguate
  */
 function validateMatchSchemas(rules: ReadonlyArray<AnyRuleDefinition>): void {
-  const bySignature = new Map<string, AnyRuleDefinition[]>()
+  const byKind = new Map<string, AnyRuleDefinition[]>()
   for (const r of rules) {
-    const sig = matchSignature(r.match)
-    const bucket = bySignature.get(sig)
-    if (bucket) bucket.push(r)
-    else bySignature.set(sig, [r])
+    const bucket = byKind.get(r.match.kind) ?? []
+    bucket.push(r)
+    byKind.set(r.match.kind, bucket)
   }
 
-  for (const bucket of bySignature.values()) {
+  const conflicts: Array<readonly [AnyRuleDefinition, AnyRuleDefinition]> = []
+  for (const bucket of byKind.values()) {
     for (let i = 0; i < bucket.length; i++) {
       for (let j = i + 1; j < bucket.length; j++) {
         const a = bucket[i]!, b = bucket[j]!
         if (!matchesOverlap(a.match, b.match)) continue
-        const aScore = specificityScore(a.match)
-        const bScore = specificityScore(b.match)
-        if (aScore !== bScore) continue
-        const aPrio = a.defaultPriority
-        const bPrio = b.defaultPriority
+        if (specificityScore(a.match) !== specificityScore(b.match)) continue
         const overrideDeclared =
           a.overrides === b.id || b.overrides === a.id ||
           a.composesWith === b.id || b.composesWith === a.id
         if (overrideDeclared) continue
-        if (aPrio !== undefined && bPrio !== undefined && aPrio !== bPrio) continue
-        console.warn(
-          `[RuleRegistry] Match shadow: rules '${a.id}' and '${b.id}' have overlapping ` +
-          `match sets with equal specificity and no explicit ordering ` +
-          `(priority differ OR overrides/composesWith). At least one may be unreachable.`
-        )
+        conflicts.push([a, b])
       }
     }
+  }
+
+  if (conflicts.length > 0) {
+    const lines = conflicts.map(([a, b]) =>
+      `  - '${a.id}' and '${b.id}': overlapping match, equal specificity`
+    ).join("\n")
+    throw new Error(
+      `RuleRegistry: ${conflicts.length} unresolved match shadow${conflicts.length === 1 ? "" : "s"} detected.\n` +
+      `Each pair must declare overrides/composesWith or narrow its match descriptor:\n${lines}`
+    )
   }
 }
 

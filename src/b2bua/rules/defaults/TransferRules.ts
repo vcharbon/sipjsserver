@@ -115,30 +115,6 @@ function isCLegNoAnswerTimer(ctx: RuleContext<TimerMatch>): boolean {
   return cLegId !== undefined && ctx.event.legId === cLegId
 }
 
-// ── Priority band — custom transfer rules live in 100–199 ─────────────────
-
-const PRIO_REJECT_REPLACES = 100
-const PRIO_REJECT_SECOND = 105
-const PRIO_REJECT_A_LEG = 110
-const PRIO_INTERCEPT = 115
-const PRIO_HTTP_REJECT = 120
-const PRIO_HTTP_ALLOW = 125
-const PRIO_HTTP_TIMEOUT = 130
-const PRIO_C_LEG_FAIL_INITIAL = 135
-const PRIO_C_LEG_ANSWER_INITIAL = 140
-const PRIO_C_LEG_PROVISIONAL = 145
-const PRIO_C_LEG_NO_ANSWER = 150
-const PRIO_C_REALIGN_FAIL = 155
-const PRIO_C_REALIGN_200 = 160
-const PRIO_C_REALIGN_TIMEOUT = 165
-const PRIO_C_GLARE_REINVITE = 170
-const PRIO_B_IN_CR_AR_REJECT = 175
-const PRIO_A_REALIGN_FAIL = 180
-const PRIO_A_REALIGN_200 = 185
-const PRIO_A_REALIGN_TIMEOUT = 190
-const PRIO_A_GLARE_REINVITE = 195
-const PRIO_OVERALL_TIMEOUT = 198
-
 // Subscription-State fragments (RFC 3265 §3.2.4)
 const SUB_STATE_ACTIVE_60 = "active;expires=60"
 const SUB_STATE_TERMINATED_NORESOURCE = "terminated;reason=noresource"
@@ -154,7 +130,7 @@ export const transferRejectReplacesRule = defineRule({
   id: "transfer-reject-replaces",
   name: "Reject REFER with Replaces (attended transfer)",
   alwaysActive: true,
-  defaultPriority: PRIO_REJECT_REPLACES,
+  overrides: "transfer-reject-second-refer",
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -185,7 +161,6 @@ export const transferRejectSecondReferRule = defineRule({
   id: "transfer-reject-second-refer",
   name: "Reject second REFER during transfer",
   alwaysActive: true,
-  defaultPriority: PRIO_REJECT_SECOND,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -212,7 +187,6 @@ export const transferRejectALegReferRule = defineRule({
   id: "transfer-reject-a-leg-refer",
   name: "Reject REFER from A leg",
   alwaysActive: true,
-  defaultPriority: PRIO_REJECT_A_LEG,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -248,7 +222,6 @@ export const transferInterceptReferRule = defineRule({
   id: "transfer-intercept-refer",
   name: "Intercept REFER on bridged B leg",
   alwaysActive: true,
-  defaultPriority: PRIO_INTERCEPT,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -330,7 +303,6 @@ export const transferHttpRejectRule = defineRule({
   id: "transfer-http-reject",
   name: "Handle /call/refer reject",
   alwaysActive: true,
-  defaultPriority: PRIO_HTTP_REJECT,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -397,7 +369,6 @@ export const transferHttpAllowRule = defineRule({
   id: "transfer-http-allow",
   name: "Handle /call/refer allow",
   alwaysActive: true,
-  defaultPriority: PRIO_HTTP_ALLOW,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -478,7 +449,6 @@ export const transferHttpTimeoutRule = defineRule({
   id: "transfer-http-timeout",
   name: "Handle REFER subscription expiry",
   alwaysActive: true,
-  defaultPriority: PRIO_HTTP_TIMEOUT,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -529,7 +499,6 @@ export const transferCLegProvisionalRule = defineRule({
   id: "transfer-c-1xx-to-notify",
   name: "NOTIFY referrer on C-leg 1xx",
   alwaysActive: true,
-  defaultPriority: PRIO_C_LEG_PROVISIONAL,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -590,7 +559,7 @@ export const transferCLegAnswerRule = defineRule({
   id: "transfer-c-200-initial",
   name: "C-leg 200 OK → final NOTIFY + re-INVITE C",
   alwaysActive: true,
-  defaultPriority: PRIO_C_LEG_ANSWER_INITIAL,
+  overrides: "retransmit-200",
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -676,7 +645,6 @@ export const transferCLegFailRule = defineRule({
   id: "transfer-c-fail-initial",
   name: "C-leg 3xx–6xx → NOTIFY terminated",
   alwaysActive: true,
-  defaultPriority: PRIO_C_LEG_FAIL_INITIAL,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -741,7 +709,6 @@ export const transferCLegNoAnswerRule = defineRule({
   id: "transfer-c-no-answer",
   name: "C-leg no-answer → NOTIFY 408 terminated",
   alwaysActive: true,
-  defaultPriority: PRIO_C_LEG_NO_ANSWER,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -793,7 +760,7 @@ export const transferCRealign200Rule = defineRule({
   id: "transfer-c-realign-200",
   name: "C-leg 2xx to c-realign re-INVITE → phase a-realigning + re-INVITE A",
   alwaysActive: true,
-  defaultPriority: PRIO_C_REALIGN_200,
+  overrides: "retransmit-200",
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -854,7 +821,6 @@ export const transferCRealignFailRule = defineRule({
   id: "transfer-c-realign-fail",
   name: "C-leg rejects c-realign re-INVITE → rollback",
   alwaysActive: true,
-  defaultPriority: PRIO_C_REALIGN_FAIL,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -910,7 +876,6 @@ export const transferCRealignTimeoutRule = defineRule({
   id: "transfer-c-realign-timeout",
   name: "c-realign re-INVITE timeout → rollback",
   alwaysActive: true,
-  defaultPriority: PRIO_C_REALIGN_TIMEOUT,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -954,7 +919,6 @@ export const transferCGlareReinviteRule = defineRule({
   id: "transfer-c-glare-reinvite",
   name: "C-leg re-INVITE during realigning → 491",
   alwaysActive: true,
-  defaultPriority: PRIO_C_GLARE_REINVITE,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -987,7 +951,6 @@ export const transferARealign200Rule = defineRule({
   id: "transfer-a-realign-200",
   name: "A-leg 2xx to a-realign re-INVITE → merge(a, c), transfer complete",
   alwaysActive: true,
-  defaultPriority: PRIO_A_REALIGN_200,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -1039,7 +1002,6 @@ export const transferARealignFailRule = defineRule({
   id: "transfer-a-realign-fail",
   name: "A-leg rejects a-realign re-INVITE → rollback",
   alwaysActive: true,
-  defaultPriority: PRIO_A_REALIGN_FAIL,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -1087,7 +1049,6 @@ export const transferARealignTimeoutRule = defineRule({
   id: "transfer-a-realign-timeout",
   name: "a-realign re-INVITE timeout → rollback",
   alwaysActive: true,
-  defaultPriority: PRIO_A_REALIGN_TIMEOUT,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -1129,7 +1090,6 @@ export const transferAGlareReinviteRule = defineRule({
   id: "transfer-a-glare-reinvite",
   name: "A-leg re-INVITE during realigning → 491",
   alwaysActive: true,
-  defaultPriority: PRIO_A_GLARE_REINVITE,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -1162,7 +1122,7 @@ export const transferBInCrArRejectRule = defineRule({
   id: "transfer-b-in-cre-are-reject",
   name: "Referrer B-leg non-BYE during realigning → 481",
   alwaysActive: true,
-  defaultPriority: PRIO_B_IN_CR_AR_REJECT,
+  overrides: "resolve-cross-bye",
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -1196,7 +1156,6 @@ export const transferOverallTimeoutRule = defineRule({
   id: "transfer-overall-timeout",
   name: "Transfer overall-safety timer → rollback",
   alwaysActive: true,
-  defaultPriority: PRIO_OVERALL_TIMEOUT,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 

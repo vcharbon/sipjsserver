@@ -14,14 +14,13 @@ import { newTag } from "../../../sip/MessageHelpers.js"
 import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
 import { confirmBridgedCall } from "../framework/actions/composites.js"
 
-// ── relay-provisional (priority 900) ──────────────────────────────────────
+// ── relay-provisional ──────────────────────────────────────
 
 /** Relay 1xx provisional response from b-leg to a-leg. */
 export const relayProvisionalRule = defineRule({
   id: "relay-provisional",
   name: "Relay Provisional",
   alwaysActive: true,
-  defaultPriority: 900,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -44,7 +43,7 @@ export const relayProvisionalRule = defineRule({
   },
 })
 
-// ── confirm-dialog (priority 903) ─────────────────────────────────────────
+// ── confirm-dialog ─────────────────────────────────────────
 
 /**
  * Handle 200 OK INVITE from b-leg — confirm dialog, relay to a-leg,
@@ -59,7 +58,6 @@ export const confirmDialogRule = defineRule({
   id: "confirm-dialog",
   name: "Confirm Dialog (200 OK INVITE)",
   alwaysActive: true,
-  defaultPriority: 903,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -146,14 +144,13 @@ export const confirmDialogRule = defineRule({
   },
 })
 
-// ── absorb-bye-200 (priority 850) ─────────────────────────────────────────
+// ── absorb-bye-200 ─────────────────────────────────────────
 
 /** Absorb 200 OK for BYE/CANCEL (B2BUA already sent its own 200). */
 export const absorbBye200Rule = defineRule({
   id: "absorb-bye-200",
   name: "Absorb BYE/CANCEL 200 OK",
   alwaysActive: true,
-  defaultPriority: 835,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -170,7 +167,7 @@ export const absorbBye200Rule = defineRule({
     Effect.succeed({ actions: [], state: undefined }),
 })
 
-// ── absorb-options-200 (priority 830) ─────────────────────────────────────
+// ── absorb-options-200 ─────────────────────────────────────
 
 /**
  * Absorb 200 OK for a B2BUA-originated keepalive OPTIONS and cancel the
@@ -183,7 +180,6 @@ export const absorbOptions200Rule = defineRule({
   id: "absorb-options-200",
   name: "Absorb OPTIONS 200 OK (keepalive)",
   alwaysActive: true,
-  defaultPriority: 830,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -212,7 +208,7 @@ export const absorbOptions200Rule = defineRule({
     }),
 })
 
-// ── absorb-notify-200 (priority 835) ──────────────────────────────────────
+// ── absorb-notify-200 ──────────────────────────────────────
 
 /**
  * Absorb 200 OK for a B2BUA-originated NOTIFY (REFER-subscription sipfrag).
@@ -226,7 +222,6 @@ export const absorbNotify200Rule = defineRule({
   id: "absorb-notify-200",
   name: "Absorb NOTIFY 200 OK",
   alwaysActive: true,
-  defaultPriority: 835,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -241,14 +236,13 @@ export const absorbNotify200Rule = defineRule({
   handle: () => Effect.succeed({ actions: [], state: undefined }),
 })
 
-// ── relay-non-invite-200 (priority 927) ───────────────────────────────────
+// ── relay-non-invite-200 ───────────────────────────────────
 
 /** Relay 200 OK for non-INVITE methods (PRACK, UPDATE, INFO) to peer. */
 export const relayNonInvite200Rule = defineRule({
   id: "relay-non-invite-200",
   name: "Relay Non-INVITE 200 OK",
   alwaysActive: true,
-  defaultPriority: 927,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 

@@ -468,8 +468,6 @@ export type TransferState = typeof TransferState.Type
 export const ActiveRule = Schema.Struct({
   /** Rule identifier — must match a registered RuleDefinition.id */
   id: Schema.String,
-  /** Lower number runs first. Default 100. */
-  priority: Schema.Int,
   /** Rule-specific configuration from HTTP response (frozen at activation) */
   params: Schema.optional(Schema.Unknown),
   /** Whether this rule is currently active (can be deactivated mid-call) */

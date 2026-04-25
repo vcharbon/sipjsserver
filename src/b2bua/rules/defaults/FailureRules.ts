@@ -10,7 +10,7 @@ import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
 import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 import { headerUpdatesFromRecord, toBareUri } from "../framework/actions/factories.js"
 
-// ── route-failure (priority 906) ──────────────────────────────────────────
+// ── route-failure ──────────────────────────────────────────
 
 /**
  * Handle 3xx-6xx response from b-leg INVITE.
@@ -20,7 +20,6 @@ export const routeFailureRule = defineRule({
   id: "route-failure",
   name: "B-Leg Route Failure",
   alwaysActive: true,
-  defaultPriority: 906,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -85,7 +84,7 @@ export const routeFailureRule = defineRule({
     }),
 })
 
-// ── no-answer-failover (priority 909) ─────────────────────────────────────
+// ── no-answer-failover ─────────────────────────────────────
 
 /**
  * Handle no-answer timeout on a b-leg. Destroys the timed-out leg,
@@ -100,7 +99,6 @@ export const noAnswerFailoverRule = defineRule({
   id: "no-answer-failover",
   name: "No-Answer Failover",
   alwaysActive: true,
-  defaultPriority: 909,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
@@ -152,7 +150,7 @@ export const noAnswerFailoverRule = defineRule({
     }),
 })
 
-// ── absorb-stale-failure (priority 905) ──────────────────────────────────
+// ── absorb-stale-failure ──────────────────────────────────
 
 /**
  * Absorb a late 3xx-6xx INVITE response arriving on an already-terminated
@@ -168,7 +166,6 @@ export const absorbStaleFailureRule = defineRule({
   id: "absorb-stale-failure",
   name: "Absorb Stale Failure",
   alwaysActive: true,
-  defaultPriority: 905,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
 
