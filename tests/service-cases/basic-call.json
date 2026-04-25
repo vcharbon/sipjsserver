@@ -1,0 +1,23 @@
+{
+  "id": "basic-call",
+  "description": "Inbound +1234, B2BUA routes via MockCallControl to bob1 on port 5666.",
+  "alices": [
+    {
+      "name": "alice",
+      "content": {
+        "fromUri": "sip:alice@test",
+        "toUri": "sip:+1234@test",
+        "requestUri": "sip:+1234@127.0.0.1:15060"
+      },
+      "checks": {}
+    }
+  ],
+  "legs": [
+    {
+      "name": "bob1",
+      "checks": {
+        "inviteRuri": { "regex": "^sip:" }
+      }
+    }
+  ]
+}

@@ -15,6 +15,9 @@ import { defineConfig } from "vitest/config"
  */
 export default defineConfig({
   test: {
-    include: ["tests/fullcall/e2e-real-clock.test.ts"],
+    include: [
+      "tests/fullcall/e2e-real-clock.test.ts",
+      "tests/harness/limiter-rejection.test.ts",
+    ],
   },
 })

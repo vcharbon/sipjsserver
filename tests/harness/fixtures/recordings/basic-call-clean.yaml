@@ -1,0 +1,283 @@
+scenario: basic-call
+serviceCase: basic-call
+callId: "3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1"
+startMs: 0
+entries:
+- kind: message
+  direction: sent
+  from: alice
+  to: B2BUA
+  sentMs: 0
+  receivedMs: 15
+  raw: |+
+    INVITE sip:+1234@127.0.0.1:15060 SIP/2.0
+    Via: SIP/2.0/UDP 127.0.0.1:15661;branch=z9hG4bK95b4df73d07546c5
+    Max-Forwards: 70
+    From: <sip:alice@test>;tag=flwvbb0h
+    To: <sip:+1234@127.0.0.1:15060>
+    Call-ID: 3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1 INVITE
+    Contact: <sip:127.0.0.1:15661;transport=udp>
+    Content-Type: application/sdp
+    Content-Length: 230
+    
+    v=0
+    o=test 1 1 IN IP4 127.0.0.1
+    s=-
+    c=IN IP4 127.0.0.1
+    t=0 0
+    m=audio 25348 RTP/AVP 8 18 101
+    a=rtpmap:8 PCMA/8000
+    a=rtpmap:18 G729/8000
+    a=rtpmap:101 telephone-event/8000
+    a=fmtp:101 0-16
+    a=x-offer-id:78adfa9f
+    a=sendrecv
+    
+- kind: message
+  direction: received
+  from: B2BUA
+  to: alice
+  label: alice.expect100
+  sentMs: 15
+  receivedMs: 30
+  raw: |+
+    SIP/2.0 100 Trying
+    Via: SIP/2.0/UDP 127.0.0.1:15661;branch=z9hG4bK95b4df73d07546c5
+    From: <sip:alice@test>;tag=flwvbb0h
+    To: <sip:+1234@127.0.0.1:15060>
+    Call-ID: 3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1 INVITE
+    Content-Length: 0
+    
+    
+- kind: message
+  direction: received
+  from: B2BUA
+  to: bob1
+  sentMs: 15
+  receivedMs: 30
+  raw: |+
+    INVITE sip:+1234@127.0.0.1:5666 SIP/2.0
+    Via: SIP/2.0/UDP 127.0.0.1:15060;branch=z9hG4bK68372c3431bf4778;cr=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;lg=b-1
+    Max-Forwards: 69
+    From: <sip:alice@test>;tag=if2kc2y9
+    To: <sip:+1234@127.0.0.1:15060>
+    Call-ID: 1-3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1354000 INVITE
+    Contact: <sip:b2bua@127.0.0.1:15060;callRef=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;leg=b-1>
+    Content-Type: application/sdp
+    Content-Length: 230
+    X-Random: 2158f680-d19c-4ac5-9ace-1d5a489b5d32
+    
+    v=0
+    o=test 1 1 IN IP4 127.0.0.1
+    s=-
+    c=IN IP4 127.0.0.1
+    t=0 0
+    m=audio 25348 RTP/AVP 8 18 101
+    a=rtpmap:8 PCMA/8000
+    a=rtpmap:18 G729/8000
+    a=rtpmap:101 telephone-event/8000
+    a=fmtp:101 0-16
+    a=x-offer-id:78adfa9f
+    a=sendrecv
+    
+- kind: message
+  direction: sent
+  from: bob1
+  to: B2BUA
+  label: bob1.send180
+  sentMs: 30
+  receivedMs: 45
+  raw: |+
+    SIP/2.0 180 Ringing
+    Via: SIP/2.0/UDP 127.0.0.1:15060;branch=z9hG4bK68372c3431bf4778;cr=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;lg=b-1
+    From: <sip:alice@test>;tag=if2kc2y9
+    To: <sip:+1234@127.0.0.1:15060>;tag=4xlpgi8u
+    Call-ID: 1-3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1354000 INVITE
+    Contact: <sip:127.0.0.1:5666;transport=udp>
+    Content-Length: 0
+    
+    
+- kind: message
+  direction: received
+  from: B2BUA
+  to: alice
+  label: alice.expect180
+  sentMs: 45
+  receivedMs: 60
+  raw: |+
+    SIP/2.0 180 Ringing
+    Via: SIP/2.0/UDP 127.0.0.1:15661;branch=z9hG4bK95b4df73d07546c5
+    From: <sip:alice@test>;tag=flwvbb0h
+    To: <sip:+1234@127.0.0.1:15060>;tag=7xmt9385
+    Call-ID: 3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1 INVITE
+    Contact: <sip:b2bua@127.0.0.1:15060;callRef=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;leg=a>
+    Content-Length: 0
+    
+    
+- kind: message
+  direction: sent
+  from: bob1
+  to: B2BUA
+  label: bob1.send200
+  sentMs: 60
+  receivedMs: 75
+  raw: |+
+    SIP/2.0 200 OK
+    Via: SIP/2.0/UDP 127.0.0.1:15060;branch=z9hG4bK68372c3431bf4778;cr=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;lg=b-1
+    From: <sip:alice@test>;tag=if2kc2y9
+    To: <sip:+1234@127.0.0.1:15060>;tag=4xlpgi8u
+    Call-ID: 1-3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1354000 INVITE
+    Contact: <sip:127.0.0.1:5666;transport=udp>
+    Content-Type: application/sdp
+    Content-Length: 181
+    
+    v=0
+    o=test 2 2 IN IP4 127.0.0.1
+    s=-
+    c=IN IP4 127.0.0.1
+    t=0 0
+    m=audio 20001 RTP/AVP 8 101
+    a=rtpmap:8 PCMA/8000
+    a=rtpmap:101 telephone-event/8000
+    a=fmtp:101 0-16
+    a=sendrecv
+    
+- kind: message
+  direction: received
+  from: B2BUA
+  to: alice
+  label: alice.expect200
+  sentMs: 75
+  receivedMs: 90
+  raw: |+
+    SIP/2.0 200 OK
+    Via: SIP/2.0/UDP 127.0.0.1:15661;branch=z9hG4bK95b4df73d07546c5
+    From: <sip:alice@test>;tag=flwvbb0h
+    To: <sip:+1234@127.0.0.1:15060>;tag=7xmt9385
+    Call-ID: 3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1 INVITE
+    Contact: <sip:b2bua@127.0.0.1:15060;callRef=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;leg=a>
+    Content-Type: application/sdp
+    Content-Length: 181
+    
+    v=0
+    o=test 2 2 IN IP4 127.0.0.1
+    s=-
+    c=IN IP4 127.0.0.1
+    t=0 0
+    m=audio 20001 RTP/AVP 8 101
+    a=rtpmap:8 PCMA/8000
+    a=rtpmap:101 telephone-event/8000
+    a=fmtp:101 0-16
+    a=sendrecv
+    
+- kind: message
+  direction: sent
+  from: alice
+  to: B2BUA
+  sentMs: 90
+  receivedMs: 105
+  raw: |+
+    ACK sip:b2bua@127.0.0.1:15060;callRef=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;leg=a SIP/2.0
+    Via: SIP/2.0/UDP 127.0.0.1:15661;branch=z9hG4bK7744f09f2e1a464c
+    Max-Forwards: 70
+    From: <sip:alice@test>;tag=flwvbb0h
+    To: <sip:+1234@127.0.0.1:15060>;tag=7xmt9385
+    Call-ID: 3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1 ACK
+    Contact: <sip:127.0.0.1:15661;transport=udp>
+    Content-Length: 0
+    
+    
+- kind: message
+  direction: received
+  from: B2BUA
+  to: bob1
+  sentMs: 105
+  receivedMs: 120
+  raw: |+
+    ACK sip:127.0.0.1:5666;transport=udp SIP/2.0
+    Via: SIP/2.0/UDP 127.0.0.1:15060;branch=z9hG4bKf6286d3ecb95472b;cr=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;lg=b-1
+    Max-Forwards: 70
+    From: <sip:alice@test>;tag=if2kc2y9
+    To: <sip:+1234@127.0.0.1:15060>;tag=4xlpgi8u
+    Call-ID: 1-3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1354000 ACK
+    Content-Length: 0
+    
+    
+- kind: message
+  direction: sent
+  from: alice
+  to: B2BUA
+  sentMs: 1120
+  receivedMs: 1135
+  raw: |+
+    BYE sip:b2bua@127.0.0.1:15060;callRef=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;leg=a SIP/2.0
+    Via: SIP/2.0/UDP 127.0.0.1:15661;branch=z9hG4bKf72b3cc7081d45f3
+    Max-Forwards: 70
+    From: <sip:alice@test>;tag=flwvbb0h
+    To: <sip:+1234@127.0.0.1:15060>;tag=7xmt9385
+    Call-ID: 3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 2 BYE
+    Contact: <sip:127.0.0.1:15661;transport=udp>
+    Content-Length: 0
+    
+    
+- kind: message
+  direction: received
+  from: B2BUA
+  to: bob1
+  sentMs: 1135
+  receivedMs: 1150
+  raw: |+
+    BYE sip:127.0.0.1:5666;transport=udp SIP/2.0
+    Via: SIP/2.0/UDP 127.0.0.1:15060;branch=z9hG4bK77f4d685db83413e;cr=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;lg=b-1
+    Max-Forwards: 70
+    From: <sip:alice@test>;tag=if2kc2y9
+    To: <sip:+1234@127.0.0.1:15060>;tag=4xlpgi8u
+    Call-ID: 1-3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1354001 BYE
+    Content-Length: 0
+    
+    
+- kind: message
+  direction: sent
+  from: bob1
+  to: B2BUA
+  sentMs: 1150
+  receivedMs: 1165
+  raw: |+
+    SIP/2.0 200 OK
+    Via: SIP/2.0/UDP 127.0.0.1:15060;branch=z9hG4bK77f4d685db83413e;cr=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;lg=b-1
+    From: <sip:alice@test>;tag=if2kc2y9
+    To: <sip:+1234@127.0.0.1:15060>;tag=4xlpgi8u
+    Call-ID: 1-3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 1354001 BYE
+    Contact: <sip:127.0.0.1:5666;transport=udp>
+    Content-Length: 0
+    
+    
+- kind: message
+  direction: received
+  from: B2BUA
+  to: alice
+  sentMs: 1135
+  receivedMs: 1150
+  raw: |+
+    SIP/2.0 200 OK
+    Via: SIP/2.0/UDP 127.0.0.1:15661;branch=z9hG4bKf72b3cc7081d45f3
+    From: <sip:alice@test>;tag=flwvbb0h
+    To: <sip:+1234@127.0.0.1:15060>;tag=7xmt9385
+    Call-ID: 3c7d90c3-f101-4321-9125-adb6074e2438@127.0.0.1
+    CSeq: 2 BYE
+    Contact: <sip:b2bua@127.0.0.1:15060;callRef=3c7d90c3-f101-4321-9125-adb6074e2438%40127.0.0.1%7Cflwvbb0h;leg=a>
+    Content-Length: 0
+    
+    

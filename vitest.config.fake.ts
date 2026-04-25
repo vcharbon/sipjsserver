@@ -14,6 +14,11 @@ import { defineConfig } from "vitest/config"
 export default defineConfig({
   test: {
     include: ["tests/**/*.test.ts"],
-    exclude: ["tests/fullcall/e2e-real-clock.test.ts", "node_modules/**", "dist/**"],
+    exclude: [
+      "tests/fullcall/e2e-real-clock.test.ts",
+      "tests/harness/limiter-rejection.test.ts",
+      "node_modules/**",
+      "dist/**",
+    ],
   },
 })

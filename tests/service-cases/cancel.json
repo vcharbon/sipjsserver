@@ -1,0 +1,17 @@
+{
+  "id": "cancel",
+  "description": "Alice cancels mid-ring; B2BUA propagates CANCEL to bob.",
+  "alices": [
+    {
+      "name": "alice",
+      "content": {
+        "fromUri": "sip:alice@test",
+        "toUri": "sip:+1234@test",
+        "requestUri": "sip:+1234@127.0.0.1:15060"
+      }
+    }
+  ],
+  "legs": [
+    { "name": "bob", "checks": { "inviteRuri": { "regex": "^sip:" } } }
+  ]
+}

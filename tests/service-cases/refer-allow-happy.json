@@ -1,0 +1,29 @@
+{
+  "id": "refer-allow-happy",
+  "description": "REFER allow happy path — A↔B established, B refers to C, C answers.",
+  "alices": [
+    {
+      "name": "alice",
+      "content": {
+        "fromUri": "sip:alice@test",
+        "toUri": "sip:+1234@test",
+        "requestUri": "sip:+1234@127.0.0.1:15062"
+      },
+      "checks": {}
+    }
+  ],
+  "legs": [
+    {
+      "name": "bob",
+      "checks": {
+        "inviteRuri": { "regex": "^sip:" }
+      }
+    },
+    {
+      "name": "charlie",
+      "checks": {
+        "inviteRuri": { "regex": "^sip:charlie@" }
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "callee-hangup",
+  "description": "Basic call where the callee (bob) initiates the BYE.",
+  "alices": [
+    {
+      "name": "alice",
+      "content": {
+        "fromUri": "sip:alice@test",
+        "toUri": "sip:+1234@test",
+        "requestUri": "sip:+1234@127.0.0.1:15060"
+      }
+    }
+  ],
+  "legs": [
+    { "name": "bob", "checks": { "inviteRuri": { "regex": "^sip:" } } }
+  ]
+}

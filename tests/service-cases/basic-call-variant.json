@@ -1,0 +1,26 @@
+{
+  "id": "basic-call-variant",
+  "description": "basic-call with a different inbound number; same flow shape, different content. Proves scenario × ServiceCase orthogonality (Slice 7).",
+  "alices": [
+    {
+      "name": "alice",
+      "content": {
+        "fromUri": "sip:alice2@test",
+        "toUri": "sip:+18005550100@test",
+        "requestUri": "sip:+18005550100@127.0.0.1:15060"
+      },
+      "checks": {
+        "inviteFrom": { "regex": "alice2@test" },
+        "inviteRuri": { "regex": "\\+18005550100" }
+      }
+    }
+  ],
+  "legs": [
+    {
+      "name": "bob1",
+      "checks": {
+        "inviteRuri": { "regex": "^sip:" }
+      }
+    }
+  ]
+}

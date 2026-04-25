@@ -1,0 +1,34 @@
+{
+  "id": "limiter-rejection",
+  "description": "Three parallel calls with shared limiter id (limit=1): alice1 establishes, alice2 is 486-rejected, alice3 establishes after alice1 hangs up.",
+  "alices": [
+    {
+      "name": "alice1",
+      "content": {
+        "fromUri": "sip:alice1@test",
+        "toUri": "sip:+1234@test",
+        "requestUri": "sip:+1234@127.0.0.1:15060"
+      }
+    },
+    {
+      "name": "alice2",
+      "content": {
+        "fromUri": "sip:alice2@test",
+        "toUri": "sip:+1234@test",
+        "requestUri": "sip:+1234@127.0.0.1:15060"
+      }
+    },
+    {
+      "name": "alice3",
+      "content": {
+        "fromUri": "sip:alice3@test",
+        "toUri": "sip:+1234@test",
+        "requestUri": "sip:+1234@127.0.0.1:15060"
+      }
+    }
+  ],
+  "legs": [
+    { "name": "bob1", "checks": { "inviteRuri": { "regex": "^sip:" } } },
+    { "name": "bob3", "checks": { "inviteRuri": { "regex": "^sip:" } } }
+  ]
+}
