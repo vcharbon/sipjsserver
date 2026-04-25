@@ -71,24 +71,19 @@ function formatRelativeTimestamp(ms: number): string {
 // ---------------------------------------------------------------------------
 
 function getCallId(msg: SipMessage): string {
-  return msg.headers.find((h) => h.name.toLowerCase() === "call-id")?.value ?? "unknown"
+  return msg.parsed.callId
 }
 
 function getFromTag(msg: SipMessage): string {
-  const from = msg.headers.find((h) => h.name.toLowerCase() === "from")?.value ?? ""
-  const match = /;tag=([^\s;,>]+)/i.exec(from)
-  return match?.[1] ?? ""
+  return msg.parsed.from.tag ?? ""
 }
 
 function getToTag(msg: SipMessage): string {
-  const to = msg.headers.find((h) => h.name.toLowerCase() === "to")?.value ?? ""
-  const match = /;tag=([^\s;,>]+)/i.exec(to)
-  return match?.[1] ?? ""
+  return msg.parsed.to.tag ?? ""
 }
 
 function getCSeqMethod(msg: SipMessage): string {
-  const cseq = msg.headers.find((h) => h.name.toLowerCase() === "cseq")?.value ?? ""
-  return cseq.split(/\s+/)[1] ?? ""
+  return msg.parsed.cseq.method
 }
 
 function hasSdp(msg: SipMessage): boolean {

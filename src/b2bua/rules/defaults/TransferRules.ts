@@ -13,7 +13,7 @@
  *  - docs/todos/REFERIMPL.md — full design and slice breakdown
  */
 
-import { Effect, Schema } from "effect"
+import { Effect, Result, Schema } from "effect"
 import type { RuleDefinition, RuleAction, RuleContext } from "../framework/RuleDefinition.js"
 import type { SipRequest } from "../../../sip/types.js"
 import { getHeader } from "../../../sip/MessageHelpers.js"
@@ -31,11 +31,14 @@ function referToOf(ctx: RuleContext): string | undefined {
   return getHeader(msg.headers, "refer-to")
 }
 
-/** Refer-To contains a Replaces header parameter in its URI query. */
+/** Refer-To contains a Replaces header parameter in its URI embedded headers. */
 function referToHasReplaces(ctx: RuleContext): boolean {
-  const referTo = referToOf(ctx)
-  if (referTo === undefined) return false
-  return /[?&]replaces=/i.test(referTo)
+  if (ctx.event.type !== "sip") return false
+  const msg = ctx.event.message
+  if (msg.type !== "request") return false
+  const r = msg.lazy.referTo()
+  if (Result.isFailure(r)) return false
+  return r.success?.replaces !== undefined
 }
 
 /** REFER arrived without a Replaces parameter in the Refer-To URI. */
@@ -56,8 +59,7 @@ function dialogIdFor(ctx: RuleContext): string {
 
 /** CSeq number on the inbound REFER, or 0 when missing/unparseable. */
 function inboundCSeq(req: SipRequest): number {
-  const h = getHeader(req.headers, "cseq") ?? ""
-  const n = parseInt(h, 10)
+  const n = req.parsed.cseq.seq
   return Number.isFinite(n) && n > 0 ? n : 0
 }
 

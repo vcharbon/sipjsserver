@@ -29,11 +29,11 @@
 import { scenario } from "../fullcall/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 import type { SipMessage } from "../../src/sip/types.js"
+import { parseNameAddr } from "../../src/sip/parsers/custom/structured-headers.js"
 
 /** Extract the To URI (without tag) from a To header value. */
 function toUri(toHeader: string): string {
-  const match = /<([^>]+)>/.exec(toHeader)
-  return match?.[1] ?? toHeader.split(";")[0]!
+  return parseNameAddr(toHeader).uri
 }
 
 export const prackForkingCall = scenario("prack-forking", (s) => {

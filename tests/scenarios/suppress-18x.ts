@@ -16,9 +16,7 @@ import type { SipMessage } from "../../src/sip/types.js"
 
 /** Extract To-tag from a SIP message. */
 function extractToTag(msg: SipMessage): string {
-  const to = msg.headers.find((h) => h.name.toLowerCase() === "to")?.value ?? ""
-  const tagMatch = /;tag=([^;>\s]+)/.exec(to)
-  return tagMatch?.[1] ?? ""
+  return msg.parsed.to.tag ?? ""
 }
 
 /** Check if a SIP message has a body. */

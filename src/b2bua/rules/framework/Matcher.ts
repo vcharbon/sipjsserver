@@ -66,8 +66,8 @@ export function statusClassFor(status: number): StatusClass {
 
 /** Extract CSeq method from a response's CSeq header. */
 export function cseqMethodOf(resp: SipResponse): string {
-  const h = resp.headers.find((h) => h.name.toLowerCase() === "cseq")?.value ?? ""
-  return h.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
+  const method = resp.parsed.cseq.method
+  return method.length > 0 ? method.toUpperCase() : "INVITE"
 }
 
 // ── Column matching (no filter) ───────────────────────────────────────────

@@ -25,6 +25,7 @@ import type { CallLimiter } from "../../call/CallLimiter.js"
 import type { AppConfigData } from "../../config/AppConfig.js"
 import { newTag } from "../../sip/MessageHelpers.js"
 import { getHeader } from "../../sip/MessageHelpers.js"
+import { splitTopLevelCommas } from "../../sip/parsers/custom/structured-headers.js"
 import { generateResponse } from "../../sip/generators.js"
 import type { ContactSpec } from "../../sip/generators.js"
 import type { RemoteInfo, SipRequest } from "../../sip/types.js"
@@ -96,7 +97,7 @@ export function applyRoute(
     if (routing.relay_first_18x_to_180) {
       const supported = getHeader(req.headers, "supported")
       if (supported) {
-        const tokens = supported.split(",").map((t) => t.trim())
+        const tokens = splitTopLevelCommas(supported)
           .filter((t) => t.toLowerCase() !== "100rel")
         updated = {
           ...updated,

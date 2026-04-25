@@ -51,6 +51,8 @@ import {
   newTag,
   stripTag,
 } from "../../../sip/MessageHelpers.js"
+import { parseSipUriString } from "../../../sip/parsers/custom/structured-headers.js"
+import { Result } from "effect"
 import {
   extractNonStructuralHeaders,
   generateAckFor2xx,
@@ -140,7 +142,7 @@ function applyRouteSet(
 
   const firstRoute = dialog.sip.routeSet[0]!
   const firstUri = extractUriFromRoute(firstRoute)
-  const isLoose = /;lr(?![a-zA-Z0-9_-])/i.test(firstUri)
+  const isLoose = parseSipUriString(firstUri)?.params["lr"] !== undefined
   if (!isLoose) return { msg, target }
 
   const routeHeaders: SipHeader[] = dialog.sip.routeSet.map((uri: string) => ({ name: "Route", value: uri }))
@@ -588,10 +590,11 @@ function relayRequest(
       // "<RSeq> <CSeq> <Method>" to the target dialog's INVITE CSeq, sourced
       // from `pendingInviteTxn`.
       const rackIn = getHeader(req.headers, "rack") ?? ""
-      const rackParts = rackIn.split(/\s+/)
+      const rackResult = req.lazy.rack()
+      const parsedRack = Result.isSuccess(rackResult) ? rackResult.success : undefined
       const targetInviteCSeq = inviteCSeqFromHandle(targetLeg, targetDialog) ?? targetDialog.sip.localCSeq
-      const rack = rackParts.length >= 3
-        ? `${rackParts[0]} ${targetInviteCSeq} ${rackParts.slice(2).join(" ")}`
+      const rack = parsedRack !== undefined
+        ? `${parsedRack.rseq} ${targetInviteCSeq} ${parsedRack.method}`
         : rackIn
       const { via, contact } = legStackIdentity(state.call, targetLeg.legId, ctx.config)
       const { request: r } = generateInDialogRequest("PRACK", targetDialog.sip, {
@@ -706,9 +709,8 @@ function relayResponseMsg(
   // addPendingRequest() in relayRequest above. Covers re-INVITE as well as
   // any transparent in-dialog method (OPTIONS, INFO, UPDATE, MESSAGE,
   // PRACK, …). See AdvancedCallModel.md §"Limitations" for context.
-  const cseqHeader = getHeader(resp.headers, "cseq") ?? ""
-  const cseqMethod = cseqHeader.split(/\s+/)[1]?.toUpperCase() ?? "INVITE"
-  const cseqNum = parseInt(cseqHeader, 10)
+  const cseqMethod = resp.parsed.cseq.method.length > 0 ? resp.parsed.cseq.method.toUpperCase() : "INVITE"
+  const cseqNum = resp.parsed.cseq.seq
   const pending = ctx.sourceDialog !== undefined
     ? findPendingRequest(ctx.sourceDialog, cseqNum)
     : undefined

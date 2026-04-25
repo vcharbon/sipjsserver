@@ -17,21 +17,21 @@ import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import { definePolicyModule } from "../framework/PolicyModule.js"
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader, getHeaders, newTag } from "../../../sip/MessageHelpers.js"
+import { splitTopLevelCommas } from "../../../sip/parsers/custom/structured-headers.js"
 import { H, removeH } from "../framework/actions/factories.js"
 import type { HeaderName, HeaderUpdate } from "../framework/actions/types.js"
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 function cseqNumber(resp: SipResponse): number {
-  const h = getHeader(resp.headers, "cseq") ?? ""
-  return parseInt(h.trim().split(/\s+/)[0] ?? "0", 10)
+  return resp.parsed.cseq.seq
 }
 
 /** RFC 3262: reliable 1xx carries Require:100rel and a numeric RSeq. */
 function reliableRseq(resp: SipResponse): number | undefined {
   const require = getHeaders(resp.headers, "require")
   const has100rel = require.some((v) =>
-    v.toLowerCase().split(",").some((t) => t.trim() === "100rel"),
+    splitTopLevelCommas(v).some((t) => t.toLowerCase() === "100rel"),
   )
   if (!has100rel) return undefined
   const rseq = getHeader(resp.headers, "rseq")

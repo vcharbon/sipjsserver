@@ -21,7 +21,7 @@
  * the transitional message is still within the "early dialog" window.
  */
 
-import type { SipMessage, SipHeader } from "../../../src/sip/types.js"
+import type { SipMessage } from "../../../src/sip/types.js"
 import { classifySdp } from "../helpers/sdp.js"
 
 export interface PendingOffer {
@@ -54,10 +54,9 @@ export class OfferAnswerTracker {
     const sdp = classifySdp(body)
     if (sdp.kind === "unclassified") return []
 
-    const callId = getHeaderValue(msg.headers, "call-id") ?? ""
-    const cseqParts = (getHeaderValue(msg.headers, "cseq") ?? "").trim().split(/\s+/)
-    const cseqNum = parseInt(cseqParts[0] ?? "0", 10)
-    const cseqMethod = (cseqParts[1] ?? "").toUpperCase()
+    const callId = msg.parsed.callId
+    const cseqNum = msg.parsed.cseq.seq
+    const cseqMethod = msg.parsed.cseq.method.toUpperCase()
     const is2xxInvite =
       msg.type === "response" &&
       msg.status >= 200 &&
@@ -142,6 +141,3 @@ export class OfferAnswerTracker {
   }
 }
 
-function getHeaderValue(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {
-  return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value
-}

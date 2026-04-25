@@ -6,6 +6,7 @@
  * (empty = pass). Checks can be skipped or overridden per-expect-step.
  */
 
+import { Result } from "effect"
 import type { SipMessage, SipHeader } from "../../../src/sip/types.js"
 import type { AgentDialogState } from "./message-builder.js"
 
@@ -86,24 +87,6 @@ function getAllHeaderValues(headers: ReadonlyArray<SipHeader>, name: string): st
   return headers.filter((h) => h.name.toLowerCase() === name.toLowerCase()).map((h) => h.value)
 }
 
-function extractTag(headerValue: string): string | undefined {
-  const m = /;tag=([^\s;,>]+)/i.exec(headerValue)
-  return m?.[1]
-}
-
-function extractBranch(viaValue: string): string | undefined {
-  const m = /;branch=([^\s;,>]+)/i.exec(viaValue)
-  return m?.[1]
-}
-
-function parseCSeq(headers: ReadonlyArray<SipHeader>): { num: number; method: string } | undefined {
-  const raw = getHeaderValue(headers, "cseq")
-  if (!raw) return undefined
-  const parts = raw.trim().split(/\s+/)
-  if (parts.length < 2) return undefined
-  return { num: parseInt(parts[0]!, 10), method: parts[1]! }
-}
-
 // ---------------------------------------------------------------------------
 // Individual validation checks
 // ---------------------------------------------------------------------------
@@ -119,12 +102,10 @@ function validateTags(
   _correlatedRequest: SipMessage | undefined
 ): string[] {
   const errors: string[] = []
-  const toHeader = getHeaderValue(msg.headers, "to") ?? ""
-  const fromHeader = getHeaderValue(msg.headers, "from") ?? ""
 
   if (msg.type === "request") {
     if (dialogState.remoteTag) {
-      const toTag = extractTag(toHeader)
+      const toTag = msg.parsed.to.tag
       if (toTag && !dialogState.localTags.has(toTag)) {
         const expected = [...dialogState.localTags].join(" | ")
         errors.push(
@@ -133,7 +114,7 @@ function validateTags(
       }
     }
   } else {
-    const fromTag = extractTag(fromHeader)
+    const fromTag = msg.parsed.from.tag
     if (fromTag !== undefined && !dialogState.localTags.has(fromTag)) {
       const expected = [...dialogState.localTags].join(" | ")
       errors.push(
@@ -158,10 +139,10 @@ function validateTags(
  * is skipped for those.
  */
 function dialogKey(msg: SipMessage): string | undefined {
-  const callId = getHeaderValue(msg.headers, "call-id")
+  const callId = msg.parsed.callId
   if (!callId) return undefined
-  const fromTag = extractTag(getHeaderValue(msg.headers, "from") ?? "")
-  const toTag = extractTag(getHeaderValue(msg.headers, "to") ?? "")
+  const fromTag = msg.parsed.from.tag
+  const toTag = msg.parsed.to.tag
   if (!fromTag || !toTag) return undefined
   return `${callId}|${fromTag}|${toTag}`
 }
@@ -186,12 +167,7 @@ function validateCSeq(
   correlatedRequest: SipMessage | undefined
 ): string[] {
   const errors: string[] = []
-  const cseq = parseCSeq(msg.headers)
-
-  if (!cseq) {
-    errors.push("Missing or malformed CSeq header")
-    return errors
-  }
+  const cseq = msg.parsed.cseq
 
   if (msg.type === "request") {
     // CSeq method must match the request method
@@ -210,15 +186,15 @@ function validateCSeq(
       const pendingInvite = dialogState.pendingRequests.findLast(
         (p) => p.method === "INVITE"
       )
-      if (pendingInvite && cseq.num !== pendingInvite.cseqNumber) {
+      if (pendingInvite && cseq.seq !== pendingInvite.cseqNumber) {
         errors.push(
-          `CSeq number mismatch: ${msg.method} has CSeq ${cseq.num} but INVITE had ${pendingInvite.cseqNumber}`
+          `CSeq number mismatch: ${msg.method} has CSeq ${cseq.seq} but INVITE had ${pendingInvite.cseqNumber}`
         )
       }
     } else {
       const key = dialogKey(msg)
       if (key !== undefined) {
-        const callId = getHeaderValue(msg.headers, "call-id") ?? ""
+        const callId = msg.parsed.callId
         const prior = dialogState.remoteCSeqByDialog.get(key)
         const baseline = dialogState.inviteCSeqByCallId.get(callId)
         const expected = prior !== undefined
@@ -226,39 +202,37 @@ function validateCSeq(
           : baseline !== undefined
             ? baseline + 1
             : undefined
-        if (expected !== undefined && cseq.num !== expected) {
+        if (expected !== undefined && cseq.seq !== expected) {
           const anchor = prior !== undefined
             ? `prior in-dialog CSeq ${prior}`
             : `INVITE baseline ${baseline}`
           errors.push(
             `Per-dialog CSeq out of sequence for ${msg.method} (dialog ${key}): ` +
-            `expected ${expected} (${anchor} + 1) but got ${cseq.num} — ` +
+            `expected ${expected} (${anchor} + 1) but got ${cseq.seq} — ` +
             `RFC 3261 §12.2.1.1 (CSeq is scoped to the dialog; forked early dialogs ` +
             `each maintain an independent sequence).`
           )
         }
-      } else if (dialogState.remoteCSeq !== undefined && cseq.num !== dialogState.remoteCSeq + 1) {
+      } else if (dialogState.remoteCSeq !== undefined && cseq.seq !== dialogState.remoteCSeq + 1) {
         // Out-of-dialog fallback (no tag pair): retain legacy single-counter check.
         errors.push(
-          `CSeq out of sequence: expected ${dialogState.remoteCSeq + 1} but got ${cseq.num}`
+          `CSeq out of sequence: expected ${dialogState.remoteCSeq + 1} but got ${cseq.seq}`
         )
       }
     }
   } else {
     // Response: CSeq must match the sent request
     if (correlatedRequest) {
-      const sentCSeq = parseCSeq(correlatedRequest.headers)
-      if (sentCSeq) {
-        if (cseq.num !== sentCSeq.num) {
-          errors.push(
-            `Response CSeq number ${cseq.num} does not match sent request CSeq ${sentCSeq.num}`
-          )
-        }
-        if (cseq.method !== sentCSeq.method) {
-          errors.push(
-            `Response CSeq method "${cseq.method}" does not match sent request method "${sentCSeq.method}"`
-          )
-        }
+      const sentCSeq = correlatedRequest.parsed.cseq
+      if (cseq.seq !== sentCSeq.seq) {
+        errors.push(
+          `Response CSeq number ${cseq.seq} does not match sent request CSeq ${sentCSeq.seq}`
+        )
+      }
+      if (cseq.method !== sentCSeq.method) {
+        errors.push(
+          `Response CSeq method "${cseq.method}" does not match sent request method "${sentCSeq.method}"`
+        )
       }
     }
   }
@@ -281,20 +255,18 @@ function validateVia(
   if (msg.type === "request") return []
 
   const errors: string[] = []
-  const responseVias = getAllHeaderValues(msg.headers, "via")
 
   if (correlatedRequest) {
-    const sentVias = getAllHeaderValues(correlatedRequest.headers, "via")
+    const responseVias = msg.parsed.vias
+    const sentVias = correlatedRequest.parsed.vias
 
     // Topmost Via branch must match
-    if (responseVias.length > 0 && sentVias.length > 0) {
-      const responseBranch = extractBranch(responseVias[0]!)
-      const sentBranch = extractBranch(sentVias[0]!)
-      if (responseBranch && sentBranch && responseBranch !== sentBranch) {
-        errors.push(
-          `Via branch mismatch: response has "${responseBranch}" but we sent "${sentBranch}"`
-        )
-      }
+    const responseBranch = responseVias[0]?.branch
+    const sentBranch = sentVias[0]?.branch
+    if (responseBranch && sentBranch && responseBranch !== sentBranch) {
+      errors.push(
+        `Via branch mismatch: response has "${responseBranch}" but we sent "${sentBranch}"`
+      )
     }
 
     // Via count must match
@@ -317,8 +289,7 @@ function validateCallId(
   dialogState: AgentDialogState,
   _correlatedRequest: SipMessage | undefined
 ): string[] {
-  const callId = getHeaderValue(msg.headers, "call-id")
-  if (!callId) return ["Missing Call-ID header"]
+  const callId = msg.parsed.callId
 
   // Only enforce consistency after Call-ID has been confirmed by a received message.
   // B-side agents have a locally generated Call-ID that gets replaced on first INVITE.
@@ -438,10 +409,7 @@ function validateToTagPresence(
   if (msg.type !== "response") return []
   if (msg.status <= 100) return []
 
-  const toHeader = getHeaderValue(msg.headers, "to")
-  if (!toHeader) return ["Missing To header on response"]
-
-  const tag = extractTag(toHeader)
+  const tag = msg.parsed.to.tag
   if (!tag) {
     return [`Missing To-tag on ${msg.status} response (required for responses > 100 per RFC 3261 §8.2.6.2)`]
   }
@@ -459,10 +427,9 @@ function validateBranchPrefix(
   _correlatedRequest: SipMessage | undefined
 ): string[] {
   const errors: string[] = []
-  const vias = getAllHeaderValues(msg.headers, "via")
 
-  for (const via of vias) {
-    const branch = extractBranch(via)
+  for (const via of msg.parsed.vias) {
+    const branch = via.branch
     if (branch && !branch.startsWith("z9hG4bK")) {
       errors.push(
         `Via branch "${branch}" missing RFC 3261 magic cookie prefix "z9hG4bK"`
@@ -492,8 +459,7 @@ function validateDialogUri(
   if (msg.type !== "request") return []
 
   const errors: string[] = []
-  const fromHeader = getHeaderValue(msg.headers, "from") ?? ""
-  const fromUri = extractUriFromNameAddr(fromHeader)
+  const fromUri = msg.parsed.from.uri
 
   if (fromUri && fromUri !== dialogState.dialogRemoteUri) {
     errors.push(
@@ -502,12 +468,6 @@ function validateDialogUri(
   }
 
   return errors
-}
-
-/** Extract the URI from a Name-Addr or addr-spec header value (e.g., `<sip:alice@test>;tag=x` → `sip:alice@test`). */
-function extractUriFromNameAddr(headerValue: string): string | undefined {
-  const m = /<([^>]+)>/.exec(headerValue)
-  return m?.[1]
 }
 
 /**
@@ -573,10 +533,7 @@ function validateCancelViaBranch(
   if (msg.type !== "request" || msg.method !== "CANCEL") return []
   if (!dialogState.receivedInviteBranch) return []
 
-  const cancelVia = getAllHeaderValues(msg.headers, "via")
-  if (cancelVia.length === 0) return []
-
-  const cancelBranch = extractBranch(cancelVia[0]!)
+  const cancelBranch = msg.parsed.via.branch
   if (!cancelBranch) return []
 
   if (cancelBranch !== dialogState.receivedInviteBranch) {
@@ -601,21 +558,18 @@ function validateRackCorrelation(
   _correlatedRequest: SipMessage | undefined
 ): string[] {
   if (msg.type !== "request" || msg.method !== "PRACK") return []
-  const rack = getHeaderValue(msg.headers, "rack")
-  if (!rack) return []
 
-  const parts = rack.trim().split(/\s+/)
-  if (parts.length < 3) return [`Malformed RAck header: "${rack}"`]
+  const r = msg.lazy.rack()
+  if (Result.isFailure(r)) return [r.failure.reason]
+  const rack = r.success
+  if (rack === undefined) return []
 
-  const cseqNum = parseInt(parts[1]!, 10)
-  const method = parts[2]!.toUpperCase()
-  if (!Number.isFinite(cseqNum)) return [`Invalid RAck CSeq number: "${parts[1]}"`]
-
+  const method = rack.method.toUpperCase()
   // We (the agent) should have received a request of that method with that CSeq
   // (it's the request WE sent in our role as UAS receiving the INVITE). Check
   // against our pendingRequests — the INVITE we received lives there.
   const matched = dialogState.pendingRequests.find(
-    (p) => p.method === method && p.cseqNumber === cseqNum
+    (p) => p.method === method && p.cseqNumber === rack.seq
   )
   if (!matched) {
     const received = dialogState.pendingRequests
@@ -623,7 +577,7 @@ function validateRackCorrelation(
       .map((p) => p.cseqNumber)
       .join(", ") || "none"
     return [
-      `RAck CSeq ${cseqNum} ${method} does not match any received ${method} CSeq [${received}] — RFC 3262 §7.2`,
+      `RAck CSeq ${rack.seq} ${method} does not match any received ${method} CSeq [${received}] — RFC 3262 §7.2`,
     ]
   }
 
@@ -649,8 +603,7 @@ function validateResponseCorrelation(
   if (msg.type !== "response") return []
   if (correlatedRequest !== undefined) return []
 
-  const cseq = parseCSeq(msg.headers)
-  if (!cseq) return []
+  const cseq = msg.parsed.cseq
 
   // Only flag when we have sent at least one request with the same method.
   // Otherwise the response may be for a request we never tracked (rare; and
@@ -660,7 +613,7 @@ function validateResponseCorrelation(
 
   const sentNums = sentSameMethod.map((r) => r.cseqNumber).join(", ")
   return [
-    `Response CSeq ${cseq.num} ${cseq.method} does not echo any sent ${cseq.method} CSeq [${sentNums}] — RFC 3261 §8.1.3.3`,
+    `Response CSeq ${cseq.seq} ${cseq.method} does not echo any sent ${cseq.method} CSeq [${sentNums}] — RFC 3261 §8.1.3.3`,
   ]
 }
 
@@ -686,12 +639,10 @@ function validateTagConsistency(
   if (msg.type !== "response") return []
   if (msg.status < 200) return []
 
-  const myVias = getAllHeaderValues(msg.headers, "via")
-  if (myVias.length === 0) return []
-  const myBranch = extractBranch(myVias[0]!)
+  const myBranch = msg.parsed.via.branch
   if (!myBranch) return []
 
-  const myTag = extractTag(getHeaderValue(msg.headers, "to") ?? "")
+  const myTag = msg.parsed.to.tag
   if (!myTag) return []
 
   const priorProvisionalTags: string[] = []
@@ -699,10 +650,8 @@ function validateTagConsistency(
     if (prior === msg) continue
     if (prior.type !== "response") continue
     if (prior.status <= 100 || prior.status >= 200) continue
-    const priorVias = getAllHeaderValues(prior.headers, "via")
-    if (priorVias.length === 0) continue
-    if (extractBranch(priorVias[0]!) !== myBranch) continue
-    const priorTag = extractTag(getHeaderValue(prior.headers, "to") ?? "")
+    if (prior.parsed.via.branch !== myBranch) continue
+    const priorTag = prior.parsed.to.tag
     if (priorTag) priorProvisionalTags.push(priorTag)
   }
 
@@ -775,13 +724,12 @@ export function correlateResponse(
 ): SipMessage | undefined {
   if (msg.type !== "response") return undefined
 
-  const cseq = parseCSeq(msg.headers)
-  if (!cseq) return undefined
+  const cseq = msg.parsed.cseq
 
   // Reverse search — most recent sent request with matching CSeq
   for (let i = dialogState.sentRequests.length - 1; i >= 0; i--) {
     const record = dialogState.sentRequests[i]!
-    if (record.cseqNumber === cseq.num && record.method === cseq.method) {
+    if (record.cseqNumber === cseq.seq && record.method === cseq.method) {
       return record.msg
     }
   }

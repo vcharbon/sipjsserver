@@ -197,6 +197,195 @@ Content-Length: 0
   })
 })
 
+const prackHeaders = `Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-test
+From: <sip:alice@example.com>;tag=tagA
+To: <sip:bob@example.com>;tag=tagB
+Call-ID: lazy-test
+CSeq: 2 PRACK`
+
+const referHeaders = `Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-test
+From: <sip:alice@example.com>;tag=tagA
+To: <sip:bob@example.com>;tag=tagB
+Call-ID: lazy-test
+CSeq: 3 REFER`
+
+describe("LazyHeaders — RAck (RFC 3262)", () => {
+  test("absent → undefined", () => {
+    const msg = parse(sipMsg`INVITE sip:bob@example.com SIP/2.0
+${baseHeaders}
+Content-Length: 0
+
+`)
+    expect(Result.getOrThrow(msg.lazy.rack())).toBeUndefined()
+  })
+
+  test("well-formed PRACK RAck", () => {
+    const msg = parse(sipMsg`PRACK sip:bob@example.com SIP/2.0
+${prackHeaders}
+RAck: 776656 1 INVITE
+Content-Length: 0
+
+`)
+    const rack = Result.getOrThrow(msg.lazy.rack())
+    expect(rack).toBeDefined()
+    expect(rack!.rseq).toBe(776656)
+    expect(rack!.seq).toBe(1)
+    expect(rack!.method).toBe("INVITE")
+  })
+
+  test("extra whitespace tolerated", () => {
+    const msg = parse(sipMsg`PRACK sip:bob@example.com SIP/2.0
+${prackHeaders}
+RAck:    42   7   INVITE
+Content-Length: 0
+
+`)
+    const rack = Result.getOrThrow(msg.lazy.rack())
+    expect(rack!.rseq).toBe(42)
+    expect(rack!.seq).toBe(7)
+    expect(rack!.method).toBe("INVITE")
+  })
+
+  test("missing method → failure", () => {
+    const msg = parse(sipMsg`PRACK sip:bob@example.com SIP/2.0
+${prackHeaders}
+RAck: 1 2
+Content-Length: 0
+
+`)
+    expect(Result.isFailure(msg.lazy.rack())).toBe(true)
+  })
+
+  test("non-numeric rseq → failure", () => {
+    const msg = parse(sipMsg`PRACK sip:bob@example.com SIP/2.0
+${prackHeaders}
+RAck: foo 2 INVITE
+Content-Length: 0
+
+`)
+    expect(Result.isFailure(msg.lazy.rack())).toBe(true)
+  })
+
+  test("memoization — second call returns same Result reference", () => {
+    const msg = parse(sipMsg`PRACK sip:bob@example.com SIP/2.0
+${prackHeaders}
+RAck: 1 1 INVITE
+Content-Length: 0
+
+`)
+    const a = msg.lazy.rack()
+    const b = msg.lazy.rack()
+    expect(a).toBe(b)
+  })
+})
+
+describe("LazyHeaders — Refer-To (RFC 3515 + RFC 3891)", () => {
+  test("absent → undefined", () => {
+    const msg = parse(sipMsg`INVITE sip:bob@example.com SIP/2.0
+${baseHeaders}
+Content-Length: 0
+
+`)
+    expect(Result.getOrThrow(msg.lazy.referTo())).toBeUndefined()
+  })
+
+  test("blind transfer (no Replaces)", () => {
+    const msg = parse(sipMsg`REFER sip:bob@example.com SIP/2.0
+${referHeaders}
+Refer-To: <sip:carol@example.com>
+Content-Length: 0
+
+`)
+    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    expect(refer.uri).toBe("sip:carol@example.com")
+    expect(refer.replaces).toBeUndefined()
+    expect(refer.embeddedHeaders).toEqual({})
+    expect(refer.parsedUri?.user).toBe("carol")
+    expect(refer.parsedUri?.host).toBe("example.com")
+  })
+
+  test("attended transfer with Replaces (percent-encoded)", () => {
+    // RFC 3891: Replaces=callid;to-tag=t1;from-tag=t2 — semicolons percent-encoded as %3B inside URI
+    const msg = parse(sipMsg`REFER sip:bob@example.com SIP/2.0
+${referHeaders}
+Refer-To: <sip:carol@example.com?Replaces=abc-call-id%3Bto-tag%3Dt1%3Bfrom-tag%3Dt2>
+Content-Length: 0
+
+`)
+    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    expect(refer.parsedUri?.user).toBe("carol")
+    expect(refer.replaces).toBeDefined()
+    expect(refer.replaces!.callId).toBe("abc-call-id")
+    expect(refer.replaces!.toTag).toBe("t1")
+    expect(refer.replaces!.fromTag).toBe("t2")
+    expect(refer.replaces!.earlyOnly).toBe(false)
+  })
+
+  test("early-only attended transfer", () => {
+    const msg = parse(sipMsg`REFER sip:bob@example.com SIP/2.0
+${referHeaders}
+Refer-To: <sip:carol@example.com?Replaces=cid%3Bto-tag%3Dx%3Bfrom-tag%3Dy%3Bearly-only>
+Content-Length: 0
+
+`)
+    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    expect(refer.replaces!.earlyOnly).toBe(true)
+  })
+
+  test("display-name containing literal '?replaces=' must NOT false-match", () => {
+    // The B2BUA's old regex /[?&]replaces=/i.test(rawHeader) would false-match
+    // on this header. The structured parser only inspects the URI portion.
+    const msg = parse(sipMsg`REFER sip:bob@example.com SIP/2.0
+${referHeaders}
+Refer-To: "Replaces?replaces=foo" <sip:carol@example.com>
+Content-Length: 0
+
+`)
+    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    expect(refer.displayName).toBe("Replaces?replaces=foo")
+    expect(refer.replaces).toBeUndefined()
+    expect(refer.embeddedHeaders).toEqual({})
+  })
+
+  test("Replaces missing mandatory tags → replaces undefined (header still parses)", () => {
+    const msg = parse(sipMsg`REFER sip:bob@example.com SIP/2.0
+${referHeaders}
+Refer-To: <sip:carol@example.com?Replaces=just-callid>
+Content-Length: 0
+
+`)
+    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    // Refer-To itself parses; the embedded Replaces is malformed (no to-tag/from-tag),
+    // so refer.replaces is undefined while embeddedHeaders.Replaces still holds the raw value.
+    expect(refer.replaces).toBeUndefined()
+    expect(refer.embeddedHeaders["Replaces"]).toBe("just-callid")
+  })
+
+  test("Refer-To with header-level params (e.g. method=INVITE)", () => {
+    const msg = parse(sipMsg`REFER sip:bob@example.com SIP/2.0
+${referHeaders}
+Refer-To: <sip:carol@example.com>;method=INVITE
+Content-Length: 0
+
+`)
+    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    expect(refer.params["method"]).toBe("INVITE")
+    expect(refer.replaces).toBeUndefined()
+  })
+
+  test("memoization — second call returns same Result reference", () => {
+    const msg = parse(sipMsg`REFER sip:bob@example.com SIP/2.0
+${referHeaders}
+Refer-To: <sip:carol@example.com>
+Content-Length: 0
+
+`)
+    const a = msg.lazy.referTo()
+    const b = msg.lazy.referTo()
+    expect(a).toBe(b)
+  })
+})
+
 describe("LazyHeaders — Remote-Party-ID, P-Preferred-Identity", () => {
   test("Remote-Party-ID with id-type / privacy params", () => {
     const msg = parse(sipMsg`INVITE sip:bob@example.com SIP/2.0

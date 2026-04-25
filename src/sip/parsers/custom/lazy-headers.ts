@@ -17,8 +17,12 @@ import type { SipHeader } from "../../types.js"
 import { SipParseError } from "../errors.js"
 import {
   parseNameAddr,
+  parseRack,
+  parseReferTo,
   splitTopLevelCommas,
   type ParsedNameAddr,
+  type ParsedRack,
+  type ParsedReferTo,
 } from "./structured-headers.js"
 
 // ---------------------------------------------------------------------------
@@ -85,6 +89,28 @@ function parseGeolocationRoutingHeader(
   )
 }
 
+/**
+ * Generic single-value lazy parse: take the first header instance, run a
+ * structured parser, return `succeed(undefined)` for absent header,
+ * `succeed(parsed)` on success, `fail(SipParseError)` when the parser
+ * rejects the value.
+ */
+function parseSingleValueHeader<T>(
+  headers: ReadonlyArray<SipHeader>,
+  headerName: string,
+  parser: (value: string) => T | undefined
+): Result.Result<T | undefined, SipParseError> {
+  const values = getHeaderValues(headers, headerName)
+  if (values.length === 0) return Result.succeed(undefined)
+  const parsed = parser(values[0]!)
+  if (parsed === undefined) {
+    return Result.fail(
+      new SipParseError({ reason: `Malformed ${headerName}: "${values[0]}"` })
+    )
+  }
+  return Result.succeed(parsed)
+}
+
 // ---------------------------------------------------------------------------
 // LazyHeaders class
 // ---------------------------------------------------------------------------
@@ -100,6 +126,8 @@ export class LazyHeaders {
   private _geolocation: Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError> | undefined = undefined
   private _geolocationError: Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError> | undefined = undefined
   private _geolocationRouting: Result.Result<boolean | undefined, SipParseError> | undefined = undefined
+  private _rack: Result.Result<ParsedRack | undefined, SipParseError> | undefined = undefined
+  private _referTo: Result.Result<ParsedReferTo | undefined, SipParseError> | undefined = undefined
 
   constructor(private readonly headers: ReadonlyArray<SipHeader>) {}
 
@@ -164,6 +192,29 @@ export class LazyHeaders {
     if (this._geolocationRouting !== undefined) return this._geolocationRouting
     const r = parseGeolocationRoutingHeader(this.headers)
     this._geolocationRouting = r
+    return r
+  }
+
+  /**
+   * RFC 3262 §7.2 — RAck header on PRACK requests: `<response-num> <CSeq-num> <method>`.
+   * `undefined` when absent (e.g. on non-PRACK messages); `Result.fail` on malformed value.
+   */
+  rack(): Result.Result<ParsedRack | undefined, SipParseError> {
+    if (this._rack !== undefined) return this._rack
+    const r = parseSingleValueHeader(this.headers, "RAck", parseRack)
+    this._rack = r
+    return r
+  }
+
+  /**
+   * RFC 3515 — Refer-To on REFER requests, with RFC 3891 Replaces support
+   * exposed through `parsed.replaces`. `undefined` when absent; `Result.fail`
+   * when parseNameAddr cannot extract a URI.
+   */
+  referTo(): Result.Result<ParsedReferTo | undefined, SipParseError> {
+    if (this._referTo !== undefined) return this._referTo
+    const r = parseSingleValueHeader(this.headers, "Refer-To", parseReferTo)
+    this._referTo = r
     return r
   }
 }

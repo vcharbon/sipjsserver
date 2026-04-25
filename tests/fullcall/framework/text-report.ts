@@ -40,8 +40,7 @@ function getArrowLabel(entry: TraceEntry): string {
   if (msg.type === "request") {
     return msg.uri ? `${msg.method} ${msg.uri}` : msg.method
   }
-  const cseq = msg.headers.find((h) => h.name.toLowerCase() === "cseq")?.value ?? ""
-  const method = cseq.split(/\s+/)[1] ?? ""
+  const method = msg.parsed.cseq.method
   return `${msg.status} ${msg.reason}${method ? ` (${method})` : ""}`
 }
 

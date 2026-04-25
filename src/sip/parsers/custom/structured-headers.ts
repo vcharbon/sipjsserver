@@ -41,6 +41,28 @@ export interface ParsedCSeq {
   readonly method: string
 }
 
+export interface ParsedRack {
+  readonly rseq: number    // RFC 3262 response-num
+  readonly seq: number     // CSeq-num of the original request being acknowledged
+  readonly method: string  // method of the request being acknowledged
+}
+
+export interface ParsedReplaces {
+  readonly callId: string
+  readonly toTag: string
+  readonly fromTag: string
+  readonly earlyOnly: boolean
+}
+
+export interface ParsedReferTo {
+  readonly displayName: string | undefined
+  readonly uri: string                                  // raw URI as written, angle brackets stripped
+  readonly parsedUri: ParsedUri | undefined             // host/port/user/scheme/uri-params (parsed up to `?`)
+  readonly params: Record<string, string | true>        // header-level params (after `;` past the `>`), e.g. method=INVITE
+  readonly embeddedHeaders: Record<string, string>      // URI-embedded `?key=value` headers, percent-decoded; Replaces lives here
+  readonly replaces: ParsedReplaces | undefined         // RFC 3891 — populated when embeddedHeaders has a Replaces that parses
+}
+
 export interface ParsedUri {
   readonly scheme: string
   readonly user: string | undefined
@@ -238,6 +260,162 @@ export function parseCSeq(value: string): ParsedCSeq {
   const method = value.slice(i).trim()
 
   return { seq, method }
+}
+
+// =========================================================================
+// RAck parsing (RFC 3262 §7.2): "response-num CSeq-num method"
+//
+// Three whitespace-separated tokens; both numbers are non-negative integers.
+// Returns undefined on any malformed input (missing token, non-numeric, etc.).
+// =========================================================================
+
+export function parseRack(value: string): ParsedRack | undefined {
+  let i = skipWS(value, 0)
+
+  // response-num
+  const rseqStart = i
+  while (i < value.length && value.charCodeAt(i) >= 0x30 && value.charCodeAt(i) <= 0x39) i++
+  if (i === rseqStart) return undefined
+  const rseq = parseInt(value.slice(rseqStart, i), 10)
+  if (!Number.isFinite(rseq)) return undefined
+
+  i = skipWS(value, i)
+  if (i >= value.length) return undefined
+
+  // CSeq-num
+  const seqStart = i
+  while (i < value.length && value.charCodeAt(i) >= 0x30 && value.charCodeAt(i) <= 0x39) i++
+  if (i === seqStart) return undefined
+  const seq = parseInt(value.slice(seqStart, i), 10)
+  if (!Number.isFinite(seq)) return undefined
+
+  i = skipWS(value, i)
+  if (i >= value.length) return undefined
+
+  // method (rest of line, trimmed; rejects extra whitespace tokens)
+  const method = value.slice(i).trim()
+  if (method.length === 0) return undefined
+  // method is a single token — reject if it contains whitespace
+  for (let j = 0; j < method.length; j++) {
+    const c = method.charCodeAt(j)
+    if (c === 0x20 || c === 0x09) return undefined
+  }
+
+  return { rseq, seq, method }
+}
+
+// =========================================================================
+// Replaces parsing (RFC 3891 §6.1)
+//
+// Replaces = callid *(SEMI replaces-param)
+// replaces-param = to-tag / from-tag / early-flag / generic-param
+// to-tag      = "to-tag" EQUAL token
+// from-tag    = "from-tag" EQUAL token
+// early-flag  = "early-only"
+//
+// Both to-tag AND from-tag are mandatory per RFC 3891 §6.1; absence makes the
+// header malformed. callid is everything before the first ;.
+// =========================================================================
+
+export function parseReplaces(value: string): ParsedReplaces | undefined {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return undefined
+
+  const semiIdx = trimmed.indexOf(";")
+  const callId = (semiIdx === -1 ? trimmed : trimmed.slice(0, semiIdx)).trim()
+  if (callId.length === 0) return undefined
+  if (semiIdx === -1) return undefined // missing mandatory tags
+
+  let toTag: string | undefined
+  let fromTag: string | undefined
+  let earlyOnly = false
+
+  const paramStr = trimmed.slice(semiIdx + 1)
+  for (const raw of paramStr.split(";")) {
+    const part = raw.trim()
+    if (part.length === 0) continue
+    const eq = part.indexOf("=")
+    if (eq === -1) {
+      if (part.toLowerCase() === "early-only") earlyOnly = true
+      continue
+    }
+    const k = part.slice(0, eq).trim().toLowerCase()
+    const v = part.slice(eq + 1).trim()
+    if (k === "to-tag") toTag = v
+    else if (k === "from-tag") fromTag = v
+  }
+
+  if (toTag === undefined || fromTag === undefined) return undefined
+  if (toTag.length === 0 || fromTag.length === 0) return undefined
+
+  return { callId, toTag, fromTag, earlyOnly }
+}
+
+// =========================================================================
+// Refer-To parsing (RFC 3515 §2.1, RFC 3891 §3 for embedded Replaces)
+//
+// Refer-To = ( name-addr / addr-spec ) *(SEMI generic-param)
+//
+// The URI inside <...> may carry embedded headers per RFC 3261 §19.1.1
+// (`?key=value&key=value`), which is where Replaces lives for attended
+// transfer.
+//
+// Quote-aware via parseNameAddr — display names containing the literal text
+// "?replaces=" do NOT trigger replaces detection because we only look at the
+// URI portion, not the raw header value.
+// =========================================================================
+
+export function parseReferTo(value: string): ParsedReferTo | undefined {
+  const nameAddr = parseNameAddr(value)
+  if (nameAddr.uri.length === 0) return undefined
+
+  const uri = nameAddr.uri
+  const qIdx = uri.indexOf("?")
+
+  let uriHead = uri
+  const embeddedHeaders: Record<string, string> = {}
+
+  if (qIdx !== -1) {
+    uriHead = uri.slice(0, qIdx)
+    const headerStr = uri.slice(qIdx + 1)
+    for (const pair of headerStr.split("&")) {
+      if (pair.length === 0) continue
+      const eq = pair.indexOf("=")
+      if (eq === -1) continue
+      const rawKey = pair.slice(0, eq)
+      const rawVal = pair.slice(eq + 1)
+      let key: string
+      let val: string
+      try {
+        key = decodeURIComponent(rawKey)
+        val = decodeURIComponent(rawVal)
+      } catch {
+        // Malformed percent-encoding — fall back to raw form rather than discard
+        key = rawKey
+        val = rawVal
+      }
+      embeddedHeaders[key] = val
+    }
+  }
+
+  const parsedUri = parseSipUriString(uriHead)
+
+  let replaces: ParsedReplaces | undefined
+  for (const k of Object.keys(embeddedHeaders)) {
+    if (k.toLowerCase() === "replaces") {
+      replaces = parseReplaces(embeddedHeaders[k]!)
+      break
+    }
+  }
+
+  return {
+    displayName: nameAddr.displayName,
+    uri,
+    parsedUri,
+    params: nameAddr.params,
+    embeddedHeaders,
+    replaces,
+  }
 }
 
 // =========================================================================

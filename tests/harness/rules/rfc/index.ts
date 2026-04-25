@@ -179,61 +179,48 @@ function checkRawContentLength(entry: RecordedMessage): string | null {
 
 function trackSent(ds: AgentDialogState, msg: SipMessage): void {
   if (msg.type === "request") {
-    const cseqRaw = msg.headers.find((h) => h.name.toLowerCase() === "cseq")?.value ?? ""
-    const cseqNum = parseInt(cseqRaw.trim().split(/\s+/)[0] ?? "0", 10)
-    const viaHeader = msg.headers.find((h) => h.name.toLowerCase() === "via")?.value ?? ""
-    const branchMatch = /;branch=([^\s;,>]+)/i.exec(viaHeader)
     ds.sentRequests.push({
       msg,
       method: msg.method,
-      cseqNumber: cseqNum,
-      viaBranch: branchMatch?.[1] ?? "",
+      cseqNumber: msg.parsed.cseq.seq,
+      viaBranch: msg.parsed.via.branch ?? "",
     })
 
     // Capture local tag from outbound From-tag (UAC) so tag validation passes.
-    const fromHdr = msg.headers.find((h) => h.name.toLowerCase() === "from")?.value ?? ""
-    const fromTag = /;tag=([^\s;,>]+)/i.exec(fromHdr)?.[1]
+    const fromTag = msg.parsed.from.tag
     if (fromTag) ds.localTags.add(fromTag)
     return
   }
 
   // Response: capture local tag from outbound To-tag (UAS).
   // Mirrors interpreter.ts:399-405.
-  const toHdr = msg.headers.find((h) => h.name.toLowerCase() === "to")?.value ?? ""
-  const toTag = /;tag=([^\s;,>]+)/i.exec(toHdr)?.[1]
+  const toTag = msg.parsed.to.tag
   if (toTag) ds.localTags.add(toTag)
 }
 
 function trackReceived(ds: AgentDialogState, msg: SipMessage): void {
   // Mirror the most-load-bearing parts of interpreter.updateDialogState.
-  const toHeader = msg.headers.find((h) => h.name.toLowerCase() === "to")?.value ?? ""
-  const fromHeader = msg.headers.find((h) => h.name.toLowerCase() === "from")?.value ?? ""
-  const callIdHeader = msg.headers.find((h) => h.name.toLowerCase() === "call-id")?.value
+  const callIdHeader = msg.parsed.callId
 
-  if (msg.type === "request" && msg.method === "INVITE" && callIdHeader) {
+  if (msg.type === "request" && msg.method === "INVITE") {
     ds.callId = callIdHeader
     ds.callIdConfirmed = true
     ds.receivedInviteUri = msg.uri
-    const viaHeader = msg.headers.find((h) => h.name.toLowerCase() === "via")?.value ?? ""
-    const branchMatch = /;branch=([^\s;,>]+)/i.exec(viaHeader)
-    if (branchMatch?.[1]) ds.receivedInviteBranch = branchMatch[1]
-    const fromUriMatch = /<([^>]+)>/.exec(fromHeader)
-    if (fromUriMatch?.[1] && !ds.dialogRemoteUri) ds.dialogRemoteUri = fromUriMatch[1]
+    if (msg.parsed.via.branch) ds.receivedInviteBranch = msg.parsed.via.branch
+    if (!ds.dialogRemoteUri) ds.dialogRemoteUri = msg.parsed.from.uri
   }
 
   if (msg.type === "response") {
-    const tagMatch = /;tag=([^\s;,>]+)/i.exec(toHeader)
-    if (tagMatch?.[1] && !ds.remoteTag) ds.remoteTag = tagMatch[1]
+    const toTag = msg.parsed.to.tag
+    if (toTag && !ds.remoteTag) ds.remoteTag = toTag
   } else {
-    const tagMatch = /;tag=([^\s;,>]+)/i.exec(fromHeader)
-    if (tagMatch?.[1] && !ds.remoteTag) ds.remoteTag = tagMatch[1]
+    const fromTag = msg.parsed.from.tag
+    if (fromTag && !ds.remoteTag) ds.remoteTag = fromTag
   }
 
   if (msg.type === "request" && msg.method !== "ACK") {
-    const cseqRaw = msg.headers.find((h) => h.name.toLowerCase() === "cseq")?.value ?? ""
-    const cseqParts = cseqRaw.trim().split(/\s+/)
-    const cseqNum = parseInt(cseqParts[0] ?? "0", 10)
-    const cseqMethod = cseqParts[1] ?? ""
+    const cseqNum = msg.parsed.cseq.seq
+    const cseqMethod = msg.parsed.cseq.method
     ds.pendingRequests.push({
       refId: -1,
       msg,
@@ -247,7 +234,7 @@ function trackReceived(ds: AgentDialogState, msg: SipMessage): void {
 
     // Per-Call-ID INVITE baseline (RFC 3261 §12.2.1.1). Forked early
     // dialogs share this baseline.
-    if (msg.method === "INVITE" && callIdHeader) {
+    if (msg.method === "INVITE") {
       if (!ds.inviteCSeqByCallId.has(callIdHeader)) {
         ds.inviteCSeqByCallId.set(callIdHeader, cseqNum)
       }
@@ -256,9 +243,9 @@ function trackReceived(ds: AgentDialogState, msg: SipMessage): void {
     // Per-dialog CSeq counter — skip CANCEL (reuses INVITE CSeq) and
     // messages without a full tag pair (out-of-dialog).
     if (msg.method !== "CANCEL" && cseqMethod !== "ACK") {
-      const fromTag = /;tag=([^\s;,>]+)/i.exec(fromHeader)?.[1]
-      const toTag = /;tag=([^\s;,>]+)/i.exec(toHeader)?.[1]
-      if (callIdHeader && fromTag && toTag) {
+      const fromTag = msg.parsed.from.tag
+      const toTag = msg.parsed.to.tag
+      if (fromTag && toTag) {
         const key = `${callIdHeader}|${fromTag}|${toTag}`
         const prev = ds.remoteCSeqByDialog.get(key)
         if (prev === undefined || cseqNum > prev) {

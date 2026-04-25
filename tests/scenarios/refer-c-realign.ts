@@ -141,10 +141,8 @@ export const referAllowCRealignHappy = scenario("refer-allow-c-realign-happy", (
     predicate: (msg) => {
       if (msg.type !== "request") return false
       if (!bytesEqual(msg.body, aliceSdp)) return false
-      const cseq = headerValue(msg, "cseq") ?? ""
-      if (!cseq.trim().endsWith("INVITE")) return false
-      const cseqNum = parseInt(cseq.trim().split(/\s+/)[0] ?? "0", 10)
-      if (cseqNum <= 1) return false
+      if (msg.parsed.cseq.method !== "INVITE") return false
+      if (msg.parsed.cseq.seq <= 1) return false
       return contactHasCLegTag(msg, "b-2")
     },
   })

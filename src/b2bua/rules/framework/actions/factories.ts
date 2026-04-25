@@ -7,7 +7,7 @@
  * for the invariants each brand represents.
  */
 
-import { parseNameAddr } from "../../../../sip/parsers/custom/structured-headers.js"
+import { parseNameAddr, parseSipUriString } from "../../../../sip/parsers/custom/structured-headers.js"
 import type {
   BareSipUri,
   HeaderName,
@@ -53,14 +53,16 @@ export function toBareUri(input: string | NameAddr): BareSipUri {
     if (parsed.uri.length === 0) {
       throw new SipUriSyntaxError(input as string, "name-addr without URI")
     }
-    if (!/^sips?:/i.test(parsed.uri)) {
+    const scheme = parseSipUriString(parsed.uri)?.scheme
+    if (scheme !== "sip" && scheme !== "sips") {
       throw new SipUriSyntaxError(input as string, "URI missing sip:/sips: scheme")
     }
     return parsed.uri as BareSipUri
   }
 
   // Plain addr-spec. Accept only sip:/sips:.
-  if (!/^sips?:/i.test(raw)) {
+  const scheme = parseSipUriString(raw)?.scheme
+  if (scheme !== "sip" && scheme !== "sips") {
     throw new SipUriSyntaxError(input as string, "missing sip:/sips: scheme")
   }
   return raw as BareSipUri

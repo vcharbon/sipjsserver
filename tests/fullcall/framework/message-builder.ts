@@ -15,6 +15,7 @@ import type { SipHeader, SipMessage, SipRequest, SipResponse } from "../../../sr
 import { newBranch, newTag, newCallId, getHeader, getHeaders } from "../../../src/sip/MessageHelpers.js"
 import { serialize } from "../../../src/sip/Serializer.js"
 import { hydrateRequest, hydrateResponse } from "../../../src/sip/parsers/extract-fields.js"
+import { parseNameAddr, parseCSeq } from "../../../src/sip/parsers/custom/structured-headers.js"
 import type {
   AgentInfo,
   HeaderOverrides,
@@ -186,18 +187,14 @@ export function buildMessageContext(
 
 function extractLastInfo(msg: SipMessage): LastMessageInfo {
   const headers = msg.headers
-  const cseqRaw = getHeader(headers, "cseq") ?? "1 INVITE"
-  const cseqParts = cseqRaw.split(/\s+/)
-  const cseqNum = parseInt(cseqParts[0] ?? "1", 10)
-  const cseqMethod = cseqParts[1] ?? "INVITE"
 
   const base = {
     from: getHeader(headers, "from") ?? "",
     to: getHeader(headers, "to") ?? "",
     via: getHeaders(headers, "via"),
-    cseq: cseqNum,
-    cseqMethod,
-    callId: getHeader(headers, "call-id") ?? "",
+    cseq: msg.parsed.cseq.seq,
+    cseqMethod: msg.parsed.cseq.method,
+    callId: msg.parsed.callId,
     headers,
     body: msg.body,
   }
@@ -444,13 +441,13 @@ function buildToHeader(
 }
 
 function addToTag(toHeader: string, localTag: string): string {
-  if (/;tag=/i.test(toHeader)) return toHeader
+  if (parseNameAddr(toHeader).tag !== undefined) return toHeader
   return `${toHeader};tag=${localTag}`
 }
 
 function extractTag(header: string | undefined): string | undefined {
   if (!header) return undefined
-  return /;tag=([^\s;,>]+)/i.exec(header)?.[1]
+  return parseNameAddr(header).tag
 }
 
 function mergeOverrides(
@@ -519,8 +516,9 @@ function applyOverrides(headers: SipHeader[], overrides: HeaderOverrides): SipHe
   if (overrides.cseq !== undefined) {
     const idx = result.findIndex((h) => h.name.toLowerCase() === "cseq")
     if (idx >= 0) {
-      const parts = result[idx]!.value.split(/\s+/)
-      result[idx] = h("CSeq", `${overrides.cseq} ${parts[1] ?? "INVITE"}`)
+      const existing = parseCSeq(result[idx]!.value)
+      const method = existing.method.length > 0 ? existing.method : "INVITE"
+      result[idx] = h("CSeq", `${overrides.cseq} ${method}`)
     }
   }
 

@@ -24,6 +24,7 @@ import type { StackDialog } from "./Dialog.js"
 import type { InviteClientTransactionHandle } from "./TransactionLayer.js"
 import { getHeader } from "./MessageHelpers.js"
 import { hydrateRequest, hydrateResponse } from "./parsers/extract-fields.js"
+import { parseNameAddr } from "./parsers/custom/structured-headers.js"
 
 // ---------------------------------------------------------------------------
 // Public input shapes
@@ -476,7 +477,7 @@ export function generateResponse(
   const cseq = getHeader(incomingRequest.headers, "cseq") ?? ""
 
   let to = rawTo
-  if (status > 100 && opts.toTag !== undefined && !/;tag=/i.test(rawTo)) {
+  if (status > 100 && opts.toTag !== undefined && parseNameAddr(rawTo).tag === undefined) {
     to = `${rawTo};tag=${opts.toTag}`
   }
 
