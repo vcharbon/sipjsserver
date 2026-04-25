@@ -8,6 +8,7 @@ All code uses TypeScript with Effect v4 (effect-smol). When designing or modifyi
 - Mocks and test implementations live alongside the production service as test layers.
 - When adding dependencies, verify they are installed in the correct workspace package.
 - `npm run typecheck` must return zero errors and zero warnings after every change. Fix warnings — do not ignore them. Only suppress with a lint-disable comment as a last resort, always with an explanation.
+- for pure function that may return an error, use effect Result construct
 
 ## MutableHashMap for shared mutable state
 

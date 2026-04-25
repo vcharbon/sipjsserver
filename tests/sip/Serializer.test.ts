@@ -10,25 +10,31 @@
 import { describe, test, expect, vi } from "vitest"
 import { serialize } from "../../src/sip/Serializer.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../src/sip/types.js"
+import { hydrateRequest, hydrateResponse } from "../../src/sip/parsers/extract-fields.js"
 
 const h = (name: string, value: string): SipHeader => ({ name, value })
 const emptyBody = new Uint8Array(0)
 const sdpBody = new TextEncoder().encode("v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\n")
+
+const MANDATORY_HEADERS: ReadonlyArray<SipHeader> = [
+  h("From", "<sip:alice@example.com>;tag=tagA"),
+  h("To", "<sip:bob@example.com>"),
+  h("Call-ID", "serializer-test-call"),
+  h("CSeq", "1 INVITE"),
+]
 
 function makeResponse(
   status: number,
   headers: SipHeader[],
   body: Uint8Array = emptyBody
 ): SipResponse {
-  return {
-    type: "response",
-    version: "SIP/2.0",
+  return hydrateResponse({
     status,
     reason: "OK",
-    headers,
+    headers: [...headers, ...MANDATORY_HEADERS],
     body,
     raw: Buffer.alloc(0),
-  }
+  })
 }
 
 function makeRequest(
@@ -36,15 +42,15 @@ function makeRequest(
   headers: SipHeader[],
   body: Uint8Array = emptyBody
 ): SipRequest {
-  return {
-    type: "request",
+  return hydrateRequest({
     method,
     uri: "sip:bob@example.com",
-    version: "SIP/2.0",
-    headers,
+    headers: [...headers, ...MANDATORY_HEADERS.map((m) =>
+      m.name === "CSeq" ? h("CSeq", `1 ${method}`) : m
+    )],
     body,
     raw: Buffer.alloc(0),
-  }
+  })
 }
 
 /** Extract a header value from the serialized buffer. */

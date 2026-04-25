@@ -11,6 +11,7 @@
 
 import type { RuleAction, RuleContext, MessageTransform } from "./RuleDefinition.js"
 import { applyBodyUpdate, applyHeaderUpdates } from "./actions/apply.js"
+import { hydrateRequest } from "../../../sip/parsers/extract-fields.js"
 import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
 import type { TimerEntry, Leg, Dialog, TransferState, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
@@ -1215,12 +1216,13 @@ function executeCreateLeg(
   let baseInvite: SipRequest | undefined
   if (fromInvite === "snapshot") {
     const snapshot = state.call.aLegInvite
-    baseInvite = {
-      type: "request", method: "INVITE", uri: snapshot.uri,
-      version: "SIP/2.0",
+    baseInvite = hydrateRequest({
+      method: "INVITE",
+      uri: snapshot.uri,
       headers: snapshot.headers.map((h) => ({ name: h.name, value: h.value })),
-      body: snapshot.body, raw: Buffer.from(snapshot.body),
-    }
+      body: snapshot.body,
+      raw: Buffer.from(snapshot.body),
+    })
   } else if (fromInvite !== undefined) {
     baseInvite = fromInvite
   }

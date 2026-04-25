@@ -50,6 +50,39 @@ export interface ParsedUri {
 }
 
 // =========================================================================
+// Top-level comma splitter — quote-aware and angle-bracket-aware.
+//
+// Used to split multi-value headers (P-Asserted-Identity, Diversion,
+// History-Info, Geolocation, Remote-Party-ID) at the entry boundary
+// without breaking on commas inside quoted display names or URI params.
+// =========================================================================
+
+export function splitTopLevelCommas(value: string): string[] {
+  const out: string[] = []
+  let depth = 0          // angle-bracket depth (URIs)
+  let inQuote = false    // inside "..."
+  let start = 0
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i)
+    if (inQuote) {
+      if (c === 0x5c && i + 1 < value.length) { i++; continue } // escaped char
+      if (c === 0x22) inQuote = false                            // closing "
+      continue
+    }
+    if (c === 0x22) { inQuote = true; continue }                 // opening "
+    if (c === 0x3c) { depth++; continue }                        // <
+    if (c === 0x3e && depth > 0) { depth--; continue }           // >
+    if (c === 0x2c && depth === 0) {                             // top-level ,
+      out.push(value.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  const tail = value.slice(start).trim()
+  if (tail.length > 0 || out.length > 0) out.push(tail)
+  return out
+}
+
+// =========================================================================
 // From / To parsing (name-addr with tag)
 //
 // RFC 3261 §20.20 / §20.39:

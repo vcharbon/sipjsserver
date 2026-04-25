@@ -8,10 +8,15 @@
  */
 
 import { describe, test, expect } from "vitest"
+import { Result } from "effect"
 
-import { jssipParser } from "../../src/sip/parsers/jssip-adapter.js"
-import { customParser } from "../../src/sip/parsers/custom/index.js"
+import { jssipParser as jssipParserRaw } from "../../src/sip/parsers/jssip-adapter.js"
+import { customParser as customParserRaw } from "../../src/sip/parsers/custom/index.js"
 import type { SipMessage } from "../../src/sip/types.js"
+
+/** Test-only helpers that unwrap the parser Result, throwing on failure. */
+const customParser = { parse: (b: Buffer) => Result.getOrThrow(customParserRaw.parse(b)) }
+const jssipParser = { parse: (b: Buffer) => Result.getOrThrow(jssipParserRaw.parse(b)) }
 import {
   getHeader,
   getHeaders,
@@ -58,6 +63,7 @@ v: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-compact
 f: <sip:alice@example.com>;tag=compact-tag
 t: <sip:bob@example.com>
 i: compact-call-id
+CSeq: 1 INVITE
 m: <sip:alice@10.0.0.1:5060>
 l: 0
 
@@ -494,15 +500,16 @@ describe("Custom parser — parsed fields (eager extraction)", () => {
 
   test("parsed.requestUri", () => {
     const msg = customParser.parse(basicInvite)
-    expect(msg.parsed!.requestUri!.scheme).toBe("sip")
-    expect(msg.parsed!.requestUri!.user).toBe("bob")
-    expect(msg.parsed!.requestUri!.host).toBe("example.com")
-    expect(msg.parsed!.requestUri!.params["transport"]).toBe("udp")
+    if (msg.type !== "request") throw new Error("expected request")
+    expect(msg.parsed.requestUri.scheme).toBe("sip")
+    expect(msg.parsed.requestUri.user).toBe("bob")
+    expect(msg.parsed.requestUri.host).toBe("example.com")
+    expect(msg.parsed.requestUri.params["transport"]).toBe("udp")
   })
 
-  test("parsed.requestUri — undefined for responses", () => {
+  test("parsed has no requestUri for responses", () => {
     const msg = customParser.parse(responseWithTags)
-    expect(msg.parsed!.requestUri).toBeUndefined()
+    expect(msg.type).toBe("response")
   })
 
   test("parsed fields work with compact forms", () => {

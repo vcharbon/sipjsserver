@@ -14,6 +14,7 @@
 import type { SipHeader, SipMessage, SipRequest, SipResponse } from "../../../src/sip/types.js"
 import { newBranch, newTag, newCallId, getHeader, getHeaders } from "../../../src/sip/MessageHelpers.js"
 import { serialize } from "../../../src/sip/Serializer.js"
+import { hydrateRequest, hydrateResponse } from "../../../src/sip/parsers/extract-fields.js"
 import type {
   AgentInfo,
   HeaderOverrides,
@@ -343,20 +344,21 @@ export function buildRequest(
     dialogState.lastInviteUri = finalUri
   }
 
-  const msg: SipRequest = {
-    type: "request",
+  const msg: SipRequest = hydrateRequest({
     method,
     uri: method === "CANCEL" && dialogState.lastInviteUri
       ? dialogState.lastInviteUri
       : finalUri,
-    version: "SIP/2.0",
     headers,
     body,
     raw: Buffer.alloc(0),
-  }
+  })
 
   const buf = serialize(msg)
-  return { msg: { ...msg, raw: buf }, buf }
+  return {
+    msg: hydrateRequest({ method: msg.method, uri: msg.uri, headers: [...msg.headers], body: msg.body, raw: buf }),
+    buf,
+  }
 }
 
 /**
@@ -402,18 +404,19 @@ export function buildResponse(
   }
   headers.push(h("Content-Length", String(body.byteLength)))
 
-  const msg: SipResponse = {
-    type: "response",
-    version: "SIP/2.0",
+  const msg: SipResponse = hydrateResponse({
     status: statusCode,
     reason,
     headers,
     body,
     raw: Buffer.alloc(0),
-  }
+  })
 
   const buf = serialize(msg)
-  return { msg: { ...msg, raw: buf }, buf }
+  return {
+    msg: hydrateResponse({ status: msg.status, reason: msg.reason, headers: [...msg.headers], body: msg.body, raw: buf }),
+    buf,
+  }
 }
 
 // ---------------------------------------------------------------------------

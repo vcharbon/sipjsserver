@@ -24,6 +24,7 @@ import type { HandlerResult } from "../../../src/sip/SipRouter.js"
 import type { RuleAction, RuleContext } from "../../../src/b2bua/rules/framework/RuleDefinition.js"
 import type { Call, Leg, Dialog, StackDialogSchemaType, B2buaDialogExt, InviteTxnHandle } from "../../../src/call/CallModel.js"
 import type { SipHeader, SipRequest, SipResponse, RemoteInfo } from "../../../src/sip/types.js"
+import { hydrateRequest, hydrateResponse } from "../../../src/sip/parsers/extract-fields.js"
 import type { AppConfigData } from "../../../src/config/AppConfig.js"
 import type { CallDecisionEngine } from "../../../src/decision/CallDecisionEngine.js"
 import type { CallLimiter } from "../../../src/call/CallLimiter.js"
@@ -243,11 +244,9 @@ function makeInviteTxnHandleStub(
   fromTag: string,
 ): InviteTxnHandle {
   const branch = `z9hG4bK-${legId}-invite`
-  const invite: SipRequest = {
-    type: "request",
+  const invite: SipRequest = hydrateRequest({
     method: "INVITE",
     uri: "sip:bob@192.168.1.200:5060",
-    version: "SIP/2.0",
     headers: [
       h("Via", `SIP/2.0/UDP 10.0.0.1:5060;branch=${branch}`),
       h("Max-Forwards", "70"),
@@ -259,7 +258,7 @@ function makeInviteTxnHandleStub(
     ],
     body: new Uint8Array(0),
     raw: Buffer.alloc(0),
-  }
+  })
   return {
     kind: "invite",
     branch,
@@ -350,9 +349,7 @@ export function make200InviteFromB(
   recordRoutes: ReadonlyArray<string> = [],
 ): SipResponse {
   const rrHeaders: ReadonlyArray<SipHeader> = recordRoutes.map((v) => h("Record-Route", v))
-  return {
-    type: "response",
-    version: "SIP/2.0",
+  return hydrateResponse({
     status: 200,
     reason: "OK",
     headers: [
@@ -367,15 +364,5 @@ export function make200InviteFromB(
     ],
     body: new Uint8Array(0),
     raw: Buffer.alloc(0),
-    parsed: {
-      to: { displayName: undefined, uri: "sip:alice@example.com", tag: toTag, params: {} },
-      from: undefined,
-      callId: undefined,
-      cseq: undefined,
-      via: undefined,
-      vias: [],
-      contact: { displayName: undefined, uri: "sip:bob@192.168.1.200:5060", params: {} },
-      requestUri: undefined,
-    },
-  }
+  })
 }

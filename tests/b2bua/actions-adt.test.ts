@@ -27,31 +27,48 @@ import type {
   NameAddr,
 } from "../../src/b2bua/rules/framework/actions/types.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../src/sip/types.js"
+import { hydrateRequest, hydrateResponse } from "../../src/sip/parsers/extract-fields.js"
 
 const h = (name: string, value: string): SipHeader => ({ name, value })
 
+// Mandatory headers backfilled when the test caller doesn't supply them — keeps
+// fixture noise out of every `makeRequest([...])` site while still satisfying
+// the parser's "every SIP message MUST carry From/To/Call-ID/CSeq/Via" rule.
+const MANDATORY: ReadonlyArray<SipHeader> = [
+  { name: "Via", value: "SIP/2.0/UDP test.invalid:5060;branch=z9hG4bK-test" },
+  { name: "From", value: "<sip:test@invalid>;tag=test-from" },
+  { name: "To", value: "<sip:test@invalid>" },
+  { name: "Call-ID", value: "test-call-id" },
+  { name: "CSeq", value: "1 INVITE" },
+]
+
+function backfillMandatory(headers: ReadonlyArray<SipHeader>): SipHeader[] {
+  const present = new Set(headers.map((h) => h.name.toLowerCase()))
+  const filled: SipHeader[] = [...headers]
+  for (const m of MANDATORY) {
+    if (!present.has(m.name.toLowerCase())) filled.push(m)
+  }
+  return filled
+}
+
 function makeRequest(headers: ReadonlyArray<SipHeader>, body: Uint8Array = new Uint8Array(0)): SipRequest {
-  return {
-    type: "request",
+  return hydrateRequest({
     method: "INVITE",
     uri: "sip:orig@example.com",
-    version: "SIP/2.0",
-    headers,
+    headers: backfillMandatory(headers),
     body,
     raw: Buffer.alloc(0),
-  }
+  })
 }
 
 function makeResponse(headers: ReadonlyArray<SipHeader>, body: Uint8Array = new Uint8Array(0)): SipResponse {
-  return {
-    type: "response",
-    version: "SIP/2.0",
+  return hydrateResponse({
     status: 200,
     reason: "OK",
-    headers,
+    headers: backfillMandatory(headers),
     body,
     raw: Buffer.alloc(0),
-  }
+  })
 }
 
 describe("toBareUri", () => {
@@ -180,7 +197,7 @@ describe("readHeaders / readBody", () => {
   })
 
   test("readHeaders returns empty when header absent", () => {
-    expect(readHeaders(makeRequest([]), H.From)).toEqual([])
+    expect(readHeaders(makeRequest([]), H.Diversion)).toEqual([])
   })
 
   test("readBody returns undefined for zero-length body", () => {

@@ -3,70 +3,84 @@
  * Headers are stored as an ordered array to preserve multiplicity and order
  * (multiple Via headers, etc.).
  *
- * Eagerly parsed structured fields are available on `parsed` when the
- * custom parser is used. These are quote-aware and immune to injection
- * attacks that affect naive regex-based extraction.
+ * Mandatory header fields (From, To, Call-ID, CSeq, top Via, plus
+ * Request-URI on requests) are eagerly parsed and guaranteed present on
+ * every well-formed message — the parser rejects messages that lack them.
+ *
+ * Optional structured headers (P-Asserted-Identity, Diversion, History-Info,
+ * Geolocation, …) are exposed via the lazy `lazy` accessor and parsed on
+ * first access only.
  */
+
+import type { LazyHeaders } from "./parsers/custom/lazy-headers.js"
 
 export interface SipHeader {
   readonly name: string   // original case
   readonly value: string  // trimmed value
 }
 
-/** Eagerly extracted structured fields from key SIP headers. */
-export interface ParsedFields {
-  /** From header: display name, URI, tag, all header params. Quote-aware. */
-  readonly from: {
-    readonly displayName: string | undefined
-    readonly uri: string
-    readonly tag: string | undefined
-    readonly params: Record<string, string | true>
-  } | undefined
-  /** To header: display name, URI, tag, all header params. Quote-aware. */
-  readonly to: {
-    readonly displayName: string | undefined
-    readonly uri: string
-    readonly tag: string | undefined
-    readonly params: Record<string, string | true>
-  } | undefined
-  /** Call-ID header value. */
-  readonly callId: string | undefined
-  /** CSeq: sequence number and method. */
-  readonly cseq: {
-    readonly seq: number
-    readonly method: string
-  } | undefined
-  /** Top Via header: transport, host, port, branch, custom params (cr, lg). */
-  readonly via: {
-    readonly transport: string
-    readonly host: string
-    readonly port: number | undefined
-    readonly branch: string | undefined
-    readonly params: Record<string, string | true>
-  } | undefined
-  /** All Via headers parsed. */
-  readonly vias: ReadonlyArray<{
-    readonly transport: string
-    readonly host: string
-    readonly port: number | undefined
-    readonly branch: string | undefined
-    readonly params: Record<string, string | true>
-  }>
-  /** Contact header: URI and params. */
-  readonly contact: {
-    readonly displayName: string | undefined
-    readonly uri: string
-    readonly params: Record<string, string | true>
-  } | undefined
-  /** Request-URI parsed (requests only). */
-  readonly requestUri: {
-    readonly scheme: string
-    readonly user: string | undefined
-    readonly host: string
-    readonly port: number | undefined
-    readonly params: Record<string, string>
-  } | undefined
+// ---------------------------------------------------------------------------
+// Eagerly-parsed structured fields
+// ---------------------------------------------------------------------------
+
+export interface ParsedNameAddrField {
+  readonly displayName: string | undefined
+  readonly uri: string
+  readonly tag: string | undefined
+  readonly params: Record<string, string | true>
 }
+
+export interface ParsedViaField {
+  readonly transport: string
+  readonly host: string
+  readonly port: number | undefined
+  readonly branch: string | undefined
+  readonly params: Record<string, string | true>
+}
+
+export interface ParsedContactField {
+  readonly displayName: string | undefined
+  readonly uri: string
+  readonly params: Record<string, string | true>
+}
+
+export interface ParsedCSeqField {
+  readonly seq: number
+  readonly method: string
+}
+
+export interface ParsedRequestUriField {
+  readonly scheme: string
+  readonly user: string | undefined
+  readonly host: string
+  readonly port: number | undefined
+  readonly params: Record<string, string>
+}
+
+/** Common mandatory parsed fields shared by requests and responses. */
+export interface ParsedFieldsCommon {
+  /** From — RFC 3261 §8.1.1.3 mandates presence; tag is independently optional on initial requests. */
+  readonly from: ParsedNameAddrField
+  /** To — mandatory; tag is absent on initial requests, present on responses and in-dialog requests. */
+  readonly to: ParsedNameAddrField
+  /** Call-ID — mandatory. */
+  readonly callId: string
+  /** CSeq — mandatory. */
+  readonly cseq: ParsedCSeqField
+  /** Top Via — mandatory. `branch` is independently optional (legacy non-3261 hops). */
+  readonly via: ParsedViaField
+  /** All Via headers, in received order. Always at least one entry. */
+  readonly vias: ReadonlyArray<ParsedViaField>
+  /** Contact — optional (mandatory on INVITE / 200 OK / REGISTER, absent elsewhere). */
+  readonly contact: ParsedContactField | undefined
+}
+
+export interface RequestParsedFields extends ParsedFieldsCommon {
+  /** Request-URI — required on every request. */
+  readonly requestUri: ParsedRequestUriField
+}
+
+export type ResponseParsedFields = ParsedFieldsCommon
 
 export interface SipRequest {
   readonly type: "request"
@@ -76,7 +90,8 @@ export interface SipRequest {
   readonly headers: ReadonlyArray<SipHeader>
   readonly body: Uint8Array      // raw bytes — opaque to B2BUA
   readonly raw: Buffer           // original packet bytes
-  readonly parsed?: ParsedFields // eagerly extracted structured data
+  readonly parsed: RequestParsedFields
+  readonly lazy: LazyHeaders
 }
 
 export interface SipResponse {
@@ -87,7 +102,8 @@ export interface SipResponse {
   readonly headers: ReadonlyArray<SipHeader>
   readonly body: Uint8Array      // raw bytes — opaque to B2BUA
   readonly raw: Buffer           // original packet bytes
-  readonly parsed?: ParsedFields // eagerly extracted structured data
+  readonly parsed: ResponseParsedFields
+  readonly lazy: LazyHeaders
 }
 
 export type SipMessage = SipRequest | SipResponse

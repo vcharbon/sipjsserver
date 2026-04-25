@@ -8,8 +8,31 @@
  */
 
 import { Clock, Effect } from "effect"
-import type { SipMessage } from "../../../src/sip/types.js"
+import type { SipMessage, SipRequest } from "../../../src/sip/types.js"
 import { SipParser } from "../../../src/sip/Parser.js"
+import { hydrateRequest } from "../../../src/sip/parsers/extract-fields.js"
+
+/**
+ * Build a synthetic placeholder request for trace entries that record an
+ * absent message (e.g. an offer/answer that never arrived). Carries the
+ * minimum mandatory header set so it satisfies the SipMessage type
+ * contract; consumers display these only as failure markers.
+ */
+function makePlaceholderRequest(method: string): SipRequest {
+  return hydrateRequest({
+    method,
+    uri: "sip:placeholder@invalid",
+    headers: [
+      { name: "Via", value: "SIP/2.0/UDP placeholder.invalid:0;branch=z9hG4bK-placeholder" },
+      { name: "From", value: "<sip:placeholder@invalid>;tag=placeholder" },
+      { name: "To", value: "<sip:placeholder@invalid>" },
+      { name: "Call-ID", value: "placeholder" },
+      { name: "CSeq", value: `0 ${method}` },
+    ],
+    body: new Uint8Array(),
+    raw: Buffer.alloc(0),
+  })
+}
 import { getHeaders } from "../../../src/sip/MessageHelpers.js"
 import type {
   AgentConfig,
@@ -964,14 +987,7 @@ function checkDanglingOffers(state: InterpreterState): Effect.Effect<void> {
         direction: "receive",
         stepIndex,
         status: "unexpected",
-        message: {
-          type: "request",
-          method: "SDP-ANSWER",
-          uri: "",
-          version: "SIP/2.0",
-          headers: [],
-          body: new Uint8Array(),
-        },
+        message: makePlaceholderRequest("SDP-ANSWER"),
       })
     }
   })
@@ -1003,14 +1019,7 @@ function checkDanglingReliableProvisionals(state: InterpreterState): Effect.Effe
           direction: "receive",
           stepIndex,
           status: "unexpected",
-          message: {
-            type: "request",
-            method: "PRACK",
-            uri: "",
-            version: "SIP/2.0",
-            headers: [],
-            body: new Uint8Array(),
-          },
+          message: makePlaceholderRequest("PRACK"),
         })
       }
     }

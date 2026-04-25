@@ -8,6 +8,7 @@
  */
 
 import { describe, test, expect } from "vitest"
+import { Result } from "effect"
 
 import { jssipParser } from "../../src/sip/parsers/jssip-adapter.js"
 import { sipParserNpm } from "../../src/sip/parsers/sip-parser-adapter.js"
@@ -85,14 +86,18 @@ describe.each(parsers)("$name — RFC 4475 valid messages", (impl) => {
 
     if (isKnownFail) {
       test(`${name} — must parse (known failure)`, () => {
-        const parsed = (() => { try { impl.parse(buf); return true } catch { return false } })()
+        const parsed = Result.isSuccess(impl.parse(buf))
         if (parsed) {
           throw new Error(`${impl.name} now parses ${caseId} — update knownFailValid`)
         }
       })
     } else {
       test(`${name} — must parse`, () => {
-        const msg = impl.parse(buf)
+        const result = impl.parse(buf)
+        if (Result.isFailure(result)) {
+          throw new Error(`${impl.name} failed to parse ${caseId}: ${result.failure.reason}`)
+        }
+        const msg = result.success
         expect(msg.type).toMatch(/^(request|response)$/)
         expect(msg.headers.length).toBeGreaterThan(0)
       })
@@ -133,15 +138,15 @@ describe.each(parsers)("$name — RFC 4475 invalid messages", (impl) => {
     if (isLenient) {
       test(`${name} — should reject (known lenient)`, () => {
         // Document that this parser accepts this invalid message
-        const threw = (() => { try { impl.parse(buf); return false } catch { return true } })()
-        if (threw) {
+        const rejected = Result.isFailure(impl.parse(buf))
+        if (rejected) {
           // Parser started rejecting — remove from knownLenient!
           throw new Error(`${impl.name} now rejects ${caseId} — update knownLenient`)
         }
       })
     } else {
       test(`${name} — should reject`, () => {
-        expect(() => impl.parse(buf)).toThrow()
+        expect(Result.isFailure(impl.parse(buf))).toBe(true)
       })
     }
   }
@@ -166,8 +171,8 @@ describe("Output equivalence — custom vs jssip", () => {
   ]
 
   test.each(bothParseCases)("%s — equivalent output", (_name, buf) => {
-    const jssipResult = jssipParser.parse(buf)
-    const customResult = customParser.parse(buf)
+    const jssipResult = Result.getOrThrow(jssipParser.parse(buf))
+    const customResult = Result.getOrThrow(customParser.parse(buf))
 
     expect(customResult.type).toBe(jssipResult.type)
     if (customResult.type === "request" && jssipResult.type === "request") {

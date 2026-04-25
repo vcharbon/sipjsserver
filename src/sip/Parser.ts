@@ -1,28 +1,18 @@
 /**
  * SipParser Effect service — thin wrapper around a pure SipParserImpl.
  *
- * The actual parsing logic lives in `parsers/` adapters. This module
- * provides the Effect service interface consumed by the rest of the
- * codebase (TransactionLayer, etc.).
+ * The actual parsing logic lives in `parsers/` adapters and is exposed as
+ * a pure `(Buffer) => Result<SipMessage, SipParseError>` function. This
+ * service simply lifts that Result into Effect for use inside `Effect.gen`.
  */
 
-import { Effect, Layer, Schema, ServiceMap } from "effect"
+import { Effect, Layer, ServiceMap } from "effect"
 import type { SipMessage } from "./types.js"
+import { SipParseError } from "./parsers/errors.js"
 import type { SipParserImpl } from "./parsers/interface.js"
 import { customParser } from "./parsers/custom/index.js"
 
-// ---------------------------------------------------------------------------
-// Error
-// ---------------------------------------------------------------------------
-
-export class SipParseError extends Schema.TaggedErrorClass<SipParseError>()(
-  "SipParseError",
-  { reason: Schema.String }
-) {}
-
-// ---------------------------------------------------------------------------
-// Service
-// ---------------------------------------------------------------------------
+export { SipParseError } from "./parsers/errors.js"
 
 export class SipParser extends ServiceMap.Service<
   SipParser,
@@ -35,15 +25,8 @@ export class SipParser extends ServiceMap.Service<
 
   /** Build a layer from any pure parser implementation. */
   static fromImpl(impl: SipParserImpl) {
-    return Layer.sync(SipParser, () => {
-      const parse = Effect.fnUntraced(function* (raw: Buffer) {
-        return yield* Effect.try({
-          try: () => impl.parse(raw),
-          catch: (err) =>
-            new SipParseError({ reason: err instanceof Error ? err.message : String(err) })
-        })
-      })
-      return { parse }
-    })
+    return Layer.sync(SipParser, () => ({
+      parse: (raw: Buffer) => Effect.fromResult(impl.parse(raw)),
+    }))
   }
 }

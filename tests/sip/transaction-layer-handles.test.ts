@@ -11,13 +11,12 @@ import { TransactionLayer } from "../../src/sip/TransactionLayer.js"
 import { fakeStackLayer } from "../support/fakeStack.js"
 import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
 import type { SipRequest } from "../../src/sip/types.js"
+import { hydrateRequest } from "../../src/sip/parsers/extract-fields.js"
 
 function makeOutboundRequest(method: "INVITE" | "BYE", branch: string): SipRequest {
-  return {
-    type: "request",
+  return hydrateRequest({
     method,
     uri: "sip:bob@192.0.2.20:5060",
-    version: "SIP/2.0",
     headers: [
       { name: "Via", value: `SIP/2.0/UDP 127.0.0.1:15070;branch=${branch}` },
       { name: "Max-Forwards", value: "70" },
@@ -30,7 +29,7 @@ function makeOutboundRequest(method: "INVITE" | "BYE", branch: string): SipReque
     ],
     body: new Uint8Array(0),
     raw: Buffer.alloc(0),
-  }
+  })
 }
 
 describe("TransactionLayer handle shape", () => {

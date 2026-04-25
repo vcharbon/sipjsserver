@@ -1,11 +1,18 @@
 /**
  * sip-parser (Formup) adapter — wraps the npm `sip-parser` package
  * and adapts its output to the shared SipParserImpl interface.
+ *
+ * Returns `Result<SipMessage, SipParseError>`. Never throws.
  */
 
+import { Result } from "effect"
 import { parse as sipParserParse, types } from "sip-parser"
 import type { SipHeader, SipMessage, SipRequest, SipResponse } from "../types.js"
 import type { SipParserImpl } from "./interface.js"
+import { SipParseError } from "./errors.js"
+import { extractCommonFields, extractRequestFields } from "./extract-fields.js"
+import { LazyHeaders } from "./custom/lazy-headers.js"
+import { expandCompactForm } from "./custom/compact-forms.js"
 
 // ---------------------------------------------------------------------------
 // sip-parser → SipMessage adapter
@@ -16,14 +23,20 @@ function isResponse(msg: types.SIPMessage): msg is types.SIPResponse {
 }
 
 function adaptHeaders(headers: types.Header[]): SipHeader[] {
-  return headers.map((h) => ({ name: h.fieldName, value: h.fieldValue }))
+  return headers.map((h) => ({ name: expandCompactForm(h.fieldName), value: h.fieldValue }))
 }
 
-function adaptMessage(msg: types.SIPMessage, raw: Buffer): SipMessage {
+function adaptMessage(
+  msg: types.SIPMessage,
+  raw: Buffer
+): Result.Result<SipMessage, SipParseError> {
   const headers = adaptHeaders(msg.headers)
   const body = msg.content ? Buffer.from(msg.content, "utf-8") : new Uint8Array(0)
+  const lazy = new LazyHeaders(headers)
 
   if (isResponse(msg)) {
+    const fields = extractCommonFields(headers)
+    if (Result.isFailure(fields)) return Result.fail(fields.failure)
     const response: SipResponse = {
       type: "response",
       version: msg.version,
@@ -31,21 +44,28 @@ function adaptMessage(msg: types.SIPMessage, raw: Buffer): SipMessage {
       reason: msg.reason,
       headers,
       body,
-      raw
+      raw,
+      parsed: fields.success,
+      lazy,
     }
-    return response
+    return Result.succeed(response)
   }
 
+  const requestUri = stringifyUri(msg.requestUri)
+  const fields = extractRequestFields(headers, requestUri)
+  if (Result.isFailure(fields)) return Result.fail(fields.failure)
   const request: SipRequest = {
     type: "request",
     method: msg.method.toUpperCase(),
-    uri: stringifyUri(msg.requestUri),
+    uri: requestUri,
     version: msg.version,
     headers,
     body,
-    raw
+    raw,
+    parsed: fields.success,
+    lazy,
   }
-  return request
+  return Result.succeed(request)
 }
 
 /** Reconstruct the Request-URI string from the parsed SipUri object. */
@@ -65,9 +85,16 @@ function stringifyUri(uri: types.SipUri): string {
 
 export const sipParserNpm: SipParserImpl = {
   name: "sip-parser",
-  parse(raw: Buffer): SipMessage {
+  parse(raw: Buffer): Result.Result<SipMessage, SipParseError> {
     const data = raw.toString("utf-8")
-    const result = sipParserParse(data)
+    let result: types.SIPMessage
+    try {
+      result = sipParserParse(data)
+    } catch (err) {
+      return Result.fail(
+        new SipParseError({ reason: err instanceof Error ? err.message : String(err) })
+      )
+    }
     return adaptMessage(result, raw)
-  }
+  },
 }

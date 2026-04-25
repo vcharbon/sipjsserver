@@ -26,6 +26,7 @@ import { executeActions } from "../../src/b2bua/rules/framework/ActionExecutor.j
 import type { RuleAction } from "../../src/b2bua/rules/framework/RuleDefinition.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
 import type { SipRequest } from "../../src/sip/types.js"
+import { hydrateRequest } from "../../src/sip/parsers/extract-fields.js"
 import { diffCall, makeDialog, makeALegDialog, makeLeg, makeCall, makeCtx, make200InviteFromB } from "./helpers/reach.js"
 
 // ── update-leg-state ────────────────────────────────────────────────────────
@@ -225,15 +226,19 @@ describe("confirm-dialog reach", () => {
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
     const call = makeCall(aLeg, bLeg)
 
-    const req: SipRequest = {
-      type: "request",
+    const req: SipRequest = hydrateRequest({
       method: "INVITE",
       uri: "sip:b2bua@10.0.0.1:5060",
-      version: "SIP/2.0",
-      headers: [{ name: "Via", value: "SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig" }],
+      headers: [
+        { name: "Via", value: "SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-orig" },
+        { name: "From", value: "<sip:alice@example.com>;tag=tagA" },
+        { name: "To", value: "<sip:bob@example.com>" },
+        { name: "Call-ID", value: "call-1" },
+        { name: "CSeq", value: "1 INVITE" },
+      ],
       body: new Uint8Array(0),
       raw: Buffer.alloc(0),
-    }
+    })
     const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", req)
 
     const result = executeActions(

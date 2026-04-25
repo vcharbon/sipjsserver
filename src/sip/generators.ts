@@ -23,6 +23,7 @@ import type { SipHeader, SipMessage, SipRequest, SipResponse } from "./types.js"
 import type { StackDialog } from "./Dialog.js"
 import type { InviteClientTransactionHandle } from "./TransactionLayer.js"
 import { getHeader } from "./MessageHelpers.js"
+import { hydrateRequest, hydrateResponse } from "./parsers/extract-fields.js"
 
 // ---------------------------------------------------------------------------
 // Public input shapes
@@ -102,7 +103,7 @@ function makeRequest(
   headers: SipHeader[],
   body: Uint8Array = EMPTY_BODY,
 ): SipRequest {
-  return { type: "request", method, uri, version: "SIP/2.0", headers, body, raw: EMPTY_RAW }
+  return hydrateRequest({ method, uri, headers, body, raw: EMPTY_RAW })
 }
 
 function makeResponse(
@@ -111,7 +112,7 @@ function makeResponse(
   headers: SipHeader[],
   body: Uint8Array = EMPTY_BODY,
 ): SipResponse {
-  return { type: "response", version: "SIP/2.0", status, reason, headers, body, raw: EMPTY_RAW }
+  return hydrateResponse({ status, reason, headers, body, raw: EMPTY_RAW })
 }
 
 /**

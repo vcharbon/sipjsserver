@@ -10,6 +10,7 @@ import { executeActions } from "../../src/b2bua/rules/framework/ActionExecutor.j
 import type { RuleAction, RuleContext } from "../../src/b2bua/rules/framework/RuleDefinition.js"
 import type { Call, Leg, Dialog } from "../../src/call/CallModel.js"
 import type { SipRequest, SipResponse, SipHeader, RemoteInfo } from "../../src/sip/types.js"
+import { hydrateRequest, hydrateResponse } from "../../src/sip/parsers/extract-fields.js"
 import type { AppConfigData } from "../../src/config/AppConfig.js"
 import type { CallDecisionEngine } from "../../src/decision/CallDecisionEngine.js"
 import type { CallLimiter } from "../../src/call/CallLimiter.js"
@@ -135,11 +136,9 @@ describe("ActionExecutor Content-Length correctness", () => {
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bDialog)
     const call = makeCall(aLeg, bLeg)
 
-    const reinvite: SipRequest = {
-      type: "request",
+    const reinvite: SipRequest = hydrateRequest({
       method: "INVITE",
       uri: "sip:b2bua@10.0.0.1:5060",
-      version: "SIP/2.0",
       headers: [
         h("Via", "SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-reinv"),
         h("From", `<sip:alice@example.com>;tag=${aLeg.fromTag}`),
@@ -152,7 +151,7 @@ describe("ActionExecutor Content-Length correctness", () => {
       ],
       body: sdpBody,
       raw: Buffer.alloc(0),
-    }
+    })
 
     test("body replacement updates Content-Length", () => {
       const ctx = makeCtx(call, aLeg, aDialog, "from-a", reinvite)
@@ -191,9 +190,7 @@ describe("ActionExecutor Content-Length correctness", () => {
     const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", bDialog)
     const call = makeCall(aLeg, bLeg)
 
-    const resp183: SipResponse = {
-      type: "response",
-      version: "SIP/2.0",
+    const resp183: SipResponse = hydrateResponse({
       status: 183,
       reason: "Session Progress",
       headers: [
@@ -208,12 +205,7 @@ describe("ActionExecutor Content-Length correctness", () => {
       ],
       body: sdpBody,
       raw: Buffer.alloc(0),
-      parsed: {
-        to: { displayName: undefined, uri: "sip:alice@example.com", tag: "bob-remote-tag", params: {} },
-        from: undefined, callId: undefined, cseq: undefined, via: undefined, vias: [],
-        contact: undefined, requestUri: undefined,
-      },
-    }
+    })
 
     test("bodyUpdate drop on response sets Content-Length to 0", () => {
       const ctx = makeCtx(call, bLeg, bDialog, "from-b", resp183)
@@ -252,11 +244,9 @@ describe("ActionExecutor Content-Length correctness", () => {
     const call = makeCall(aLeg, bLeg)
 
     // Event doesn't matter much for send-request-to-leg — it generates its own request
-    const dummyReq: SipRequest = {
-      type: "request",
+    const dummyReq: SipRequest = hydrateRequest({
       method: "OPTIONS",
       uri: "sip:b2bua@10.0.0.1:5060",
-      version: "SIP/2.0",
       headers: [
         h("Via", "SIP/2.0/UDP 192.168.1.100:5060;branch=z9hG4bK-opt"),
         h("From", `<sip:alice@example.com>;tag=${aLeg.fromTag}`),
@@ -267,7 +257,7 @@ describe("ActionExecutor Content-Length correctness", () => {
       ],
       body: emptyBody,
       raw: Buffer.alloc(0),
-    }
+    })
 
     test("send-request-to-leg with body updates Content-Length from 0", () => {
       const ctx = makeCtx(call, aLeg, aDialog, "from-a", dummyReq)

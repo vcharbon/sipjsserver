@@ -189,6 +189,99 @@ Re-INVITEs are relayed transparently in both directions (a→b and b→a) using 
 
 4. **Response interception:** `tryHandleReInviteResponse()` runs before the existing provisional/200OK/error handlers and intercepts all responses belonging to a pending re-INVITE, preventing misidentification (e.g. re-INVITE 200 OK vs retransmitted initial 200 OK).
 
+## Cluster routing via technical headers
+
+In cluster mode the main process is a thin **Dispatcher** that owns the UDP socket and shards each packet to one of N worker child processes by hashing the SIP Call-ID. Workers parse, run rules, and produce outbound buffers that the dispatcher then puts back on the wire. Three layers of B2BUA-stamped technical headers carry the identity information needed to make this routing deterministic and parse-free at the dispatcher hop.
+
+| Carrier | Param | Set by | Read by | Resolves |
+|---------|-------|--------|---------|----------|
+| `Call-ID` header | (whole value) | a-leg: Alice; b-leg: B2BUA via `generateBLegCallId` | Dispatcher byte-scan (`extractCallIdFromBuffer`) → `fnv1a(callId) % N` | which **worker process** |
+| Top `Via` of responses | `;cr=<callRef>;lg=<legId>` | `legStackIdentity` (every outbound request) | Worker — `parseViaParams` / `resolveFromResponse` | which **call + leg** the response belongs to |
+| Request-URI / `Contact` of in-dialog requests | `;callRef=<callRef>;leg=<legId>` | `legStackIdentity` (every outbound `Contact`; peers target-refresh and use it as Request-URI) | Worker — `parseUriParams` / `resolveFromRequest` | which **call + leg** the in-dialog request targets |
+| Top `Via` + `Contact` | `;em=1` / `;emerg=1` | `legStackIdentity` when `call.emergency` | Dispatcher byte-scan (`bufferHasEmergencyMarker`) | overload-protection class (Tier 1/2 — see [overload-protection.md](overload-protection.md)) |
+| Top `Via` of every request | `;branch=<z9hG4bK…>` | `legStackIdentity` (mints fresh) or `forceBranch` (replay) | UAS for transaction matching (RFC 3261 §17.2.3); B2BUA caches it on `InviteClientTransactionHandle` for CANCEL / ACK-for-2xx | the **transaction** |
+
+### Worker affinity
+
+The dispatcher's hash routes by Call-ID, but a B2BUA call has **two** Call-IDs (one per leg). To keep both legs on the same worker, the b-leg Call-ID is **mined** rather than randomly generated:
+
+```ts
+generateBLegCallId(legNumber, workerIndex, totalWorkers, localHost)
+//   tries `${legNumber}-${counter}-${localHost}` until
+//   fnv1a(candidate) % totalWorkers === workerIndex
+```
+
+Average ~2-4 attempts for N=4-8 workers. The result: every packet of either leg of a given call lands on the same worker, so call state, timers, and tag mappings never need to migrate.
+
+### Routing diagram
+
+```
+Alice                      Dispatcher (main)                     Worker k                       Bob
+  │                              │                                  │                            │
+  │  INVITE                      │                                  │                            │
+  │  Call-ID: alice-xyz          │                                  │                            │
+  │ ───────────────────────────► │                                  │                            │
+  │                              │ extractCallIdFromBuffer (byte    │                            │
+  │                              │   scan, no SIP parse)            │                            │
+  │                              │ k = fnv1a("alice-xyz") % N       │                            │
+  │                              │ classifyPacket (em? toTag?)      │                            │
+  │                              │ ── IPC (raw Buffer) ───────────► │                            │
+  │                              │                                  │ resolveFromRequest:        │
+  │                              │                                  │   no callRef in R-URI      │
+  │                              │                                  │   → INITIAL INVITE         │
+  │                              │                                  │ create call, callRef=X     │
+  │                              │                                  │ generateBLegCallId →       │
+  │                              │                                  │   "1-42-h"  (hashes to k)  │
+  │                              │                                  │ legStackIdentity(call,b-1):│
+  │                              │                                  │   Via: ...;branch=z9..;    │
+  │                              │                                  │     cr=X;lg=b-1            │
+  │                              │                                  │   Contact: <sip:b2bua@h:p; │
+  │                              │                                  │     callRef=X;leg=b-1>     │
+  │                              │ ◄─ IPC "send" ───────────────── │                            │
+  │                              │      (raw Buffer)                │                            │
+  │                              │ ─────────────────────────────────────────────────► INVITE    │
+  │                              │                                  │                            │
+  │                              │                                  │            200 OK          │
+  │                              │                                  │            Call-ID: 1-42-h │
+  │                              │                                  │            Via: ...;cr=X;  │
+  │                              │                                  │              lg=b-1        │
+  │                              │ ◄────────────────────────────────────────────────────────────│
+  │                              │ k' = fnv1a("1-42-h") % N == k    │                            │
+  │                              │ ── IPC ────────────────────────► │                            │
+  │                              │                                  │ resolveFromResponse:       │
+  │                              │                                  │   Via.cr=X, Via.lg=b-1     │
+  │                              │                                  │ checkout(X) → run rules    │
+  │                              │                                  │ generateRelayedResponse →  │
+  │                              │                                  │   a-leg 200 OK             │
+  │                              │ ◄─ IPC "send" ─────────────────  │                            │
+  │ ◄─────────────────────────── │                                  │                            │
+  │                              │                                  │                            │
+  │                              │                                  │            BYE             │
+  │                              │                                  │            R-URI: sip:b2bua│
+  │                              │                                  │             @h:p;callRef=X;│
+  │                              │                                  │             leg=b-1        │
+  │                              │                                  │            Call-ID: 1-42-h │
+  │                              │ ◄────────────────────────────────────────────────────────────│
+  │                              │ k = fnv1a("1-42-h") % N          │                            │
+  │                              │ ── IPC ────────────────────────► │                            │
+  │                              │                                  │ resolveFromRequest:        │
+  │                              │                                  │   R-URI.callRef=X,leg=b-1  │
+  │                              │                                  │ no dialog-key lookup       │
+  │                              │                                  │   needed                   │
+```
+
+### Why each header is load-bearing
+
+- **Call-ID — process-level routing.** The dispatcher must shard *before* parsing (a full SIP parse per packet would cap throughput). A byte-scan for `\r\nCall-ID:` (or compact `\r\ni:`) plus FNV-1a is a few hundred nanoseconds per packet. Mining the b-leg Call-ID guarantees the b→a return path lands on the same worker as the original a-leg.
+- **Via `cr` / `lg` — response → call/leg resolution at the worker.** Response routing per RFC 3261 §18.1.2 is by branch, but the B2BUA needs *call+leg* identity, not just transaction identity (e.g. to pick the right b-leg dialog for forking). Stamping `cr` and `lg` in the top Via lets the worker resolve straight off `parsed.via.params` without consulting any in-memory map keyed by branch.
+- **Contact `callRef` / `leg` — in-dialog request resolution at the worker.** A peer's in-dialog request (BYE, re-INVITE, NOTIFY, …) has its Request-URI set to whatever the B2BUA put in `Contact` on the dialog-creating 2xx (RFC 3261 §12.2.1.1 / §20.10). Embedding `callRef`/`leg` in the Contact URI means the worker resolves the request without a dialog-key (Call-ID + From-tag + To-tag) lookup — even after worker restart, before Redis-backed dialog state is hydrated.
+- **`em` / `emerg` — overload-protection classification at the dispatcher.** The dispatcher classifies packets into `emergency` / `inDialog` / `normalNewCall` queues by a byte-scan that recognises the `Resource-Priority` / `;em=1` / `;emerg=1` markers without parsing. Emergency calls are drained first and never silently dropped (Tier 2 in [overload-protection.md](overload-protection.md)).
+- **`branch` — transaction matching, RFC 3261 §17.2.3.** Distinct from the routing role of `cr`/`lg`: `branch` matches a response back to the client transaction it answers, and a CANCEL / ACK-for-2xx must echo (or in the ACK-for-2xx case, *not* echo, but cache its own) the right value (see "Branch capture lifecycle" above).
+
+### URL-encoding
+
+`callRef` / `leg` values can contain `;`, `=`, `@`, or whitespace — characters that would corrupt Via/URI parsing if emitted verbatim. `legStackIdentity` runs `encodeURIComponent` before stamping, and `resolveFromRequest` / `resolveFromResponse` run `decodeURIComponent` after parsing, so values round-trip safely.
+
 ## Known issues and gaps
 
 ### Tag mapping (`call.tagMap`)
