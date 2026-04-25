@@ -154,7 +154,12 @@ function columnMatches(match: Match, ctx: RuleContext): boolean {
 /** Full match test: columns first, then the optional corner-case filter. */
 export function matchAccepts(match: Match, ctx: RuleContext): boolean {
   if (!columnMatches(match, ctx)) return false
-  const filter: MatchFilter | undefined = match.filter
+  // Each match shape now declares its filter as `MatchFilter<RequestMatch>` etc.,
+  // so `match.filter` is the contravariant union of those — TS can't prove the
+  // wide `RuleContext` is assignable. At call time `match.filter` corresponds
+  // to the actual `match` shape (columnMatches verified the kind), so the cast
+  // is sound.
+  const filter = match.filter as MatchFilter | undefined
   if (filter !== undefined && !filter(ctx)) return false
   return true
 }

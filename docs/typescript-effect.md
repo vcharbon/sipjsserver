@@ -1,6 +1,7 @@
 # TypeScript & Effect Conventions
 
 All code uses TypeScript with Effect v4 (effect-smol). When designing or modifying TypeScript in this project, activate the `effect` skill first to load the idiomatic-usage guide.
+If `<ide_diagnostics>` errors look stale or contradict `npm run typecheck`, trust typecheck — the IDE process is sometimes one edit behind.
 
 ## Core patterns
 

@@ -189,14 +189,12 @@ export const absorbOptions200Rule = defineRule({
 
   // Filter distinguishes a B2BUA-originated keepalive OPTIONS (no pending
   // relay snapshot) from a relayed OPTIONS (snapshot present → falls through
-  // to relay-non-invite-200). Filter is invoked by the matcher with the
-  // wide RuleContext, so it keeps its kind/type guards.
+  // to relay-non-invite-200).
   match: {
     kind: "response",
     cseqMethod: "OPTIONS",
     statusClass: "2xx",
     filter: (ctx) => {
-      if (ctx.event.type !== "sip" || ctx.event.message.type !== "response") return false
       const cseqNum = ctx.event.message.parsed.cseq.seq
       return ctx.sourceDialog !== undefined &&
         findPendingRequest(ctx.sourceDialog, cseqNum) === undefined

@@ -124,6 +124,12 @@ type Match =
 
 Omitting a column means "accept any value". `OneOrMany<T>` accepts either a single value or a `ReadonlyArray<T>`. Filters are synchronous, pure, and only used for relational checks that can't be expressed as columns (CSeq-number correlation with `findPendingRequest`, etc.).
 
+`MatchFilter<M extends Match = Match>` is generic; each shape declares its filter per-shape (`filter?: MatchFilter<RequestMatch>` on `RequestMatch`, etc.). When written with `defineRule({...})`, both the filter callback and the handler see a `RuleContext<TMatch>` already narrowed by the match's `kind` — there is no need for `if (ctx.event.type !== "sip" || ctx.event.message.type !== "request") return false` guards in either position. The matcher invokes the filter only after the column-level kind check passes, so the per-shape narrowing is sound.
+
+### Defining a rule
+
+Always prefer the `defineRule({...})` factory over a hand-typed `RuleDefinition<TState, TParams>` literal — the factory infers `TMatch` from the `match` value and threads it into `RuleContext<TMatch>`, and infers `TState` from `stateSchema` (via `NoInfer` on `init` / `handle`), so neither the handler nor `init` needs an explicit return-type annotation when the schema has optional fields.
+
 ## Action Types
 
 | Action | What it does |

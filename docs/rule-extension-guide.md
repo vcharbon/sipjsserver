@@ -75,7 +75,7 @@ Create `src/b2bua/rules/custom/myPolicy.ts`:
 
 ```typescript
 import { Effect, Schema } from "effect"
-import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
+import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
 import { definePolicyModule } from "../framework/PolicyModule.js"
 
 // ── Shared state (module-private) ──────────────────────────────────
@@ -89,7 +89,7 @@ const STATE_KEY = "my_policy"
 
 // ── Rule 1 (module-private) ────────────────────────────────────────
 
-const myRule: RuleDefinition<PolicyState, undefined> = {
+const myRule = defineRule({
   id: "my-rule",
   name: "My Rule Description",
   alwaysActive: true,
@@ -109,6 +109,10 @@ const myRule: RuleDefinition<PolicyState, undefined> = {
     direction: "from-b",
   },
 
+  // `defineRule` infers TState from `stateSchema` via NoInfer — `init` does
+  // not need an explicit return-type annotation even when PolicyState has
+  // optional fields. ctx is RuleContext<TMatch> here, so ctx.event.message
+  // is typed as a SipResponseTagged with INVITE CSeq — no defensive guards.
   init: () => ({ /* initial state */ }),
 
   handle: (ctx, state) => {
@@ -119,7 +123,7 @@ const myRule: RuleDefinition<PolicyState, undefined> = {
       state: { /* updated state */ },
     })
   },
-}
+})
 
 // ── Single export ──────────────────────────────────────────────────
 
@@ -151,19 +155,19 @@ const ruleRegistry = createRuleRegistry(defaultRules, [relayFirst18xTo180, myPol
 Multiple rules in a policy module can share state by using the same `stateKey`:
 
 ```typescript
-const rule1: RuleDefinition<SharedState, undefined> = {
+const rule1 = defineRule({
   id: "rule-1",
   stateKey: "shared_key",
   stateSchema: SharedState,
   // ...
-}
+})
 
-const rule2: RuleDefinition<SharedState, undefined> = {
+const rule2 = defineRule({
   id: "rule-2",
   stateKey: "shared_key",
   stateSchema: SharedState,
   // ...
-}
+})
 ```
 
 Both rules read/write the same entry in `call.ruleState`. The `init()` of whichever rule runs first creates the state; subsequent rules find the existing state via `getRuleState()`.
@@ -173,7 +177,7 @@ Both rules read/write the same entry in `call.ruleState`. The `init()` of whiche
 A rule can declare that it runs BEFORE a named base rule:
 
 ```typescript
-const myPreProcessor: RuleDefinition<...> = {
+const myPreProcessor = defineRule({
   id: "my-preprocessor",
   composesWith: "confirm-dialog",  // runs before confirm-dialog
   // ...
@@ -181,7 +185,7 @@ const myPreProcessor: RuleDefinition<...> = {
     // Return actions that run BEFORE confirm-dialog
     // Return undefined to let confirm-dialog run alone
   },
-}
+})
 ```
 
 **Composition semantics:**

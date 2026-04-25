@@ -82,7 +82,7 @@ const suppress18x = defineRule({
     direction: "from-b",
   },
 
-  init: (): PolicyState => ({ firstRelayed: false }),
+  init: () => ({ firstRelayed: false }),
 
   handle: (ctx, state) => {
     const resp = ctx.event.message
@@ -165,7 +165,7 @@ const forceTagConsistency = defineRule({
     direction: "from-b",
   },
 
-  init: (): PolicyState => ({ firstRelayed: false }),
+  init: () => ({ firstRelayed: false }),
 
   handle: (ctx, state) => {
     if (!state.storedATag) return Effect.void
@@ -209,7 +209,7 @@ const absorbPrack200 = defineRule({
     direction: "from-b",
   },
 
-  init: (): PolicyState => ({ firstRelayed: false }),
+  init: () => ({ firstRelayed: false }),
 
   handle: (ctx, state) =>
     Effect.succeed({

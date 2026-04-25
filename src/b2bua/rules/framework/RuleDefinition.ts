@@ -46,8 +46,16 @@ export type Direction = "from-a" | "from-b"
 /** Singleton or array form for enum columns. */
 type OneOrMany<T> = T | ReadonlyArray<T>
 
-/** Post-match corner-case predicate. Pure, sync, reads only RuleContext state. */
-export type MatchFilter = (ctx: RuleContext) => boolean
+/**
+ * Post-match corner-case predicate. Pure, sync, reads only RuleContext state.
+ *
+ * Generic over the Match shape so each match interface declares its filter as
+ * `MatchFilter<RequestMatch>` etc. — the matcher only invokes the filter after
+ * `columnMatches` has verified the event kind, so per-shape narrowing is sound.
+ * The wide-default `M = Match` form is the historical signature and remains
+ * usable for filters that don't care about narrowing.
+ */
+export type MatchFilter<M extends Match = Match> = (ctx: RuleContext<M>) => boolean
 
 /**
  * Transfer-phase gate.
@@ -77,7 +85,7 @@ export interface RequestMatch {
   readonly legDisposition?: OneOrMany<LegDisposition>
   readonly direction?: Direction
   readonly transferPhase?: TransferPhaseGate
-  readonly filter?: MatchFilter
+  readonly filter?: MatchFilter<RequestMatch>
 }
 
 /** Match descriptor for an inbound SIP response. */
@@ -94,7 +102,7 @@ export interface ResponseMatch {
   readonly legDisposition?: OneOrMany<LegDisposition>
   readonly direction?: Direction
   readonly transferPhase?: TransferPhaseGate
-  readonly filter?: MatchFilter
+  readonly filter?: MatchFilter<ResponseMatch>
 }
 
 /** Match descriptor for a background timer firing. */
@@ -104,7 +112,7 @@ export interface TimerMatch {
   readonly timerType?: OneOrMany<TimerType>
   readonly callState?: OneOrMany<CallModelState>
   readonly transferPhase?: TransferPhaseGate
-  readonly filter?: MatchFilter
+  readonly filter?: MatchFilter<TimerMatch>
 }
 
 /** Match descriptor for transaction timeouts (Timer B/F expiry). */
@@ -113,7 +121,7 @@ export interface TimeoutMatch {
   readonly method?: OneOrMany<SipMethod>
   readonly callState?: OneOrMany<CallModelState>
   readonly transferPhase?: TransferPhaseGate
-  readonly filter?: MatchFilter
+  readonly filter?: MatchFilter<TimeoutMatch>
 }
 
 /** Match descriptor for CANCEL-of-initial-INVITE signal (from a-leg). */
@@ -121,7 +129,7 @@ export interface CancelledMatch {
   readonly kind: "cancelled"
   readonly callState?: OneOrMany<CallModelState>
   readonly transferPhase?: TransferPhaseGate
-  readonly filter?: MatchFilter
+  readonly filter?: MatchFilter<CancelledMatch>
 }
 
 /**
@@ -137,7 +145,7 @@ export interface InternalEventMatch {
   readonly outcome?: OneOrMany<string>
   readonly callState?: OneOrMany<CallModelState>
   readonly transferPhase?: TransferPhaseGate
-  readonly filter?: MatchFilter
+  readonly filter?: MatchFilter<InternalEventMatch>
 }
 
 /** Declarative match descriptor. Replaces imperative matches(). */
@@ -800,14 +808,15 @@ export function defineRule<
     readonly id: string
     readonly name: string
     readonly match: TMatch
+    /** Source of truth for `TState` — `init`/`handle` are NoInfer'd against this. */
     readonly stateSchema: Schema.Schema<TState>
     readonly paramsSchema: Schema.Schema<TParams>
-    readonly init: (params: TParams, call: Call) => TState
+    readonly init: (params: TParams, call: Call) => NoInfer<TState>
     readonly handle: (
       ctx: RuleContext<TMatch>,
-      state: TState,
+      state: NoInfer<TState>,
       params: TParams,
-    ) => Effect.Effect<RuleHandleResult<TState> | undefined | void, never, never>
+    ) => Effect.Effect<RuleHandleResult<NoInfer<TState>> | undefined | void, never, never>
     readonly alwaysActive?: boolean
     readonly defaultPriority?: number
     readonly stateKey?: string

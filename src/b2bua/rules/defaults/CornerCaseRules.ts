@@ -8,8 +8,8 @@
  * Each rule uses `defineRule({...})`, so handler bodies see a `ctx` whose
  * event/message are already narrowed by the match — no defensive
  * `event.type !== "sip"` or `(msg as SipResponse)` casts in the body.
- * Filters keep their wide-RuleContext signature because the matcher
- * invokes them before kind-narrowing applies.
+ * Filters share that narrowing via per-shape `MatchFilter<ResponseMatch>` /
+ * `MatchFilter<RequestMatch>` typing on each Match interface.
  */
 
 import { Effect, Schema } from "effect"
@@ -104,7 +104,6 @@ export const retransmit200Rule = defineRule({
     direction: "from-b",
     filter: (ctx) => {
       if (ctx.sourceDialog === undefined) return false
-      if (ctx.event.type !== "sip" || ctx.event.message.type !== "response") return false
       return findPendingRequest(ctx.sourceDialog, ctx.event.message.parsed.cseq.seq) === undefined
     },
   },
@@ -181,7 +180,6 @@ export const relayReinviteResponseRule = defineRule({
     cseqMethod: "INVITE",
     filter: (ctx) => {
       if (ctx.sourceDialog === undefined) return false
-      if (ctx.event.type !== "sip" || ctx.event.message.type !== "response") return false
       return findPendingRequest(ctx.sourceDialog, ctx.event.message.parsed.cseq.seq) !== undefined
     },
   },

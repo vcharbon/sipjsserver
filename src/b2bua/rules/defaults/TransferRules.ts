@@ -20,7 +20,12 @@
 
 import { Effect, Result, Schema } from "effect"
 import { defineRule, type RuleAction, type RuleContext } from "../framework/RuleDefinition.js"
-import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
+import type {
+  AnyRuleDefinition,
+  RequestMatch,
+  ResponseMatch,
+  TimerMatch,
+} from "../framework/RuleDefinition.js"
 import type { SipRequest } from "../../../sip/types.js"
 import type { Dialog } from "../../../call/CallModel.js"
 import { getHeader } from "../../../sip/MessageHelpers.js"
@@ -57,30 +62,28 @@ function extractSipHeaders(req: SipRequest): Record<string, string> {
   return result
 }
 
-// Filter predicates — invoked by the matcher with the wide `RuleContext`
-// before the kind-specific narrowing applies, so they keep the kind/type
-// guards. Rule bodies do not.
+// Filter predicates — typed per-Match-shape so the matcher's column-narrowing
+// (kind, message.type) carries through. Rule bodies use the same narrowed ctx.
 
 /** Refer-To contains a Replaces= header parameter in its embedded URI headers. */
-function referToHasReplaces(ctx: RuleContext): boolean {
-  if (ctx.event.type !== "sip" || ctx.event.message.type !== "request") return false
+function referToHasReplaces(ctx: RuleContext<RequestMatch>): boolean {
   const r = ctx.event.message.lazy.referTo()
   return Result.isSuccess(r) && r.success?.replaces !== undefined
 }
 
 /** REFER arrived without a Replaces parameter in the Refer-To URI. */
-function referToLacksReplaces(ctx: RuleContext): boolean {
+function referToLacksReplaces(ctx: RuleContext<RequestMatch>): boolean {
   return !referToHasReplaces(ctx)
 }
 
 /** Matches only when the inbound response is on the transfer's C leg. */
-function isCLegResponse(ctx: RuleContext): boolean {
+function isCLegResponse(ctx: RuleContext<ResponseMatch>): boolean {
   const cLegId = ctx.call.transfer?.cLegId
   return cLegId !== undefined && ctx.sourceLeg.legId === cLegId
 }
 
 /** Matches only when the inbound request is on the transfer's C leg. */
-function isCLegRequest(ctx: RuleContext): boolean {
+function isCLegRequest(ctx: RuleContext<RequestMatch>): boolean {
   const cLegId = ctx.call.transfer?.cLegId
   return cLegId !== undefined && ctx.sourceLeg.legId === cLegId
 }
@@ -90,26 +93,24 @@ function isCLegRequest(ctx: RuleContext): boolean {
  * BYE. BYE gets its own handling; other methods during the realigning phases
  * are rejected 481.
  */
-function isReferrerBLegNonBye(ctx: RuleContext): boolean {
-  if (ctx.event.type !== "sip" || ctx.event.message.type !== "request") return false
+function isReferrerBLegNonBye(ctx: RuleContext<RequestMatch>): boolean {
   if (ctx.event.message.method === "BYE") return false
   const referrerLegId = ctx.call.transfer?.referrerLegId
   return referrerLegId !== undefined && ctx.sourceLeg.legId === referrerLegId
 }
 
 /** Response arrived on the a-leg. */
-function isALegResponse(ctx: RuleContext): boolean {
+function isALegResponse(ctx: RuleContext<ResponseMatch>): boolean {
   return ctx.sourceLeg.legId === "a"
 }
 
 /** Timer fired for the a-leg refer_reinvite_answer watchdog. */
-function isALegReinviteTimer(ctx: RuleContext): boolean {
-  return ctx.event.type === "timer" && ctx.event.legId === "a"
+function isALegReinviteTimer(ctx: RuleContext<TimerMatch>): boolean {
+  return ctx.event.legId === "a"
 }
 
 /** No-answer timer for the C-leg specifically. */
-function isCLegNoAnswerTimer(ctx: RuleContext): boolean {
-  if (ctx.event.type !== "timer") return false
+function isCLegNoAnswerTimer(ctx: RuleContext<TimerMatch>): boolean {
   const cLegId = ctx.call.transfer?.cLegId
   return cLegId !== undefined && ctx.event.legId === cLegId
 }

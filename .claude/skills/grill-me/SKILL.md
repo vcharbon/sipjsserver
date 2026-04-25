@@ -10,5 +10,3 @@ Ask the questions one at a time.
 If a question can be answered by exploring the codebase, explore the codebase instead.
 
 When plan involve changing the code behavior, systematically include a way to test the expected target behavior as part of the plan.
-
-If final plan is complex multi slice, write it down in the docs/todos/ as a detailed plan with tracking info at the top.

@@ -29,14 +29,18 @@ export function createRuleRegistry(
   // match.filter so the Matcher respects policy activation.
   for (const mod of (policyModules ?? [])) {
     for (const rule of mod.rules) {
-      const originalFilter = rule.match.filter
+      const originalFilter = rule.match.filter as ((ctx: RuleContext) => boolean) | undefined
       const guardedFilter: (ctx: RuleContext) => boolean = originalFilter !== undefined
         ? (ctx) => mod.guard(ctx) && originalFilter(ctx)
         : mod.guard
+      // Cast: per-shape MatchFilter<RequestMatch> | ... is contravariantly
+      // incompatible with the wide-form `guardedFilter`, but this composer
+      // operates at the framework boundary where the wide form is correct —
+      // the matcher invokes filters only after the column kind matches.
       allRules.push({
         ...rule,
         alwaysActive: true,
-        match: { ...rule.match, filter: guardedFilter },
+        match: { ...rule.match, filter: guardedFilter as never },
       })
     }
   }
