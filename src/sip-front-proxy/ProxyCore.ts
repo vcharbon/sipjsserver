@@ -51,6 +51,7 @@ import type { SipHeader, SipMessage, SipRequest } from "../sip/types.js"
 import {
   CancelBranchLru,
   type CancelBranchLruApi,
+  callIdCseqKey,
 } from "./CancelBranchLru.js"
 import {
   type RouteParams,
@@ -336,17 +337,18 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
     let synthesizedReply: { status: number; reason: string } | undefined
 
     if (method === "CANCEL") {
-      // §16.10: forward CANCEL to the same downstream as the matching INVITE.
-      // Match by the topmost Via branch — for stateless proxies, this is the
-      // branch the upstream UAC put on the INVITE that we mirrored on the
-      // CANCEL we are now seeing.
-      const branch = req.parsed.via.branch
-      if (branch !== undefined) {
-        const found = yield* cancelLru.lookup(branch)
-        if (Option.isSome(found)) {
-          target = found.value
-          counters.cancelMatched++
-        }
+      // §16.10: forward CANCEL to the same downstream as the matching
+      // INVITE. RFC 3261 §9.1 — a CANCEL shares the INVITE's Call-ID and
+      // CSeq number (only the CSeq method differs, INVITE→CANCEL). We key
+      // the LRU on `(Call-ID, CSeq number)` so the lookup works at any
+      // hop regardless of what the upstream UAC chose for the top-Via
+      // branch on the CANCEL — and crucially without re-sharding to a
+      // different worker under `LoadBalancer`.
+      const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+      const found = yield* cancelLru.lookup(key)
+      if (Option.isSome(found)) {
+        target = found.value
+        counters.cancelMatched++
       }
       if (target === undefined) {
         counters.cancelUnmatched++
@@ -409,9 +411,13 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
     const viaValue = `SIP/2.0/UDP ${advertisedAddress.ip}:${advertisedAddress.port};branch=${ourBranch};rport`
     nextHeaders = prependHeader(nextHeaders, "Via", viaValue)
 
-    // ── Remember branch→target for CANCEL correlation ─────────────────────
+    // ── Remember (Call-ID, CSeq number)→target for CANCEL correlation ──
+    // Per RFC 3261 §9.1 the CANCEL we may later receive will carry the
+    // same Call-ID and CSeq number; that pair is the canonical correlator
+    // independent of what branch the upstream UAC stamps on the CANCEL.
     if (method === "INVITE") {
-      yield* cancelLru.remember(ourBranch, target)
+      const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+      yield* cancelLru.remember(key, target)
     }
 
     // ── Serialize + fire-and-forget send ──────────────────────────────────

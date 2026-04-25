@@ -87,6 +87,25 @@ export interface HmacKeyProviderApi {
     kid: string,
     mac: Uint8Array
   ) => Effect.Effect<boolean>
+  /**
+   * Truncated-MAC verify — recompute the full HMAC for `input` under the
+   * named `kid` (current or previous), then compare its leading
+   * `truncatedMac.byteLength` bytes against `truncatedMac` in
+   * constant time. Used by `LoadBalancerStrategy` (PR3b) which carries a
+   * 16-byte (128-bit) prefix of the SHA-256 MAC in the routing cookie.
+   *
+   * Truncating to 128 bits is a standard short-token tradeoff
+   * (RFC 4868 §2.6 / NIST SP 800-107): collision/forgery resistance stays
+   * comfortably above attacker budgets on a per-message HMAC, while
+   * shaving the cookie down to ~22 base64url chars.
+   *
+   * Returns `false` for unknown kid, zero-length truncation, or mismatch.
+   */
+  readonly verifyTruncated: (
+    input: Uint8Array,
+    kid: string,
+    truncatedMac: Uint8Array
+  ) => Effect.Effect<boolean>
 }
 
 export class HmacKeyProvider extends ServiceMap.Service<HmacKeyProvider, HmacKeyProviderApi>()(
@@ -173,23 +192,45 @@ export const staticLayer = (
       const sign = (input: Uint8Array): Effect.Effect<HmacSignResult> =>
         Effect.sync(() => ({ kid: current.id, mac: macFor(current, input) }))
 
+      const lookupKey = (kid: string): HmacKey | undefined =>
+        kid === current.id
+          ? current
+          : previous !== undefined && kid === previous.id
+            ? previous
+            : undefined
+
       const verify = (
         input: Uint8Array,
         kid: string,
         mac: Uint8Array
       ): Effect.Effect<boolean> =>
         Effect.sync(() => {
-          const key =
-            kid === current.id
-              ? current
-              : previous !== undefined && kid === previous.id
-                ? previous
-                : undefined
+          const key = lookupKey(kid)
           if (key === undefined) return false
           const expected = macFor(key, input)
           return constantTimeEqual(expected, mac)
         })
 
-      return Effect.succeed({ sign, verify } satisfies HmacKeyProviderApi)
+      const verifyTruncated = (
+        input: Uint8Array,
+        kid: string,
+        truncatedMac: Uint8Array
+      ): Effect.Effect<boolean> =>
+        Effect.sync(() => {
+          const key = lookupKey(kid)
+          if (key === undefined) return false
+          if (truncatedMac.byteLength === 0) return false
+          const full = macFor(key, input)
+          if (truncatedMac.byteLength > full.byteLength) return false
+          // node:crypto.timingSafeEqual requires equal-length buffers.
+          const prefix = full.subarray(0, truncatedMac.byteLength)
+          return timingSafeEqual(Buffer.from(prefix), Buffer.from(truncatedMac))
+        })
+
+      return Effect.succeed({
+        sign,
+        verify,
+        verifyTruncated,
+      } satisfies HmacKeyProviderApi)
     })
   )

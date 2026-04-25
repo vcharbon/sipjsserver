@@ -124,20 +124,13 @@ describe("sip-front-proxy/transit-only — CANCEL during ringing", () => {
 
       // ── 3. Alice → Proxy: CANCEL (mirrors the INVITE's top Via per
       //      RFC 3261 §9.1 — i.e. Alice's own branch). ───────────────
-      // Important detail: the proxy's CancelBranchLru is keyed by the
-      // *proxy*'s branch on the INVITE — but Alice doesn't know that
-      // value. RFC 3261 §16.10 / §17.2.3 say the CANCEL transaction at
-      // each hop matches by the branch on the *incoming* top Via. So at
-      // the proxy: the CANCEL's top Via is Alice's `aliceBranch`, NOT
-      // the proxy-side branch. The current implementation tries the
-      // top Via branch in the LRU; for §16.10 transparency this should
-      // still resolve to Bob because the proxy ALSO inserted a row keyed
-      // on `aliceBranch` is wrong. Instead, the practical fallback in
-      // this PR is `selectForNewDialog` (which always returns Bob in
-      // ForwardAll). So we still hit Bob — and in PR3+ the
-      // CancelBranchLru will be keyed on the upstream branch too. We
-      // assert end-to-end behavior here (CANCEL reaches Bob) rather
-      // than the LRU mechanic.
+      // Per PR3b the CancelBranchLru is now keyed on `(Call-ID, CSeq
+      // number)` (RFC 3261 §9.1: the CANCEL shares both with the
+      // matching INVITE), so the lookup hits regardless of what branch
+      // Alice put on the CANCEL or what branch the proxy stamped on the
+      // INVITE. End-to-end the CANCEL reaches Bob — same behavior as
+      // before, but now via the canonical correlator instead of the
+      // ForwardAll fallback path.
       const cancel = Buffer.from(
         [
           `CANCEL sip:bob@${BOB.host}:${BOB.port} SIP/2.0`,

@@ -1,23 +1,39 @@
 /**
- * CancelBranchLru — proxy-local, branch→target cache with TTL.
+ * CancelBranchLru — proxy-local, (Call-ID, CSeq number)→target cache with
+ * TTL. The historical name kept for backwards compatibility — the cache
+ * still solves the CANCEL correlation problem, but the key has been
+ * rewritten as of PR3b (see "Keying" below).
  *
  * RFC 3261 §16.10 / §17.2.3: a stateless proxy must forward a CANCEL to the
- * same downstream that the matching INVITE was forwarded to. The match key
- * is the topmost Via branch + sent-by + method "CANCEL"; for a stateless
- * proxy that means we simply remember "for this branch I sent the INVITE to
- * X" and reuse X for the CANCEL.
+ * same downstream that the matching INVITE was forwarded to.
  *
- * The cache holds entries for ~32 s — long enough for the SIP Timer C
- * window (3 min) is excessive at the proxy hop because once any downstream
- * response (provisional or final) traverses us, the UA-side state machine
- * controls retries; what matters is that the CANCEL the UAC dispatches in
+ * Keying — RFC 3261 §9.1. A CANCEL request shares its Request-URI, From,
+ * To (no tag), Call-ID, and **CSeq number** with the INVITE it cancels;
+ * only the CSeq method differs (`CANCEL` vs `INVITE`). At the same hop the
+ * UAC reuses the INVITE's top-Via branch on the CANCEL too — but at the
+ * **proxy** the relevant branch is the upstream UAC's, not the proxy's
+ * outbound branch. Earlier PRs keyed the LRU on the proxy's outbound
+ * branch, which papered over the mismatch only because `ForwardAll` always
+ * targets the same downstream and could fall back via
+ * `selectForNewDialog`. With `LoadBalancer` the fallback would re-shard
+ * the CANCEL to a different worker than the INVITE — a real bug. Keying
+ * on `(Call-ID, CSeq number)` is the canonical correlator and works at
+ * any hop regardless of whether the upstream rewrote the branch.
+ *
+ * The cache holds entries for ~32 s — Timer C goes up to 3 min, but at
+ * the proxy hop what matters is that the CANCEL the UAC dispatches in
  * the first few seconds of ringing finds the right downstream. 32 s
  * comfortably covers user-driven CANCEL on a ringing call.
  *
- * Implementation: a single `MutableHashMap<branch, Entry>` (per repo
+ * Implementation: a single `MutableHashMap<key, Entry>` (per repo
  * convention for hot-path maps — `Ref<HashMap>` would copy on every write)
  * paired with a periodic sweep fiber that deletes entries past their
  * `expiresAtMs`. Reads are O(1) and never block.
+ *
+ * The `key` is built by `callIdCseqKey(callId, cseqNum)` which the proxy
+ * core calls on both sides (INVITE remember + CANCEL lookup). Format is
+ * `<callId>|<cseq>` — `|` is an illegal Call-ID character per RFC 3261's
+ * `word` grammar so the join is unambiguous.
  */
 
 import { Clock, Effect, Layer, MutableHashMap, Option, type Scope, ServiceMap } from "effect"
@@ -36,11 +52,27 @@ export const DEFAULT_SWEEP_INTERVAL_MS = 16_000
 // Service surface
 // ---------------------------------------------------------------------------
 
+/**
+ * Build the composite key for an INVITE or matching CANCEL. The CANCEL's
+ * Call-ID and CSeq number are guaranteed identical to the INVITE's per
+ * RFC 3261 §9.1. We delimit with `|`, which is illegal inside an RFC 3261
+ * Call-ID `word`, so the resulting string is unambiguous.
+ */
+export const callIdCseqKey = (callId: string, cseqNum: number): string =>
+  `${callId}|${cseqNum}`
+
 export interface CancelBranchLruApi {
-  /** Remember the downstream target we forwarded an INVITE with `branch` to. */
-  readonly remember: (branch: string, target: SocketAddr) => Effect.Effect<void>
-  /** Look up the previously-remembered target for a CANCEL's branch. */
-  readonly lookup: (branch: string) => Effect.Effect<Option.Option<SocketAddr>>
+  /**
+   * Remember the downstream target we forwarded an INVITE to. The key is
+   * the `(Call-ID, CSeq number)` composite produced by `callIdCseqKey`.
+   */
+  readonly remember: (key: string, target: SocketAddr) => Effect.Effect<void>
+  /**
+   * Look up the previously-remembered target for a CANCEL. The key is the
+   * `(Call-ID, CSeq number)` composite produced by `callIdCseqKey` — the
+   * CANCEL's Call-ID and CSeq number match the INVITE's per RFC 3261 §9.1.
+   */
+  readonly lookup: (key: string) => Effect.Effect<Option.Option<SocketAddr>>
   /** Current map size — for tests and metrics. */
   readonly size: () => number
 }
@@ -85,21 +117,21 @@ function makeCancelBranchLru(opts: {
   return Effect.gen(function* () {
     const table = MutableHashMap.empty<string, Entry>()
 
-    const remember = (branch: string, target: SocketAddr) =>
+    const remember = (key: string, target: SocketAddr) =>
       Effect.gen(function* () {
         const nowMs = yield* Clock.currentTimeMillis
         yield* Effect.sync(() =>
-          MutableHashMap.set(table, branch, { target, expiresAtMs: nowMs + ttlMs })
+          MutableHashMap.set(table, key, { target, expiresAtMs: nowMs + ttlMs })
         )
       })
 
-    const lookup = (branch: string) =>
+    const lookup = (key: string) =>
       Effect.gen(function* () {
-        const entry = Option.getOrUndefined(MutableHashMap.get(table, branch))
+        const entry = Option.getOrUndefined(MutableHashMap.get(table, key))
         if (entry === undefined) return Option.none<SocketAddr>()
         const nowMs = yield* Clock.currentTimeMillis
         if (entry.expiresAtMs <= nowMs) {
-          yield* Effect.sync(() => MutableHashMap.remove(table, branch))
+          yield* Effect.sync(() => MutableHashMap.remove(table, key))
           return Option.none<SocketAddr>()
         }
         return Option.some(entry.target)
@@ -117,10 +149,10 @@ function makeCancelBranchLru(opts: {
           const nowMs = yield* Clock.currentTimeMillis
           yield* Effect.sync(() => {
             const expired: string[] = []
-            for (const [branch, entry] of table) {
-              if (entry.expiresAtMs <= nowMs) expired.push(branch)
+            for (const [k, entry] of table) {
+              if (entry.expiresAtMs <= nowMs) expired.push(k)
             }
-            for (const branch of expired) MutableHashMap.remove(table, branch)
+            for (const k of expired) MutableHashMap.remove(table, k)
           })
         })
       )
