@@ -10,10 +10,14 @@
  *
  * Rules are module-private — only the PolicyModule export is public.
  * Guard is applied by createRuleRegistry at registration time.
+ *
+ * Each rule uses `defineRule({...})`, so handler bodies see a `ctx` whose
+ * event/message are already narrowed by the match — no `as SipResponse`
+ * casts and no `?? ""` defaults on `parsed.to.tag`.
  */
 
 import { Effect, Schema } from "effect"
-import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
+import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
 import { definePolicyModule } from "../framework/PolicyModule.js"
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader, getHeaders, newTag } from "../../../sip/MessageHelpers.js"
@@ -23,11 +27,12 @@ import type { HeaderName, HeaderUpdate } from "../framework/actions/types.js"
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function cseqNumber(resp: SipResponse): number {
-  return resp.parsed.cseq.seq
-}
-
-/** RFC 3262: reliable 1xx carries Require:100rel and a numeric RSeq. */
+/**
+ * RFC 3262: a reliable 1xx carries `Require: 100rel` and a numeric `RSeq`.
+ * RSeq is not in the eagerly-parsed mandatory fields, so we still parse the
+ * raw header value here — `Number.isFinite` guards a malformed peer payload,
+ * not a parser invariant.
+ */
 function reliableRseq(resp: SipResponse): number | undefined {
   const require = getHeaders(resp.headers, "require")
   const has100rel = require.some((v) =>
@@ -58,7 +63,7 @@ const STATE_KEY = "relayFirst18x_to_180"
 // tag, seed tag mapping, relay as bare 180. On subsequent 18x: suppress
 // relay but still record CDR.
 
-const suppress18x: RuleDefinition<PolicyState, undefined> = {
+const suppress18x = defineRule({
   id: "suppress-18x",
   name: "Suppress 18x -> 180",
   alwaysActive: true,
@@ -67,7 +72,7 @@ const suppress18x: RuleDefinition<PolicyState, undefined> = {
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
 
-  // Identical match signature to relay-provisional; overrides: claims its slot
+  // Identical match signature to relay-provisional; overrides claims its slot
   // whenever this policy module is active on the call.
   overrides: "relay-provisional",
   match: {
@@ -77,20 +82,20 @@ const suppress18x: RuleDefinition<PolicyState, undefined> = {
     direction: "from-b",
   },
 
-  init: () => ({ firstRelayed: false }),
+  init: (): PolicyState => ({ firstRelayed: false }),
 
   handle: (ctx, state) => {
-    const resp = (ctx.event as Extract<typeof ctx.event, { type: "sip" }>).message as SipResponse
-    const bTag = resp.parsed?.to?.tag ?? ""
+    const resp = ctx.event.message
+    const bTag = resp.parsed.to.tag
     const rseq = reliableRseq(resp)
-    const inviteCSeq = cseqNumber(resp)
+    const inviteCSeq = resp.parsed.cseq.seq
 
     // Reliable 1xx → B2BUA must PRACK the b-leg itself (RFC 3262 §3-4).
     // alice never sees the reliable provisional (downgraded to bare 180 with
     // Require/RSeq stripped), so she will never send a PRACK to relay; the
     // B2BUA acks locally to stop UAS retransmissions.
     const prackAction: RuleAction | undefined =
-      rseq !== undefined && bTag
+      rseq !== undefined
         ? { type: "send-prack-to-leg", legId: ctx.sourceLeg.legId,
             rseq, inviteCSeq, bTag }
         : undefined
@@ -131,7 +136,7 @@ const suppress18x: RuleDefinition<PolicyState, undefined> = {
       state: { firstRelayed: true, storedATag: aFacingTag },
     })
   },
-}
+})
 
 // ── force-tag-consistency (module-private, priority 851) ─────────────────
 //
@@ -140,7 +145,7 @@ const suppress18x: RuleDefinition<PolicyState, undefined> = {
 // confirm-dialog's findByBTag() finds it and reuses it instead of
 // generating a new tag. This makes the 200 OK To-tag match the 180.
 
-const forceTagConsistency: RuleDefinition<PolicyState, undefined> = {
+const forceTagConsistency = defineRule({
   id: "force-tag-consistency",
   name: "Force Tag Consistency on 200 OK",
   alwaysActive: true,
@@ -160,13 +165,13 @@ const forceTagConsistency: RuleDefinition<PolicyState, undefined> = {
     direction: "from-b",
   },
 
-  init: () => ({ firstRelayed: false }),
+  init: (): PolicyState => ({ firstRelayed: false }),
 
   handle: (ctx, state) => {
     if (!state.storedATag) return Effect.void
 
-    const resp = (ctx.event as Extract<typeof ctx.event, { type: "sip" }>).message as SipResponse
-    const bTag = resp.parsed?.to?.tag ?? ""
+    const resp = ctx.event.message
+    const bTag = resp.parsed.to.tag
 
     // Pre-seed tag mapping so confirm-dialog reuses our stored a-facing tag
     return Effect.succeed({
@@ -177,7 +182,7 @@ const forceTagConsistency: RuleDefinition<PolicyState, undefined> = {
       state,
     })
   },
-}
+})
 
 // ── absorb-prack-200 (module-private, priority 920) ──────────────────────
 //
@@ -186,7 +191,7 @@ const forceTagConsistency: RuleDefinition<PolicyState, undefined> = {
 // won't generate the PRACK). Bob's 200 OK for that B2BUA-originated PRACK
 // must not be relayed to alice — absorb it here.
 
-const absorbPrack200: RuleDefinition<PolicyState, undefined> = {
+const absorbPrack200 = defineRule({
   id: "absorb-prack-200",
   name: "Absorb 200 OK for B2BUA-synthesized PRACK",
   alwaysActive: true,
@@ -204,7 +209,7 @@ const absorbPrack200: RuleDefinition<PolicyState, undefined> = {
     direction: "from-b",
   },
 
-  init: () => ({ firstRelayed: false }),
+  init: (): PolicyState => ({ firstRelayed: false }),
 
   handle: (ctx, state) =>
     Effect.succeed({
@@ -214,7 +219,7 @@ const absorbPrack200: RuleDefinition<PolicyState, undefined> = {
       ],
       state,
     }),
-}
+})
 
 // ── Single export: the PolicyModule ───────────────────────────────────────
 
