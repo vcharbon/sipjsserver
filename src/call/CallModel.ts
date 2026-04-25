@@ -654,8 +654,20 @@ export function makeEmptyDialog(leg: MakeDialogLegCtx): Dialog {
 /**
  * Build a dialog initialized from a received request's CSeq.
  * Used for the a-leg dialog where we know Alice's CSeq from her INVITE.
+ *
+ * `routeSet` carries the dialog-creating request's `Record-Route`
+ * headers **in order** — RFC 3261 §12.1.1 (UAS dialog construction).
+ * The B2BUA is the UAS on the a-leg, so any worker-originated A-leg
+ * in-dialog request (BYE relayed from b-side, worker-initiated UPDATE,
+ * etc.) must traverse this route set to reach Alice through the
+ * upstream front proxy. Defaults to `[]` for callers that don't have
+ * a request to pull headers from.
  */
-export function makeDialogFromIncoming(leg: MakeDialogLegCtx, remoteCSeq: number): Dialog {
+export function makeDialogFromIncoming(
+  leg: MakeDialogLegCtx,
+  remoteCSeq: number,
+  routeSet: ReadonlyArray<string> = []
+): Dialog {
   return {
     sip: {
       callId: leg.callId,
@@ -665,7 +677,7 @@ export function makeDialogFromIncoming(leg: MakeDialogLegCtx, remoteCSeq: number
       remoteUri: leg.remoteUri,
       remoteTarget: "",
       localCSeq: randomInitialCSeq(),
-      routeSet: [],
+      routeSet,
     },
     ext: {
       remoteCSeq,

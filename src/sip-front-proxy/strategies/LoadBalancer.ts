@@ -47,7 +47,7 @@
  * in constant time.
  */
 
-import { Effect, Layer, Option, ServiceMap } from "effect"
+import { Clock, Effect, Layer, Option, ServiceMap } from "effect"
 import { getHeader } from "../../sip/MessageHelpers.js"
 import type { SipMessage } from "../../sip/types.js"
 import {
@@ -177,11 +177,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
     const cfg = yield* LoadBalancerConfig
 
     const cookieName = cfg.cookieName ?? DEFAULT_COOKIE_NAME
-    // Default the grace policy so the field is consumed at layer-build
-    // time and PR4 inherits a stable default. Not used for selection logic
-    // in PR3b — the registry snapshot already filters draining/dead.
-    const _drainGraceMs = cfg.drainGracePolicyMs ?? DEFAULT_DRAIN_GRACE_MS
-    void _drainGraceMs
+    const drainGraceMs = cfg.drainGracePolicyMs ?? DEFAULT_DRAIN_GRACE_MS
 
     // ---- selectForNewDialog -----------------------------------------------
     const selectForNewDialog = (
@@ -247,6 +243,32 @@ export const LoadBalancerStrategyLive: Layer.Layer<
     }
 
     // ---- decodeStickiness -------------------------------------------------
+    /**
+     * D5 (Draining model) wiring:
+     *
+     *   - When the resolved worker is `alive`: forward.
+     *   - When `draining` AND the request method is **NOT** ACK or CANCEL:
+     *     check `drainingSince` — if `(now - drainingSince) <= drainGraceMs`
+     *     forward to the original worker, otherwise return `unknown` so
+     *     the proxy core falls back via `selectForNewDialog` (a new live
+     *     worker hydrates from Redis on its own).
+     *   - When `dead`: same logic as draining-post-grace — return
+     *     `unknown` so the core picks a live worker. ACK/CANCEL still
+     *     hit the dead worker because we have nothing better to try and
+     *     the UAC's transaction will time out either way.
+     *   - When `draining`/`dead` AND method is ACK or CANCEL: forward
+     *     to the resolved worker regardless of grace. ACK on 2xx and
+     *     CANCEL must reach the worker that owns the INVITE
+     *     transaction (RFC 3261 §13.2.2.4 / §9.1, §16.10) — only that
+     *     worker can complete the handshake. Routing them to a fresh
+     *     worker would fabricate a 481 storm.
+     */
+    const isAckOrCancel = (msg: SipMessage): boolean => {
+      if (msg.type !== "request") return false
+      const m = msg.method
+      return m === "ACK" || m === "CANCEL"
+    }
+
     const decodeStickiness = (
       routeParam: RouteParams,
       msg: SipMessage
@@ -305,7 +327,34 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           // selectForNewDialog → new worker hydrates from Redis (D5).
           return DecodeResult.unknown()
         }
-        return DecodeResult.forward(opt.value.address)
+        const entry = opt.value
+
+        // ── D5 (draining) routing matrix ────────────────────────────────
+        if (entry.health === "alive") {
+          return DecodeResult.forward(entry.address)
+        }
+        // ACK / CANCEL exemption: always reach the original worker.
+        if (isAckOrCancel(msg)) {
+          return DecodeResult.forward(entry.address)
+        }
+        if (entry.health === "draining") {
+          const since = entry.drainingSince
+          if (since !== undefined) {
+            const nowMs = yield* Clock.currentTimeMillis
+            if (nowMs - since <= drainGraceMs) {
+              // Pre-grace: still forward to the original worker so
+              // in-flight re-INVITE / UPDATE / INFO completes.
+              return DecodeResult.forward(entry.address)
+            }
+          }
+          // Post-grace (or no `drainingSince` stamped) → fall back to
+          // a fresh selection via the core. The new worker hydrates
+          // from Redis; on hydration miss it 481s, which is the
+          // documented post-grace failure mode (D-RES).
+          return DecodeResult.unknown()
+        }
+        // entry.health === "dead": same as post-grace.
+        return DecodeResult.unknown()
       })
 
     return {

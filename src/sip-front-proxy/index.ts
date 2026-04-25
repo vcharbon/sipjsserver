@@ -7,8 +7,13 @@
  * PR3b adds the rendezvous-hash `LoadBalancer` strategy, the canonical
  * `proxyFakeStack` test fixture, and re-keys `CancelBranchLru` on
  * `(Call-ID, CSeq number)` (RFC 3261 §9.1) so CANCEL correlation works
- * across worker re-balances. Draining + observability arrive in PR4+.
- * See `docs/todos/SIP-Front-Proxy.md`.
+ * across worker re-balances. PR4 wires `HealthProbe`
+ * (optionsKeepalive + manual), `WorkerRegistryControl`, the D5
+ * draining model in `LoadBalancerStrategy.decodeStickiness`
+ * (drain-grace fallback + ACK/CANCEL exemption), and the worker-side
+ * `DrainingState` + OPTIONS handler. K8s integration arrives in PR5.
+ * See `docs/todos/SIP-Front-Proxy.md` and
+ * `docs/sip-front-proxy/resilience-model.md` (D-RES).
  *
  * Dependency policy (enforced by ESLint `no-restricted-imports`, scoped to
  * `src/sip-front-proxy/**` in `eslint.config.js`):
@@ -16,7 +21,7 @@
  *   - Forbidden: `src/{b2bua,call,decision,redis,cdr,cluster,http,observability}/**`.
  */
 
-export const PROXY_VERSION = "0.4.0-pr3b"
+export const PROXY_VERSION = "0.5.0-pr4"
 
 export {
   ProxyCore,
@@ -82,3 +87,16 @@ export {
   staticLayer as hmacKeyProviderStaticLayer,
   type StaticOpts as HmacKeyProviderStaticOpts,
 } from "./security/HmacKeyProvider.js"
+export {
+  HealthProbe,
+  type HealthProbeApi,
+  type OptionsKeepaliveOpts,
+  manualLayer as healthProbeManualLayer,
+  optionsKeepaliveLayer as healthProbeOptionsKeepaliveLayer,
+} from "./health/HealthProbe.js"
+export {
+  WorkerRegistryControl,
+  type WorkerRegistryControlApi,
+  noopLayer as workerRegistryControlNoopLayer,
+  simulatedAdapterLayer as workerRegistryControlSimulatedAdapterLayer,
+} from "./health/WorkerRegistryControl.js"

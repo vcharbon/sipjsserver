@@ -51,6 +51,7 @@ import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { TracingService } from "../../src/tracing/TracingService.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { B2buaCoreLayer } from "../../src/b2bua/B2buaCore.js"
+import { DrainingState } from "../../src/b2bua/DrainingState.js"
 import { MockCallControlLayer } from "../fullcall/framework/MockCallControlLayer.js"
 
 /**
@@ -143,5 +144,10 @@ export function fakeStackLayer(opts: {
 
   // B2buaCoreLayer (SipRouter, TransactionLayer, CallState, TimerService,
   // SipParser) consumes every mid/leaf service and republishes them.
-  return B2buaCoreLayer.pipe(Layer.provideMerge(MidServices))
+  // DrainingState.test skips the SIGTERM listener so tests don't leak
+  // process handlers across runs.
+  return B2buaCoreLayer.pipe(
+    Layer.provideMerge(MidServices),
+    Layer.provideMerge(DrainingState.test),
+  )
 }

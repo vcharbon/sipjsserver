@@ -34,6 +34,7 @@ import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { TracingService } from "../../src/tracing/TracingService.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { B2buaCoreLayer } from "../../src/b2bua/B2buaCore.js"
+import { DrainingState } from "../../src/b2bua/DrainingState.js"
 
 /**
  * Build the full live stack for a given `AppConfigData`. Every backing
@@ -88,6 +89,9 @@ export function liveStackLayer(opts: {
     Layer.provideMerge(MetricsLayer),
     Layer.provideMerge(NetworkLayer),
     Layer.provideMerge(RedisLayer),
-    Layer.provideMerge(AppConfigLayer)
+    Layer.provideMerge(AppConfigLayer),
+    // Live stack runs against real sockets but tests still drive
+    // markDraining explicitly — skip the SIGTERM hook.
+    Layer.provideMerge(DrainingState.test),
   )
 }

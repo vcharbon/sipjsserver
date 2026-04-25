@@ -31,6 +31,7 @@ import { CallLimiter } from "../call/CallLimiter.js"
 import { TimerService } from "../call/TimerService.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
 import { TracingService } from "../tracing/TracingService.js"
+import { DrainingState } from "../b2bua/DrainingState.js"
 import {
   type Call,
   type Leg,
@@ -227,6 +228,7 @@ export class SipRouter extends ServiceMap.Service<
       const timers = yield* TimerService
       const cdr = yield* CdrWriter
       const tracing = yield* TracingService
+      const draining = yield* DrainingState
 
       // ── Timer handler that feeds back into withCall ──────────────────
 
@@ -417,6 +419,50 @@ export class SipRouter extends ServiceMap.Service<
                 return
               }
             }
+          }
+
+          // ── Dialog-less OPTIONS keepalive (RFC 3261 §11) ──────────────
+          // The proxy front sends out-of-dialog OPTIONS to probe the worker.
+          // These are infrastructure pings, not call-bound — short-circuit
+          // BEFORE call resolution so they never touch CallStateCache.
+          //
+          // Behavior depends on `DrainingState`:
+          //   - serving  → 200 OK (per §11; minimal response, no Allow body
+          //                — operators use Prometheus / SIP probes for
+          //                feature discovery in this codebase).
+          //   - draining → 503 Service Unavailable + `Retry-After: 0`
+          //                (RFC 3261 §21.5.4 + §20.33). `Retry-After: 0`
+          //                is the canonical "drained" signal proxies use
+          //                to demote the worker to `health=draining`.
+          //
+          // In-dialog OPTIONS (To-tag present) falls through to the rule
+          // chain so existing transparent-relay rules handle it.
+          if (
+            event.type === "sip" &&
+            event.message.type === "request" &&
+            event.message.method === "OPTIONS" &&
+            !event.message.parsed?.to?.tag
+          ) {
+            const mode = yield* draining.mode
+            const req = event.message
+            const respDest = { host: event.rinfo.address, port: event.rinfo.port }
+            if (mode === "serving") {
+              const ok = generateResponse(req, 200, "OK", { toTag: newTag() })
+              yield* Effect.logDebug(
+                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 200 (serving)`
+              )
+              yield* txnLayer.send(ok, respDest, "response")
+            } else {
+              const unavailable = generateResponse(req, 503, "Service Unavailable", {
+                toTag: newTag(),
+                extraHeaders: [{ name: "Retry-After", value: "0" }],
+              })
+              yield* Effect.logDebug(
+                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 503 (draining)`
+              )
+              yield* txnLayer.send(unavailable, respDest, "response")
+            }
+            return
           }
 
           // In-dialog or timer event — resolve callRef

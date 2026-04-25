@@ -832,8 +832,15 @@ function relayResponseMsg(
         localTag: aFacingToTag!,
         remoteTag: state.call.aLeg.fromTag,
       }
+      // RFC 3261 §12.1.1: UAS dialog route set is the request's
+      // Record-Route headers in order. Worker-originated A-leg in-dialog
+      // requests (BYE relay, UPDATE) need this to traverse the front
+      // proxy back to Alice — without it the proxy is bypassed and
+      // Alice's UA either rejects the request or never sees it.
+      const aLegRouteSet = getHeaders(state.call.aLegInvite.headers, "record-route")
       state.call = updateLeg(state.call, "a", (l) => ({
-        ...l, dialogs: [makeDialogFromIncoming(aLegCtx, aLegInviteCSeqNum(state.call))],
+        ...l,
+        dialogs: [makeDialogFromIncoming(aLegCtx, aLegInviteCSeqNum(state.call), aLegRouteSet)],
       }))
     }
 
@@ -1032,8 +1039,14 @@ function executeStampDialogToTag(
       localTag: isALeg ? toTag : leg.fromTag,
       remoteTag: isALeg ? leg.fromTag : toTag,
     }
+    // RFC 3261 §12.1.1: UAS dialog route set is the request's
+    // Record-Route headers in order. See `executeRelayResponse` for the
+    // companion site that hits the same code path on the relay branch.
+    const aLegRouteSet = isALeg
+      ? getHeaders(state.call.aLegInvite.headers, "record-route")
+      : []
     const dialog = isALeg
-      ? makeDialogFromIncoming(legCtx, aLegInviteCSeqNum(state.call))
+      ? makeDialogFromIncoming(legCtx, aLegInviteCSeqNum(state.call), aLegRouteSet)
       : makeEmptyDialog(legCtx)
     state.call = updateLeg(state.call, legId, (l) => ({
       ...l,

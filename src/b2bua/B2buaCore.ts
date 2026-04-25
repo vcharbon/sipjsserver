@@ -120,6 +120,12 @@ export const handlers: HandlerRegistry = buildHandlers(ruleRegistry)
 // Core B2BUA layer
 // ---------------------------------------------------------------------------
 
+/**
+ * Core B2BUA layer. Caller must provide `DrainingState` (use
+ * `DrainingState.Default` in production; `DrainingState.test` in tests
+ * to skip the SIGTERM hook). Both fake and live stacks compose this
+ * via `B2buaCoreLayer.pipe(Layer.provideMerge(...))`.
+ */
 export const B2buaCoreLayer = SipRouter.layer.pipe(
   Layer.provideMerge(TransactionLayer.layer),
   Layer.provideMerge(CallState.layer),

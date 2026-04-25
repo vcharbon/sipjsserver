@@ -30,6 +30,7 @@ import { HttpReferenceAdapterLayer } from "../decision/adapters/http-reference/H
 import { TracingService } from "../tracing/TracingService.js"
 import { FetchHttpClient } from "effect/unstable/http"
 import { handlers, B2buaCoreLayer } from "../b2bua/B2buaCore.js"
+import { DrainingState } from "../b2bua/DrainingState.js"
 import { IpcTransportLayer } from "./IpcTransport.js"
 import { OverloadController } from "../b2bua/OverloadController.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
@@ -113,6 +114,7 @@ const SipLayer = B2buaCoreLayer.pipe(
   Layer.provide(CallControlLayer),
   Layer.provide(TracingLayer),
   Layer.provide(CdrLayer),
+  Layer.provide(DrainingState.Default),
 )
 
 // ---------------------------------------------------------------------------
