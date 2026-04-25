@@ -36,7 +36,7 @@
  * Stateless proxy: we do **not** retransmit; UDP reliability is end-to-end.
  */
 
-import { Effect, Layer, Option, type Scope, ServiceMap, Stream } from "effect"
+import { Clock, Effect, Layer, Option, type Scope, ServiceMap, Stream } from "effect"
 import {
   getHeader,
   newBranch,
@@ -53,6 +53,13 @@ import {
   type CancelBranchLruApi,
   callIdCseqKey,
 } from "./CancelBranchLru.js"
+import { ProxyLogger, type ProxyLoggerApi } from "./observability/Logger.js"
+import {
+  ProxyMetrics,
+  type ProxyMetricsApi,
+  type RoutingDecisionKind,
+} from "./observability/Metrics.js"
+import { ProxyTracing, type ProxyTracingApi } from "./observability/Tracing.js"
 import {
   type RouteParams,
   RoutingStrategy,
@@ -111,7 +118,22 @@ export class ProxyCore extends ServiceMap.Service<ProxyCore, ProxyCoreApi>()(
     | CancelBranchLru
     | ProxyBindConfig
   > = Layer.suspend(() =>
-    Layer.effect(ProxyCore, makeProxyCore.pipe(Effect.provide(SipParser.layer)))
+    Layer.effect(
+      ProxyCore,
+      makeProxyCore.pipe(
+        // Observability layers have no own deps and can be instantiated
+        // process-wide; bundling them with `SipParser.layer` keeps every
+        // call site a 1-line update without forcing fixtures to re-wire.
+        Effect.provide(
+          Layer.mergeAll(
+            SipParser.layer,
+            ProxyMetrics.Default,
+            ProxyTracing.Default,
+            ProxyLogger.Default
+          )
+        )
+      )
+    )
   )
 }
 
@@ -159,6 +181,9 @@ const makeProxyCore: Effect.Effect<
   | CancelBranchLru
   | ProxyBindConfig
   | SipParser
+  | ProxyMetrics
+  | ProxyTracing
+  | ProxyLogger
   | Scope.Scope
 > = Effect.gen(function* () {
   const network = yield* SignalingNetwork
@@ -166,6 +191,9 @@ const makeProxyCore: Effect.Effect<
   const cancelLru = yield* CancelBranchLru
   const cfg = yield* ProxyBindConfig
   const parser = yield* SipParser
+  const metrics = yield* ProxyMetrics
+  const tracing = yield* ProxyTracing
+  const logger = yield* ProxyLogger
 
   const queueMax = cfg.queueMax ?? 1024
   const endpoint = yield* network
@@ -225,6 +253,9 @@ const makeProxyCore: Effect.Effect<
       counters,
       sendBuf,
       replyToSource,
+      metrics,
+      tracing,
+      logger,
     })
 
   const handleResponse = (msg: SipMessage) =>
@@ -233,6 +264,7 @@ const makeProxyCore: Effect.Effect<
       advertisedAddress,
       counters,
       sendBuf,
+      metrics,
     })
 
   // -------------------------------------------------------------------------
@@ -293,137 +325,253 @@ interface HandleRequestArgs {
     buf: Buffer,
     src: { readonly address: string; readonly port: number }
   ) => Effect.Effect<void>
+  readonly metrics: ProxyMetricsApi
+  readonly tracing: ProxyTracingApi
+  readonly logger: ProxyLoggerApi
 }
 
 const DIALOG_CREATING: ReadonlySet<string> = new Set(["INVITE", "SUBSCRIBE"])
 
 const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const { req, src, advertisedAddress, strategy, cancelLru, counters, sendBuf, replyToSource } = args
+    const {
+      req,
+      src,
+      advertisedAddress,
+      strategy,
+      cancelLru,
+      counters,
+      sendBuf,
+      replyToSource,
+      metrics,
+      tracing,
+      logger,
+    } = args
 
-    // ── §16.3 + Max-Forwards check ────────────────────────────────────────
-    const mfRaw = getHeader(req.headers, "max-forwards")
-    const mf = mfRaw === undefined ? 70 : Number.parseInt(mfRaw, 10)
-    if (Number.isFinite(mf) && mf <= 0) {
-      counters.maxForwardsRejected++
-      const resp = generateResponse(req, 483, "Too Many Hops", { toTag: newTag() })
-      yield* replyToSource(serialize(resp), src)
-      return
-    }
-    const mfNext = (Number.isFinite(mf) ? mf : 70) - 1
-
-    // ── §16.4 Route preprocessing ─────────────────────────────────────────
-    // If topmost Route points at us, strip it and remember the params (used
-    // below for stickiness decoding).
-    let headers: ReadonlyArray<SipHeader> = req.headers
-    let strippedRouteParams: RouteParams | undefined
-    const topRoute = getHeader(headers, "route")
-    if (topRoute !== undefined) {
-      const parsedRoute = parseSipUri(topRoute)
-      if (
-        parsedRoute !== undefined &&
-        parsedRoute.host === advertisedAddress.ip &&
-        parsedRoute.port === advertisedAddress.port
-      ) {
-        headers = removeFirstHeader(headers, "route")
-        strippedRouteParams = parsedRoute.params
-        counters.routeStripped++
-      }
-    }
-
-    // ── Pick the downstream target ────────────────────────────────────────
+    const startMs = yield* Clock.currentTimeMillis
     const method = req.method.toUpperCase()
-    let target: SocketAddr | undefined
-    let synthesizedReply: { status: number; reason: string } | undefined
+    const callId = req.parsed.callId
+    yield* metrics.recordMessage({
+      direction: "inbound",
+      methodOrStatus: method,
+      result: "forwarded", // pre-decision; final result tag below
+    })
 
-    if (method === "CANCEL") {
-      // §16.10: forward CANCEL to the same downstream as the matching
-      // INVITE. RFC 3261 §9.1 — a CANCEL shares the INVITE's Call-ID and
-      // CSeq number (only the CSeq method differs, INVITE→CANCEL). We key
-      // the LRU on `(Call-ID, CSeq number)` so the lookup works at any
-      // hop regardless of what the upstream UAC chose for the top-Via
-      // branch on the CANCEL — and crucially without re-sharding to a
-      // different worker under `LoadBalancer`.
-      const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
-      const found = yield* cancelLru.lookup(key)
-      if (Option.isSome(found)) {
-        target = found.value
-        counters.cancelMatched++
+    // The body is wrapped in a route span so every routing path produces a
+    // single inbound→decision tracing record. Decision is captured after
+    // the fact via the closure variables below.
+    let decisionKind: RoutingDecisionKind = "select_new"
+    let decisionTarget: SocketAddr | undefined
+    let result: "forwarded" | "rejected" | "dropped" = "forwarded"
+
+    const observeAndLog = Effect.suspend(() =>
+      Effect.gen(function* () {
+        const endMs = yield* Clock.currentTimeMillis
+        const durationSeconds = Math.max(0, (endMs - startMs) / 1000)
+        yield* metrics.observeRoutingDuration({
+          strategy: strategy.name,
+          decision: decisionKind,
+          durationSeconds,
+        })
+        yield* metrics.recordRoutingDecision({
+          strategy: strategy.name,
+          kind: decisionKind,
+        })
+        yield* logger.routingDecision({
+          callId,
+          method,
+          decision: decisionKind,
+          strategy: strategy.name,
+          target:
+            decisionTarget === undefined
+              ? "n/a"
+              : `${decisionTarget.host}:${decisionTarget.port}`,
+          message: `routed ${method} ${callId} → ${
+            decisionTarget === undefined
+              ? "<no target>"
+              : `${decisionTarget.host}:${decisionTarget.port}`
+          } (decision=${decisionKind}, result=${result})`,
+        })
+      })
+    )
+
+    const body = Effect.gen(function* () {
+      // ── §16.3 + Max-Forwards check ────────────────────────────────────────
+      const mfRaw = getHeader(req.headers, "max-forwards")
+      const mf = mfRaw === undefined ? 70 : Number.parseInt(mfRaw, 10)
+      if (Number.isFinite(mf) && mf <= 0) {
+        counters.maxForwardsRejected++
+        const resp = generateResponse(req, 483, "Too Many Hops", { toTag: newTag() })
+        yield* replyToSource(serialize(resp), src)
+        decisionKind = "decode_reject"
+        result = "rejected"
+        yield* metrics.recordMessage({
+          direction: "outbound",
+          methodOrStatus: "483",
+          result: "rejected",
+        })
+        return
       }
-      if (target === undefined) {
-        counters.cancelUnmatched++
-        // Fall back to selectForNewDialog so a CANCEL we never saw the INVITE
-        // for still gets forwarded somewhere reasonable. Stateless proxies
-        // can't conjure a "we don't know" — we'd otherwise drop.
-        target = yield* tryStrategySelect(strategy, req, counters)
+      const mfNext = (Number.isFinite(mf) ? mf : 70) - 1
+
+      // ── §16.4 Route preprocessing ─────────────────────────────────────────
+      // If topmost Route points at us, strip it and remember the params (used
+      // below for stickiness decoding).
+      let headers: ReadonlyArray<SipHeader> = req.headers
+      let strippedRouteParams: RouteParams | undefined
+      const topRoute = getHeader(headers, "route")
+      if (topRoute !== undefined) {
+        const parsedRoute = parseSipUri(topRoute)
+        if (
+          parsedRoute !== undefined &&
+          parsedRoute.host === advertisedAddress.ip &&
+          parsedRoute.port === advertisedAddress.port
+        ) {
+          headers = removeFirstHeader(headers, "route")
+          strippedRouteParams = parsedRoute.params
+          counters.routeStripped++
+        }
       }
-    } else if (strippedRouteParams !== undefined) {
-      const decoded = yield* strategy.decodeStickiness(strippedRouteParams, req)
-      switch (decoded._tag) {
-        case "forward":
-          target = decoded.target
-          break
-        case "reject":
-          synthesizedReply = { status: decoded.status, reason: decoded.reason }
-          break
-        case "unknown":
+
+      // ── Pick the downstream target ────────────────────────────────────────
+      let target: SocketAddr | undefined
+      let synthesizedReply: { status: number; reason: string } | undefined
+
+      if (method === "CANCEL") {
+        // §16.10: forward CANCEL to the same downstream as the matching
+        // INVITE. RFC 3261 §9.1 — a CANCEL shares the INVITE's Call-ID and
+        // CSeq number (only the CSeq method differs, INVITE→CANCEL). We key
+        // the LRU on `(Call-ID, CSeq number)` so the lookup works at any
+        // hop regardless of what the upstream UAC chose for the top-Via
+        // branch on the CANCEL — and crucially without re-sharding to a
+        // different worker under `LoadBalancer`.
+        const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+        const found = yield* cancelLru.lookup(key)
+        if (Option.isSome(found)) {
+          target = found.value
+          counters.cancelMatched++
+          decisionKind = "cancel_lookup_hit"
+          yield* metrics.recordCancelLookup("hit")
+        } else {
+          counters.cancelUnmatched++
+          decisionKind = "cancel_lookup_miss"
+          yield* metrics.recordCancelLookup("miss")
+          // Fall back to selectForNewDialog so a CANCEL we never saw the INVITE
+          // for still gets forwarded somewhere reasonable. Stateless proxies
+          // can't conjure a "we don't know" — we'd otherwise drop.
           target = yield* tryStrategySelect(strategy, req, counters)
-          break
+        }
+      } else if (strippedRouteParams !== undefined) {
+        const decoded = yield* strategy.decodeStickiness(strippedRouteParams, req)
+        switch (decoded._tag) {
+          case "forward":
+            target = decoded.target
+            decisionKind = "decode_forward"
+            break
+          case "reject":
+            synthesizedReply = { status: decoded.status, reason: decoded.reason }
+            decisionKind = "decode_reject"
+            break
+          case "unknown":
+            target = yield* tryStrategySelect(strategy, req, counters)
+            decisionKind = "decode_unknown"
+            break
+        }
+      } else {
+        target = yield* tryStrategySelect(strategy, req, counters)
+        decisionKind = "select_new"
       }
-    } else {
-      target = yield* tryStrategySelect(strategy, req, counters)
-    }
 
-    if (synthesizedReply !== undefined) {
-      const resp = generateResponse(req, synthesizedReply.status, synthesizedReply.reason, {
-        toTag: newTag(),
+      if (synthesizedReply !== undefined) {
+        const resp = generateResponse(req, synthesizedReply.status, synthesizedReply.reason, {
+          toTag: newTag(),
+        })
+        yield* replyToSource(serialize(resp), src)
+        result = "rejected"
+        yield* metrics.recordMessage({
+          direction: "outbound",
+          methodOrStatus: String(synthesizedReply.status),
+          result: "rejected",
+        })
+        return
+      }
+
+      if (target === undefined) {
+        // selectForNewDialog raised NoTargetAvailable → emit 503 to source.
+        const resp = generateResponse(req, 503, "Service Unavailable", {
+          toTag: newTag(),
+          extraHeaders: [{ name: "Retry-After", value: "5" }],
+        })
+        yield* replyToSource(serialize(resp), src)
+        result = "dropped"
+        yield* metrics.recordMessage({
+          direction: "outbound",
+          methodOrStatus: "503",
+          result: "dropped",
+        })
+        return
+      }
+
+      decisionTarget = target
+
+      // ── §16.6 / §16.6.5 Record-Route ──────────────────────────────────────
+      let nextHeaders: SipHeader[] = [...headers]
+      // Update Max-Forwards in place (or append).
+      nextHeaders = upsertHeader(nextHeaders, "Max-Forwards", String(mfNext))
+
+      if (DIALOG_CREATING.has(method)) {
+        const stickiness = strategy.encodeStickiness(target, req)
+        const rrValue = buildRecordRouteValue(advertisedAddress, stickiness)
+        // Insert Record-Route at the top of the header set so it sits ahead of
+        // any existing Record-Route (RFC 3261 §16.6.4 — proxies prepend).
+        nextHeaders = prependHeader(nextHeaders, "Record-Route", rrValue)
+        counters.recordRouteInserted++
+      }
+
+      // ── §16.6.4 push our Via on top with a unique branch ──────────────────
+      const ourBranch = newBranch()
+      const viaValue = `SIP/2.0/UDP ${advertisedAddress.ip}:${advertisedAddress.port};branch=${ourBranch};rport`
+      nextHeaders = prependHeader(nextHeaders, "Via", viaValue)
+
+      // ── Remember (Call-ID, CSeq number)→target for CANCEL correlation ──
+      // Per RFC 3261 §9.1 the CANCEL we may later receive will carry the
+      // same Call-ID and CSeq number; that pair is the canonical correlator
+      // independent of what branch the upstream UAC stamps on the CANCEL.
+      if (method === "INVITE") {
+        const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+        yield* cancelLru.remember(key, target)
+        // Update active-dialog estimate from LRU size (best-effort, see
+        // Metrics.ts header comment).
+        yield* metrics.setActiveDialogsEstimate(cancelLru.size())
+      }
+
+      // ── Serialize + fire-and-forget send ──────────────────────────────────
+      const outBuf = serialize({ ...req, headers: nextHeaders })
+      counters.routedRequests++
+      yield* sendBuf(outBuf, target)
+      result = "forwarded"
+      yield* metrics.recordMessage({
+        direction: "outbound",
+        methodOrStatus: method,
+        result: "forwarded",
       })
-      yield* replyToSource(serialize(resp), src)
-      return
-    }
+    })
 
-    if (target === undefined) {
-      // selectForNewDialog raised NoTargetAvailable → emit 503 to source.
-      const resp = generateResponse(req, 503, "Service Unavailable", {
-        toTag: newTag(),
-        extraHeaders: [{ name: "Retry-After", value: "5" }],
-      })
-      yield* replyToSource(serialize(resp), src)
-      return
-    }
-
-    // ── §16.6 / §16.6.5 Record-Route ──────────────────────────────────────
-    let nextHeaders: SipHeader[] = [...headers]
-    // Update Max-Forwards in place (or append).
-    nextHeaders = upsertHeader(nextHeaders, "Max-Forwards", String(mfNext))
-
-    if (DIALOG_CREATING.has(method)) {
-      const stickiness = strategy.encodeStickiness(target, req)
-      const rrValue = buildRecordRouteValue(advertisedAddress, stickiness)
-      // Insert Record-Route at the top of the header set so it sits ahead of
-      // any existing Record-Route (RFC 3261 §16.6.4 — proxies prepend).
-      nextHeaders = prependHeader(nextHeaders, "Record-Route", rrValue)
-      counters.recordRouteInserted++
-    }
-
-    // ── §16.6.4 push our Via on top with a unique branch ──────────────────
-    const ourBranch = newBranch()
-    const viaValue = `SIP/2.0/UDP ${advertisedAddress.ip}:${advertisedAddress.port};branch=${ourBranch};rport`
-    nextHeaders = prependHeader(nextHeaders, "Via", viaValue)
-
-    // ── Remember (Call-ID, CSeq number)→target for CANCEL correlation ──
-    // Per RFC 3261 §9.1 the CANCEL we may later receive will carry the
-    // same Call-ID and CSeq number; that pair is the canonical correlator
-    // independent of what branch the upstream UAC stamps on the CANCEL.
-    if (method === "INVITE") {
-      const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
-      yield* cancelLru.remember(key, target)
-    }
-
-    // ── Serialize + fire-and-forget send ──────────────────────────────────
-    const outBuf = serialize({ ...req, headers: nextHeaders })
-    counters.routedRequests++
-    yield* sendBuf(outBuf, target)
+    yield* tracing
+      .withRouteSpan(
+        {
+          method,
+          callId,
+          strategy: strategy.name,
+          decision: decisionKind,
+          workerTarget:
+            decisionTarget === undefined
+              ? "n/a"
+              : `${decisionTarget.host}:${decisionTarget.port}`,
+        },
+        body
+      )
+      .pipe(Effect.ensuring(observeAndLog))
   })
 
 const tryStrategySelect = (
@@ -454,12 +602,19 @@ interface HandleResponseArgs {
   readonly advertisedAddress: { readonly ip: string; readonly port: number }
   readonly counters: ProxyCounters
   readonly sendBuf: (buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
+  readonly metrics: ProxyMetricsApi
 }
 
 const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const { msg, advertisedAddress, counters, sendBuf } = args
+    const { msg, advertisedAddress, counters, sendBuf, metrics } = args
     if (msg.type !== "response") return
+
+    yield* metrics.recordMessage({
+      direction: "inbound",
+      methodOrStatus: String(msg.status),
+      result: "forwarded",
+    })
 
     // RFC 3261 §16.7.3: pop the topmost Via (must be one we own — i.e. the
     // sent-by host:port matches our advertised address). Forward to the
@@ -470,6 +625,11 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
       yield* Effect.logWarning(
         `[ProxyCore] response dropped — only ${vias.length} Via header(s); cannot relay upstream`
       )
+      yield* metrics.recordMessage({
+        direction: "outbound",
+        methodOrStatus: String(msg.status),
+        result: "dropped",
+      })
       return
     }
     const top = vias[0]!
@@ -478,6 +638,11 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
       yield* Effect.logWarning(
         `[ProxyCore] response dropped — top Via ${top.host}:${top.port ?? 5060} is not us (${advertisedAddress.ip}:${advertisedAddress.port})`
       )
+      yield* metrics.recordMessage({
+        direction: "outbound",
+        methodOrStatus: String(msg.status),
+        result: "dropped",
+      })
       return
     }
 
@@ -495,6 +660,11 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
     const outBuf = serialize({ ...msg, headers })
     counters.routedResponses++
     yield* sendBuf(outBuf, { host, port })
+    yield* metrics.recordMessage({
+      direction: "outbound",
+      methodOrStatus: String(msg.status),
+      result: "forwarded",
+    })
   })
 
 // ---------------------------------------------------------------------------

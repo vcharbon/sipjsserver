@@ -26,7 +26,7 @@
  *   - Forbidden: `src/{b2bua,call,decision,redis,cdr,cluster,http,observability}/**`.
  */
 
-export const PROXY_VERSION = "0.6.0-pr5"
+export const PROXY_VERSION = "1.0.0-pr6"
 
 export {
   ProxyCore,
@@ -114,3 +114,31 @@ export {
   noopLayer as workerRegistryControlNoopLayer,
   simulatedAdapterLayer as workerRegistryControlSimulatedAdapterLayer,
 } from "./health/WorkerRegistryControl.js"
+export {
+  ProxyMetrics,
+  type ProxyMetricsApi,
+  type MessageDirection,
+  type MessageResult,
+  type RoutingDecisionKind,
+  type HmacFailureReason,
+  type WorkerHealthLabel,
+  type CancelLookupOutcome,
+  snapshot as proxyMetricsSnapshot,
+} from "./observability/Metrics.js"
+export {
+  ProxyTracing,
+  type ProxyTracingApi,
+  type RouteSpanAttributes,
+} from "./observability/Tracing.js"
+export {
+  ProxyLogger,
+  type ProxyLoggerApi,
+  type RoutingDecisionLog,
+  type RoutingErrorLog,
+} from "./observability/Logger.js"
+export {
+  MetricsServer,
+  type MetricsServerApi,
+  type MetricsServerOpts,
+  renderPrometheus,
+} from "./observability/MetricsServer.js"

@@ -37,6 +37,7 @@
  */
 
 import { Clock, Effect, Layer, MutableHashMap, Option, type Scope, ServiceMap } from "effect"
+import { ProxyMetrics } from "./observability/Metrics.js"
 import type { SocketAddr } from "./RoutingStrategy.js"
 
 // ---------------------------------------------------------------------------
@@ -116,6 +117,11 @@ function makeCancelBranchLru(opts: {
 
   return Effect.gen(function* () {
     const table = MutableHashMap.empty<string, Entry>()
+    // Metrics provided inline so the public layer signature is unchanged
+    // (existing tests just provide CancelBranchLru.Default / .layer(opts)).
+    const metrics = yield* (Effect.gen(function* () {
+      return yield* ProxyMetrics
+    }).pipe(Effect.provide(ProxyMetrics.Default)))
 
     const remember = (key: string, target: SocketAddr) =>
       Effect.gen(function* () {
@@ -147,13 +153,20 @@ function makeCancelBranchLru(opts: {
         Effect.gen(function* () {
           yield* Effect.sleep(`${sweepIntervalMs} millis`)
           const nowMs = yield* Clock.currentTimeMillis
+          let expiredCount = 0
           yield* Effect.sync(() => {
             const expired: string[] = []
             for (const [k, entry] of table) {
               if (entry.expiresAtMs <= nowMs) expired.push(k)
             }
             for (const k of expired) MutableHashMap.remove(table, k)
+            expiredCount = expired.length
           })
+          if (expiredCount > 0) {
+            for (let i = 0; i < expiredCount; i++) {
+              yield* metrics.recordCancelLookup("expired_sweep")
+            }
+          }
         })
       )
     )

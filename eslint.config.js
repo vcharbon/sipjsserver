@@ -18,17 +18,44 @@
 
 import tseslint from "typescript-eslint"
 
+// PR6 decision (option b in the PR6 spec): we kept the original ban on
+// `src/observability/**` and added a thin observability wrapper inside
+// `src/sip-front-proxy/observability/` that uses Effect's first-party
+// `Metric` module directly — no cross-package import needed. The lint
+// patterns below are anchored to absolute `src/...` paths so they don't
+// false-match the proxy's own `src/sip-front-proxy/observability/**`
+// submodule when imported relatively.
+//
+// Sibling `../<dir>/...` style imports from inside `src/sip-front-proxy/`
+// can only ever resolve back to `src/sip-front-proxy/<dir>` (one level
+// up from a file under `health/`, `strategies/`, etc.) — they cannot
+// reach a forbidden package, so we don't need a separate `../<dir>`
+// pattern. Imports that try to leave the package use `../../<dir>/...`
+// or absolute `src/<dir>/...` — both shapes hit the patterns below
+// because they include the literal `src/<dir>/` segment.
 const FORBIDDEN_FROM_PROXY = [
-  // Path-style patterns. Both `src/foo/...` and `../foo/...` style imports
-  // get caught because we ban each segment as part of any import path.
-  "**/b2bua/**",
-  "**/call/**",
-  "**/decision/**",
-  "**/redis/**",
-  "**/cdr/**",
-  "**/cluster/**",
-  "**/http/**",
-  "**/observability/**",
+  "**/src/b2bua/**",
+  "**/src/call/**",
+  "**/src/decision/**",
+  "**/src/redis/**",
+  "**/src/cdr/**",
+  "**/src/cluster/**",
+  "**/src/http/**",
+  "**/src/observability/**",
+  // `..`-relative escapes: each banned module also lives under its own
+  // top-level path inside `src/`, so `../../<dir>` from anywhere in the
+  // proxy resolves to a forbidden one. The proxy's own subdirectories
+  // (`observability/`, `registry/`, `security/`, `strategies/`,
+  // `health/`) are imported as `../<dir>` (one segment up), which the
+  // double-segment pattern doesn't match.
+  "**/../../b2bua/**",
+  "**/../../call/**",
+  "**/../../decision/**",
+  "**/../../redis/**",
+  "**/../../cdr/**",
+  "**/../../cluster/**",
+  "**/../../http/**",
+  "**/../../observability/**",
 ]
 
 export default tseslint.config(

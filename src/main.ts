@@ -1,12 +1,14 @@
 /**
  * Entry point — composes all layers and launches the SIP B2BUA.
  *
- * Modes:
- *   - Standalone (CLUSTER_WORKERS=0): single process, direct UDP socket
- *   - Cluster (CLUSTER_WORKERS>0): dispatcher in main process, N worker child processes
+ * Single mode after PR6: standalone worker. The legacy `cluster.fork`
+ * dispatcher (`src/cluster/`) has been retired in favor of the SIP
+ * front proxy (`src/sip-front-proxy/`) running as a separate K8s
+ * Deployment. Multi-process scaling is now done via K8s replicas plus
+ * the proxy's rendezvous hashing across pods.
  *
  * Services:
- *   1. SIP B2BUA — UDP/IPC, TransactionLayer, SipRouter, handlers
+ *   1. SIP B2BUA — UDP, TransactionLayer, SipRouter, handlers
  *   2. HTTP status + call control — HTTP
  */
 
@@ -30,7 +32,6 @@ import { TracingService } from "./tracing/TracingService.js"
 import { FetchHttpClient } from "effect/unstable/http"
 import { handlers, B2buaCoreLayer } from "./b2bua/B2buaCore.js"
 import { DrainingState } from "./b2bua/DrainingState.js"
-import { Dispatcher } from "./cluster/Dispatcher.js"
 import { OverloadController } from "./b2bua/OverloadController.js"
 import { MetricsRegistry } from "./observability/MetricsRegistry.js"
 
@@ -126,13 +127,8 @@ const HttpLayer = StatusServerLayer.pipe(
   Layer.provide(MetricsRegistryLayer)
 )
 
-const DispatcherLayer = Dispatcher.layer.pipe(
-  Layer.provide(AppConfigLayer),
-  Layer.provide(MetricsRegistryLayer)
-)
-
 // ---------------------------------------------------------------------------
-// Standalone program (CLUSTER_WORKERS=0)
+// Standalone program (the only mode after the PR6 cluster retirement)
 // ---------------------------------------------------------------------------
 
 const standaloneMain = Effect.gen(function* () {
@@ -157,39 +153,10 @@ const standaloneMain = Effect.gen(function* () {
 )
 
 // ---------------------------------------------------------------------------
-// Cluster program (CLUSTER_WORKERS>0)
+// Main — single mode after PR6.
 // ---------------------------------------------------------------------------
 
-const clusterMain = Effect.gen(function* () {
-  const config = yield* AppConfig
-  yield* Effect.logInfo(
-    `SIP B2BUA starting (cluster, ${config.clusterWorkers} workers) — UDP :${config.sipLocalPort}, HTTP :${config.httpStatusPort}`
-  )
-
-  // Run HTTP server in the main process (workers don't run HTTP)
-  yield* Effect.forkDetach(Layer.launch(HttpLayer))
-
-  const dispatcher = yield* Dispatcher
-  return yield* dispatcher.start()
-}).pipe(
-  Effect.provide(
-    Layer.mergeAll(DispatcherLayer, AppConfigLayer, CallStateLayer).pipe(
-      Layer.provideMerge(OtelLayer)
-    )
-  )
-)
-
-// ---------------------------------------------------------------------------
-// Main — select mode based on config
-// ---------------------------------------------------------------------------
-
-const main = Effect.gen(function* () {
-  const config = yield* AppConfig
-  if (config.clusterWorkers > 0) {
-    return yield* clusterMain
-  }
-  return yield* standaloneMain
-}).pipe(Effect.provide(AppConfigLayer))
+const main = standaloneMain
 
 // ---------------------------------------------------------------------------
 // Log level from env

@@ -13,7 +13,7 @@ import {
   generateOutOfDialogRequest,
 } from "../sip/generators.js"
 import type { SipHeader } from "../sip/types.js"
-import { generateBLegCallId } from "../cluster/HashUtils.js"
+import { generateBLegCallId } from "./HashUtils.js"
 import { buildCallVia, buildCallContact } from "./stack-identity.js"
 
 // ---------------------------------------------------------------------------

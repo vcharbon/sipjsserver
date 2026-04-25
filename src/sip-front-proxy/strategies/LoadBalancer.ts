@@ -50,6 +50,7 @@
 import { Clock, Effect, Layer, Option, ServiceMap } from "effect"
 import { getHeader } from "../../sip/MessageHelpers.js"
 import type { SipMessage } from "../../sip/types.js"
+import { ProxyMetrics } from "../observability/Metrics.js"
 import {
   type RouteParams,
   RoutingStrategy,
@@ -175,6 +176,11 @@ export const LoadBalancerStrategyLive: Layer.Layer<
     const registry = yield* WorkerRegistry
     const hmac = yield* HmacKeyProvider
     const cfg = yield* LoadBalancerConfig
+    // Metrics is provided inline (its Default has no deps) so the public
+    // layer signature stays exactly what PR3b shipped.
+    const metrics = yield* (Effect.gen(function* () {
+      return yield* ProxyMetrics
+    }).pipe(Effect.provide(ProxyMetrics.Default)))
 
     const cookieName = cfg.cookieName ?? DEFAULT_COOKIE_NAME
     const drainGraceMs = cfg.drainGracePolicyMs ?? DEFAULT_DRAIN_GRACE_MS
@@ -289,12 +295,14 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           kid.length === 0 ||
           sig.length === 0
         ) {
+          yield* metrics.recordHmacFailure("missing")
           return DecodeResult.unknown()
         }
         if (v !== COOKIE_VERSION) {
           // Future-proofing: a cookie minted by a different version is not
           // forgeable into the current grammar, so reject rather than fall
           // back (which could silently re-route a hostile cookie).
+          yield* metrics.recordHmacFailure("decode")
           return DecodeResult.reject(
             403,
             `unsupported stickiness cookie version "${v}"`
@@ -303,10 +311,12 @@ export const LoadBalancerStrategyLive: Layer.Layer<
 
         const callId = callIdOf(msg)
         if (callId === undefined) {
+          yield* metrics.recordHmacFailure("decode")
           return DecodeResult.reject(403, "missing Call-ID for stickiness verify")
         }
         const decoded = base64urlDecode(sig)
         if (decoded === undefined || decoded.byteLength !== TRUNCATED_MAC_BYTES) {
+          yield* metrics.recordHmacFailure("decode")
           return DecodeResult.reject(
             403,
             `malformed stickiness signature (length=${decoded?.byteLength ?? "?"})`
@@ -316,6 +326,13 @@ export const LoadBalancerStrategyLive: Layer.Layer<
         const input = stickinessInput(w, callId)
         const ok = yield* hmac.verifyTruncated(input, kid, decoded)
         if (!ok) {
+          // Distinguish unknown_kid from mismatch: when the kid isn't
+          // recognised, `verifyTruncated` returns false the same way it
+          // does on a bad MAC. We don't have direct visibility here, so
+          // we tag this as `mismatch` — the more common case. A future
+          // PR can split the provider's return shape if operators need
+          // to alert on rotation lag specifically.
+          yield* metrics.recordHmacFailure("mismatch")
           return DecodeResult.reject(403, "stickiness signature mismatch")
         }
 

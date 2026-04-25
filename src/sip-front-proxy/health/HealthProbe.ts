@@ -54,6 +54,7 @@ import {
 } from "effect"
 import { generateOutOfDialogRequest } from "../../sip/generators.js"
 import { newBranch, newTag } from "../../sip/MessageHelpers.js"
+import { ProxyMetrics, type ProxyMetricsApi } from "../observability/Metrics.js"
 import { customParser } from "../../sip/parsers/custom/index.js"
 import { serialize } from "../../sip/Serializer.js"
 import { SignalingNetwork } from "../../sip/SignalingNetwork.js"
@@ -157,7 +158,16 @@ export const optionsKeepaliveLayer = (
 
       const network = yield* SignalingNetwork
       const registry = yield* WorkerRegistry
-      const control = yield* WorkerRegistryControl
+      const controlRaw = yield* WorkerRegistryControl
+      const metrics = yield* (Effect.gen(function* () {
+        return yield* ProxyMetrics
+      }).pipe(Effect.provide(ProxyMetrics.Default)))
+      // Wrap the control's setHealth so EVERY call updates the
+      // sip_worker_health gauge — both probe-driven flips and external
+      // overrides via HealthProbe.setHealth.
+      const control = {
+        setHealth: wrapSetHealth(metrics, controlRaw.setHealth),
+      }
 
       // Per-worker miss counters. Plain MutableHashMap keyed on
       // WorkerId — kept inside the probe's closure, not exposed.
@@ -359,9 +369,32 @@ export const manualLayer: Layer.Layer<
   HealthProbe,
   Effect.gen(function* () {
     const control = yield* WorkerRegistryControl
+    const metrics = yield* (Effect.gen(function* () {
+      return yield* ProxyMetrics
+    }).pipe(Effect.provide(ProxyMetrics.Default)))
+    const wrapped = wrapSetHealth(metrics, control.setHealth)
     return {
       start: Effect.void,
-      setHealth: (id, health) => control.setHealth(id, health),
+      setHealth: (id, health) => wrapped(id, health),
     }
   })
 )
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Decorate a `setHealth` function to additionally tick the
+ * `sip_worker_health` gauge. Failures during the metric write do not
+ * propagate — the probe's primary job is to update the registry; metrics
+ * are best-effort.
+ */
+const wrapSetHealth = (
+  metrics: ProxyMetricsApi,
+  inner: (id: WorkerId, health: WorkerHealth) => Effect.Effect<void>
+) =>
+  (id: WorkerId, health: WorkerHealth): Effect.Effect<void> =>
+    inner(id, health).pipe(
+      Effect.tap(() => metrics.setWorkerHealth({ workerId: id, health }))
+    )
