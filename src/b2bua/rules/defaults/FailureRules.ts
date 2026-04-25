@@ -1,13 +1,13 @@
 /**
- * Failure rules — route-failure, no-answer-failover.
+ * Failure rules — route-failure, no-answer-failover, absorb-stale-failure.
  *
  * Handle b-leg failures (3xx-6xx responses) and no-answer timeouts.
  * Both support failover via the HTTP /call/failure API.
  */
 
 import { Effect, Schema } from "effect"
-import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
-import type { SipResponse } from "../../../sip/types.js"
+import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
+import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 import { headerUpdatesFromRecord, toBareUri } from "../framework/actions/factories.js"
 
 // ── route-failure (priority 906) ──────────────────────────────────────────
@@ -15,13 +15,8 @@ import { headerUpdatesFromRecord, toBareUri } from "../framework/actions/factori
 /**
  * Handle 3xx-6xx response from b-leg INVITE.
  * Calls /call/failure for potential failover, or terminates the call.
- *
- * NOTE: This rule requires async HTTP calls (callControl.callFailure) and
- * b-leg creation logic that isn't fully expressible as pure RuleActions yet.
- * For now, it passes through to the default handler. Once ActionExecutor
- * supports "create-leg-from-failover" or similar, this can be migrated.
  */
-export const routeFailureRule: RuleDefinition<undefined, undefined> = {
+export const routeFailureRule = defineRule({
   id: "route-failure",
   name: "B-Leg Route Failure",
   alwaysActive: true,
@@ -42,8 +37,7 @@ export const routeFailureRule: RuleDefinition<undefined, undefined> = {
 
   handle: (ctx) =>
     Effect.gen(function* () {
-      if (ctx.event.type !== "sip") return undefined
-      const resp = ctx.event.message as SipResponse
+      const resp = ctx.event.message
 
       const actions: RuleAction[] = [
         { type: "add-cdr-event", eventType: "reject" as const, legId: ctx.sourceLeg.legId, statusCode: resp.status, reason: resp.reason },
@@ -89,15 +83,20 @@ export const routeFailureRule: RuleDefinition<undefined, undefined> = {
 
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── no-answer-failover (priority 909) ─────────────────────────────────────
 
 /**
  * Handle no-answer timeout on a b-leg. Destroys the timed-out leg,
  * calls /call/failure for potential failover, or terminates.
+ *
+ * `event.legId` is `string | undefined` even on timer events because the
+ * timer-event union allows call-scoped timers without a leg target. The
+ * `if (legId === undefined)` guard remains the only runtime check in this
+ * rule body — the dispatcher cannot pre-narrow it.
  */
-export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
+export const noAnswerFailoverRule = defineRule({
   id: "no-answer-failover",
   name: "No-Answer Failover",
   alwaysActive: true,
@@ -111,7 +110,6 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
 
   handle: (ctx) =>
     Effect.gen(function* () {
-      if (ctx.event.type !== "timer") return undefined
       const legId = ctx.event.legId
       if (legId === undefined) return undefined
 
@@ -152,7 +150,7 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
       actions.push({ type: "begin-termination" })
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── absorb-stale-failure (priority 905) ──────────────────────────────────
 
@@ -163,9 +161,10 @@ export const noAnswerFailoverRule: RuleDefinition<undefined, undefined> = {
  * retransmissions.
  *
  * Replaces the imperative `legState !== "terminated"` negation that lived
- * inside route-failure's legacy matches() body — same semantics, positively expressed.
+ * inside route-failure's legacy matches() body — same semantics, positively
+ * expressed.
  */
-export const absorbStaleFailureRule: RuleDefinition<undefined, undefined> = {
+export const absorbStaleFailureRule = defineRule({
   id: "absorb-stale-failure",
   name: "Absorb Stale Failure",
   alwaysActive: true,
@@ -185,4 +184,11 @@ export const absorbStaleFailureRule: RuleDefinition<undefined, undefined> = {
 
   handle: () =>
     Effect.succeed({ actions: [], state: undefined }),
-}
+})
+
+// Compile-time grouping — keeps the rule list typed as AnyRuleDefinition.
+export const failureRules: ReadonlyArray<AnyRuleDefinition> = [
+  routeFailureRule,
+  noAnswerFailoverRule,
+  absorbStaleFailureRule,
+]

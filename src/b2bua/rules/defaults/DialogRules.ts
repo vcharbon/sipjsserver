@@ -1,20 +1,23 @@
 /**
  * Dialog rules — relay-provisional, confirm-dialog, relay-non-invite-200, absorb-bye-200.
  *
- * Handle SIP responses that affect dialog state.
+ * Handle SIP responses that affect dialog state. Each rule uses
+ * `defineRule({...})`, so handler bodies see a `ctx` whose event/message
+ * are already narrowed by the match — no defensive `event.type !== "sip"`
+ * or `(msg as SipResponse)` casts in the body.
  */
 
 import { Effect, Schema } from "effect"
-import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
-import type { SipResponse } from "../../../sip/types.js"
-import { getHeader, newTag } from "../../../sip/MessageHelpers.js"
+import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
+import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
+import { newTag } from "../../../sip/MessageHelpers.js"
 import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
 import { confirmBridgedCall } from "../framework/actions/composites.js"
 
 // ── relay-provisional (priority 900) ──────────────────────────────────────
 
 /** Relay 1xx provisional response from b-leg to a-leg. */
-export const relayProvisionalRule: RuleDefinition<undefined, undefined> = {
+export const relayProvisionalRule = defineRule({
   id: "relay-provisional",
   name: "Relay Provisional",
   alwaysActive: true,
@@ -32,24 +35,27 @@ export const relayProvisionalRule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) => {
-    const resp = (ctx.event as Extract<typeof ctx.event, { type: "sip" }>).message as SipResponse
-
+    const resp = ctx.event.message
     const actions: RuleAction[] = [
       { type: "relay-to-peer" },
       { type: "add-cdr-event", eventType: "provisional", legId: ctx.sourceLeg.legId, statusCode: resp.status },
     ]
-
     return Effect.succeed({ actions, state: undefined })
   },
-}
+})
 
 // ── confirm-dialog (priority 903) ─────────────────────────────────────────
 
 /**
  * Handle 200 OK INVITE from b-leg — confirm dialog, relay to a-leg,
- * cancel other pending b-legs, schedule keepalive/duration/limiter-refresh timers.
+ * cancel other pending b-legs, schedule keepalive/duration/limiter-refresh
+ * timers.
+ *
+ * Narrowed: response → SipResponseTagged → `resp.parsed.to.tag` is `string`
+ * (not `string | undefined`) because the parser rejects non-100 responses
+ * missing a To-tag.
  */
-export const confirmDialogRule: RuleDefinition<undefined, undefined> = {
+export const confirmDialogRule = defineRule({
   id: "confirm-dialog",
   name: "Confirm Dialog (200 OK INVITE)",
   alwaysActive: true,
@@ -72,9 +78,9 @@ export const confirmDialogRule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) => {
-    const resp = (ctx.event as Extract<typeof ctx.event, { type: "sip" }>).message as SipResponse
+    const resp = ctx.event.message
     const bLeg = ctx.sourceLeg
-    const bTag = resp.parsed?.to?.tag ?? ""
+    const bTag = resp.parsed.to.tag
 
     // Resolve or create the a-facing tag for this (bLeg, bTag). Policy
     // modules such as relayFirst18xTo180 pre-seed the mapping via the
@@ -138,12 +144,12 @@ export const confirmDialogRule: RuleDefinition<undefined, undefined> = {
 
     return Effect.succeed({ actions, state: undefined })
   },
-}
+})
 
 // ── absorb-bye-200 (priority 850) ─────────────────────────────────────────
 
 /** Absorb 200 OK for BYE/CANCEL (B2BUA already sent its own 200). */
-export const absorbBye200Rule: RuleDefinition<undefined, undefined> = {
+export const absorbBye200Rule = defineRule({
   id: "absorb-bye-200",
   name: "Absorb BYE/CANCEL 200 OK",
   alwaysActive: true,
@@ -162,7 +168,7 @@ export const absorbBye200Rule: RuleDefinition<undefined, undefined> = {
   handle: () =>
     // Absorb silently — no actions needed
     Effect.succeed({ actions: [], state: undefined }),
-}
+})
 
 // ── absorb-options-200 (priority 830) ─────────────────────────────────────
 
@@ -171,9 +177,9 @@ export const absorbBye200Rule: RuleDefinition<undefined, undefined> = {
  * paired keepalive-timeout timer. Distinguished from an end-to-end relayed
  * OPTIONS by the absence of a pending-relay snapshot on the source dialog:
  * relayed OPTIONS leave an `inboundPendingRequests` entry that matches the
- * response's CSeq, keepalive OPTIONS originated by the B2BUA do not.
+ * response's CSeq; keepalive OPTIONS originated by the B2BUA do not.
  */
-export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
+export const absorbOptions200Rule = defineRule({
   id: "absorb-options-200",
   name: "Absorb OPTIONS 200 OK (keepalive)",
   alwaysActive: true,
@@ -183,17 +189,15 @@ export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
 
   // Filter distinguishes a B2BUA-originated keepalive OPTIONS (no pending
   // relay snapshot) from a relayed OPTIONS (snapshot present → falls through
-  // to relay-non-invite-200).
+  // to relay-non-invite-200). Filter is invoked by the matcher with the
+  // wide RuleContext, so it keeps its kind/type guards.
   match: {
     kind: "response",
     cseqMethod: "OPTIONS",
     statusClass: "2xx",
     filter: (ctx) => {
-      if (ctx.event.type !== "sip") return false
-      const msg = ctx.event.message
-      if (msg.type !== "response") return false
-      const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "", 10)
-      if (!Number.isFinite(cseqNum)) return false
+      if (ctx.event.type !== "sip" || ctx.event.message.type !== "response") return false
+      const cseqNum = ctx.event.message.parsed.cseq.seq
       return ctx.sourceDialog !== undefined &&
         findPendingRequest(ctx.sourceDialog, cseqNum) === undefined
     },
@@ -201,16 +205,14 @@ export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
 
   init: () => undefined,
 
-  handle: (ctx) => {
-    const legId = ctx.sourceLeg.legId
-    return Effect.succeed({
+  handle: (ctx) =>
+    Effect.succeed({
       actions: [
-        { type: "cancel-timer", timerId: `keepalive_timeout-${ctx.callRef}-${legId}` },
+        { type: "cancel-timer", timerId: `keepalive_timeout-${ctx.callRef}-${ctx.sourceLeg.legId}` },
       ],
       state: undefined,
-    })
-  },
-}
+    }),
+})
 
 // ── absorb-notify-200 (priority 835) ──────────────────────────────────────
 
@@ -222,7 +224,7 @@ export const absorbOptions200Rule: RuleDefinition<undefined, undefined> = {
  * 200 OK for that NOTIFY must be absorbed so `relay-non-invite-200` does
  * not forward it to the opposite leg as a spurious response.
  */
-export const absorbNotify200Rule: RuleDefinition<undefined, undefined> = {
+export const absorbNotify200Rule = defineRule({
   id: "absorb-notify-200",
   name: "Absorb NOTIFY 200 OK",
   alwaysActive: true,
@@ -239,12 +241,12 @@ export const absorbNotify200Rule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: () => Effect.succeed({ actions: [], state: undefined }),
-}
+})
 
 // ── relay-non-invite-200 (priority 927) ───────────────────────────────────
 
 /** Relay 200 OK for non-INVITE methods (PRACK, UPDATE, INFO) to peer. */
-export const relayNonInvite200Rule: RuleDefinition<undefined, undefined> = {
+export const relayNonInvite200Rule = defineRule({
   id: "relay-non-invite-200",
   name: "Relay Non-INVITE 200 OK",
   alwaysActive: true,
@@ -269,4 +271,14 @@ export const relayNonInvite200Rule: RuleDefinition<undefined, undefined> = {
       actions: [{ type: "relay-to-peer" as const }],
       state: undefined,
     }),
-}
+})
+
+// Compile-time grouping — keeps the rule list typed as AnyRuleDefinition.
+export const dialogRules: ReadonlyArray<AnyRuleDefinition> = [
+  relayProvisionalRule,
+  confirmDialogRule,
+  absorbBye200Rule,
+  absorbOptions200Rule,
+  absorbNotify200Rule,
+  relayNonInvite200Rule,
+]

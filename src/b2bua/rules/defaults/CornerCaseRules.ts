@@ -1,14 +1,21 @@
 /**
- * Corner case rules — cancel-200-crossing, retransmit-200, reinvite-glare.
+ * Corner case rules — cancel-200-crossing, retransmit-200, reinvite-glare,
+ * relay-reinvite-response.
  *
  * These run at priority 850, before default rules at 900, to catch
  * edge cases that would otherwise be mishandled by the normal path.
+ *
+ * Each rule uses `defineRule({...})`, so handler bodies see a `ctx` whose
+ * event/message are already narrowed by the match — no defensive
+ * `event.type !== "sip"` or `(msg as SipResponse)` casts in the body.
+ * Filters keep their wide-RuleContext signature because the matcher
+ * invokes them before kind-narrowing applies.
  */
 
 import { Effect, Schema } from "effect"
-import type { RuleDefinition } from "../framework/RuleDefinition.js"
-import type { SipResponse } from "../../../sip/types.js"
-import { getHeader, newTag } from "../../../sip/MessageHelpers.js"
+import { defineRule } from "../framework/RuleDefinition.js"
+import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
+import { newTag } from "../../../sip/MessageHelpers.js"
 import { findByBTag, findPendingRequest } from "../../../call/CallModel.js"
 import { confirmBridgedCall } from "../framework/actions/composites.js"
 
@@ -27,8 +34,10 @@ import { confirmBridgedCall } from "../framework/actions/composites.js"
  *                    have the right dialog state.
  *   ack-leg        → ACK the 2xx end-to-end.
  *   destroy-leg    → BYE (state is now "confirmed", so destroy-leg BYEs).
+ *
+ * Narrowed: response → SipResponseTagged → `resp.parsed.to.tag` is `string`.
  */
-export const cancel200CrossingRule: RuleDefinition<undefined, undefined> = {
+export const cancel200CrossingRule = defineRule({
   id: "cancel-200-crossing",
   name: "CANCEL/200 Crossing",
   alwaysActive: true,
@@ -47,9 +56,9 @@ export const cancel200CrossingRule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) => {
-    const resp = (ctx.event as Extract<typeof ctx.event, { type: "sip" }>).message as SipResponse
+    const resp = ctx.event.message
     const bLeg = ctx.sourceLeg
-    const bTag = resp.parsed?.to?.tag ?? ""
+    const bTag = resp.parsed.to.tag
     const existingMapping = findByBTag(ctx.call, bLeg.legId, bTag)
     const aFacingTag = existingMapping?.aTag ?? newTag()
 
@@ -68,15 +77,15 @@ export const cancel200CrossingRule: RuleDefinition<undefined, undefined> = {
       state: undefined,
     })
   },
-}
+})
 
-// ── retransmit-200 (priority 850) ─────────────────────────────────────────
+// ── retransmit-200 (priority 855) ─────────────────────────────────────────
 
 /**
  * Retransmitted 200 OK on an already-confirmed b-leg — re-ACK only.
  * Do NOT relay (already relayed the first 200 OK).
  */
-export const retransmit200Rule: RuleDefinition<undefined, undefined> = {
+export const retransmit200Rule = defineRule({
   id: "retransmit-200",
   name: "Retransmit 200 OK",
   alwaysActive: true,
@@ -95,11 +104,8 @@ export const retransmit200Rule: RuleDefinition<undefined, undefined> = {
     direction: "from-b",
     filter: (ctx) => {
       if (ctx.sourceDialog === undefined) return false
-      if (ctx.event.type !== "sip") return false
-      const msg = ctx.event.message
-      if (msg.type !== "response") return false
-      const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "0", 10)
-      return findPendingRequest(ctx.sourceDialog, cseqNum) === undefined
+      if (ctx.event.type !== "sip" || ctx.event.message.type !== "response") return false
+      return findPendingRequest(ctx.sourceDialog, ctx.event.message.parsed.cseq.seq) === undefined
     },
   },
 
@@ -112,7 +118,7 @@ export const retransmit200Rule: RuleDefinition<undefined, undefined> = {
       ],
       state: undefined,
     }),
-}
+})
 
 // ── reinvite-glare (priority 890) ─────────────────────────────────────────
 
@@ -120,7 +126,7 @@ export const retransmit200Rule: RuleDefinition<undefined, undefined> = {
  * Re-INVITE glare detection: reject with 491 if there's already a
  * pending re-INVITE on the target dialog.
  */
-export const reinviteGlareRule: RuleDefinition<undefined, undefined> = {
+export const reinviteGlareRule = defineRule({
   id: "reinvite-glare",
   name: "Re-INVITE Glare Detection",
   alwaysActive: true,
@@ -146,19 +152,19 @@ export const reinviteGlareRule: RuleDefinition<undefined, undefined> = {
       ],
       state: undefined,
     }),
-}
+})
 
-// ── relay-reinvite-response (priority 850) ────────────────────────────────
+// ── relay-reinvite-response (priority 845) ────────────────────────────────
 
 /**
  * Relay re-INVITE response (provisional, 2xx, error) back to the
  * originator using pendingReInvite correlation.
  *
- * This matches INVITE responses where a pendingReInvite exists on
- * the receiving leg's dialog. It runs at 850 so it catches re-INVITE
- * responses before the general provisional/confirm-dialog/failure rules.
+ * Matches INVITE responses where a pendingReInvite exists on the receiving
+ * leg's dialog. Runs at 845 so it catches re-INVITE responses before the
+ * general provisional/confirm-dialog/failure rules.
  */
-export const relayReinviteResponseRule: RuleDefinition<undefined, undefined> = {
+export const relayReinviteResponseRule = defineRule({
   id: "relay-reinvite-response",
   name: "Relay re-INVITE Response",
   alwaysActive: true,
@@ -175,25 +181,29 @@ export const relayReinviteResponseRule: RuleDefinition<undefined, undefined> = {
     cseqMethod: "INVITE",
     filter: (ctx) => {
       if (ctx.sourceDialog === undefined) return false
-      if (ctx.event.type !== "sip") return false
-      const msg = ctx.event.message
-      if (msg.type !== "response") return false
-      const cseqNum = parseInt(getHeader(msg.headers, "cseq") ?? "0", 10)
-      return findPendingRequest(ctx.sourceDialog, cseqNum) !== undefined
+      if (ctx.event.type !== "sip" || ctx.event.message.type !== "response") return false
+      return findPendingRequest(ctx.sourceDialog, ctx.event.message.parsed.cseq.seq) !== undefined
     },
   },
 
   init: () => undefined,
 
-  handle: (_ctx) => {
+  handle: () =>
     // ActionExecutor.relayResponseMsg auto-detects the pending re-INVITE on
     // the source dialog (matching CSeq) and rebuilds Call-ID, Vias, From, To,
     // and CSeq from the snapshot captured at request-relay time. It also
     // updates the source dialog's contact on 2xx and removes the pending
     // entry on any final response. This rule just signals "yes, relay it".
-    return Effect.succeed({
+    Effect.succeed({
       actions: [{ type: "relay-to-peer" }],
       state: undefined,
-    })
-  },
-}
+    }),
+})
+
+// Compile-time grouping — keeps the rule list typed as AnyRuleDefinition.
+export const cornerCaseRules: ReadonlyArray<AnyRuleDefinition> = [
+  cancel200CrossingRule,
+  retransmit200Rule,
+  reinviteGlareRule,
+  relayReinviteResponseRule,
+]
