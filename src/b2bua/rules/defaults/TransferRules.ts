@@ -1,5 +1,5 @@
 /**
- * Transfer rules — REFER-driven blind transfer on the B leg (slice 4: reject paths).
+ * Transfer rules — REFER-driven blind transfer on the B leg.
  *
  * The B2BUA intercepts an in-dialog REFER from the remote B leg, authorizes
  * the transfer via POST /call/refer, and either drives the outbound call to
@@ -11,11 +11,18 @@
  *  - RFC 3265 §3 — Subscription-State header values
  *  - RFC 3420 — message/sipfrag
  *  - docs/todos/REFERIMPL.md — full design and slice breakdown
+ *
+ * Type discipline: every rule uses `defineRule({...})` so the handler's
+ * `ctx` is narrowed by the rule's `match` (event kind, direction, transfer
+ * phase, in-dialog tag presence). The dispatcher and parser have already
+ * enforced these invariants at runtime, so handler bodies do not re-check.
  */
 
 import { Effect, Result, Schema } from "effect"
-import type { RuleDefinition, RuleAction, RuleContext } from "../framework/RuleDefinition.js"
+import { defineRule, type RuleAction, type RuleContext } from "../framework/RuleDefinition.js"
+import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 import type { SipRequest } from "../../../sip/types.js"
+import type { Dialog } from "../../../call/CallModel.js"
 import { getHeader } from "../../../sip/MessageHelpers.js"
 import { headerUpdatesFromRecord, toBareUri } from "../framework/actions/factories.js"
 import { sipfragFromStatus } from "../../../sip/SipFragUtils.js"
@@ -23,44 +30,17 @@ import { buildHeldSdpFromProfile, extractCodecProfile } from "../../../sip/SdpUt
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-/** Pull the Refer-To header value, or undefined when absent. */
-function referToOf(ctx: RuleContext): string | undefined {
-  if (ctx.event.type !== "sip") return undefined
-  const msg = ctx.event.message
-  if (msg.type !== "request") return undefined
-  return getHeader(msg.headers, "refer-to")
-}
-
-/** Refer-To contains a Replaces header parameter in its URI embedded headers. */
-function referToHasReplaces(ctx: RuleContext): boolean {
-  if (ctx.event.type !== "sip") return false
-  const msg = ctx.event.message
-  if (msg.type !== "request") return false
-  const r = msg.lazy.referTo()
-  if (Result.isFailure(r)) return false
-  return r.success?.replaces !== undefined
-}
-
-/** REFER arrived without a Replaces parameter in the Refer-To URI. */
-function referToLacksReplaces(ctx: RuleContext): boolean {
-  return !referToHasReplaces(ctx)
-}
-
-/** Dialog id string exposed to the backend — Call-ID;to-tag=…;from-tag=… (B-leg perspective). */
-function dialogIdFor(ctx: RuleContext): string {
-  const leg = ctx.sourceLeg
-  // b-leg: dialog's "to-tag" is the peer (Bob) tag → sip.remoteTag.
-  // a-leg: dialog's "to-tag" is the B2BUA's tag → sip.localTag.
-  const toTag = leg.legId === "a"
-    ? ctx.sourceDialog?.sip.localTag ?? ""
-    : ctx.sourceDialog?.sip.remoteTag ?? ""
-  return `${leg.callId};to-tag=${toTag};from-tag=${leg.fromTag}`
-}
-
-/** CSeq number on the inbound REFER, or 0 when missing/unparseable. */
-function inboundCSeq(req: SipRequest): number {
-  const n = req.parsed.cseq.seq
-  return Number.isFinite(n) && n > 0 ? n : 0
+/**
+ * Dialog id string exposed to the backend — `Call-ID;to-tag=…;from-tag=…`
+ * from the B-leg perspective (the leg that issued the REFER).
+ *
+ * Receives `Dialog` (non-undefined) — callers must have already established
+ * a confirmed dialog via the rule's match-criteria (legState=confirmed or
+ * legDisposition=bridged), so no `?? ""` defaults.
+ */
+function dialogIdFor(callId: string, fromTag: string, dialog: Dialog): string {
+  // B-leg perspective: dialog's "to-tag" is the peer (Bob) tag → sip.remoteTag.
+  return `${callId};to-tag=${dialog.sip.remoteTag};from-tag=${fromTag}`
 }
 
 /** Non-standard headers on the REFER forwarded verbatim to /call/refer. */
@@ -75,6 +55,63 @@ function extractSipHeaders(req: SipRequest): Record<string, string> {
     result[h.name] = h.value
   }
   return result
+}
+
+// Filter predicates — invoked by the matcher with the wide `RuleContext`
+// before the kind-specific narrowing applies, so they keep the kind/type
+// guards. Rule bodies do not.
+
+/** Refer-To contains a Replaces= header parameter in its embedded URI headers. */
+function referToHasReplaces(ctx: RuleContext): boolean {
+  if (ctx.event.type !== "sip" || ctx.event.message.type !== "request") return false
+  const r = ctx.event.message.lazy.referTo()
+  return Result.isSuccess(r) && r.success?.replaces !== undefined
+}
+
+/** REFER arrived without a Replaces parameter in the Refer-To URI. */
+function referToLacksReplaces(ctx: RuleContext): boolean {
+  return !referToHasReplaces(ctx)
+}
+
+/** Matches only when the inbound response is on the transfer's C leg. */
+function isCLegResponse(ctx: RuleContext): boolean {
+  const cLegId = ctx.call.transfer?.cLegId
+  return cLegId !== undefined && ctx.sourceLeg.legId === cLegId
+}
+
+/** Matches only when the inbound request is on the transfer's C leg. */
+function isCLegRequest(ctx: RuleContext): boolean {
+  const cLegId = ctx.call.transfer?.cLegId
+  return cLegId !== undefined && ctx.sourceLeg.legId === cLegId
+}
+
+/**
+ * Request arrived on the original referrer B leg (not the C leg) and is not a
+ * BYE. BYE gets its own handling; other methods during the realigning phases
+ * are rejected 481.
+ */
+function isReferrerBLegNonBye(ctx: RuleContext): boolean {
+  if (ctx.event.type !== "sip" || ctx.event.message.type !== "request") return false
+  if (ctx.event.message.method === "BYE") return false
+  const referrerLegId = ctx.call.transfer?.referrerLegId
+  return referrerLegId !== undefined && ctx.sourceLeg.legId === referrerLegId
+}
+
+/** Response arrived on the a-leg. */
+function isALegResponse(ctx: RuleContext): boolean {
+  return ctx.sourceLeg.legId === "a"
+}
+
+/** Timer fired for the a-leg refer_reinvite_answer watchdog. */
+function isALegReinviteTimer(ctx: RuleContext): boolean {
+  return ctx.event.type === "timer" && ctx.event.legId === "a"
+}
+
+/** No-answer timer for the C-leg specifically. */
+function isCLegNoAnswerTimer(ctx: RuleContext): boolean {
+  if (ctx.event.type !== "timer") return false
+  const cLegId = ctx.call.transfer?.cLegId
+  return cLegId !== undefined && ctx.event.legId === cLegId
 }
 
 // ── Priority band — custom transfer rules live in 100–199 ─────────────────
@@ -112,7 +149,7 @@ const SUB_STATE_TERMINATED_TIMEOUT = "terminated;reason=timeout"
  * REFER with a Replaces= parameter in the Refer-To URI is attended transfer
  * (RFC 3891). Not supported in v1 — respond 501 Not Implemented.
  */
-export const transferRejectReplacesRule: RuleDefinition<undefined, undefined> = {
+export const transferRejectReplacesRule = defineRule({
   id: "transfer-reject-replaces",
   name: "Reject REFER with Replaces (attended transfer)",
   alwaysActive: true,
@@ -134,7 +171,7 @@ export const transferRejectReplacesRule: RuleDefinition<undefined, undefined> = 
       actions: [{ type: "respond" as const, status: 501, reason: "Not Implemented" }],
       state: undefined,
     }),
-}
+})
 
 // ── transfer-reject-second-refer ──────────────────────────────────────────
 
@@ -143,7 +180,7 @@ export const transferRejectReplacesRule: RuleDefinition<undefined, undefined> = 
  * Request Pending (RFC 3261 §14.1) so the referrer retries after the
  * current transfer resolves.
  */
-export const transferRejectSecondReferRule: RuleDefinition<undefined, undefined> = {
+export const transferRejectSecondReferRule = defineRule({
   id: "transfer-reject-second-refer",
   name: "Reject second REFER during transfer",
   alwaysActive: true,
@@ -165,14 +202,12 @@ export const transferRejectSecondReferRule: RuleDefinition<undefined, undefined>
       actions: [{ type: "respond" as const, status: 491, reason: "Request Pending" }],
       state: undefined,
     }),
-}
+})
 
 // ── transfer-reject-a-leg-refer ───────────────────────────────────────────
 
-/**
- * REFER originated from the A leg — out of scope for v1. Respond 501.
- */
-export const transferRejectALegReferRule: RuleDefinition<undefined, undefined> = {
+/** REFER originated from the A leg — out of scope for v1. Respond 501. */
+export const transferRejectALegReferRule = defineRule({
   id: "transfer-reject-a-leg-refer",
   name: "Reject REFER from A leg",
   alwaysActive: true,
@@ -193,7 +228,7 @@ export const transferRejectALegReferRule: RuleDefinition<undefined, undefined> =
       actions: [{ type: "respond" as const, status: 501, reason: "Not Implemented" }],
       state: undefined,
     }),
-}
+})
 
 // ── transfer-intercept-refer ──────────────────────────────────────────────
 
@@ -202,8 +237,13 @@ export const transferRejectALegReferRule: RuleDefinition<undefined, undefined> =
  * seed TransferState, send NOTIFY 100 active, arm the subscription-expiry
  * timer, and kick /call/refer asynchronously. The HTTP response re-enters
  * the rule chain via an internal-event.
+ *
+ * `legState: "confirmed"` is the in-dialog gate — together with the parser
+ * tightening for in-dialog requests, the handler sees an
+ * `InDialogMethodRequest<"REFER">` with both From-tag and To-tag guaranteed,
+ * and `sourceDialog: Dialog` (non-undefined).
  */
-export const transferInterceptReferRule: RuleDefinition<undefined, undefined> = {
+export const transferInterceptReferRule = defineRule({
   id: "transfer-intercept-refer",
   name: "Intercept REFER on bridged B leg",
   alwaysActive: true,
@@ -215,6 +255,7 @@ export const transferInterceptReferRule: RuleDefinition<undefined, undefined> = 
     kind: "request",
     method: "REFER",
     direction: "from-b",
+    legState: "confirmed",
     legDisposition: "bridged",
     transferPhase: null,
     filter: referToLacksReplaces,
@@ -223,15 +264,11 @@ export const transferInterceptReferRule: RuleDefinition<undefined, undefined> = 
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
-      if (ctx.event.type !== "sip") return undefined
+    Effect.sync(() => {
       const req = ctx.event.message
-      if (req.type !== "request") return undefined
-
-      const referTo = referToOf(ctx) ?? ""
-      const referredBy = getHeader(req.headers, "referred-by")
-      const referCSeq = inboundCSeq(req)
       const legId = ctx.sourceLeg.legId
+      const referTo = getHeader(req.headers, "refer-to") ?? ""
+      const referredBy = getHeader(req.headers, "referred-by")
 
       const initialBody = sipfragFromStatus(100, "Trying")
 
@@ -243,7 +280,7 @@ export const transferInterceptReferRule: RuleDefinition<undefined, undefined> = 
             phase: "refer-authorizing" as const,
             referrerLegId: legId,
             referToUri: referTo,
-            referCSeq,
+            referCSeq: req.parsed.cseq.seq,
             startedAtMs: ctx.nowMs,
           },
         },
@@ -269,7 +306,7 @@ export const transferInterceptReferRule: RuleDefinition<undefined, undefined> = 
           type: "refer-async-http" as const,
           request: {
             call_id: ctx.call.aLeg.callId,
-            dialog_id: dialogIdFor(ctx),
+            dialog_id: dialogIdFor(ctx.sourceLeg.callId, ctx.sourceLeg.fromTag, ctx.sourceDialog),
             refer_to: referTo,
             ...(referredBy !== undefined ? { referred_by: referredBy } : {}),
             sip_headers: extractSipHeaders(req),
@@ -279,7 +316,7 @@ export const transferInterceptReferRule: RuleDefinition<undefined, undefined> = 
 
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-http-reject ──────────────────────────────────────────────────
 
@@ -288,7 +325,7 @@ export const transferInterceptReferRule: RuleDefinition<undefined, undefined> = 
  * Emit a terminal NOTIFY with the rejected status and clear the transfer.
  * The A↔B call is left untouched.
  */
-export const transferHttpRejectRule: RuleDefinition<undefined, undefined> = {
+export const transferHttpRejectRule = defineRule({
   id: "transfer-http-reject",
   name: "Handle /call/refer reject",
   alwaysActive: true,
@@ -306,10 +343,8 @@ export const transferHttpRejectRule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
-      if (ctx.event.type !== "internal-event") return undefined
+    Effect.sync(() => {
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const legId = transfer.referrerLegId
 
       const payload = ctx.event.payload as Record<string, unknown> | undefined
@@ -339,7 +374,7 @@ export const transferHttpRejectRule: RuleDefinition<undefined, undefined> = {
 
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-http-allow ───────────────────────────────────────────────────
 
@@ -357,7 +392,7 @@ interface AllowPayload {
  * profile, create the C leg via create-leg (with bodyUpdate carrying the held
  * SDP), advance the transfer phase to `c-ringing`, and record the C leg id.
  */
-export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
+export const transferHttpAllowRule = defineRule({
   id: "transfer-http-allow",
   name: "Handle /call/refer allow",
   alwaysActive: true,
@@ -377,9 +412,6 @@ export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
   handle: (ctx) =>
     Effect.gen(function* () {
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
-
-      if (ctx.event.type !== "internal-event") return undefined
       const payload = ctx.event.payload as AllowPayload | undefined
       if (payload === undefined || payload.action !== "allow") return undefined
 
@@ -433,7 +465,7 @@ export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
 
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-http-timeout ─────────────────────────────────────────────────
 
@@ -441,7 +473,7 @@ export const transferHttpAllowRule: RuleDefinition<undefined, undefined> = {
  * The subscription-expiry timer fired while we were still awaiting the
  * HTTP decision. Send NOTIFY 408/500 terminated and clear the transfer.
  */
-export const transferHttpTimeoutRule: RuleDefinition<undefined, undefined> = {
+export const transferHttpTimeoutRule = defineRule({
   id: "transfer-http-timeout",
   name: "Handle REFER subscription expiry",
   alwaysActive: true,
@@ -458,9 +490,8 @@ export const transferHttpTimeoutRule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
+    Effect.sync(() => {
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const legId = transfer.referrerLegId
       const body = sipfragFromStatus(500, "Server Internal Error")
 
@@ -479,20 +510,7 @@ export const transferHttpTimeoutRule: RuleDefinition<undefined, undefined> = {
 
       return { actions, state: undefined }
     }),
-}
-
-// ── C-leg predicate (filter for all three transfer-c-* rules) ────────────
-
-/** Matches only when the inbound response is on the transfer's C leg. */
-function isCLegResponse(ctx: RuleContext): boolean {
-  if (ctx.event.type !== "sip") return false
-  const msg = ctx.event.message
-  if (msg.type !== "response") return false
-  const transfer = ctx.call.transfer
-  if (transfer === null || transfer === undefined) return false
-  if (transfer.cLegId === undefined) return false
-  return ctx.sourceLeg.legId === transfer.cLegId
-}
+})
 
 // ── transfer-c-1xx-to-notify ──────────────────────────────────────────────
 
@@ -501,10 +519,12 @@ function isCLegResponse(ctx: RuleContext): boolean {
  * REFER subscription. Dedup by `lastCLegNotifiedStatus` on TransferState so a
  * repeated 180 only produces one NOTIFY.
  *
+ * 100 Trying never reaches here — TransactionLayer absorbs it.
+ *
  * Outranks `relay-provisional` for C-leg responses via higher specificity
  * (transfer-phase gate + filter) — a 1xx from C must not be relayed back to A.
  */
-export const transferCLegProvisionalRule: RuleDefinition<undefined, undefined> = {
+export const transferCLegProvisionalRule = defineRule({
   id: "transfer-c-1xx-to-notify",
   name: "NOTIFY referrer on C-leg 1xx",
   alwaysActive: true,
@@ -524,16 +544,11 @@ export const transferCLegProvisionalRule: RuleDefinition<undefined, undefined> =
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
-      if (ctx.event.type !== "sip") return undefined
+    Effect.sync(() => {
       const resp = ctx.event.message
-      if (resp.type !== "response") return undefined
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
 
-      // Skip 100 Trying — it's a hop-by-hop transaction progress indicator,
-      // not an end-to-end subscription update. Also dedupe identical repeats.
-      if (resp.status === 100) return { actions: [], state: undefined }
+      // Dedupe identical repeats (e.g. 180 followed by 180).
       if (transfer.lastCLegNotifiedStatus === resp.status) {
         return { actions: [], state: undefined }
       }
@@ -555,7 +570,7 @@ export const transferCLegProvisionalRule: RuleDefinition<undefined, undefined> =
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-c-200-initial ────────────────────────────────────────────────
 
@@ -568,9 +583,9 @@ export const transferCLegProvisionalRule: RuleDefinition<undefined, undefined> =
  * media endpoint.
  *
  * The overall-safety timer stays armed across realigning; it is only cancelled
- * when transfer completes (slice 7) or rollback fires.
+ * when transfer completes or rollback fires.
  */
-export const transferCLegAnswerRule: RuleDefinition<undefined, undefined> = {
+export const transferCLegAnswerRule = defineRule({
   id: "transfer-c-200-initial",
   name: "C-leg 200 OK → final NOTIFY + re-INVITE C",
   alwaysActive: true,
@@ -590,16 +605,13 @@ export const transferCLegAnswerRule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
-      if (ctx.event.type !== "sip") return undefined
+    Effect.sync(() => {
       const resp = ctx.event.message
-      if (resp.type !== "response") return undefined
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const cLegId = transfer.cLegId
       if (cLegId === undefined) return undefined
 
-      // Capture C's 200-OK SDP — drives the a-realign re-INVITE (slice 7).
+      // Capture C's 200-OK SDP — drives the a-realign re-INVITE.
       const cInitialSdp = resp.body.byteLength > 0 ? resp.body : undefined
 
       // A's SDP for the re-INVITE-C offer comes from the a-leg INVITE snapshot
@@ -650,18 +662,16 @@ export const transferCLegAnswerRule: RuleDefinition<undefined, undefined> = {
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-c-fail-initial ──────────────────────────────────────────────
 
 /**
  * C rejected our initial INVITE with a 3xx–6xx response. Translate the
  * failure into a terminal NOTIFY on the REFER subscription, cancel transfer
- * timers, and clear transfer state. The C leg itself is terminated by the
- * framework's standard failure path (`route-failure` / `absorb-stale-failure`)
- * running after this rule via rule passthrough.
+ * timers, and clear transfer state.
  */
-export const transferCLegFailRule: RuleDefinition<undefined, undefined> = {
+export const transferCLegFailRule = defineRule({
   id: "transfer-c-fail-initial",
   name: "C-leg 3xx–6xx → NOTIFY terminated",
   alwaysActive: true,
@@ -681,12 +691,9 @@ export const transferCLegFailRule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
-      if (ctx.event.type !== "sip") return undefined
+    Effect.sync(() => {
       const resp = ctx.event.message
-      if (resp.type !== "response") return undefined
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const cLegId = transfer.cLegId
 
       const body = sipfragFromStatus(resp.status, resp.reason)
@@ -702,37 +709,34 @@ export const transferCLegFailRule: RuleDefinition<undefined, undefined> = {
         { type: "cancel-timer" as const, timerId: `refer_subscription_expiry-${ctx.callRef}` },
         { type: "cancel-timer" as const, timerId: `refer_overall_safety-${ctx.callRef}` },
         ...(cLegId !== undefined
-          ? [{ type: "cancel-timer" as const, timerId: `no-answer-${ctx.callRef}-${cLegId}` }]
-          : []),
-        ...(cLegId !== undefined
-          ? [{
-              type: "add-cdr-event" as const,
-              eventType: "reject" as const,
-              legId: cLegId,
-              statusCode: resp.status,
-              reason: resp.reason,
-            }]
-          : []),
-        ...(cLegId !== undefined
-          ? [{ type: "terminate-leg" as const, legId: cLegId, byeDisposition: "rejected" as const }]
+          ? [
+              { type: "cancel-timer" as const, timerId: `no-answer-${ctx.callRef}-${cLegId}` },
+              {
+                type: "add-cdr-event" as const,
+                eventType: "reject" as const,
+                legId: cLegId,
+                statusCode: resp.status,
+                reason: resp.reason,
+              },
+              { type: "terminate-leg" as const, legId: cLegId, byeDisposition: "rejected" as const },
+            ]
           : []),
         { type: "clear-transfer" as const },
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-c-no-answer ─────────────────────────────────────────────────
 
 /**
  * C did not answer within the no-answer window. Translate to NOTIFY 408,
  * CANCEL the C INVITE, cancel transfer timers, and clear transfer state.
- * A↔B stays alive — the transfer simply reports 408 on the subscription.
  *
  * Outranks `no-answer-failover` via transferPhase + filter so the default
  * call-level termination path never fires for transfer-driven no-answer.
  */
-export const transferCLegNoAnswerRule: RuleDefinition<undefined, undefined> = {
+export const transferCLegNoAnswerRule = defineRule({
   id: "transfer-c-no-answer",
   name: "C-leg no-answer → NOTIFY 408 terminated",
   alwaysActive: true,
@@ -744,20 +748,14 @@ export const transferCLegNoAnswerRule: RuleDefinition<undefined, undefined> = {
     kind: "timer",
     timerType: "no_answer",
     transferPhase: "c-ringing",
-    filter: (ctx) => {
-      if (ctx.event.type !== "timer") return false
-      const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return false
-      return ctx.event.legId !== undefined && ctx.event.legId === transfer.cLegId
-    },
+    filter: isCLegNoAnswerTimer,
   },
 
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
+    Effect.sync(() => {
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const cLegId = transfer.cLegId
       if (cLegId === undefined) return undefined
 
@@ -779,35 +777,7 @@ export const transferCLegNoAnswerRule: RuleDefinition<undefined, undefined> = {
       ]
       return { actions, state: undefined }
     }),
-}
-
-// ── C / B leg predicates for realigning-phase rules ───────────────────────
-
-/** Request arrived on the C leg (as tracked by TransferState.cLegId). */
-function isCLegRequest(ctx: RuleContext): boolean {
-  if (ctx.event.type !== "sip") return false
-  const msg = ctx.event.message
-  if (msg.type !== "request") return false
-  const transfer = ctx.call.transfer
-  if (transfer === null || transfer === undefined) return false
-  if (transfer.cLegId === undefined) return false
-  return ctx.sourceLeg.legId === transfer.cLegId
-}
-
-/**
- * Request arrived on the original referrer B leg (not the C leg) and is not a
- * BYE. BYE gets its own handling (transfer-b-bye-during-transfer — future
- * slice); other methods during the realigning phases are rejected 481.
- */
-function isReferrerBLegNonBye(ctx: RuleContext): boolean {
-  if (ctx.event.type !== "sip") return false
-  const msg = ctx.event.message
-  if (msg.type !== "request") return false
-  if (msg.method === "BYE") return false
-  const transfer = ctx.call.transfer
-  if (transfer === null || transfer === undefined) return false
-  return ctx.sourceLeg.legId === transfer.referrerLegId
-}
+})
 
 // ── transfer-c-realign-200 ────────────────────────────────────────────────
 
@@ -818,7 +788,7 @@ function isReferrerBLegNonBye(ctx: RuleContext): boolean {
  * A carrying C's captured initial SDP. A's 2xx completes the merge
  * (transfer-a-realign-200); 4xx/5xx/6xx rolls back (transfer-a-realign-fail).
  */
-export const transferCRealign200Rule: RuleDefinition<undefined, undefined> = {
+export const transferCRealign200Rule = defineRule({
   id: "transfer-c-realign-200",
   name: "C-leg 2xx to c-realign re-INVITE → phase a-realigning + re-INVITE A",
   alwaysActive: true,
@@ -838,9 +808,8 @@ export const transferCRealign200Rule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
+    Effect.sync(() => {
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const cLegId = transfer.cLegId
       if (cLegId === undefined) return undefined
       const cInitialSdp = transfer.cInitialSdp
@@ -871,7 +840,7 @@ export const transferCRealign200Rule: RuleDefinition<undefined, undefined> = {
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-c-realign-fail ───────────────────────────────────────────────
 
@@ -880,7 +849,7 @@ export const transferCRealign200Rule: RuleDefinition<undefined, undefined> = {
  * cannot complete — begin termination on all legs, emit a rollback CDR
  * event for diagnosis.
  */
-export const transferCRealignFailRule: RuleDefinition<undefined, undefined> = {
+export const transferCRealignFailRule = defineRule({
   id: "transfer-c-realign-fail",
   name: "C-leg rejects c-realign re-INVITE → rollback",
   alwaysActive: true,
@@ -900,20 +869,19 @@ export const transferCRealignFailRule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
-      if (ctx.event.type !== "sip") return undefined
+    Effect.sync(() => {
       const resp = ctx.event.message
-      if (resp.type !== "response") return undefined
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const cLegId = transfer.cLegId
 
       const actions: RuleAction[] = [
         ...(cLegId !== undefined
-          ? [{
-              type: "cancel-timer" as const,
-              timerId: `refer_reinvite_answer-${ctx.callRef}-${cLegId}`,
-            }]
+          ? [
+              {
+                type: "cancel-timer" as const,
+                timerId: `refer_reinvite_answer-${ctx.callRef}-${cLegId}`,
+              },
+            ]
           : []),
         { type: "cancel-timer" as const, timerId: `refer_overall_safety-${ctx.callRef}` },
         ...(cLegId !== undefined
@@ -929,7 +897,7 @@ export const transferCRealignFailRule: RuleDefinition<undefined, undefined> = {
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-c-realign-timeout ────────────────────────────────────────────
 
@@ -937,7 +905,7 @@ export const transferCRealignFailRule: RuleDefinition<undefined, undefined> = {
  * The refer_reinvite_answer watchdog fired during `c-realigning` — C did
  * not respond to our re-INVITE within 32s. Roll back the transfer.
  */
-export const transferCRealignTimeoutRule: RuleDefinition<undefined, undefined> = {
+export const transferCRealignTimeoutRule = defineRule({
   id: "transfer-c-realign-timeout",
   name: "c-realign re-INVITE timeout → rollback",
   alwaysActive: true,
@@ -954,9 +922,8 @@ export const transferCRealignTimeoutRule: RuleDefinition<undefined, undefined> =
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
+    Effect.sync(() => {
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const cLegId = transfer.cLegId
 
       const actions: RuleAction[] = [
@@ -973,7 +940,7 @@ export const transferCRealignTimeoutRule: RuleDefinition<undefined, undefined> =
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-c-glare-reinvite ────────────────────────────────────────────
 
@@ -982,7 +949,7 @@ export const transferCRealignTimeoutRule: RuleDefinition<undefined, undefined> =
  * (phase c-realigning or a-realigning). RFC 3261 §14.1 — respond 491
  * Request Pending so C retries after our exchange completes.
  */
-export const transferCGlareReinviteRule: RuleDefinition<undefined, undefined> = {
+export const transferCGlareReinviteRule = defineRule({
   id: "transfer-c-glare-reinvite",
   name: "C-leg re-INVITE during realigning → 491",
   alwaysActive: true,
@@ -1005,23 +972,7 @@ export const transferCGlareReinviteRule: RuleDefinition<undefined, undefined> = 
       actions: [{ type: "respond" as const, status: 491, reason: "Request Pending" }],
       state: undefined,
     }),
-}
-
-// ── A-leg predicates for a-realigning rules ──────────────────────────────
-
-/** Response arrived on the a-leg (direction: from-a). */
-function isALegResponse(ctx: RuleContext): boolean {
-  if (ctx.event.type !== "sip") return false
-  const msg = ctx.event.message
-  if (msg.type !== "response") return false
-  return ctx.sourceLeg.legId === "a"
-}
-
-/** Timer fired for the a-leg refer_reinvite_answer watchdog. */
-function isALegReinviteTimer(ctx: RuleContext): boolean {
-  if (ctx.event.type !== "timer") return false
-  return ctx.event.legId === "a"
-}
+})
 
 // ── transfer-a-realign-200 ──────────────────────────────────────────────
 
@@ -1031,7 +982,7 @@ function isALegReinviteTimer(ctx: RuleContext): boolean {
  * timer, merge(a, cLeg) so subsequent in-dialog traffic routes to the
  * new peer, clear transfer state, and CDR the completion.
  */
-export const transferARealign200Rule: RuleDefinition<undefined, undefined> = {
+export const transferARealign200Rule = defineRule({
   id: "transfer-a-realign-200",
   name: "A-leg 2xx to a-realign re-INVITE → merge(a, c), transfer complete",
   alwaysActive: true,
@@ -1051,9 +1002,8 @@ export const transferARealign200Rule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
+    Effect.sync(() => {
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const cLegId = transfer.cLegId
       if (cLegId === undefined) return undefined
 
@@ -1076,7 +1026,7 @@ export const transferARealign200Rule: RuleDefinition<undefined, undefined> = {
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-a-realign-fail ─────────────────────────────────────────────
 
@@ -1084,7 +1034,7 @@ export const transferARealign200Rule: RuleDefinition<undefined, undefined> = {
  * A rejected the a-realigning re-INVITE with 4xx/5xx/6xx. The merge
  * cannot complete — roll back all legs.
  */
-export const transferARealignFailRule: RuleDefinition<undefined, undefined> = {
+export const transferARealignFailRule = defineRule({
   id: "transfer-a-realign-fail",
   name: "A-leg rejects a-realign re-INVITE → rollback",
   alwaysActive: true,
@@ -1104,10 +1054,8 @@ export const transferARealignFailRule: RuleDefinition<undefined, undefined> = {
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
-      if (ctx.event.type !== "sip") return undefined
+    Effect.sync(() => {
       const resp = ctx.event.message
-      if (resp.type !== "response") return undefined
 
       const actions: RuleAction[] = [
         {
@@ -1126,7 +1074,7 @@ export const transferARealignFailRule: RuleDefinition<undefined, undefined> = {
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-a-realign-timeout ──────────────────────────────────────────
 
@@ -1134,7 +1082,7 @@ export const transferARealignFailRule: RuleDefinition<undefined, undefined> = {
  * The refer_reinvite_answer watchdog fired during `a-realigning` — A did
  * not respond to our re-INVITE within 32s. Roll back all legs.
  */
-export const transferARealignTimeoutRule: RuleDefinition<undefined, undefined> = {
+export const transferARealignTimeoutRule = defineRule({
   id: "transfer-a-realign-timeout",
   name: "a-realign re-INVITE timeout → rollback",
   alwaysActive: true,
@@ -1152,7 +1100,7 @@ export const transferARealignTimeoutRule: RuleDefinition<undefined, undefined> =
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
+    Effect.sync(() => {
       const actions: RuleAction[] = [
         { type: "cancel-timer" as const, timerId: `refer_overall_safety-${ctx.callRef}` },
         {
@@ -1165,7 +1113,7 @@ export const transferARealignTimeoutRule: RuleDefinition<undefined, undefined> =
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── transfer-a-glare-reinvite ──────────────────────────────────────────
 
@@ -1176,7 +1124,7 @@ export const transferARealignTimeoutRule: RuleDefinition<undefined, undefined> =
  * (refer-authorizing, c-ringing) A re-INVITEs still relay transparently
  * to B — this rule only gates Regime 2.
  */
-export const transferAGlareReinviteRule: RuleDefinition<undefined, undefined> = {
+export const transferAGlareReinviteRule = defineRule({
   id: "transfer-a-glare-reinvite",
   name: "A-leg re-INVITE during realigning → 491",
   alwaysActive: true,
@@ -1198,7 +1146,7 @@ export const transferAGlareReinviteRule: RuleDefinition<undefined, undefined> = 
       actions: [{ type: "respond" as const, status: 491, reason: "Request Pending" }],
       state: undefined,
     }),
-}
+})
 
 // ── transfer-b-in-cre-are-reject ─────────────────────────────────────────
 
@@ -1209,7 +1157,7 @@ export const transferAGlareReinviteRule: RuleDefinition<undefined, undefined> = 
  * traffic on that leg has no meaningful target. BYE is excluded so the B
  * leg can still tear down (absorbed by other transfer rules / default relay).
  */
-export const transferBInCrArRejectRule: RuleDefinition<undefined, undefined> = {
+export const transferBInCrArRejectRule = defineRule({
   id: "transfer-b-in-cre-are-reject",
   name: "Referrer B-leg non-BYE during realigning → 481",
   alwaysActive: true,
@@ -1231,7 +1179,7 @@ export const transferBInCrArRejectRule: RuleDefinition<undefined, undefined> = {
       actions: [{ type: "respond" as const, status: 481, reason: "Call/Transaction Does Not Exist" }],
       state: undefined,
     }),
-}
+})
 
 // ── transfer-overall-timeout ──────────────────────────────────────────────
 
@@ -1243,7 +1191,7 @@ export const transferBInCrArRejectRule: RuleDefinition<undefined, undefined> = {
  * this rule, the transfer is genuinely stuck — force a full rollback so no
  * call is left half-swapped.
  */
-export const transferOverallTimeoutRule: RuleDefinition<undefined, undefined> = {
+export const transferOverallTimeoutRule = defineRule({
   id: "transfer-overall-timeout",
   name: "Transfer overall-safety timer → rollback",
   alwaysActive: true,
@@ -1260,9 +1208,8 @@ export const transferOverallTimeoutRule: RuleDefinition<undefined, undefined> = 
   init: () => undefined,
 
   handle: (ctx) =>
-    Effect.gen(function* () {
+    Effect.sync(() => {
       const transfer = ctx.call.transfer
-      if (transfer === null || transfer === undefined) return undefined
       const cLegId = transfer.cLegId
 
       const actions: RuleAction[] = [
@@ -1284,11 +1231,11 @@ export const transferOverallTimeoutRule: RuleDefinition<undefined, undefined> = 
       ]
       return { actions, state: undefined }
     }),
-}
+})
 
 // ── Exported rule list (registration order is irrelevant — Matcher ranks) ─
 
-export const transferRules: ReadonlyArray<RuleDefinition<undefined, undefined>> = [
+export const transferRules: ReadonlyArray<AnyRuleDefinition> = [
   transferRejectReplacesRule,
   transferRejectSecondReferRule,
   transferRejectALegReferRule,
