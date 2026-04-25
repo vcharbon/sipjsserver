@@ -81,7 +81,7 @@ describe("sip-front-proxy/load-balancer — distribution", () => {
     () =>
       runProxyScenario(
         {
-          name: "load-balancer.distribution",
+          name: "load-balancer.distribution-NO_ANALYSIS",
           description:
             `8 workers, ${N_INVITES} INVITEs with PRNG-derived Call-IDs;\n` +
             `asserts each worker handles within ±${TOLERANCE * 100}% of the per-worker\n` +
