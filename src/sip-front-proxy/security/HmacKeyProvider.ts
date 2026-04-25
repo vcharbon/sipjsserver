@@ -20,18 +20,16 @@
  *     (the kid is non-secret — it's stamped on the wire — and so timing
  *     leaks on it would only let an attacker enumerate kids they could
  *     have observed anyway).
- *   - Only the `static` impl ships in this PR. The `kubernetesSecret`
- *     fs-watch impl (D14 / PR5) lives behind the same interface and
- *     will reuse the same `verify`/`sign` shape with current+previous
- *     reloads driven by `chokidar`-style notifications.
- *
- * TODO(PR5): add `kubernetesSecret({ currentPath, previousPath? })`
- * impl per D14 — fs-watch the mounted Secret files, hot-reload on
- * change, keep one rotation generation in `previous` for NFR-8.
+ *   - `static` and `kubernetesSecret` impls ship in PR5. The fs-watch
+ *     `kubernetesSecret` impl (D14 / PR5) wraps the same `sign`/`verify`
+ *     shape behind a `Ref<{ current, previous? }>` mutated by a
+ *     `node:fs.watch` listener on the mounted Secret files. Reloads
+ *     keep one rotation generation in `previous` for NFR-8.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto"
-import { Data, Effect, Layer, ServiceMap } from "effect"
+import * as fs from "node:fs"
+import { Data, Effect, Layer, Ref, type Scope, ServiceMap } from "effect"
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -232,5 +230,308 @@ export const staticLayer = (
         verify,
         verifyTruncated,
       } satisfies HmacKeyProviderApi)
+    })
+  )
+
+// ---------------------------------------------------------------------------
+// kubernetesSecret impl (D14 / PR5)
+// ---------------------------------------------------------------------------
+
+export interface KubernetesSecretOpts {
+  /**
+   * Filesystem path of the **current** key file. K8s typically mounts a
+   * `Secret` as a directory of files; pass the path of the entry that
+   * holds the key bytes (e.g. `/etc/sip-proxy/hmac/current`).
+   */
+  readonly keyPath: string
+  /**
+   * Optional path of the **previous** key file. When operators perform
+   * an explicit two-file rotation (`current` and `previous` mounted from
+   * separate Secret keys), this file is loaded and used by `verify`
+   * during the NFR-8 1h overlap window.
+   *
+   * If omitted, the registry tracks an internal "previous" by
+   * remembering the last key it loaded from `keyPath` — that satisfies
+   * the rotation overlap automatically when the operator just bumps the
+   * Secret in place.
+   */
+  readonly previousKeyPath?: string
+  /**
+   * Debounce window for `fs.watch` notifications (ms). Editors and
+   * Kubelet's atomic-rename mechanism often emit several change events
+   * for a single update; we coalesce them. Default: 200ms.
+   */
+  readonly watchDebounceMs?: number
+}
+
+const DEFAULT_WATCH_DEBOUNCE_MS = 200
+
+/**
+ * Read raw key bytes from disk and derive a `kid` from a SHA-1 prefix
+ * of the bytes. Using a content-derived kid means rotations don't need
+ * the operator to choose a new id — every distinct key gets a distinct
+ * kid automatically, which is exactly what `verify` needs for the
+ * overlap window.
+ *
+ * The kid is non-secret (it lands on the wire in every cookie). A
+ * 16-hex-char prefix of SHA-1 is plenty to distinguish keys without
+ * leaking material — even if an attacker learns the kid, they learn
+ * nothing about the underlying bytes.
+ */
+const loadKeyFromFile = (path: string): HmacKey => {
+  const raw = fs.readFileSync(path)
+  if (raw.byteLength < MIN_KEY_BYTES) {
+    throw new HmacKeyProviderConfigError({
+      reason: `${path} key must be at least ${MIN_KEY_BYTES} bytes (got ${raw.byteLength})`,
+    })
+  }
+  const hash = createHmac("sha1", "kid-derive")
+  hash.update(raw)
+  const kid = hash.digest("hex").slice(0, 16)
+  return { id: kid, bytes: new Uint8Array(raw) }
+}
+
+/**
+ * Build a Layer providing `HmacKeyProvider` from K8s Secret-mounted
+ * files. Watches the file(s) via `node:fs.watch` and hot-reloads on
+ * change — no pod restart required for rotation.
+ *
+ * On rotation:
+ *   - With a single `keyPath`: when the file content changes, the new
+ *     key becomes `current` and the previous `current` slides into
+ *     `previous` for the NFR-8 overlap window.
+ *   - With both `keyPath` + `previousKeyPath`: each file is watched
+ *     independently. Operator-controlled rotation (Phase 2 GitOps).
+ *
+ * Reload failures (file removed, permissions, key too short) MUST log
+ * + retain the prior key, never crash. D4 invariant: the watch fiber's
+ * failures cannot reach the routing path.
+ */
+export const kubernetesSecretLayer = (
+  opts: KubernetesSecretOpts
+): Layer.Layer<HmacKeyProvider, HmacKeyProviderConfigError> =>
+  Layer.effect(
+    HmacKeyProvider,
+    Effect.gen(function* () {
+      const debounceMs = opts.watchDebounceMs ?? DEFAULT_WATCH_DEBOUNCE_MS
+
+      // Initial load — surface failures here as a layer-build error so
+      // a misconfigured deploy fails fast at startup.
+      const initialCurrent = yield* Effect.try({
+        try: () => loadKeyFromFile(opts.keyPath),
+        catch: (err) =>
+          err instanceof HmacKeyProviderConfigError
+            ? err
+            : new HmacKeyProviderConfigError({
+                reason: `failed to read current key from ${opts.keyPath}: ${String(err)}`,
+              }),
+      })
+      let initialPrevious: HmacKey | undefined
+      if (opts.previousKeyPath !== undefined) {
+        initialPrevious = yield* Effect.try({
+          try: () => loadKeyFromFile(opts.previousKeyPath!),
+          catch: (err) =>
+            err instanceof HmacKeyProviderConfigError
+              ? err
+              : new HmacKeyProviderConfigError({
+                  reason: `failed to read previous key from ${opts.previousKeyPath!}: ${String(err)}`,
+                }),
+        })
+      }
+
+      interface KeyState {
+        readonly current: HmacKey
+        readonly previous?: HmacKey
+      }
+      const stateRef = yield* Ref.make<KeyState>(
+        initialPrevious === undefined
+          ? { current: initialCurrent }
+          : { current: initialCurrent, previous: initialPrevious }
+      )
+
+      const sign = (input: Uint8Array): Effect.Effect<HmacSignResult> =>
+        Ref.get(stateRef).pipe(
+          Effect.map((s) => ({ kid: s.current.id, mac: macFor(s.current, input) }))
+        )
+
+      const lookupKey = (s: KeyState, kid: string): HmacKey | undefined =>
+        kid === s.current.id
+          ? s.current
+          : s.previous !== undefined && kid === s.previous.id
+            ? s.previous
+            : undefined
+
+      const verify = (
+        input: Uint8Array,
+        kid: string,
+        mac: Uint8Array
+      ): Effect.Effect<boolean> =>
+        Ref.get(stateRef).pipe(
+          Effect.map((s) => {
+            const key = lookupKey(s, kid)
+            if (key === undefined) return false
+            const expected = macFor(key, input)
+            return constantTimeEqual(expected, mac)
+          })
+        )
+
+      const verifyTruncated = (
+        input: Uint8Array,
+        kid: string,
+        truncatedMac: Uint8Array
+      ): Effect.Effect<boolean> =>
+        Ref.get(stateRef).pipe(
+          Effect.map((s) => {
+            const key = lookupKey(s, kid)
+            if (key === undefined) return false
+            if (truncatedMac.byteLength === 0) return false
+            const full = macFor(key, input)
+            if (truncatedMac.byteLength > full.byteLength) return false
+            const prefix = full.subarray(0, truncatedMac.byteLength)
+            return timingSafeEqual(Buffer.from(prefix), Buffer.from(truncatedMac))
+          })
+        )
+
+      // ── Reload helpers ──────────────────────────────────────────────
+      // Use plain try/catch inside Effect.sync rather than Effect.try +
+      // catchAll: simpler, no v3 vs v4 surface ambiguity, and we want
+      // the failure path to log + return undefined (non-fatal) anyway.
+      const tryLoad = (path: string, label: string): Effect.Effect<HmacKey | undefined> =>
+        Effect.suspend(() => {
+          try {
+            return Effect.succeed(loadKeyFromFile(path))
+          } catch (err) {
+            return Effect.logWarning(
+              `kubernetesSecret: failed to reload ${label} key from ${path}: ${String(err)}`
+            ).pipe(Effect.as(undefined as HmacKey | undefined))
+          }
+        })
+
+      const reloadCurrent: Effect.Effect<void> = Effect.gen(function* () {
+        const next = yield* tryLoad(opts.keyPath, "current")
+        if (next === undefined) return
+        yield* Ref.update(stateRef, (s) => {
+          if (next.id === s.current.id) return s
+          // Single-path mode: previous current slides into previous slot.
+          if (opts.previousKeyPath === undefined) {
+            return { current: next, previous: s.current }
+          }
+          // Two-path mode: previous slot is owned by previousKeyPath; the
+          // current slot just moves.
+          return s.previous === undefined
+            ? { current: next }
+            : { current: next, previous: s.previous }
+        })
+        yield* Effect.logInfo(
+          `kubernetesSecret: reloaded current key (kid=${next.id})`
+        )
+      })
+
+      const reloadPrevious: Effect.Effect<void> = Effect.gen(function* () {
+        if (opts.previousKeyPath === undefined) return
+        const next = yield* tryLoad(opts.previousKeyPath, "previous")
+        if (next === undefined) return
+        yield* Ref.update(stateRef, (s) =>
+          s.previous !== undefined && s.previous.id === next.id
+            ? s
+            : { current: s.current, previous: next }
+        )
+        yield* Effect.logInfo(
+          `kubernetesSecret: reloaded previous key (kid=${next.id})`
+        )
+      })
+
+      // ── fs.watch wiring ─────────────────────────────────────────────
+      // We watch each file individually and debounce per-file. K8s
+      // mounts Secret keys via a symlink to a `..data/` directory, so
+      // updates manifest as a rename of the `..data` symlink — `watch`
+      // on the leaf file path will fire even when only the symlink
+      // target moves. On Linux this is `inotify` under the hood.
+      //
+      // We capture the parent layer's Effect services here so that
+      // when fs.watch fires its callback (outside any Effect context)
+      // we can `runForkWith(parentServices)(action)` and the reload
+      // effect runs with the same logging/clock/etc the layer uses.
+      const parentServices = yield* Effect.services<never>()
+
+      // Install a single fs.watch and (best-effort) keep going even if
+      // the install itself throws synchronously. Returns a tuple of
+      // (timer-getter, watcher-or-undefined) so the finalizer can tear
+      // down whatever was actually created.
+      interface WatchHandle {
+        readonly getTimer: () => NodeJS.Timeout | undefined
+        readonly watcher: fs.FSWatcher | undefined
+      }
+      const tryInstall = (
+        path: string,
+        action: Effect.Effect<void>
+      ): Effect.Effect<WatchHandle> =>
+        Effect.suspend(() => {
+          let timer: NodeJS.Timeout | undefined
+          let watcher: fs.FSWatcher | undefined
+          const onChange = () => {
+            if (timer !== undefined) clearTimeout(timer)
+            timer = setTimeout(() => {
+              timer = undefined
+              // Run on the parent runtime — we're in a node callback,
+              // not an Effect context. Reload effects swallow their
+              // own errors so this is safe to fire-and-forget.
+              Effect.runForkWith(parentServices)(action)
+            }, debounceMs)
+          }
+          // fs.watch can throw synchronously (ENOENT, EPERM). Log,
+          // retain the loaded key, never crash. We surface the failure
+          // through Effect.logWarning rather than the error channel so
+          // the layer doesn't fail at start time on a transient mount
+          // race.
+          let installError: unknown = null
+          try {
+            watcher = fs.watch(path, { persistent: false }, onChange)
+            watcher.on("error", (err) => {
+              Effect.runForkWith(parentServices)(
+                Effect.logWarning(
+                  `kubernetesSecret: watcher on ${path} error: ${String(err)}`
+                )
+              )
+            })
+          } catch (err) {
+            installError = err
+            watcher = undefined
+          }
+          const handle: WatchHandle = { getTimer: () => timer, watcher }
+          if (installError !== null) {
+            return Effect.logWarning(
+              `kubernetesSecret: failed to install watcher on ${path}: ${String(installError)}`
+            ).pipe(Effect.as(handle))
+          }
+          return Effect.succeed(handle)
+        })
+
+      const installWatcher = (
+        path: string,
+        action: Effect.Effect<void>
+      ): Effect.Effect<void, never, Scope.Scope> =>
+        Effect.gen(function* () {
+          const handle = yield* tryInstall(path, action)
+          // Tear down on layer release.
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              const t = handle.getTimer()
+              if (t !== undefined) clearTimeout(t)
+              if (handle.watcher !== undefined) handle.watcher.close()
+            })
+          )
+        })
+
+      yield* installWatcher(opts.keyPath, reloadCurrent)
+      if (opts.previousKeyPath !== undefined) {
+        yield* installWatcher(opts.previousKeyPath, reloadPrevious)
+      }
+
+      return {
+        sign,
+        verify,
+        verifyTruncated,
+      } satisfies HmacKeyProviderApi
     })
   )

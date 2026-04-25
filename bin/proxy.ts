@@ -1,38 +1,80 @@
 /**
  * SIP Front Proxy entry point.
  *
- * PR2 wires the real `ProxyCore` + `ForwardAllStrategy` over
- * `SignalingNetwork.real` and forwards every received SIP message to a
- * single configured backend. The PR1 echo behavior is gone — for a raw
- * UDP echo loop, drop back to `git show 25de99f^:bin/proxy.ts`.
+ * Modes (selected via `PROXY_REGISTRY_MODE`):
  *
- * Configuration (env-driven, no `AppConfig` dep — see `docs/todos/SIP-Front-Proxy.md` D9):
- *   - PROXY_BIND_HOST           default "0.0.0.0"
- *   - PROXY_BIND_PORT           default 5070
- *   - PROXY_ADVERTISED_HOST     default = bind host (override behind NAT / Service VIP)
- *   - PROXY_ADVERTISED_PORT     default = bind port
- *   - PROXY_FORWARD_TARGET      required: "host:port" — the single backend
- *                               every dialog gets forwarded to. Without it
- *                               the proxy refuses to start.
+ *   - `static` (default): wires `ForwardAllStrategy` against a single
+ *     `PROXY_FORWARD_TARGET=host:port`. Useful for dev / smoke tests.
+ *   - `kubernetes`: wires `LoadBalancerStrategy` against
+ *     `WorkerRegistry.kubernetesStatefulSet` + `HmacKeyProvider.kubernetesSecret`
+ *     + `HealthProbe.optionsKeepalive`. This is the production path.
  *
- * Manual smoke (two terminals):
+ * Configuration (env-driven, no `AppConfig` dep — see
+ * `docs/todos/SIP-Front-Proxy.md` D9):
+ *
+ *   General:
+ *     - PROXY_REGISTRY_MODE          static (default) | kubernetes
+ *     - PROXY_BIND_HOST              default "0.0.0.0"
+ *     - PROXY_BIND_PORT              default 5070
+ *     - PROXY_ADVERTISED_HOST        default = bind host
+ *     - PROXY_ADVERTISED_PORT        default = bind port
+ *
+ *   Static mode:
+ *     - PROXY_FORWARD_TARGET         required: "host:port" — the single
+ *                                    backend every dialog gets forwarded
+ *                                    to. Without it the proxy refuses to
+ *                                    start.
+ *
+ *   Kubernetes mode:
+ *     - PROXY_K8S_NAMESPACE          required: namespace to watch.
+ *     - PROXY_K8S_STATEFULSET_NAME   required: drives the default label
+ *                                    selector `app.kubernetes.io/name=…`.
+ *     - PROXY_K8S_POD_PORT           required: SIP UDP port the worker
+ *                                    listens on inside each pod.
+ *     - PROXY_K8S_LABEL_SELECTOR     optional override of the label
+ *                                    selector.
+ *     - PROXY_HMAC_KEY_PATH          required: file path of the HMAC
+ *                                    Secret-mounted current key.
+ *     - PROXY_HMAC_PREVIOUS_KEY_PATH optional second mounted file for
+ *                                    operator-controlled rotation
+ *                                    (NFR-8 overlap window).
+ *     - PROXY_HEALTH_PROBE_BIND_HOST required: bind address for the
+ *                                    OPTIONS keepalive probe.
+ *     - PROXY_HEALTH_PROBE_BIND_PORT required: bind UDP port for the
+ *                                    OPTIONS keepalive probe.
+ *     - PROXY_HEALTH_PROBE_INTERVAL_MS  optional, default 2000.
+ *     - PROXY_HEALTH_PROBE_TIMEOUT_MS   optional, default 1500.
+ *     - PROXY_HEALTH_PROBE_THRESHOLD    optional, default 3.
+ *
+ * Manual smoke (static mode, two terminals):
  *   PROXY_FORWARD_TARGET=127.0.0.1:5061 npm run proxy:dev
  *   sipp -sn uas -p 5061 127.0.0.1
  *   sipp -sn uac -s alice 127.0.0.1:5070
  */
 
 import { NodeRuntime } from "@effect/platform-node"
+import { KubeConfig, Watch } from "@kubernetes/client-node"
 import { Effect, Layer } from "effect"
 import { SignalingNetwork } from "../src/sip/SignalingNetwork.js"
 import {
   CancelBranchLru,
   ForwardAllConfig,
   ForwardAllStrategyLive,
+  HealthProbe,
+  healthProbeOptionsKeepaliveLayer,
+  LoadBalancerConfig,
+  LoadBalancerStrategyLive,
   ProxyBindConfig,
   ProxyCore,
   PROXY_VERSION,
   type SocketAddr,
+  workerRegistryControlNoopLayer,
 } from "../src/sip-front-proxy/index.js"
+import {
+  kubernetesStatefulSetLayer,
+  kubernetesWatchClient,
+} from "../src/sip-front-proxy/registry/kubernetes.js"
+import { kubernetesSecretLayer } from "../src/sip-front-proxy/security/HmacKeyProvider.js"
 
 const DEFAULT_BIND_HOST = "0.0.0.0"
 const DEFAULT_BIND_PORT = 5070
@@ -41,6 +83,24 @@ const parsePort = (raw: string | undefined, fallback: number): number => {
   if (raw === undefined || raw.length === 0) return fallback
   const n = Number.parseInt(raw, 10)
   return Number.isFinite(n) && n > 0 && n <= 65535 ? n : fallback
+}
+
+const requirePort = (raw: string | undefined, name: string): number => {
+  if (raw === undefined || raw.length === 0) {
+    throw new Error(`${name} is required (must be a port in 1..65535)`)
+  }
+  const n = Number.parseInt(raw, 10)
+  if (!Number.isFinite(n) || n <= 0 || n > 65535) {
+    throw new Error(`${name} malformed: ${raw} (must be 1..65535)`)
+  }
+  return n
+}
+
+const requireString = (raw: string | undefined, name: string): string => {
+  if (raw === undefined || raw.length === 0) {
+    throw new Error(`${name} is required`)
+  }
+  return raw
 }
 
 const parseTarget = (raw: string | undefined): SocketAddr => {
@@ -63,37 +123,146 @@ const bindHost = process.env["PROXY_BIND_HOST"] ?? DEFAULT_BIND_HOST
 const bindPort = parsePort(process.env["PROXY_BIND_PORT"], DEFAULT_BIND_PORT)
 const advertisedHost = process.env["PROXY_ADVERTISED_HOST"] ?? bindHost
 const advertisedPort = parsePort(process.env["PROXY_ADVERTISED_PORT"], bindPort)
-const target = parseTarget(process.env["PROXY_FORWARD_TARGET"])
+const mode = (process.env["PROXY_REGISTRY_MODE"] ?? "static").toLowerCase()
 
-const program = Effect.gen(function* () {
-  const proxy = yield* ProxyCore
-  yield* Effect.logInfo(
-    `sip-front-proxy ${PROXY_VERSION} bound=${proxy.localAddress.ip}:${proxy.localAddress.port} ` +
-      `advertised=${proxy.advertisedAddress.ip}:${proxy.advertisedAddress.port} ` +
-      `→ ${target.host}:${target.port}`
-  )
-  // ProxyCore's ingress fiber is forked into the layer scope; we just keep
-  // the runtime alive until SIGINT/SIGTERM.
-  return yield* Effect.never
-})
-
-const ProxyLayer = ProxyCore.Default.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      SignalingNetwork.real,
-      ProxyBindConfig.layer({
-        bindHost,
-        bindPort,
-        advertisedHost,
-        advertisedPort,
-        reusePort: true,
-      }),
-      ForwardAllStrategyLive.pipe(
-        Layer.provide(ForwardAllConfig.layer(target))
-      ),
-      CancelBranchLru.Default
-    )
-  )
+const baseBindLayer = Layer.mergeAll(
+  SignalingNetwork.real,
+  ProxyBindConfig.layer({
+    bindHost,
+    bindPort,
+    advertisedHost,
+    advertisedPort,
+    reusePort: true,
+  }),
+  CancelBranchLru.Default
 )
 
-NodeRuntime.runMain(Effect.scoped(program).pipe(Effect.provide(ProxyLayer)))
+const buildStaticLayer = () => {
+  const target = parseTarget(process.env["PROXY_FORWARD_TARGET"])
+  const program = Effect.gen(function* () {
+    const proxy = yield* ProxyCore
+    yield* Effect.logInfo(
+      `sip-front-proxy ${PROXY_VERSION} mode=static bound=${proxy.localAddress.ip}:${proxy.localAddress.port} ` +
+        `advertised=${proxy.advertisedAddress.ip}:${proxy.advertisedAddress.port} ` +
+        `→ ${target.host}:${target.port}`
+    )
+    return yield* Effect.never
+  })
+  const layer = ProxyCore.Default.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        baseBindLayer,
+        ForwardAllStrategyLive.pipe(
+          Layer.provide(ForwardAllConfig.layer(target))
+        ),
+        // ForwardAll doesn't need a registry / HMAC / probe; we still
+        // provide a no-op WorkerRegistryControl so any future code that
+        // reaches for it in this mode doesn't crash.
+        workerRegistryControlNoopLayer
+      )
+    )
+  )
+  return { program, layer }
+}
+
+const buildKubernetesLayer = () => {
+  const namespace = requireString(process.env["PROXY_K8S_NAMESPACE"], "PROXY_K8S_NAMESPACE")
+  const statefulSetName = requireString(
+    process.env["PROXY_K8S_STATEFULSET_NAME"],
+    "PROXY_K8S_STATEFULSET_NAME"
+  )
+  const podPort = requirePort(process.env["PROXY_K8S_POD_PORT"], "PROXY_K8S_POD_PORT")
+  const labelSelector = process.env["PROXY_K8S_LABEL_SELECTOR"]
+  const hmacKeyPath = requireString(
+    process.env["PROXY_HMAC_KEY_PATH"],
+    "PROXY_HMAC_KEY_PATH"
+  )
+  const hmacPreviousKeyPath = process.env["PROXY_HMAC_PREVIOUS_KEY_PATH"]
+  const probeBindHost = requireString(
+    process.env["PROXY_HEALTH_PROBE_BIND_HOST"],
+    "PROXY_HEALTH_PROBE_BIND_HOST"
+  )
+  const probeBindPort = requirePort(
+    process.env["PROXY_HEALTH_PROBE_BIND_PORT"],
+    "PROXY_HEALTH_PROBE_BIND_PORT"
+  )
+  const probeIntervalMs = process.env["PROXY_HEALTH_PROBE_INTERVAL_MS"]
+  const probeTimeoutMs = process.env["PROXY_HEALTH_PROBE_TIMEOUT_MS"]
+  const probeThreshold = process.env["PROXY_HEALTH_PROBE_THRESHOLD"]
+
+  // Build the K8s client at module scope (synchronous) — the SDK's
+  // `loadFromCluster` reads the ServiceAccount-mounted token. Failing
+  // here is the right behavior: a misconfigured RBAC binding shouldn't
+  // be silently masked.
+  const kubeConfig = new KubeConfig()
+  kubeConfig.loadFromCluster()
+  const watch = new Watch(kubeConfig)
+  const watchClient = kubernetesWatchClient(watch)
+
+  const program = Effect.gen(function* () {
+    const proxy = yield* ProxyCore
+    const probe = yield* HealthProbe
+    yield* probe.start
+    yield* Effect.logInfo(
+      `sip-front-proxy ${PROXY_VERSION} mode=kubernetes ns=${namespace} ` +
+        `sts=${statefulSetName} bound=${proxy.localAddress.ip}:${proxy.localAddress.port} ` +
+        `advertised=${proxy.advertisedAddress.ip}:${proxy.advertisedAddress.port}`
+    )
+    return yield* Effect.never
+  })
+
+  const registryLayer = kubernetesStatefulSetLayer(
+    labelSelector !== undefined
+      ? { namespace, statefulSetName, podPort, labelSelector }
+      : { namespace, statefulSetName, podPort },
+    watchClient
+  )
+
+  const hmacLayer = kubernetesSecretLayer(
+    hmacPreviousKeyPath !== undefined
+      ? { keyPath: hmacKeyPath, previousKeyPath: hmacPreviousKeyPath }
+      : { keyPath: hmacKeyPath }
+  )
+
+  const probeLayer = healthProbeOptionsKeepaliveLayer({
+    bindHost: probeBindHost,
+    bindPort: probeBindPort,
+    ...(probeIntervalMs !== undefined && {
+      intervalMs: parsePort(probeIntervalMs, 2000),
+    }),
+    ...(probeTimeoutMs !== undefined && {
+      timeoutMs: parsePort(probeTimeoutMs, 1500),
+    }),
+    ...(probeThreshold !== undefined && {
+      threshold: Number.parseInt(probeThreshold, 10) || 3,
+    }),
+  })
+
+  // Layer composition:
+  //   - registryLayer  provides WorkerRegistry + WorkerRegistryControl
+  //   - hmacLayer      provides HmacKeyProvider
+  //   - probeLayer     needs SignalingNetwork, WorkerRegistry, WorkerRegistryControl
+  //   - LB strategy    needs WorkerRegistry, HmacKeyProvider
+  //   - ProxyCore      needs RoutingStrategy, SignalingNetwork, ProxyBindConfig, CancelBranchLru
+  //
+  // We build a single shared "infra" layer below ProxyCore + HealthProbe so
+  // the registry and HMAC providers are instantiated exactly once and
+  // shared across consumers.
+  const infraLayer = Layer.mergeAll(baseBindLayer, registryLayer, hmacLayer)
+  const lbStrategyLayer = LoadBalancerStrategyLive.pipe(
+    Layer.provide(LoadBalancerConfig.layer({}))
+  )
+  const layer = Layer.mergeAll(
+    ProxyCore.Default.pipe(Layer.provide(lbStrategyLayer)),
+    probeLayer
+  ).pipe(Layer.provide(infraLayer))
+  return { program, layer }
+}
+
+if (mode === "kubernetes") {
+  const { program, layer } = buildKubernetesLayer()
+  NodeRuntime.runMain(Effect.scoped(program).pipe(Effect.provide(layer)))
+} else {
+  const { program, layer } = buildStaticLayer()
+  NodeRuntime.runMain(Effect.scoped(program).pipe(Effect.provide(layer)))
+}

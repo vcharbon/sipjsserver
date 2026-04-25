@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sip-front-proxy.fullname" . }}
+  labels:
+    {{- include "sip-front-proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "sip-front-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sip-front-proxy.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "sip-front-proxy.serviceAccountName" . }}
+      # RFC 3261 Timer C ceiling for in-flight INVITE establishment is
+      # 180s. Add 20s safety so the proxy can keep responding to CANCELs
+      # / drains for the entire grace window. See
+      # docs/sip-front-proxy/resilience-model.md timing table.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Proxy entrypoint baked into the image as
+          # `dist-bin/bin/proxy.js` (see Dockerfile).
+          command: ["node", "dist-bin/bin/proxy.js"]
+          ports:
+            - name: sip-udp
+              containerPort: {{ .Values.bind.port }}
+              protocol: UDP
+            - name: probe-udp
+              containerPort: {{ .Values.healthProbe.bindPort }}
+              protocol: UDP
+          envFrom:
+            - configMapRef:
+                name: {{ include "sip-front-proxy.fullname" . }}
+          env:
+            {{- if .Values.hmacKey }}
+            - name: PROXY_HMAC_KEY_PATH
+              value: /etc/sip-proxy/hmac/current
+            {{- end }}
+            {{- if .Values.previousHmacKey }}
+            - name: PROXY_HMAC_PREVIOUS_KEY_PATH
+              value: /etc/sip-proxy/hmac/previous
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or .Values.hmacKey .Values.previousHmacKey }}
+          volumeMounts:
+            - name: hmac
+              mountPath: /etc/sip-proxy/hmac
+              readOnly: true
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if or .Values.hmacKey .Values.previousHmacKey }}
+      volumes:
+        - name: hmac
+          secret:
+            secretName: {{ include "sip-front-proxy.fullname" . }}-hmac
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

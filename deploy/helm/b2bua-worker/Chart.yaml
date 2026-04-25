@@ -1,0 +1,13 @@
+apiVersion: v2
+name: b2bua-worker
+description: B2BUA worker StatefulSet — receives SIP traffic from the sip-front-proxy and runs the call-control logic.
+type: application
+version: 0.1.0
+appVersion: "0.6.0-pr5"
+keywords:
+  - sip
+  - b2bua
+  - voip
+home: https://github.com/vincent-charbonneau/sipjsserver
+maintainers:
+  - name: SIP Front Proxy Team

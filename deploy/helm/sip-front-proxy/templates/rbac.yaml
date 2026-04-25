@@ -1,0 +1,29 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sip-front-proxy.fullname" . }}
+  labels:
+    {{- include "sip-front-proxy.labels" . | nindent 4 }}
+rules:
+  # `WorkerRegistry.kubernetesStatefulSet` watches Pods to track the
+  # B2BUA worker fleet. No other API access required.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sip-front-proxy.fullname" . }}
+  labels:
+    {{- include "sip-front-proxy.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sip-front-proxy.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sip-front-proxy.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end -}}

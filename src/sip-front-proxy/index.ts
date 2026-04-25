@@ -11,8 +11,13 @@
  * (optionsKeepalive + manual), `WorkerRegistryControl`, the D5
  * draining model in `LoadBalancerStrategy.decodeStickiness`
  * (drain-grace fallback + ACK/CANCEL exemption), and the worker-side
- * `DrainingState` + OPTIONS handler. K8s integration arrives in PR5.
- * See `docs/todos/SIP-Front-Proxy.md` and
+ * `DrainingState` + OPTIONS handler. PR5 lands the production
+ * `WorkerRegistry.kubernetesStatefulSet` impl backed by a K8s pod
+ * watch (with deletion-timestamp accelerant + most-restrictive health
+ * composition over probe-side flips), the `HmacKeyProvider.kubernetesSecret`
+ * fs-watch impl for live key rotation, the K8s-mode wiring in
+ * `bin/proxy.ts`, and Helm charts under `deploy/helm/`. See
+ * `docs/todos/SIP-Front-Proxy.md` and
  * `docs/sip-front-proxy/resilience-model.md` (D-RES).
  *
  * Dependency policy (enforced by ESLint `no-restricted-imports`, scoped to
@@ -21,7 +26,7 @@
  *   - Forbidden: `src/{b2bua,call,decision,redis,cdr,cluster,http,observability}/**`.
  */
 
-export const PROXY_VERSION = "0.5.0-pr4"
+export const PROXY_VERSION = "0.6.0-pr5"
 
 export {
   ProxyCore,
@@ -86,7 +91,16 @@ export {
   HmacKeyProviderConfigError,
   staticLayer as hmacKeyProviderStaticLayer,
   type StaticOpts as HmacKeyProviderStaticOpts,
+  kubernetesSecretLayer as hmacKeyProviderKubernetesSecretLayer,
+  type KubernetesSecretOpts as HmacKeyProviderKubernetesSecretOpts,
 } from "./security/HmacKeyProvider.js"
+export {
+  kubernetesStatefulSetLayer as workerRegistryKubernetesStatefulSetLayer,
+  kubernetesWatchClient as workerRegistryKubernetesWatchClient,
+  mostRestrictiveHealth,
+  type KubernetesStatefulSetOpts as WorkerRegistryKubernetesStatefulSetOpts,
+  type WatchClient as WorkerRegistryKubernetesWatchClient,
+} from "./registry/kubernetes.js"
 export {
   HealthProbe,
   type HealthProbeApi,

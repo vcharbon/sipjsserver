@@ -1,0 +1,77 @@
+# Default values for b2bua-worker.
+
+replicaCount: 3
+
+image:
+  repository: sipjsserver
+  pullPolicy: IfNotPresent
+  tag: ""  # Defaults to chart appVersion if empty.
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# SIP UDP port the worker binds inside the pod. The sip-front-proxy
+# chart's `worker.podPort` MUST match this.
+sipPort: 5060
+
+# Admin/HTTP port the worker exposes for status. Used by the sidecar
+# liveness / readiness TCP socket probes since K8s doesn't natively
+# support UDP probes (Phase 2 may replace with a real HTTP health
+# endpoint backed by `DrainingState.mode`).
+adminPort: 3002
+
+# RFC 3261 Timer C (180s) + 20s safety. The worker's
+# `DrainingState.Default` SIGTERM handler flips OPTIONS replies to 503
+# immediately on receipt of SIGTERM; the proxy observes the
+# deletion-timestamp accelerant in the K8s view as well. The worker
+# keeps serving in-flight calls (ACK / CANCEL especially) for the
+# entire grace window before K8s SIGKILLs.
+terminationGracePeriodSeconds: 200
+
+resources: {}
+
+# Liveness/readiness: K8s does not support UDP probes. We use a TCP
+# socket probe against the admin port as a coarse "process alive"
+# signal. Real OPTIONS-driven readiness comes from the proxy's own
+# HealthProbe; the K8s probe just gates the pod for restart on hard
+# crash.
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 3
+  failureThreshold: 3
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+# Headless Service for stable per-pod DNS (StatefulSet pattern). The
+# proxy resolves pods by name+IP from its watch, but the headless
+# Service is required so pod DNS records exist (`<pod>.<svc>.<ns>`).
+service:
+  clusterIP: None
+  annotations: {}
+
+# Storage for CDR / persistence. Set to non-empty to enable a PVC.
+persistence:
+  enabled: false
+  storageClass: ""
+  size: 1Gi
+  mountPath: /data
+
+extraEnv: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+
+# StatefulSet-specific.
+podManagementPolicy: OrderedReady
+updateStrategy:
+  type: RollingUpdate

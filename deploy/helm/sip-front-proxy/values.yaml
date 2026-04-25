@@ -1,0 +1,73 @@
+# Default values for sip-front-proxy.
+
+replicaCount: 2
+
+image:
+  repository: sipjsserver
+  pullPolicy: IfNotPresent
+  tag: ""  # Defaults to chart appVersion if empty.
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# K8s registry watch target — the B2BUA-worker StatefulSet to load-balance.
+worker:
+  namespace: ""              # Defaults to .Release.Namespace.
+  statefulSetName: b2bua-worker
+  podPort: 5060
+  labelSelector: ""          # Optional override; defaults to
+                             # `app.kubernetes.io/name=<statefulSetName>`.
+
+# UDP bind for the proxy itself.
+bind:
+  host: "0.0.0.0"
+  port: 5060
+  advertisedHost: ""         # Defaults to the Service ClusterIP.
+  advertisedPort: 0          # 0 → use bind.port.
+
+# OPTIONS keepalive probe — auxiliary UDP socket the proxy uses to ping
+# workers and overlay probe-side health on the K8s view.
+healthProbe:
+  bindHost: "0.0.0.0"
+  bindPort: 5061
+  intervalMs: 2000
+  timeoutMs: 1500
+  threshold: 3
+
+# HMAC key for the routing-cookie signature. Operator provides one of:
+#   --set hmacKey=<base64-bytes>            (will be base64-decoded by Helm)
+#   --set-file hmacKey=path/to/key.bin
+# When `previousHmacKey` is set the proxy verifies cookies signed by EITHER
+# key during the NFR-8 1h overlap window.
+hmacKey: ""
+previousHmacKey: ""
+
+service:
+  type: ClusterIP
+  # Annotations for upstream LBs / IPVS / consistent-hash topologies (D6).
+  annotations: {}
+
+resources: {}
+
+# RFC 3261 Timer C max INVITE establishment is 180s; +20s safety = 200s
+# (see resilience-model.md timing table).
+terminationGracePeriodSeconds: 200
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra env vars injected verbatim into the proxy pod.
+extraEnv: []
+
+# RBAC: the proxy needs `get,list,watch` on `pods` in its namespace to
+# drive `WorkerRegistry.kubernetesStatefulSet`.
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}

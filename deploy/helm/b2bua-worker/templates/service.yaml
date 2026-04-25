@@ -1,0 +1,28 @@
+# Headless Service for stable per-pod DNS. The proxy's
+# WorkerRegistry.kubernetesStatefulSet impl reads `pod.status.podIP`
+# directly, but the headless Service is required so each pod gets a
+# `<pod>.<svc>.<ns>.svc.cluster.local` record (operators / debug
+# tooling rely on this).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "b2bua-worker.fullname" . }}
+  labels:
+    {{- include "b2bua-worker.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  clusterIP: {{ .Values.service.clusterIP }}  # `None` → headless.
+  selector:
+    {{- include "b2bua-worker.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: sip-udp
+      protocol: UDP
+      port: {{ .Values.sipPort }}
+      targetPort: {{ .Values.sipPort }}
+    - name: admin
+      protocol: TCP
+      port: {{ .Values.adminPort }}
+      targetPort: {{ .Values.adminPort }}

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: sip-front-proxy
+description: SIP front proxy that watches a B2BUA-worker StatefulSet and load-balances UDP traffic across its pods.
+type: application
+version: 0.1.0
+appVersion: "0.6.0-pr5"
+keywords:
+  - sip
+  - b2bua
+  - voip
+  - proxy
+home: https://github.com/vincent-charbonneau/sipjsserver
+maintainers:
+  - name: SIP Front Proxy Team
