@@ -108,6 +108,73 @@ export interface SipResponse {
 
 export type SipMessage = SipRequest | SipResponse
 
+// ---------------------------------------------------------------------------
+// Narrowed message subtypes — zero-copy refinements
+// ---------------------------------------------------------------------------
+//
+// These interfaces describe the SAME runtime objects as `SipRequest` /
+// `SipResponse` but carry stronger compile-time guarantees the dispatcher
+// (and parser) enforces at runtime. Code paths that have already established
+// the runtime invariants cast their `SipRequest` / `SipResponse` references
+// to the narrower view; no allocation, no copy.
+//
+// See docs/AdvancedCallModel.md for the dispatch-time invariants and
+// docs/typescript-effect.md for the projection rationale.
+
+/** Tag-bearing parsed name-addr — `tag` is guaranteed present. */
+export interface TaggedNameAddrField extends ParsedNameAddrField {
+  readonly tag: string
+}
+
+/**
+ * Request known to be in-dialog at dispatch time.
+ *
+ * Both `From.tag` and `To.tag` are guaranteed present:
+ * - From-tag is set by every UAC on the initial request.
+ * - To-tag is added by the UAS when the dialog is created and echoed by
+ *   every subsequent in-dialog request (RFC 3261 §12.2).
+ *
+ * The router only resolves the request to an existing dialog/leg when both
+ * tags match a confirmed dialog, so by the time a rule sees it gated by
+ * `legState: "confirmed"` (or any in-dialog-implying match), this is the
+ * runtime-true type.
+ */
+export interface InDialogRequest extends SipRequest {
+  readonly parsed: RequestParsedFields & {
+    readonly from: TaggedNameAddrField
+    readonly to: TaggedNameAddrField
+  }
+}
+
+/** Request whose `method` is the literal type `M` (matches a `RequestMatch.method` gate). */
+export interface MethodRequest<M extends string> extends SipRequest {
+  readonly method: M
+}
+
+/** In-dialog request whose `method` is the literal type `M`. */
+export type InDialogMethodRequest<M extends string> = InDialogRequest & MethodRequest<M>
+
+/**
+ * Response surfaced to the B2BUA application layer.
+ *
+ * `To.tag` is guaranteed present because:
+ * - The parser rejects any non-100 response missing a To-tag
+ *   (see `extractResponseFields`).
+ * - The TransactionLayer absorbs all `100 Trying` responses (RFC 3261:
+ *   100 is hop-by-hop only) before they reach the application.
+ *
+ * Together these two boundaries mean every response a rule sees has a
+ * non-empty To-tag, so this view is the runtime truth.
+ */
+export interface SipResponseTagged extends SipResponse {
+  readonly parsed: ResponseParsedFields & {
+    readonly to: TaggedNameAddrField
+  }
+}
+
+/** Message that may be surfaced to the B2BUA application layer (post-txn-layer). */
+export type B2BUAMessage = SipRequest | SipResponseTagged
+
 /** Remote address from which a UDP packet was received. */
 export interface RemoteInfo {
   readonly address: string

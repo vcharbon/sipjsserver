@@ -7,7 +7,16 @@
  */
 
 import type { Effect, Schema } from "effect"
-import type { SipRequest, SipResponse, RemoteInfo } from "../../../sip/types.js"
+import type {
+  SipRequest,
+  SipResponse,
+  RemoteInfo,
+  InDialogMethodRequest,
+  MethodRequest,
+  SipResponseTagged,
+  ResponseParsedFields,
+  ParsedCSeqField,
+} from "../../../sip/types.js"
 import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType, TransferPhase, TransferState } from "../../../call/CallModel.js"
 import type { AppConfigData } from "../../../config/AppConfig.js"
 import type { CallEvent } from "../../../sip/SipRouter.js"
@@ -140,30 +149,163 @@ export type Match =
   | CancelledMatch
   | InternalEventMatch
 
+// ── Type-level projections from Match → narrowed RuleContext ──────────────
+//
+// These conditional types map a rule's declarative `match` descriptor into
+// the static guarantees its handler can rely on. The narrowing is purely
+// type-level — at runtime the dispatcher hands the rule the same wide
+// `RuleContext` value, but the dispatcher has already verified the runtime
+// invariants the conditional types depend on (kind, direction, transferPhase,
+// legState, callState gates), so the assertion is sound.
+//
+// See docs/AdvancedCallModel.md "Match-driven RuleContext narrowing".
+
+/** Pull a single literal out of `T | ReadonlyArray<T>`-shaped match fields. */
+type Singleton<T> = T extends ReadonlyArray<infer U> ? U : T
+
+/**
+ * `true` when the request match-criteria imply an in-dialog (confirmed-leg)
+ * request — i.e. the router will only route to this rule after matching the
+ * incoming request to an existing confirmed dialog. RFC 3261 §12.2 then
+ * guarantees both From-tag and To-tag.
+ */
+type IsInDialogRequest<M extends RequestMatch> =
+    M extends { readonly legState: "confirmed" } ? true
+  : M extends { readonly legState: ReadonlyArray<infer LS> } ? "confirmed" extends LS ? true : false
+  : M extends { readonly transferPhase: TransferPhase } ? true
+  : M extends { readonly transferPhase: ReadonlyArray<infer P> }
+      ? P extends TransferPhase ? true : false
+  : M extends { readonly callState: "bridged" } ? true
+  : false
+
+/** Extract a SIP-method literal from a `RequestMatch.method` gate, or fall back to the wide union. */
+type MethodFor<M extends RequestMatch> =
+  Singleton<M["method"]> extends infer Mt
+    ? Mt extends SipMethod ? Mt : SipMethod
+    : SipMethod
+
+/** Extract a SIP-method literal from a `ResponseMatch.cseqMethod` gate, or fall back. */
+type CseqMethodFor<M extends ResponseMatch> =
+  Singleton<M["cseqMethod"]> extends infer Mt
+    ? Mt extends SipMethod ? Mt : SipMethod
+    : SipMethod
+
+/** Narrow the inbound request type from a `RequestMatch`. */
+type RequestMessageFor<M extends RequestMatch> =
+  IsInDialogRequest<M> extends true
+    ? InDialogMethodRequest<MethodFor<M>>
+    : MethodRequest<MethodFor<M>>
+
+/** Narrow the inbound response type from a `ResponseMatch`. */
+type ResponseMessageFor<M extends ResponseMatch> =
+  CseqMethodFor<M> extends infer Mt extends SipMethod
+    ? SipResponseTagged & {
+        readonly parsed: ResponseParsedFields & {
+          readonly cseq: ParsedCSeqField & { readonly method: Mt }
+        }
+      }
+    : SipResponseTagged
+
+/** Narrow `ctx.event` from any `Match`. The tuple-wrap on the wide guard
+ *  prevents distribution so `EventFor<Match>` reduces back to `CallEvent`. */
+export type EventFor<M extends Match> =
+    [Match] extends [M] ? CallEvent
+  : M extends RequestMatch
+      ? { readonly type: "sip"; readonly message: RequestMessageFor<M>; readonly rinfo: RemoteInfo }
+  : M extends ResponseMatch
+      ? { readonly type: "sip"; readonly message: ResponseMessageFor<M>; readonly rinfo: RemoteInfo }
+  : M extends TimerMatch
+      ? Extract<CallEvent, { type: "timer" }>
+  : M extends TimeoutMatch
+      ? Extract<CallEvent, { type: "timeout" }>
+  : M extends CancelledMatch
+      ? Extract<CallEvent, { type: "cancelled" }>
+  : M extends InternalEventMatch
+      ? Extract<CallEvent, { type: "internal-event" }>
+  : CallEvent
+
+/** Narrow `ctx.direction` from a `RequestMatch` / `ResponseMatch` gate. */
+export type DirectionFor<M extends Match> =
+  [Match] extends [M] ? Direction
+    : M extends { readonly direction: infer D } ? D extends Direction ? D : Direction : Direction
+
+/**
+ * Narrow `ctx.call.transfer` from `Match.transferPhase`.
+ *
+ * - `transferPhase: null`              → transfer is `null | undefined`
+ * - `transferPhase: <TransferPhase>`   → transfer non-null, `phase` literal-narrowed
+ * - `transferPhase: ReadonlyArray<…>`  → transfer non-null, `phase` is the union
+ * - omitted                             → transfer stays at the wide type
+ */
+export type TransferFor<M extends Match> =
+    M extends { readonly transferPhase: null } ? null | undefined
+  : M extends { readonly transferPhase: infer P }
+      ? P extends TransferPhase
+          ? Omit<TransferState, "phase"> & { readonly phase: P }
+      : P extends ReadonlyArray<infer Q>
+          ? Q extends TransferPhase
+              ? Omit<TransferState, "phase"> & { readonly phase: Q }
+              : TransferState | null | undefined
+          : TransferState | null | undefined
+  : TransferState | null | undefined
+
+/** Narrow `ctx.call.state` from `Match.callState`. */
+type CallStateFor<M extends Match> =
+  M extends { readonly callState: infer S }
+    ? Singleton<S> extends infer S2
+        ? S2 extends CallModelState ? S2 : CallModelState
+        : CallModelState
+    : CallModelState
+
+/**
+ * Narrow `ctx.call`. The wide-case guard makes `CallFor<Match>` reduce back to
+ * `Call` (preserving `transfer?` optionality and `state` width); only specific
+ * matches synthesize the narrowed shape.
+ */
+export type CallFor<M extends Match> =
+  [Match] extends [M]
+    ? Call
+    : Omit<Call, "transfer" | "state"> & {
+        readonly transfer: TransferFor<M>
+        readonly state: CallStateFor<M>
+      }
+
+/** Narrow `ctx.sourceDialog` — non-undefined when the match implies a confirmed dialog. */
+export type DialogFor<M extends Match> =
+  [Match] extends [M] ? Dialog | undefined
+    : M extends RequestMatch
+        ? IsInDialogRequest<M> extends true ? Dialog : Dialog | undefined
+        : Dialog | undefined
+
 // ── Rule context (what rules see) ──────────────────────────────────────────
 
 /**
  * Read-only context passed to rule handlers.
  *
- * Peer resolution is intentionally NOT included here — it was removed because
- * `activePeer` is null during early dialog (before confirm-dialog/merge), making
- * any eagerly-resolved `peer` field unreliable. Rules that need the peer should
- * emit `relay-to-peer` and let ActionExecutor resolve the target with its richer
+ * Generic over the rule's `Match` so that handlers see exactly the guarantees
+ * the dispatcher already enforces — no defensive `if (event.type !== "sip")`
+ * guards in the body. `RuleContext` (no parameter) is the wide form, used by
+ * legacy rules that take any event.
+ *
+ * Peer resolution is intentionally NOT included — `activePeer` is null during
+ * early dialog (before confirm-dialog/merge), making any eagerly-resolved
+ * `peer` field unreliable. Rules that need the peer should emit
+ * `relay-to-peer` and let ActionExecutor resolve the target with its richer
  * fallback logic (tagMap, single-b-leg fallback, etc.).
  */
-export interface RuleContext {
-  /** Full call state (legs, dialogs, peering, rule states). Read-only for rules. */
-  readonly call: Call
+export interface RuleContext<TMatch extends Match = Match> {
+  /** Full call state — narrowed transfer / state when match-criteria imply it. */
+  readonly call: CallFor<TMatch>
   /** Deterministic call reference (callId|fromTag). */
   readonly callRef: string
-  /** The event being processed. */
-  readonly event: CallEvent
+  /** The event being processed — narrowed to the kind declared by `match.kind`. */
+  readonly event: EventFor<TMatch>
   /** Which leg the event came from. */
   readonly sourceLeg: Leg
-  /** Dialog on the source leg (may be undefined for early state). */
-  readonly sourceDialog: Dialog | undefined
-  /** Direction from which the event arrived. */
-  readonly direction: "from-a" | "from-b"
+  /** Dialog on the source leg — non-undefined when `match` implies a confirmed dialog. */
+  readonly sourceDialog: DialogFor<TMatch>
+  /** Direction from which the event arrived — literal-narrowed when `match.direction` is set. */
+  readonly direction: DirectionFor<TMatch>
   /** App configuration. */
   readonly config: AppConfigData
   /** Canonical call-decision engine for routing / failure / refer decisions. */
@@ -612,3 +754,67 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyRuleDefinition = RuleDefinition<any, any>
+
+// ── Match-aware factory ────────────────────────────────────────────────────
+
+/**
+ * Define a rule with a `match`-narrowed handler context.
+ *
+ * `defineRule` infers `TMatch` from the literal `match` value, so the handler's
+ * `ctx` is typed as `RuleContext<TMatch>` — narrowed event, message, direction,
+ * call.transfer, sourceDialog all derived from the match-criteria. The result
+ * is a plain `RuleDefinition<TState, TParams>` (handler context erased to the
+ * wide form) which the dispatcher invokes via the same code path as legacy
+ * rules; the cast is sound because the dispatcher only invokes the handler
+ * after the matcher has verified `match` against the runtime event.
+ *
+ * Example:
+ * ```ts
+ * export const referInterceptRule = defineRule({
+ *   id: "transfer-intercept-refer",
+ *   name: "Transfer intercept REFER",
+ *   match: {
+ *     kind: "request", method: "REFER", direction: "from-b",
+ *     callState: "bridged", transferPhase: null,
+ *   },
+ *   stateSchema: Schema.Undefined,
+ *   paramsSchema: Schema.Undefined,
+ *   init: () => undefined,
+ *   handle: (ctx) => Effect.sync(() => {
+ *     // ctx.event.message: InDialogMethodRequest<"REFER"> — to.tag, from.tag both string
+ *     // ctx.sourceDialog: Dialog (non-undefined)
+ *     // ctx.direction: "from-b"
+ *     // ctx.call.transfer: null | undefined
+ *     // ctx.call.state: "bridged"
+ *     return undefined
+ *   }),
+ * })
+ * ```
+ */
+export function defineRule<
+  TMatch extends Match,
+  TState = undefined,
+  TParams = undefined,
+>(
+  def: {
+    readonly id: string
+    readonly name: string
+    readonly match: TMatch
+    readonly stateSchema: Schema.Schema<TState>
+    readonly paramsSchema: Schema.Schema<TParams>
+    readonly init: (params: TParams, call: Call) => TState
+    readonly handle: (
+      ctx: RuleContext<TMatch>,
+      state: TState,
+      params: TParams,
+    ) => Effect.Effect<RuleHandleResult<TState> | undefined | void, never, never>
+    readonly alwaysActive?: boolean
+    readonly defaultPriority?: number
+    readonly stateKey?: string
+    readonly composesWith?: string
+    readonly overrides?: string
+    readonly onError?: "passthrough" | "terminate"
+  },
+): RuleDefinition<TState, TParams> {
+  return def as unknown as RuleDefinition<TState, TParams>
+}

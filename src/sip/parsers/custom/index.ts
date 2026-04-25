@@ -11,7 +11,7 @@ import { Result } from "effect"
 import type { SipMessage, SipRequest, SipResponse, SipHeader } from "../../types.js"
 import type { SipParserImpl } from "../interface.js"
 import { SipParseError } from "../errors.js"
-import { extractCommonFields, extractRequestFields } from "../extract-fields.js"
+import { extractResponseFields, extractRequestFields } from "../extract-fields.js"
 import { Scanner } from "./scanner.js"
 import { parseStartLine } from "./start-line.js"
 import { parseHeaders } from "./headers.js"
@@ -93,7 +93,7 @@ export const customParser: SipParserImpl = {
       return Result.succeed(request)
     }
 
-    const fields = extractCommonFields(headers)
+    const fields = extractResponseFields(headers, startLine.status)
     if (Result.isFailure(fields)) return Result.fail(fields.failure)
     const response: SipResponse = {
       type: "response",

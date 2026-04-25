@@ -14,7 +14,7 @@
  */
 
 import { Cause, Clock, Duration, Effect, Fiber, Layer, MutableHashMap, Option, Queue, ServiceMap, Stream } from "effect"
-import type { RemoteInfo, SipMessage, SipRequest, SipResponse } from "./types.js"
+import type { RemoteInfo, SipMessage, SipRequest, SipResponse, SipResponseTagged, B2BUAMessage } from "./types.js"
 import { SipParser } from "./Parser.js"
 import { UdpTransport } from "./UdpTransport.js"
 import { serialize, sipSummary } from "./Serializer.js"
@@ -33,7 +33,7 @@ import { parseVia, parseNameAddr } from "./parsers/custom/structured-headers.js"
 // ---------------------------------------------------------------------------
 
 export type TransactionEvent =
-  | { readonly type: "message"; readonly message: SipMessage; readonly rinfo: RemoteInfo }
+  | { readonly type: "message"; readonly message: B2BUAMessage; readonly rinfo: RemoteInfo }
   | { readonly type: "cancelled"; readonly callId: string; readonly fromTag: string }
   | {
       readonly type: "timeout"
@@ -534,7 +534,36 @@ export class TransactionLayer extends ServiceMap.Service<
       const handleInboundResponse = Effect.fnUntraced(
         function* (resp: SipResponse, rinfo: RemoteInfo) {
           const branch = resp.parsed?.via?.branch ?? ""
+
+          // RFC 3261 §17 / §8.1.3.4: 100 Trying is a hop-by-hop progress
+          // indicator only — it never carries a To-tag (and per §8.1.3.4 SHOULD
+          // not be forwarded by an upstream UAC). Absorb it here regardless of
+          // CSeq method, after updating the matching client transaction's
+          // retransmit/state machine. The application never sees a 100, which
+          // is what lets `SipResponseTagged.parsed.to.tag` be `string` (not
+          // `string | undefined`) for everything that does reach the rule chain.
+          if (resp.status === 100) {
+            if (branch) {
+              const existing = yield* findTxn(branch)
+              if (existing !== undefined && existing.role === "client") {
+                yield* Effect.sync(() => {
+                  const opt = MutableHashMap.get(txnMap, branch)
+                  if (Option.isSome(opt)) MutableHashMap.set(txnMap, branch, { ...opt.value, state: "proceeding" })
+                })
+                if (existing.retransmitFiber) {
+                  yield* Fiber.interrupt(existing.retransmitFiber)
+                }
+              }
+            }
+            return
+          }
+
           const respCSeqMethod = resp.parsed?.cseq?.method?.toUpperCase()
+
+          // The parser rejects non-100 responses missing a To-tag (see
+          // extractResponseFields), and we just absorbed every 100 above.
+          // Anything still here is therefore a SipResponseTagged at runtime.
+          const tagged = resp as SipResponseTagged
 
           if (branch) {
             const existing = yield* findTxn(branch)
@@ -546,12 +575,13 @@ export class TransactionLayer extends ServiceMap.Service<
             // no CANCEL client txn is tracked; we simply bypass client-txn
             // handling when the CSeq method is CANCEL and emit the message.
             if (respCSeqMethod === "CANCEL") {
-              yield* emit({ type: "message", message: resp, rinfo })
+              yield* emit({ type: "message", message: tagged, rinfo })
               return
             }
             if (existing !== undefined && existing.role === "client") {
-              if (resp.status >= 100 && resp.status < 200) {
-                // Provisional — move to proceeding, stop retransmit (but keep timeout)
+              if (resp.status < 200) {
+                // Provisional 1xx > 100 — move to proceeding, stop retransmit
+                // (100 was already handled above and never reaches this branch).
                 yield* Effect.sync(() => {
                   const opt = MutableHashMap.get(txnMap, branch)
                   if (Option.isSome(opt)) MutableHashMap.set(txnMap, branch, { ...opt.value, state: "proceeding" })
@@ -581,7 +611,7 @@ export class TransactionLayer extends ServiceMap.Service<
             }
           }
 
-          yield* emit({ type: "message", message: resp, rinfo })
+          yield* emit({ type: "message", message: tagged, rinfo })
         }
       )
 

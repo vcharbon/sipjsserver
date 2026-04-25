@@ -10,7 +10,7 @@ import { Result } from "effect"
 import type { SipHeader, SipMessage, SipRequest, SipResponse } from "../types.js"
 import type { SipParserImpl } from "./interface.js"
 import { SipParseError } from "./errors.js"
-import { extractCommonFields, extractRequestFields } from "./extract-fields.js"
+import { extractResponseFields, extractRequestFields } from "./extract-fields.js"
 import { LazyHeaders } from "./custom/lazy-headers.js"
 import { expandCompactForm } from "./custom/compact-forms.js"
 
@@ -60,7 +60,7 @@ function adaptMessage(
   const lazy = new LazyHeaders(headers)
 
   if (msg.status_code !== undefined) {
-    const fields = extractCommonFields(headers)
+    const fields = extractResponseFields(headers, msg.status_code)
     if (Result.isFailure(fields)) return Result.fail(fields.failure)
     const response: SipResponse = {
       type: "response",

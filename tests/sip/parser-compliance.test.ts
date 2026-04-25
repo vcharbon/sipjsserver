@@ -113,14 +113,18 @@ describe.each(parsers)("$name — RFC 4475 valid messages", (impl) => {
 // We use test.fails() annotations where a parser is known to accept.
 // ---------------------------------------------------------------------------
 
-// Known-lenient cases per parser (parser accepts when RFC says reject)
+// Known-lenient cases per parser (parser accepts when RFC says reject).
+//
+// 3.1.2.5 (overlarge response scalars) is now rejected by every parser
+// because the response — a 503 — lacks a To-tag, and `extractResponseFields`
+// rejects any non-100 response missing a To-tag (RFC 3261 §8.2.6.2).
 const knownLenient: Record<string, Set<string>> = {
   jssip: new Set([
-    "3.1.2.2", "3.1.2.4", "3.1.2.5", "3.1.2.10",
+    "3.1.2.2", "3.1.2.4", "3.1.2.10",
     "3.1.2.11", "3.1.2.12", "3.1.2.16", "3.1.2.17", "3.1.2.18",
   ]),
   "sip-parser": new Set([
-    "3.1.2.2", "3.1.2.3", "3.1.2.4", "3.1.2.5", "3.1.2.6",
+    "3.1.2.2", "3.1.2.3", "3.1.2.4", "3.1.2.6",
     "3.1.2.8", "3.1.2.10", "3.1.2.11", "3.1.2.12",
     "3.1.2.13", "3.1.2.14", "3.1.2.15", "3.1.2.17", "3.1.2.18",
   ]),

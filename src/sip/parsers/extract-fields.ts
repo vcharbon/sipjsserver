@@ -193,3 +193,31 @@ export function extractRequestFields(
     },
   })
 }
+
+/**
+ * Extract response-specific parsed fields with status-aware validation.
+ *
+ * RFC 3261 §8.2.6.2 / §17.1.3: every response except 100 Trying MUST carry
+ * a To-tag — for 1xx > 100 and final responses, the To-tag identifies the
+ * dialog (or the would-be dialog for non-2xx). 100 Trying is purely a
+ * hop-by-hop progress indicator and may omit the tag.
+ *
+ * Failing here keeps the rest of the B2BUA free of defensive `to.tag ?? ""`
+ * fallbacks: every parsed response with `status > 100` is guaranteed to
+ * have a non-empty To-tag.
+ */
+export function extractResponseFields(
+  headers: ReadonlyArray<SipHeader>,
+  status: number,
+): Result.Result<ResponseParsedFields, SipParseError> {
+  const common = extractCommonFields(headers)
+  if (Result.isFailure(common)) return common
+  if (status > 100 && common.success.to.tag === undefined) {
+    return Result.fail(
+      new SipParseError({
+        reason: `Non-100 response (status=${status}) missing mandatory To-tag`,
+      })
+    )
+  }
+  return common
+}

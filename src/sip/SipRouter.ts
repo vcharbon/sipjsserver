@@ -12,7 +12,7 @@
  */
 
 import { Clock, Effect, Layer, ServiceMap, Stream, Tracer } from "effect"
-import type { RemoteInfo, SipMessage, SipRequest, SipResponse } from "./types.js"
+import type { RemoteInfo, SipRequest, SipResponse, B2BUAMessage } from "./types.js"
 import { TransactionLayer } from "./TransactionLayer.js"
 import { UdpTransport } from "./UdpTransport.js"
 import { serialize, messageSummary } from "./Serializer.js"
@@ -46,7 +46,7 @@ import {
 
 /** Unified event type consumed by withCall. */
 export type CallEvent =
-  | { readonly type: "sip"; readonly message: SipMessage; readonly rinfo: RemoteInfo }
+  | { readonly type: "sip"; readonly message: B2BUAMessage; readonly rinfo: RemoteInfo }
   | { readonly type: "timer"; readonly timerType: TimerType; readonly callRef: string; readonly legId: string | undefined }
   | { readonly type: "cancelled"; readonly callId: string; readonly fromTag: string }
   | {
