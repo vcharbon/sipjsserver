@@ -98,6 +98,21 @@ function isInitialInvite(msg: SipMessage): boolean {
   return !toTag
 }
 
+/**
+ * `true` when the message is an out-of-dialog request that is NOT a
+ * dialog-creating INVITE — i.e. a request without a To-tag whose method
+ * is anything other than INVITE. Catches OPTIONS keepalive, out-of-dialog
+ * NOTIFY/INFO, and similar "non-call-establishing" traffic. Used to mute
+ * such arrows in the report so call signaling stays visually dominant
+ * while keepalive traffic remains visible (critical for HA scenarios
+ * where probe loss is the protagonist).
+ */
+function isOutOfDialogNonInvite(msg: SipMessage): boolean {
+  if (msg.type !== "request") return false
+  if (msg.method === "INVITE") return false
+  return !getToTag(msg)
+}
+
 function getArrowLabel(msg: SipMessage): string {
   const sdpTag = hasSdp(msg) ? " [SDP]" : ""
   if (msg.type === "request") {
@@ -251,7 +266,10 @@ export function renderSequenceDiagram(
     // collide in the click-handler map. `data-step-index` is kept on the
     // attribute for backward compatibility with anything that scrapes the
     // SVG; the click handler uses `data-trace-index` exclusively.
-    svgParts.push(`<g class="trace-arrow" data-step-index="${entry.stepIndex}" data-trace-index="${i}" style="cursor:pointer">`)
+    const arrowClasses = isOutOfDialogNonInvite(entry.message)
+      ? "trace-arrow trace-arrow--out-of-dialog-non-invite"
+      : "trace-arrow"
+    svgParts.push(`<g class="${arrowClasses}" data-step-index="${entry.stepIndex}" data-trace-index="${i}" style="cursor:pointer">`)
 
     // Arrow line
     const arrowFromX = isLeftToRight ? fromX + 5 : fromX - 5

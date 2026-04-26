@@ -177,6 +177,12 @@ export function writeScenarioReport(
     .trace-arrow:hover line { stroke-width: 3 !important; }
     .trace-arrow:hover rect { fill: rgba(59, 130, 246, 0.05) !important; }
     .trace-arrow.selected rect { fill: rgba(59, 130, 246, 0.1) !important; }
+    /* Out-of-dialog non-INVITE arrows (OPTIONS keepalive, out-of-dialog
+       NOTIFY/INFO, etc.) are muted so call signaling stays visually
+       dominant. They remain fully visible — and clickable — but recede
+       so the eye finds the call flow first. */
+    .trace-arrow--out-of-dialog-non-invite { opacity: 0.35; }
+    .trace-arrow--out-of-dialog-non-invite:hover { opacity: 1; }
     .index-link {
       font-size: 13px;
       color: #60a5fa;
