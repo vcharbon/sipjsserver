@@ -46,8 +46,19 @@ export const WorkerId = (raw: string): WorkerId => raw as WorkerId
 // Domain types
 // ---------------------------------------------------------------------------
 
-/** Health classification for a worker, per D5 (draining model). */
-export type WorkerHealth = "alive" | "draining" | "dead"
+/**
+ * Health classification for a worker, per D5 (draining model).
+ *
+ * `unknown` is the initial state for a freshly-admitted worker that the
+ * proxy has not yet exchanged an OPTIONS round-trip with. It is **distinct
+ * from `dead`**: dead means we previously confirmed the worker is gone,
+ * unknown means we haven't yet confirmed anything. Routing-side filters
+ * MUST treat unknown as not-routable for new dialogs (same as dead). The
+ * distinction is preserved so future hysteresis on `dead → alive` recovery
+ * (e.g. require N consecutive 200 OKs before re-admitting) does not also
+ * penalize cold-start workers.
+ */
+export type WorkerHealth = "unknown" | "alive" | "draining" | "dead"
 
 export interface WorkerEntry {
   readonly id: WorkerId

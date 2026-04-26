@@ -153,7 +153,7 @@ describe("sip-front-proxy/registry/kubernetes", () => {
     })
   )
 
-  it.effect("ADDED with Ready=True + podIP → 'added' event, alive", () => {
+  it.effect("ADDED with Ready=True + podIP → 'added' event, unknown until probe", () => {
     const fake = makeFakeWatchClient()
     return Effect.gen(function* () {
       const reg = yield* WorkerRegistry
@@ -172,11 +172,14 @@ describe("sip-front-proxy/registry/kubernetes", () => {
       const ev = events[0] as Extract<RegistryEvent, { _tag: "added" }>
       expect(ev.entry.id).toBe("pod-0")
       expect(ev.entry.address).toEqual({ host: "10.0.0.10", port: 5060 })
-      expect(ev.entry.health).toBe("alive")
+      // Composed health is `unknown`: K8s ready=True but probe has not
+      // yet observed an OPTIONS round-trip. HealthProbe transitions
+      // unknown → alive on first 200 OK.
+      expect(ev.entry.health).toBe("unknown")
 
       const snap = yield* reg.snapshot
       expect(snap).toHaveLength(1)
-      expect(snap[0]!.health).toBe("alive")
+      expect(snap[0]!.health).toBe("unknown")
     }).pipe(Effect.provide(layerWith(fake.client)))
   })
 
@@ -201,7 +204,10 @@ describe("sip-front-proxy/registry/kubernetes", () => {
       expect(events).toHaveLength(1)
       expect(events[0]!._tag).toBe("health_changed")
       const ev = events[0] as Extract<RegistryEvent, { _tag: "health_changed" }>
-      expect(ev.from).toBe("alive")
+      // Initial admission composes to `unknown` (K8s alive + probe
+      // unknown). The deletionTimestamp transition pushes K8s to
+      // draining; mostRestrictiveHealth(draining, unknown) → draining.
+      expect(ev.from).toBe("unknown")
       expect(ev.to).toBe("draining")
 
       const e = yield* reg.resolve(WorkerId("pod-0"))
@@ -231,7 +237,11 @@ describe("sip-front-proxy/registry/kubernetes", () => {
 
       expect(events).toHaveLength(1)
       const ev = events[0] as Extract<RegistryEvent, { _tag: "health_changed" }>
-      expect(ev.from).toBe("alive")
+      // Composed pre-transition health was `unknown` (K8s side alive,
+      // probe still unknown). After Ready drops, K8s side flips to
+      // dead because `prevK8sHealth === "alive"` (interpretPod tracks
+      // the K8s side independently of probe state).
+      expect(ev.from).toBe("unknown")
       expect(ev.to).toBe("dead")
 
       const e = yield* reg.resolve(WorkerId("pod-0"))

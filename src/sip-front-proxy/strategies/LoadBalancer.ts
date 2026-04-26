@@ -370,7 +370,10 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           // documented post-grace failure mode (D-RES).
           return DecodeResult.unknown()
         }
-        // entry.health === "dead": same as post-grace.
+        // entry.health === "dead" or "unknown": same as post-grace.
+        // (`unknown` here is degenerate — a worker that's never been
+        // confirmed alive shouldn't own any in-dialog state — but
+        // falling back to a fresh selection is the right safety net.)
         return DecodeResult.unknown()
       })
 

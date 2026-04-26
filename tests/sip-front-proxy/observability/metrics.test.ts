@@ -139,13 +139,16 @@ describe("sip-front-proxy/observability — metrics increment on routing", () =>
           s.type === "Gauge" &&
           (s.attributes?.["worker_id"] ?? "") === "w-gauge-test"
       )
-      // 3 entries (one per health state), only `alive` should be 1.
-      expect(gauges.length).toBe(3)
+      // 4 entries (one per health state — unknown/alive/draining/dead);
+      // only `alive` should be 1.
+      expect(gauges.length).toBe(4)
       const alive = gauges.find((g) => g.attributes?.["health"] === "alive")
       expect(alive).toBeDefined()
       expect((alive!.state as { value: number }).value).toBe(1)
       const draining = gauges.find((g) => g.attributes?.["health"] === "draining")
       expect((draining!.state as { value: number }).value).toBe(0)
+      const unknown = gauges.find((g) => g.attributes?.["health"] === "unknown")
+      expect((unknown!.state as { value: number }).value).toBe(0)
     }).pipe(Effect.provide(ProxyMetrics.Default))
   )
 })

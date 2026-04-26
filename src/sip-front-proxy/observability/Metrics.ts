@@ -143,7 +143,7 @@ export type RoutingDecisionKind =
 
 export type HmacFailureReason = "missing" | "decode" | "mismatch" | "unknown_kid"
 
-export type WorkerHealthLabel = "alive" | "draining" | "dead"
+export type WorkerHealthLabel = "unknown" | "alive" | "draining" | "dead"
 
 export type CancelLookupOutcome = "hit" | "miss" | "expired_sweep"
 
@@ -221,7 +221,7 @@ export class ProxyMetrics extends ServiceMap.Service<ProxyMetrics, ProxyMetricsA
   )
 }
 
-const HEALTH_VALUES: ReadonlyArray<WorkerHealthLabel> = ["alive", "draining", "dead"]
+const HEALTH_VALUES: ReadonlyArray<WorkerHealthLabel> = ["unknown", "alive", "draining", "dead"]
 
 function buildApi(): ProxyMetricsApi {
   const recordMessage = (opts: {

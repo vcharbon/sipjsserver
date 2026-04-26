@@ -166,11 +166,19 @@ const DEFAULT_EVENT_BUFFER = 256
 
 const RANK: Record<WorkerHealth, number> = {
   alive: 0,
-  draining: 1,
-  dead: 2,
+  unknown: 1,
+  draining: 2,
+  dead: 3,
 }
 
-/** `dead > draining > alive`. Returns the more-restrictive of the two. */
+/**
+ * `dead > draining > unknown > alive`. Returns the more-restrictive of
+ * the two. `unknown` ranks above `alive` so `(k8s=alive, probe=unknown)`
+ * composes to `unknown` — a worker the K8s pod-watch admits as Ready
+ * but whose OPTIONS round-trip we haven't yet observed is not routable.
+ * `draining`/`dead` rank above `unknown` because both signals are
+ * authoritative regardless of probe state.
+ */
 export const mostRestrictiveHealth = (
   a: WorkerHealth,
   b: WorkerHealth
@@ -286,7 +294,10 @@ export const kubernetesStatefulSetLayer = (
             // Need an address to register a new worker — without an IP
             // we can't route to it. Wait for a later MODIFIED event.
             if (address === undefined) return
-            const newPair: HealthPair = { k8s: k8sHealth, probe: "alive" }
+            // Probe side defaults to `unknown` — the worker is not
+            // routable until HealthProbe observes a 200 OK to OPTIONS
+            // and flips this to `alive`. See `WorkerHealth` doc comment.
+            const newPair: HealthPair = { k8s: k8sHealth, probe: "unknown" }
             const resolved = resolvePair(newPair)
             const drainingSince =
               resolved === "draining" ? yield* Clock.currentTimeMillis : undefined
@@ -302,9 +313,14 @@ export const kubernetesStatefulSetLayer = (
 
           // Existing worker — diff address + composed health.
           const oldEntry = prevEntry.value
+          // Defensive fallback when the pair-side state is missing
+          // (should not happen if `applyPodObservation` is the only
+          // mutator). `probe: "unknown"` matches the new-admission
+          // default so the worker stays not-routable until the probe
+          // confirms it.
           const oldPair: HealthPair = prevPair._tag === "Some"
             ? prevPair.value
-            : { k8s: "alive", probe: "alive" }
+            : { k8s: "alive", probe: "unknown" }
           const newPair: HealthPair = { k8s: k8sHealth, probe: oldPair.probe }
           const resolvedOld = oldEntry.health
           const resolvedNew = resolvePair(newPair)
