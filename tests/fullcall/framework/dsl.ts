@@ -18,7 +18,7 @@ import type {
   Sut,
   SutTarget,
 } from "./types.js"
-import { ALL_SUTS } from "./types.js"
+import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "./types.js"
 import { record, type ScenarioContext } from "./recorder.js"
 
 // ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ export class ComposableScenario {
      * narrow via `.runOn(...)` for scenarios meaningful only on one
      * topology (e.g. asserting B2BUA-only header semantics).
      */
-    readonly applicableSuts: readonly Sut[] = ALL_SUTS,
+    readonly applicableSuts: readonly Sut[] = DEFAULT_APPLICABLE_SUTS,
   ) {}
 
   /** Attach a human-readable description. Returns a new immutable scenario. */

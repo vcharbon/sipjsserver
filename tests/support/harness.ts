@@ -24,6 +24,7 @@ import { createLiveTransport } from "../fullcall/framework/live-backend.js"
 import { formatReport } from "../fullcall/framework/report.js"
 import { writeScenarioReport, writeIndexReport } from "../fullcall/framework/html-report.js"
 import { writeTextReports } from "../fullcall/framework/text-report.js"
+import { HA_PROXY_ADDR } from "./proxyB2bFakeStack.js"
 
 export type { Sut }
 
@@ -123,7 +124,14 @@ export function createSimulatedRunner(opts?: {
       ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep, realClock, sut }
       : { sipPort, httpPort, clockSleep, realClock, sut }
   const transport = createSimulatedTransport(transportOpts)
-  const target = { host: "127.0.0.1", port: sipPort }
+  // SUT ingress address — used by scenario steps that send their
+  // initial INVITE without specifying a destination explicitly. The
+  // sipproxyHA SUT exposes its proxy on a non-loopback subnet IP; the
+  // legacy SUTs keep 127.0.0.1.
+  const target =
+    sut === "sipproxyHA"
+      ? { host: HA_PROXY_ADDR.host, port: HA_PROXY_ADDR.port }
+      : { host: "127.0.0.1", port: sipPort }
 
   return (scenario: Scenario): Effect.Effect<void> => {
     // Provide the simulated stack at the *outer* runScoped scope — NOT

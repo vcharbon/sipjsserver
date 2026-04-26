@@ -32,13 +32,18 @@ import {
 import { recordFiring } from "./rule-usage-collector.js"
 import { DEFAULT_TRANSIT_DELAY_MS, fakeStackLayer } from "../../support/fakeStack.js"
 import {
+  HA_PROXY_ADDR,
+  HA_WORKER_ADDR,
+  HealthProbe,
   INGRESS_ADDR as PROXY_B2B_INGRESS,
   WORKER_ADDR as PROXY_B2B_WORKER,
   proxyB2bFakeStackLayer,
+  setSipproxyHASecondaryHandlers,
+  sipproxyHAFakeStackLayer,
 } from "../../support/proxyB2bFakeStack.js"
 import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
 
-export type Sut = "b2bonly" | "proxy+b2b"
+export type Sut = "b2bonly" | "proxy+b2b" | "sipproxyHA"
 
 // ---------------------------------------------------------------------------
 // Test rule registry: disable-on-env + handle-firing tracker
@@ -142,9 +147,17 @@ export function createSimulatedTransport(opts?: {
   const sut: Sut = opts?.sut ?? "b2bonly"
 
   const config = testAppConfig(sipPort, httpPort, opts?.configOverrides)
-  const StackLayer = sut === "proxy+b2b"
-    ? proxyB2bFakeStackLayer({ config })
-    : fakeStackLayer({ config })
+  // sipproxyHA secondary worker boots inside the SUT layer; inject
+  // its handler registry before the layer materializes.
+  if (sut === "sipproxyHA") {
+    setSipproxyHASecondaryHandlers(buildTestHandlers())
+  }
+  const StackLayer =
+    sut === "sipproxyHA"
+      ? sipproxyHAFakeStackLayer({ config })
+      : sut === "proxy+b2b"
+        ? proxyB2bFakeStackLayer({ config })
+        : fakeStackLayer({ config })
 
   const mockState: MockTransportState = {
     agents: new Map(),
@@ -168,6 +181,15 @@ export function createSimulatedTransport(opts?: {
       labelKey(PROXY_B2B_WORKER.host, PROXY_B2B_WORKER.port),
       "worker-1",
     )
+  } else if (sut === "sipproxyHA") {
+    participantLabels.set(
+      labelKey(HA_PROXY_ADDR.host, HA_PROXY_ADDR.port),
+      "proxy",
+    )
+    const w1 = HA_WORKER_ADDR(1)
+    const w2 = HA_WORKER_ADDR(2)
+    participantLabels.set(labelKey(w1.host, w1.port), "b2b-1")
+    participantLabels.set(labelKey(w2.host, w2.port), "b2b-2")
   } else {
     participantLabels.set(labelKey("127.0.0.1", sipPort), "B2BUA")
   }
@@ -201,6 +223,18 @@ export function createSimulatedTransport(opts?: {
         // the service once — the layer wires the rest.
         if (sut === "proxy+b2b") {
           yield* ProxyCore
+        }
+
+        // sipproxyHA: force-materialize ProxyCore (forks ingress
+        // fiber). Worker-2's SipRouter is forked from inside the SUT
+        // layer's `Layer.effectDiscard`, so no extra fork is needed
+        // here. Start the OPTIONS health probe so workers transition
+        // `unknown → alive` via 200 OK to OPTIONS — scenarios pause
+        // ~5s to give the probe time to settle.
+        if (sut === "sipproxyHA") {
+          yield* ProxyCore
+          const probe = yield* HealthProbe
+          yield* probe.start
         }
 
         mockState.network = network

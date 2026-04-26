@@ -19,7 +19,7 @@ import {
   referSecondDuringAuthorizing,
 } from "../../scenarios/refer-reject.js"
 import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
-import { ALL_SUTS } from "../framework/types.js"
+import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "../framework/types.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 
@@ -30,7 +30,9 @@ afterAll(() => {
   }
 })
 
-for (const sut of ALL_SUTS) {
+// REFER scenarios apply only to legacy SUTs (b2bonly, proxy+b2b);
+// sipproxyHA is reserved for HA scenarios.
+for (const sut of DEFAULT_APPLICABLE_SUTS) {
   describe(`E2E (fake clock) — REFER reject paths — ${sut}`, () => {
     const run = createSimulatedRunner({ outputDir: OUTPUT_DIR, sut })
 

@@ -29,6 +29,7 @@ import { delayedOfferFailure } from "../scenarios/delayed-offer-failure.js"
 import { retransmit200 } from "../scenarios/retransmit-200.js"
 import { keepaliveHappy } from "../scenarios/keepalive-happy.js"
 import { keepalive481 } from "../scenarios/keepalive-481.js"
+import { twoCallsRoutedToTwoWorkers } from "../scenarios/ha/two-calls-routed-to-two-workers.js"
 import { createSimulatedRunner, flushIndexReport } from "../support/harness.js"
 import { ALL_SUTS } from "./framework/types.js"
 
@@ -119,6 +120,17 @@ for (const sut of ALL_SUTS) {
     }
     if (keepalive481.appliesTo(sut)) {
       it.effect("keepalive + 481: bob rejects OPTIONS → begin-termination BYEs alice", () => run(keepalive481.toScenario()), { timeout: 30_000 })
+    }
+    if (twoCallsRoutedToTwoWorkers.appliesTo(sut)) {
+      // sipproxyHA-only: two alice→bob calls with pre-computed Call-IDs
+      // hashing to distinct workers; mixed BYE direction (alice / bob).
+      // Higher timeout because the 5s OPTIONS settle pause is virtual but
+      // still walks the test scheduler twice.
+      it.effect(
+        "HA: two calls routed to two workers (alice-BYE + bob-BYE)",
+        () => run(twoCallsRoutedToTwoWorkers.toScenario()),
+        { timeout: 60_000 },
+      )
     }
   })
 }

@@ -1,8 +1,20 @@
 /**
  * Basic call scenario: INVITE → 100 → 180 → 200 → ACK → pause → BYE → 200
+ *
+ * Exposed in two forms:
+ *
+ *   - `basicCall` — the original scenario (alice + bob hardcoded, alice
+ *     sends BYE). Default-args path of the new builder. Existing tests
+ *     import this and see no behavior change.
+ *
+ *   - `basicCallBody(s, opts?)` — the same body factored into a helper
+ *     that an outer `scenario(...)` block can call multiple times to
+ *     compose several calls in one scenario, each with its own agents,
+ *     proxy address, Call-ID, and BYE direction. Used by the HA SUT's
+ *     `two-calls-routed-to-two-workers` scenario.
  */
-
 import { scenario } from "../fullcall/framework/dsl.js"
+import type { ScenarioContext } from "../fullcall/framework/recorder.js"
 import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
 import type { SipHeader } from "../../src/sip/types.js"
 
@@ -10,23 +22,115 @@ function getHeaderValue(headers: ReadonlyArray<SipHeader>, name: string): string
   return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value
 }
 
-export const basicCall = scenario("basic-call", (s) => {
-  const alice = s.agent("alice", { uri: "sip:alice@test" })
-  const bob = s.agent("bob", { uri: "sip:bob@test", port: 5666 })
+export interface BasicCallOpts {
+  /** Logical agent name for the caller. Default: `"alice"`. */
+  readonly aliceName?: string
+  /** Logical agent name for the callee. Default: `"bob"`. */
+  readonly bobName?: string
+  /**
+   * Bind IP for the caller agent. Default: `127.0.0.1` (legacy
+   * single-host shape). HA scenarios pass `10.30.0.x` (alice subnet).
+   */
+  readonly aliceHost?: string
+  /**
+   * Bind IP for the callee agent. Default: `127.0.0.1`. HA scenarios
+   * pass `10.40.0.x` (bob subnet). The mock CallDecisionEngine will
+   * route the B-leg here when the caller sends an `X-Api-Call` header
+   * naming this destination.
+   */
+  readonly bobHost?: string
+  /** Bob's UDP bind port. Default: `5666` (matches the MockCallControlServer). */
+  readonly bobPort?: number
+  /**
+   * Proxy / B2BUA ingress that the caller sends its initial INVITE to.
+   * Default: `127.0.0.1:15060`. HA scenarios pass `10.10.0.1:15060`.
+   */
+  readonly proxyHost?: string
+  readonly proxyPort?: number
+  /**
+   * Pre-assigned Call-ID. When set, steers HRW routing on the proxy to
+   * a specific worker. Default: framework-generated random Call-ID.
+   */
+  readonly callId?: string
+  /**
+   * Who hangs up the call. `"alice"` (default, current behavior) sends
+   * a BYE through the forward A-leg → B-leg path. `"bob"` sends BYE
+   * back from the B-leg, exercising the proxy's stickiness-cookie
+   * decode path on the way back to alice.
+   */
+  readonly byeFrom?: "alice" | "bob"
+}
 
-  // Alice sends INVITE to B2BUA, which routes to Bob
-  const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite("sip:+1234@127.0.0.1:15060", {
-    // MockCallControlServer routes to 127.0.0.1:5666 (bob's port)
+const DEFAULTS: Required<Omit<BasicCallOpts, "callId">> = {
+  aliceName: "alice",
+  bobName: "bob",
+  aliceHost: "127.0.0.1",
+  bobHost: "127.0.0.1",
+  bobPort: 5666,
+  proxyHost: "127.0.0.1",
+  proxyPort: 15060,
+  byeFrom: "alice",
+}
+
+/**
+ * Body of a basic call. Pulls every previously-hardcoded value (host,
+ * port, Call-ID, BYE direction) out as opts. Default-args produce the
+ * original scenario unchanged.
+ */
+export function basicCallBody(s: ScenarioContext, opts: BasicCallOpts = {}): void {
+  const aliceName = opts.aliceName ?? DEFAULTS.aliceName
+  const bobName = opts.bobName ?? DEFAULTS.bobName
+  const aliceHost = opts.aliceHost ?? DEFAULTS.aliceHost
+  const bobHost = opts.bobHost ?? DEFAULTS.bobHost
+  const bobPort = opts.bobPort ?? DEFAULTS.bobPort
+  const proxyHost = opts.proxyHost ?? DEFAULTS.proxyHost
+  const proxyPort = opts.proxyPort ?? DEFAULTS.proxyPort
+  const byeFrom = opts.byeFrom ?? DEFAULTS.byeFrom
+
+  const aliceCfg: Parameters<ScenarioContext["agent"]>[1] = {
+    uri: `sip:${aliceName}@test`,
+    ...(aliceHost !== "127.0.0.1" ? { ip: aliceHost } : {}),
+    ...(opts.callId !== undefined ? { callId: opts.callId } : {}),
+  }
+  const bobCfg: Parameters<ScenarioContext["agent"]>[1] = {
+    uri: `sip:${bobName}@test`,
+    port: bobPort,
+    ...(bobHost !== "127.0.0.1" ? { ip: bobHost } : {}),
+  }
+
+  const alice = s.agent(aliceName, aliceCfg)
+  const bob = s.agent(bobName, bobCfg)
+
+  // Alice sends INVITE to the SUT ingress. The B-leg destination is
+  // carried via X-Api-Call so the mock CallDecisionEngine routes Bob's
+  // leg to `bobHost:bobPort` (else it defaults to 127.0.0.1:5666).
+  const inviteHeaders =
+    bobHost === DEFAULTS.bobHost && bobPort === DEFAULTS.bobPort
+      ? undefined
+      : {
+          "X-Api-Call": JSON.stringify({
+            action: "route",
+            destination: { host: bobHost, port: bobPort },
+            new_ruri: `sip:${bobName}@${bobHost}:${bobPort}`,
+          }),
+        }
+
+  const inviteOpts: Parameters<typeof alice.invite>[1] = {
     body: sdpOffer(),
-  })
+    ...(inviteHeaders !== undefined ? { headers: inviteHeaders } : {}),
+  }
 
-  // Alice receives 100 Trying from B2BUA
+  const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite(
+    `sip:+1234@${proxyHost}:${proxyPort}`,
+    inviteOpts,
+  )
+
+  // Alice receives 100 Trying from the SUT
   aliceInviteTxn.expect(100)
 
-  // Bob receives the INVITE from B2BUA — verify Max-Forwards decremented at
-  // least once (b2bonly: 70→69 at the worker; proxy+b2b: 70→69 at the proxy
-  // and 69→68 at the worker, total decrement = 2). Either way the value the
-  // peer sees must be strictly less than 70.
+  // Bob receives the INVITE — verify Max-Forwards decremented at least
+  // once. b2bonly: 70→69 at the worker; proxy+b2b: 70→69→68 (proxy + worker).
+  // Either way the value the peer sees must be strictly less than 70.
   const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite({
     predicate: (msg) => {
       const mf = getHeaderValue(msg.headers, "max-forwards")
@@ -35,36 +139,39 @@ export const basicCall = scenario("basic-call", (s) => {
     },
   })
 
-  // Bob sends 180 Ringing
+  // Bob → 180 Ringing
   bobInviteTxn.reply(180)
-
-  // Alice receives 180
   aliceInviteTxn.expect(180)
 
-  // Bob answers with 200 OK
+  // Bob → 200 OK with SDP answer
   bobInviteTxn.reply(200, { body: sdpAnswer() })
-
-  // Alice receives 200 OK
   aliceInviteTxn.expect(200)
 
-  // Alice sends ACK (relayed end-to-end, may carry SDP)
+  // ACK end-to-end (may carry SDP)
   aliceDialog.ack()
-
-  // Bob receives relayed ACK
   bobDialog.expect("ACK")
 
-  // Call is established — pause for 1 second
+  // Call established — pause briefly before hangup
   s.pause(1000)
 
-  // Alice hangs up
-  const aliceByeTxn = aliceDialog.bye()
+  // Hangup direction
+  if (byeFrom === "alice") {
+    const aliceByeTxn = aliceDialog.bye()
+    const bobByeTxn = bobDialog.expect("BYE")
+    bobByeTxn.reply(200)
+    aliceByeTxn.expect(200)
+  } else {
+    const bobByeTxn = bobDialog.bye()
+    const aliceByeTxn = aliceDialog.expect("BYE")
+    aliceByeTxn.reply(200)
+    bobByeTxn.expect(200)
+  }
+}
 
-  // Bob receives BYE
-  const bobByeTxn = bobDialog.expect("BYE")
-
-  // Bob sends 200 OK for BYE
-  bobByeTxn.reply(200)
-
-  // Alice receives 200 OK for BYE
-  aliceByeTxn.expect(200)
+/**
+ * Original `basicCall` scenario — preserved for existing imports.
+ * `basicCallBody` with default opts produces the exact same body.
+ */
+export const basicCall = scenario("basic-call", (s) => {
+  basicCallBody(s)
 })

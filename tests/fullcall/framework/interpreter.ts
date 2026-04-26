@@ -145,6 +145,14 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
 
   for (const [name, info] of Object.entries(rawInfos)) {
     const ds = createAgentDialogState(info.ip)
+    // Apply pre-assigned Call-ID from AgentConfig if present. HA
+    // scenarios use this to steer dialogs to specific workers via the
+    // proxy's HRW hash. Existing scenarios omit `callId` and fall
+    // through to the auto-generated value.
+    const cfgCallId = scenario.agents[name]?.callId
+    if (typeof cfgCallId === "string" && cfgCallId.length > 0) {
+      ds.callId = cfgCallId
+    }
     dialogStates[name] = ds
     agentInfos[name] = {
       ...info,

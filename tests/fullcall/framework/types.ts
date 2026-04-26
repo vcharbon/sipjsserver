@@ -211,6 +211,13 @@ export interface AgentConfig {
    * (e.g. 10.0.0.1, 10.0.0.2).
    */
   readonly ip?: string
+  /**
+   * Pre-assigned `Call-ID` for this agent's first outbound dialog. Used
+   * by HA scenarios that need to deterministically steer a call to a
+   * specific worker via the proxy's HRW Call-ID hash. When omitted the
+   * framework auto-generates a random Call-ID (existing behavior).
+   */
+  readonly callId?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -236,14 +243,27 @@ export interface AllowedExtraPattern {
 export type ScenarioTier = "short" | "medium" | "long"
 
 /**
- * SUT topologies the matrix-driven runner can exercise. `b2bonly` is
- * the canonical fake-clock B2BUA stack; `proxy+b2b` puts a `ProxyCore`
- * in front of one B2BUA worker on the same SignalingNetwork. Scenarios
- * default to running on both — narrow via the DSL's `.runOn(...)`.
+ * SUT topologies the matrix-driven runner can exercise.
+ *
+ *   - `b2bonly`     — single B2BUA, no proxy.
+ *   - `proxy+b2b`   — `ProxyCore` in front of one B2BUA worker.
+ *   - `sipproxyHA`  — `ProxyCore` in front of TWO B2BUA workers, with
+ *                     `HealthProbe` wired so workers admit as `unknown`
+ *                     and transition to `alive` after the first OPTIONS
+ *                     round-trip. Used for HA / takeover scenarios.
+ *
+ * `ALL_SUTS` is the full matrix iterated by `e2e-fake-clock.test.ts`.
+ * `DEFAULT_APPLICABLE_SUTS` is what a scenario opts into by default
+ * when no explicit `.runOn(...)` is supplied — sipproxyHA is excluded
+ * because legacy scenarios hardcode the loopback ingress address and
+ * would not reach the subnet-addressed HA proxy. HA-specific
+ * scenarios opt into `sipproxyHA` via `.runOn(["sipproxyHA"])`.
  */
-export type Sut = "b2bonly" | "proxy+b2b"
+export type Sut = "b2bonly" | "proxy+b2b" | "sipproxyHA"
 
-export const ALL_SUTS: readonly Sut[] = ["b2bonly", "proxy+b2b"]
+export const ALL_SUTS: readonly Sut[] = ["b2bonly", "proxy+b2b", "sipproxyHA"]
+
+export const DEFAULT_APPLICABLE_SUTS: readonly Sut[] = ["b2bonly", "proxy+b2b"]
 
 export interface Scenario {
   readonly name: string
