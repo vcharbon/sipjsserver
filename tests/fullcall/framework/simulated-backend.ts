@@ -31,6 +31,14 @@ import {
 } from "../../../src/b2bua/rules/framework/RuleRegistry.js"
 import { recordFiring } from "./rule-usage-collector.js"
 import { DEFAULT_TRANSIT_DELAY_MS, fakeStackLayer } from "../../support/fakeStack.js"
+import {
+  INGRESS_ADDR as PROXY_B2B_INGRESS,
+  WORKER_ADDR as PROXY_B2B_WORKER,
+  proxyB2bFakeStackLayer,
+} from "../../support/proxyB2bFakeStack.js"
+import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
+
+export type Sut = "b2bonly" | "proxy+b2b"
 
 // ---------------------------------------------------------------------------
 // Test rule registry: disable-on-env + handle-firing tracker
@@ -120,19 +128,48 @@ export function createSimulatedTransport(opts?: {
    * TestClock sweep; real tests get a short wall-clock sleep.
    */
   realClock?: boolean
+  /**
+   * SUT topology under test. `b2bonly` is the canonical fake stack:
+   * agents talk to a single B2BUA. `proxy+b2b` puts a `ProxyCore` in
+   * front of one B2BUA worker on the same SignalingNetwork — the
+   * scenario body is unchanged; only the topology around it differs.
+   */
+  sut?: Sut
 }): TestTransport {
   const sipPort = opts?.sipPort ?? 15060
   const httpPort = opts?.httpPort ?? 13002
   const clockSleep = opts?.clockSleep ?? ((ms: number) => Effect.sleep(`${ms} millis`))
+  const sut: Sut = opts?.sut ?? "b2bonly"
 
   const config = testAppConfig(sipPort, httpPort, opts?.configOverrides)
-  const StackLayer = fakeStackLayer({ config })
+  const StackLayer = sut === "proxy+b2b"
+    ? proxyB2bFakeStackLayer({ config })
+    : fakeStackLayer({ config })
 
   const mockState: MockTransportState = {
     agents: new Map(),
     network: undefined,
     callStateRef: undefined,
     timerServiceRef: undefined,
+  }
+
+  // Participant registry: (ip,port) → label. Seeded with SUT-side
+  // participants (proxy / worker / b2bua) up-front, then extended in
+  // setup() with each agent's bind address. Used by the report renderer
+  // to label network-trace entries that don't originate from an agent.
+  const participantLabels = new Map<string, string>()
+  const labelKey = (ip: string, port: number) => `${ip}:${port}`
+  if (sut === "proxy+b2b") {
+    participantLabels.set(
+      labelKey(PROXY_B2B_INGRESS.host, PROXY_B2B_INGRESS.port),
+      "proxy",
+    )
+    participantLabels.set(
+      labelKey(PROXY_B2B_WORKER.host, PROXY_B2B_WORKER.port),
+      "worker-1",
+    )
+  } else {
+    participantLabels.set(labelKey("127.0.0.1", sipPort), "B2BUA")
   }
 
   return {
@@ -157,6 +194,14 @@ export function createSimulatedTransport(opts?: {
         const callState = yield* CallState
         const timerService = yield* TimerService
         const router = yield* SipRouter
+
+        // Force ProxyCore to materialize when sut is `proxy+b2b` so its
+        // forked ingress fiber starts. The fiber is forked into the layer
+        // scope (see ProxyCore.ts:274), so all we need is to construct
+        // the service once — the layer wires the rest.
+        if (sut === "proxy+b2b") {
+          yield* ProxyCore
+        }
 
         mockState.network = network
         mockState.callStateRef = callState
@@ -190,6 +235,7 @@ export function createSimulatedTransport(opts?: {
           // ingress by SignalingNetwork, and the harness reads straight
           // off endpoint.poll() / endpoint.take().
           mockState.agents.set(name, { ip, port, endpoint })
+          participantLabels.set(labelKey(ip, port), name)
           agentInfos[name] = {
             ip,
             port,
@@ -260,6 +306,16 @@ export function createSimulatedTransport(opts?: {
         return yield* agent.endpoint.poll()
       }),
 
+    participantLabel: (ip: string, port: number) =>
+      participantLabels.get(labelKey(ip, port)),
+
+    drainNetworkTrace: () =>
+      Effect.gen(function* () {
+        const network = mockState.network
+        if (network === undefined) return []
+        return yield* network.drainTrace()
+      }),
+
     settle: () =>
       // End-of-scenario sweep. Three concerns:
       //   1. Yield the scheduler so TransactionLayer's auto-ACK (for non-
@@ -274,6 +330,14 @@ export function createSimulatedTransport(opts?: {
       //      retransmit-sweep detection — fake owns that responsibility).
       //   3. Yield again so any messages produced by step 2 land in the
       //      endpoint queues before drain.
+      //
+      // The first 500ms is advanced in 50ms steps so any in-flight responses
+      // (e.g., the BYE/200-OK round-trip on the proxy+b2b SUT, which spans
+      // four transits) get processed by their target fibers BEFORE the 24h
+      // jump fires the SIP retransmit timers. A single 24h leap would race
+      // Timer E retransmits against deliver fibers and produce spurious
+      // duplicate sends to bob. After the first 500ms everything in-flight
+      // has settled, so the long jump can clean up Timer B/F residue.
       Effect.gen(function* () {
         for (let i = 0; i < 20; i++) {
           yield* Effect.yieldNow
@@ -281,6 +345,10 @@ export function createSimulatedTransport(opts?: {
         if (opts?.realClock) {
           yield* Effect.sleep("100 millis")
         } else {
+          for (let i = 0; i < 10; i++) {
+            yield* TestClock.adjust("50 millis")
+            yield* Effect.yieldNow
+          }
           yield* TestClock.adjust("24 hours")
         }
         for (let i = 0; i < 20; i++) {

@@ -300,15 +300,38 @@ export function buildRequest(
     h("Contact", `<sip:${ctx.local.ip}:${ctx.local.port};transport=udp>`),
   ]
 
-  // For in-dialog requests (BYE, ACK, re-INVITE), use the remote Contact as Request-URI
-  const uri = step.uri
+  // RFC 3261 §12.2.1 / §16.12: in-dialog request routing.
+  //   - remoteTarget = peer's Contact URI (already tracked as `remoteContact`).
+  //   - routeSet from R-R: reversed for UAC, kept for UAS (see updateDialogState).
+  //   - If routeSet[0] carries `;lr` → loose-route: R-URI = remoteTarget,
+  //     Route = full routeSet in order.
+  //   - Else (strict-route, legacy) → R-URI = first route URI (params stripped),
+  //     Route = remaining route set + remoteTarget appended.
+  const remoteTarget = step.uri
     ?? (dialogState.remoteContact || undefined)
     ?? `sip:${ctx.remote.ip}:${ctx.remote.port}`
-
-  // Add Route headers for in-dialog requests (from Record-Route in responses)
-  const routeHeaders = (method !== "INVITE" && method !== "CANCEL" && dialogState.routeSet.length > 0)
-    ? dialogState.routeSet.map((r) => h("Route", r))
-    : []
+  const inDialogWithRoutes =
+    method !== "INVITE" && method !== "CANCEL" && dialogState.routeSet.length > 0
+  let routeHeaders: SipHeader[] = []
+  let uri = remoteTarget
+  if (inDialogWithRoutes) {
+    if (firstRouteIsLoose(dialogState.routeSet[0]!)) {
+      // Loose-route: R-URI stays at remoteTarget; Route headers carry the
+      // full routeSet in order so the first hop sees its own URI on top.
+      uri = remoteTarget
+      routeHeaders = dialogState.routeSet.map((r) => h("Route", r))
+    } else {
+      // Strict-route fallback (RFC 3261 §16.12): R-URI = first route URI
+      // with non-R-URI params stripped; Route = rest of route set, with the
+      // remoteTarget appended as the final Route value.
+      uri = stripRouteUriToRequestUri(dialogState.routeSet[0]!)
+      const tail = dialogState.routeSet.slice(1)
+      routeHeaders = [
+        ...tail.map((r) => h("Route", r)),
+        h("Route", `<${remoteTarget}>`),
+      ]
+    }
+  }
 
   let headers = [...defaultHeaders, ...routeHeaders]
   let body: Uint8Array = new Uint8Array(0)
@@ -583,6 +606,38 @@ function defaultReason(statusCode: number): string {
     603: "Decline",
   }
   return reasons[statusCode] ?? "Unknown"
+}
+
+// ---------------------------------------------------------------------------
+// Loose-route helpers (RFC 3261 §16.12)
+// ---------------------------------------------------------------------------
+
+/**
+ * True if the given Record-Route / Route header value carries the `;lr`
+ * loose-route flag in its URI parameters. Loose-route is the modern
+ * default; strict-route is the legacy fallback we still implement for
+ * RFC completeness.
+ */
+function firstRouteIsLoose(routeValue: string): boolean {
+  // Match `;lr` followed by `>`, `;`, `,`, end-of-string, or whitespace —
+  // i.e. as a URI parameter, not a substring of something else.
+  return /;lr(?=[;>,\s]|$)/i.test(routeValue)
+}
+
+/**
+ * Extract the URI portion of a Route header value for use as a Request-URI
+ * (strict-route case). Strips surrounding angle brackets and any
+ * header-level parameters that follow `>`.
+ *
+ * Per RFC 3261 §16.12 the resulting Request-URI MUST omit URI parameters
+ * not allowed in a Request-URI, but for the test DSL this is unused in
+ * practice (the proxy in this codebase always emits `;lr`); we keep the
+ * simpler trim and rely on the receiving side to ignore unknown params.
+ */
+function stripRouteUriToRequestUri(routeValue: string): string {
+  const trimmed = routeValue.trim()
+  const m = trimmed.match(/^<([^>]+)>/)
+  return m ? m[1]! : trimmed
 }
 
 /**

@@ -89,7 +89,36 @@ export const AppConfigData = Schema.Struct({
   /** Max span attribute value length (bytes) passed to OTel SDK spanLimits. */
   otelMaxAttributeValueLength: Schema.Int,
   /** Emit tombstone spans (call.started / call.ended) for non-sampled calls. */
-  traceTombstoneEnabled: Schema.Boolean
+  traceTombstoneEnabled: Schema.Boolean,
+
+  // ── Outbound proxy (B-leg through SIP front proxy) ────────────────────
+  /**
+   * Optional ingress address of the SIP front proxy in deployments where
+   * the worker sits *behind* it. When set, every B-leg dialog-creating
+   * outbound (initial INVITE, REFER, …) is sent to this address with a
+   * pre-loaded `Route: <sip:host:port;lr;outbound>` header rather than
+   * directly to the controller-supplied `route.destination` (Bob).
+   *
+   * This lets the proxy:
+   *   1. Insert its stickiness-cookie Record-Route on the B-leg too, so
+   *      Bob-initiated in-dialog requests route back to the originating
+   *      worker via the same cookie-decode path used on the A-leg.
+   *   2. Serve as the only edge external peers ever see — survives worker
+   *      restarts/draining without leaving the peer talking to a dead
+   *      socket.
+   *
+   * Topology, not call routing. Wire-level egress only. The HTTP
+   * controller's `route.destination` (logical truth) is unchanged; only
+   * the wire-level send rewrites to the proxy.
+   *
+   * Source: `B2B_OUTBOUND_PROXY=<host>:<port>` env var; absent in
+   * standalone-worker deployments. Tests inject it via
+   * `proxyB2bFakeStack`.
+   */
+  b2bOutboundProxy: Schema.optional(Schema.Struct({
+    host: Schema.String,
+    port: Schema.Int,
+  })),
 })
 
 export type AppConfigData = typeof AppConfigData.Type
@@ -102,7 +131,19 @@ function envOrDefault(key: string, fallback: string): string {
   return process.env[key] ?? fallback
 }
 
+function parseB2bOutboundProxy(): AppConfigData["b2bOutboundProxy"] {
+  const raw = process.env["B2B_OUTBOUND_PROXY"]
+  if (raw === undefined || raw.length === 0) return undefined
+  const idx = raw.lastIndexOf(":")
+  if (idx <= 0) return undefined
+  const host = raw.slice(0, idx)
+  const port = parseInt(raw.slice(idx + 1), 10)
+  if (!Number.isFinite(port) || port <= 0) return undefined
+  return { host, port }
+}
+
 function readConfigFromEnv(): AppConfigData {
+  const outbound = parseB2bOutboundProxy()
   return {
     sipLocalIp: envOrDefault("SIP_LOCAL_IP", "127.0.0.1"),
     sipLocalPort: parseInt(envOrDefault("SIP_LOCAL_PORT", "5060"), 10),
@@ -153,7 +194,8 @@ function readConfigFromEnv(): AppConfigData {
       .map((h) => h.trim())
       .filter((h) => h.length > 0),
     otelMaxAttributeValueLength: parseInt(envOrDefault("OTEL_MAX_ATTRIBUTE_VALUE_LENGTH", "32768"), 10),
-    traceTombstoneEnabled: envOrDefault("TRACE_TOMBSTONE_ENABLED", "true") === "true"
+    traceTombstoneEnabled: envOrDefault("TRACE_TOMBSTONE_ENABLED", "true") === "true",
+    ...(outbound !== undefined ? { b2bOutboundProxy: outbound } : {}),
   }
 }
 

@@ -66,6 +66,10 @@ import {
   type RoutingStrategyApi,
   type SocketAddr,
 } from "./RoutingStrategy.js"
+import {
+  WorkerRegistry,
+  type WorkerRegistryApi,
+} from "./registry/WorkerRegistry.js"
 
 // ---------------------------------------------------------------------------
 // Bind config
@@ -117,6 +121,7 @@ export class ProxyCore extends ServiceMap.Service<ProxyCore, ProxyCoreApi>()(
     | RoutingStrategy
     | CancelBranchLru
     | ProxyBindConfig
+    | WorkerRegistry
   > = Layer.suspend(() =>
     Layer.effect(
       ProxyCore,
@@ -153,6 +158,9 @@ interface ProxyCounters {
   recordRouteInserted: number
   responseDroppedNoVia: number
   sendErrors: number
+  /** Worker-outbound (`;outbound`) request rejected because the R-URI is
+   *  unparseable; the worker is the bug source — we 400 it back. */
+  malformedRouteParam: number
 }
 
 const newCounters = (): ProxyCounters => ({
@@ -167,6 +175,7 @@ const newCounters = (): ProxyCounters => ({
   recordRouteInserted: 0,
   responseDroppedNoVia: 0,
   sendErrors: 0,
+  malformedRouteParam: 0,
 })
 
 // ---------------------------------------------------------------------------
@@ -184,6 +193,7 @@ const makeProxyCore: Effect.Effect<
   | ProxyMetrics
   | ProxyTracing
   | ProxyLogger
+  | WorkerRegistry
   | Scope.Scope
 > = Effect.gen(function* () {
   const network = yield* SignalingNetwork
@@ -194,6 +204,7 @@ const makeProxyCore: Effect.Effect<
   const metrics = yield* ProxyMetrics
   const tracing = yield* ProxyTracing
   const logger = yield* ProxyLogger
+  const registry = yield* WorkerRegistry
 
   const queueMax = cfg.queueMax ?? 1024
   const endpoint = yield* network
@@ -256,6 +267,7 @@ const makeProxyCore: Effect.Effect<
       metrics,
       tracing,
       logger,
+      registry,
     })
 
   const handleResponse = (msg: SipMessage) =>
@@ -328,6 +340,7 @@ interface HandleRequestArgs {
   readonly metrics: ProxyMetricsApi
   readonly tracing: ProxyTracingApi
   readonly logger: ProxyLoggerApi
+  readonly registry: WorkerRegistryApi
 }
 
 const DIALOG_CREATING: ReadonlySet<string> = new Set(["INVITE", "SUBSCRIBE"])
@@ -346,6 +359,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       metrics,
       tracing,
       logger,
+      registry,
     } = args
 
     const startMs = yield* Clock.currentTimeMillis
@@ -417,8 +431,24 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       // ── §16.4 Route preprocessing ─────────────────────────────────────────
       // If topmost Route points at us, strip it and remember the params (used
       // below for stickiness decoding).
+      //
+      // Worker-outbound classification has two triggers:
+      //
+      //   1. `;outbound` URI param on the top-Route — the worker pre-loaded
+      //      `Route: <sip:proxy:port;lr;outbound>` on a dialog-creating B-leg
+      //      request (see src/b2bua/helpers.ts when `AppConfig.b2bOutboundProxy`
+      //      is set). Initial INVITE/SUBSCRIBE.
+      //
+      //   2. The packet's source ip:port matches a registered worker. Covers
+      //      in-dialog requests (ACK, BYE, re-INVITE) where the worker's
+      //      B-leg dialog routeSet contains the proxy with a stickiness
+      //      cookie — without source classification we'd decode that cookie
+      //      and route the packet back to the same worker (loop).
+      //
+      // Both cases skip the cookie decode entirely; target is the R-URI.
       let headers: ReadonlyArray<SipHeader> = req.headers
       let strippedRouteParams: RouteParams | undefined
+      let isWorkerOutbound = false
       const topRoute = getHeader(headers, "route")
       if (topRoute !== undefined) {
         const parsedRoute = parseSipUri(topRoute)
@@ -428,8 +458,26 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
           parsedRoute.port === advertisedAddress.port
         ) {
           headers = removeFirstHeader(headers, "route")
-          strippedRouteParams = parsedRoute.params
           counters.routeStripped++
+          if (parsedRoute.params["outbound"] !== undefined) {
+            isWorkerOutbound = true
+          } else {
+            strippedRouteParams = parsedRoute.params
+          }
+        }
+      }
+
+      // Source-based outbound override: any packet from a registered worker
+      // is treated as worker-outbound regardless of cookie params. This
+      // breaks the in-dialog routing loop described above.
+      if (!isWorkerOutbound) {
+        const sourceWorker = yield* registry.lookupByAddress({
+          host: src.address,
+          port: src.port,
+        })
+        if (Option.isSome(sourceWorker)) {
+          isWorkerOutbound = true
+          strippedRouteParams = undefined
         }
       }
 
@@ -461,6 +509,27 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
           // can't conjure a "we don't know" — we'd otherwise drop.
           target = yield* tryStrategySelect(strategy, req, counters)
         }
+      } else if (isWorkerOutbound) {
+        // Worker→external (B-leg egress through us). The packet's source
+        // IP:port identifies the originating worker; forward to whatever
+        // the R-URI says (controller-supplied Bob address). Cookie
+        // encoding for the inserted Record-Route happens below — the
+        // `target` here is the wire destination only.
+        const parsedRuri = parseSipUri(req.uri)
+        if (parsedRuri === undefined) {
+          counters.malformedRouteParam++
+          const resp = generateResponse(req, 400, "Bad Request", { toTag: newTag() })
+          yield* replyToSource(serialize(resp), src)
+          result = "rejected"
+          yield* metrics.recordMessage({
+            direction: "outbound",
+            methodOrStatus: "400",
+            result: "rejected",
+          })
+          return
+        }
+        target = { host: parsedRuri.host, port: parsedRuri.port ?? 5060 }
+        decisionKind = "worker_outbound"
       } else if (strippedRouteParams !== undefined) {
         const decoded = yield* strategy.decodeStickiness(strippedRouteParams, req)
         switch (decoded._tag) {
@@ -520,7 +589,16 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       nextHeaders = upsertHeader(nextHeaders, "Max-Forwards", String(mfNext))
 
       if (DIALOG_CREATING.has(method)) {
-        const stickiness = strategy.encodeStickiness(target, req)
+        // Encode stickiness for the destination Bob's UAS will see in
+        // its received Record-Route. For a normal A-leg ingress that's
+        // the LB-selected target (`target`). For worker-outbound that's
+        // the *source* worker — Bob's in-dialog requests must come back
+        // to the worker that originated the call, not to whichever
+        // worker the proxy would HRW-pick fresh.
+        const cookieAddr = isWorkerOutbound
+          ? { host: src.address, port: src.port }
+          : target
+        const stickiness = strategy.encodeStickiness(cookieAddr, req)
         const rrValue = buildRecordRouteValue(advertisedAddress, stickiness)
         // Insert Record-Route at the top of the header set so it sits ahead of
         // any existing Record-Route (RFC 3261 §16.6.4 — proxies prepend).

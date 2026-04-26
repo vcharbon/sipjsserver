@@ -44,10 +44,12 @@ export function writeScenarioReport(
   const sortedTrace = [...result.trace].sort((a, b) => a.timestamp - b.timestamp)
   const svg = renderSequenceDiagram(sortedTrace, result.participants)
 
-  // Build message data for the click handler
-  const messageData: Array<{ stepIndex: number; raw: string }> = sortedTrace.map(
-    (entry) => ({
-      stepIndex: entry.stepIndex,
+  // Build message data for the click handler. Key is the entry's index
+  // in `sortedTrace` — `stepIndex` would collide for internal hops
+  // (proxy↔worker), which all share `stepIndex = -1`.
+  const messageData: Array<{ traceIndex: number; raw: string }> = sortedTrace.map(
+    (entry, i) => ({
+      traceIndex: i,
       raw: serializeMessage(entry.message),
     })
   )
@@ -273,14 +275,14 @@ export function writeScenarioReport(
   </div>
   <script>
     const messages = {
-      ${messageData.map((m) => `${m.stepIndex}: '${escapeJs(m.raw)}'`).join(",\n      ")}
+      ${messageData.map((m) => `${m.traceIndex}: '${escapeJs(m.raw)}'`).join(",\n      ")}
     };
 
     let selectedArrow = null;
 
     document.querySelectorAll('.trace-arrow').forEach(g => {
       g.addEventListener('click', () => {
-        const idx = parseInt(g.dataset.stepIndex, 10);
+        const idx = parseInt(g.dataset.traceIndex, 10);
         const raw = messages[idx];
 
         if (selectedArrow) selectedArrow.classList.remove('selected');
@@ -291,7 +293,7 @@ export function writeScenarioReport(
         if (raw) {
           body.innerHTML = '<pre>' + raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
         } else {
-          body.innerHTML = '<div class="detail-placeholder">No message data for step #' + (idx + 1) + '</div>';
+          body.innerHTML = '<div class="detail-placeholder">No message data for trace entry #' + (idx + 1) + '</div>';
         }
       });
     });

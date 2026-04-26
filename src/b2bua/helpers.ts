@@ -258,16 +258,38 @@ export function createBLegFromRoute(
       bLegInvite = { ...bLegInvite, headers: applied }
     }
 
+    // ── Outbound proxy support ────────────────────────────────────────
+    // When the worker is deployed behind the SIP front proxy
+    // (`config.b2bOutboundProxy` set), pre-load a `Route` header pointing
+    // at the proxy with `;outbound` so the proxy recognises the flow as
+    // worker→external (skip LB; insert R-R encoding the *source* worker;
+    // forward to R-URI). Wire-level destination becomes the proxy; R-URI
+    // stays at Bob (controller-supplied logical truth).
+    //
+    // RFC 3261 §16.12: a UAC with an outbound proxy in its preloaded
+    // route set sends the request to the top Route's URI, keeping the
+    // remote target in the Request-URI.
+    const outboundProxy = config.b2bOutboundProxy
+    let wireDestination = route.destination
+    if (outboundProxy !== undefined) {
+      const routeHeader: SipHeader = {
+        name: "Route",
+        value: `<sip:${outboundProxy.host}:${outboundProxy.port};lr;outbound>`,
+      }
+      bLegInvite = { ...bLegInvite, headers: [routeHeader, ...bLegInvite.headers] }
+      wireDestination = { host: outboundProxy.host, port: outboundProxy.port }
+    }
+
     pendingInviteTxn = {
       kind: "invite",
       branch: bLegInviteBranch,
       originalInvite: bLegInvite,
-      destination: route.destination,
+      destination: wireDestination,
     }
 
     outbound.push({
       message: bLegInvite,
-      destination: route.destination,
+      destination: wireDestination,
       label: `send ${legId} INVITE`,
       legId,
     })

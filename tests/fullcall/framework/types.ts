@@ -8,6 +8,7 @@
 import type { Effect, Layer, Scope } from "effect"
 import { Data } from "effect"
 import type { SipHeader, SipMessage } from "../../../src/sip/types.js"
+import type { NetworkTraceEntry } from "../../../src/sip/SignalingNetwork.js"
 import type { ValidationCheckName, ValidationOverrides } from "./validation.js"
 
 // ---------------------------------------------------------------------------
@@ -234,6 +235,16 @@ export interface AllowedExtraPattern {
  */
 export type ScenarioTier = "short" | "medium" | "long"
 
+/**
+ * SUT topologies the matrix-driven runner can exercise. `b2bonly` is
+ * the canonical fake-clock B2BUA stack; `proxy+b2b` puts a `ProxyCore`
+ * in front of one B2BUA worker on the same SignalingNetwork. Scenarios
+ * default to running on both — narrow via the DSL's `.runOn(...)`.
+ */
+export type Sut = "b2bonly" | "proxy+b2b"
+
+export const ALL_SUTS: readonly Sut[] = ["b2bonly", "proxy+b2b"]
+
 export interface Scenario {
   readonly name: string
   readonly agents: Record<string, AgentConfig>
@@ -250,6 +261,14 @@ export interface Scenario {
   readonly description?: string | undefined
   /** Duration tier — defaults to "short" when omitted. */
   readonly tier?: ScenarioTier | undefined
+  /**
+   * Which SUT topologies this scenario applies to. Defaults to both
+   * (`b2bonly` and `proxy+b2b`). Scenarios that codify behavior only
+   * meaningful under one topology (e.g. asserting absence of proxy-
+   * inserted Record-Route on a bare B2BUA) narrow this list via the
+   * DSL's `.runOn(...)` builder.
+   */
+  readonly runOn?: readonly Sut[] | undefined
   /**
    * Opt out of the end-of-scenario 24h TestClock sweep and the
    * subsequent `verifyCleanState` check. Use for scenarios that
@@ -358,6 +377,23 @@ export interface TestTransport {
     agentName: string,
     timeoutMs: number
   ) => Effect.Effect<ReceivedPacket | null, TransportError>
+  /**
+   * Optional: map an `(ip, port)` pair to a human-readable participant
+   * label (`alice`, `bob`, `proxy`, `worker-1`, ...). Used by the report
+   * renderer to label network-trace entries that originate from
+   * non-agent SIP nodes (proxy, worker behind a proxy). Returns
+   * `undefined` for unknown addresses; the renderer falls back to
+   * `<ip>:<port>` in that case.
+   */
+  readonly participantLabel?: (ip: string, port: number) => string | undefined
+  /**
+   * Optional: drain the simulated network's delivery trace at the end
+   * of a scenario. Only implemented by the simulated backend; lets the
+   * interpreter splice internal proxy↔worker hops into the trace that
+   * agent-level send/receive recording would miss. Live backend
+   * returns `undefined` (no tap).
+   */
+  readonly drainNetworkTrace?: () => Effect.Effect<ReadonlyArray<NetworkTraceEntry>>
   /**
    * Optional post-scenario verification: asserts that all internal state
    * (callsMap, limiter counters, timer fibers) is fully empty after the

@@ -99,9 +99,9 @@ describe("sip-front-proxy/load-balancer — CANCEL keyed by (Call-ID, CSeq)", ()
       // Pick a Call-ID that hashes to A under the initial 2-worker set.
       const callId = findCallIdMappingTo(W_A)
 
-      const alice = yield* fx.bindRecordedUac("alice", ALICE)
-      const aEp = yield* fx.bindRecordedUasFor("worker-a", W_A)
-      const bEp = yield* fx.bindRecordedUasFor("worker-b", W_B)
+      const alice = yield* fx.bindNamedUac("alice", ALICE)
+      const aEp = yield* fx.bindNamedUasFor("worker-a", W_A)
+      const bEp = yield* fx.bindNamedUasFor("worker-b", W_B)
 
       // ── 1. INVITE → must reach A ─────────────────────────────────────
       const inviteBranch = "z9hG4bK-alice-inv"
@@ -133,7 +133,7 @@ describe("sip-front-proxy/load-balancer — CANCEL keyed by (Call-ID, CSeq)", ()
 
       // ── 2. Add worker C — would shift rendezvous winner for some keys ─
       yield* fx.addSimulatedWorker(W_C, ADDR_C)
-      const cEp = yield* fx.bindRecordedUasFor("worker-c", W_C)
+      const cEp = yield* fx.bindNamedUasFor("worker-c", W_C)
 
       // ── 3. CANCEL with the same Call-ID + CSeq, upstream branch ──────
       // RFC 3261 §9.1 — UAC reuses the INVITE's top-Via branch on CANCEL.

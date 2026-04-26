@@ -245,8 +245,13 @@ export function renderSequenceDiagram(
       : entry.status === "unexpected" ? "url(#arrowhead-unexpected)"
       : "url(#arrowhead-pass)"
 
-    // Clickable group
-    svgParts.push(`<g class="trace-arrow" data-step-index="${entry.stepIndex}" style="cursor:pointer">`)
+    // Clickable group. The lookup key is the entry's index in the sorted
+    // trace, NOT `stepIndex` — internal hops (proxy↔worker, spliced in by
+    // the interpreter) all share `stepIndex = -1` and would otherwise
+    // collide in the click-handler map. `data-step-index` is kept on the
+    // attribute for backward compatibility with anything that scrapes the
+    // SVG; the click handler uses `data-trace-index` exclusively.
+    svgParts.push(`<g class="trace-arrow" data-step-index="${entry.stepIndex}" data-trace-index="${i}" style="cursor:pointer">`)
 
     // Arrow line
     const arrowFromX = isLeftToRight ? fromX + 5 : fromX - 5

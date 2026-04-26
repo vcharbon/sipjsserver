@@ -13,6 +13,7 @@
 import { describe, it } from "@effect/vitest"
 import { afterAll } from "vitest"
 import { basicCall } from "../scenarios/basic-call.js"
+import { routeSetPropagation } from "../scenarios/route-set-propagation.js"
 import { callReject } from "../scenarios/call-reject.js"
 import { cancelCall } from "../scenarios/cancel.js"
 import { prackCall } from "../scenarios/prack.js"
@@ -21,7 +22,6 @@ import { cancelCrossing200Ok } from "../scenarios/cancel-200ok-crossing.js"
 import { callerHangup, calleeHangup } from "../scenarios/bye-directions.js"
 import { aliceReInvite, bobReInvite, crossingReInvite } from "../scenarios/reinvite.js"
 import { explicitRouteCall, failoverWithHeaders } from "../scenarios/shared-port.js"
-import { recordRouteBasic, recordRouteFakeRR } from "../scenarios/record-route.js"
 import { suppress18xBasic, suppress18xFailoverNoAnswer, suppress18xFailoverReject, suppress18xDisabled } from "../scenarios/suppress-18x.js"
 import { unknownDialogReject } from "../scenarios/indialog-unknown-reject.js"
 import { indialogOptions } from "../scenarios/indialog-options.js"
@@ -31,21 +31,45 @@ import { retransmit200 } from "../scenarios/retransmit-200.js"
 import { keepaliveHappy } from "../scenarios/keepalive-happy.js"
 import { keepalive481 } from "../scenarios/keepalive-481.js"
 import { createSimulatedRunner, flushIndexReport } from "../support/harness.js"
+import { ALL_SUTS } from "./framework/types.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 
 afterAll(() => {
   flushIndexReport(OUTPUT_DIR)
+  // SUT-matrix subdirs each accumulate their own results; flush per-SUT.
+  for (const sut of ALL_SUTS) {
+    flushIndexReport(`${OUTPUT_DIR}/${sut}`)
+  }
 })
 
 // ---------------------------------------------------------------------------
-// Simulated backend tests
+// SUT matrix — scenarios that run unchanged against b2bonly *and* proxy+b2b.
+// Reports land under test-results/fake-clock/<sut>/<scenario>.{txt,html}.
+// ---------------------------------------------------------------------------
+
+for (const sut of ALL_SUTS) {
+  describe(`E2E (fake clock) — ${sut}`, () => {
+    const run = createSimulatedRunner({ outputDir: OUTPUT_DIR, sut })
+
+    if (basicCall.appliesTo(sut)) {
+      it.effect("basic call", () => run(basicCall.toScenario()), { timeout: 30_000 })
+    }
+    if (routeSetPropagation.appliesTo(sut)) {
+      it.effect("route-set propagation", () => run(routeSetPropagation.toScenario()), { timeout: 30_000 })
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Legacy single-SUT block — scenarios not yet migrated to the SUT matrix.
+// Run on b2bonly only. Migrate one at a time; once a scenario is matrix-
+// ready, move its `it.effect(...)` into the loop above.
 // ---------------------------------------------------------------------------
 
 describe("E2E (fake clock) — simulated backend", () => {
   const run = createSimulatedRunner({ outputDir: OUTPUT_DIR })
 
-  it.effect("basic call", () => run(basicCall.toScenario()), { timeout: 30_000 })
   it.effect("call rejection (403)", () => run(callReject.toScenario()), { timeout: 30_000 })
   it.effect("CANCEL during early dialog", () => run(cancelCall.toScenario()), { timeout: 30_000 })
   it.effect("CANCEL ↔ 200 OK crossing", () => run(cancelCrossing200Ok.toScenario()), { timeout: 30_000 })
@@ -56,8 +80,6 @@ describe("E2E (fake clock) — simulated backend", () => {
   it.effect("re-INVITE from caller (SDP in ACK)", () => run(aliceReInvite.toScenario()), { timeout: 30_000 })
   it.effect("re-INVITE from callee", () => run(bobReInvite.toScenario()), { timeout: 30_000 })
   it.effect("crossing re-INVITEs (glare → 491)", () => run(crossingReInvite.toScenario()), { timeout: 30_000 })
-  it.effect("Record-Route basic compliance", () => run(recordRouteBasic.toScenario()), { timeout: 30_000 })
-  it.effect("Record-Route fake RR from UAS stripped", () => run(recordRouteFakeRR.toScenario()), { timeout: 30_000 })
 
   // suppress-18x policy tests
   it.effect("suppress-18x: basic (183→180, suppression, 200 OK)", () => run(suppress18xBasic.toScenario()), { timeout: 30_000 })

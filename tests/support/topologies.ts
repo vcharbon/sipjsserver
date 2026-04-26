@@ -60,8 +60,8 @@ import {
 } from "../../src/sip-front-proxy/index.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../src/sip/SignalingNetwork.js"
 import {
-  bindRecordedEndpoint,
-  ProxyRecorder,
+  bindNamedEndpoint,
+  ProxyParticipants,
   runProxyScenario,
 } from "../sip-front-proxy/_report/runner.js"
 
@@ -89,7 +89,7 @@ export interface Topology {
     name: string,
     addr: SocketAddr,
     queueMax?: number
-  ) => Effect.Effect<UdpEndpoint, never, SignalingNetwork | ProxyRecorder | Scope.Scope>
+  ) => Effect.Effect<UdpEndpoint, never, SignalingNetwork | ProxyParticipants | Scope.Scope>
   /**
    * Bind a recorded UAS endpoint at `addr`. In `direct` topology the
    * test owns the address. In `withProxy` topology the address MUST
@@ -100,7 +100,7 @@ export interface Topology {
     name: string,
     addr: SocketAddr,
     queueMax?: number
-  ) => Effect.Effect<UdpEndpoint, never, SignalingNetwork | ProxyRecorder | Scope.Scope>
+  ) => Effect.Effect<UdpEndpoint, never, SignalingNetwork | ProxyParticipants | Scope.Scope>
   /** Advance the simulated clock enough for `cycles` round-trips. */
   readonly pump: (cycles?: number) => Effect.Effect<void>
 }
@@ -161,7 +161,7 @@ const directLayer = (transitMs: number) =>
 
 const directBody = (
   defaults: TopologyDefaults,
-  body: (t: Topology) => Effect.Effect<void, unknown, ProxyRecorder | SignalingNetwork | Scope.Scope>
+  body: (t: Topology) => Effect.Effect<void, unknown, ProxyParticipants | SignalingNetwork | Scope.Scope>
 ) => {
   const transitMs = defaults.transitDelayMs ?? DEFAULT_TRANSIT_MS
   const pump = makePump(transitMs)
@@ -169,8 +169,8 @@ const directBody = (
     kind: "direct",
     target: defaults.bobAddr,
     proxyAddr: undefined,
-    bindUac: (name, addr, queueMax = 64) => bindRecordedEndpoint(name, addr, queueMax),
-    bindUas: (name, addr, queueMax = 64) => bindRecordedEndpoint(name, addr, queueMax),
+    bindUac: (name, addr, queueMax = 64) => bindNamedEndpoint(name, addr, queueMax),
+    bindUas: (name, addr, queueMax = 64) => bindNamedEndpoint(name, addr, queueMax),
     pump,
   }
   return body(topology)
@@ -184,7 +184,7 @@ const withProxyBody = (
   defaults: TopologyDefaults,
   fx: ProxyFakeStack,
   workerId: WorkerId,
-  body: (t: Topology) => Effect.Effect<void, unknown, ProxyRecorder | SignalingNetwork | Scope.Scope>
+  body: (t: Topology) => Effect.Effect<void, unknown, ProxyParticipants | SignalingNetwork | Scope.Scope>
 ) => {
   const transitMs = defaults.transitDelayMs ?? DEFAULT_TRANSIT_MS
   const pump = makePump(transitMs)
@@ -193,7 +193,7 @@ const withProxyBody = (
     target: defaults.proxyAddr,
     proxyAddr: defaults.proxyAddr,
     bindUac: (name, addr, queueMax = 64) =>
-      bindRecordedEndpoint(name, addr, queueMax),
+      bindNamedEndpoint(name, addr, queueMax),
     // For withProxy the UAS sits at the registered worker's address.
     // We accept whatever address the test passes (callers normally
     // pass `defaults.bobAddr === workerAddr` per the suite's fixture
@@ -201,7 +201,7 @@ const withProxyBody = (
     bindUas: (name, addr, queueMax = 64) => {
       void workerId
       void fx
-      return bindRecordedEndpoint(name, addr, queueMax)
+      return bindNamedEndpoint(name, addr, queueMax)
     },
     pump,
   }
@@ -233,14 +233,14 @@ export interface TopologyTestOpts {
  * dumps `.txt` + `.html` reports under the `transparency/` folder.
  *
  * The body receives a `Topology` argument and must return an Effect.
- * The body's outer environment is `ProxyRecorder | SignalingNetwork |
+ * The body's outer environment is `ProxyParticipants | SignalingNetwork |
  * Scope.Scope` — provided by the wrapper. Bodies that need extra
  * services should use `Effect.provide` inside their own composition.
  */
 export const topologyTest = (
   name: string,
   opts: TopologyTestOpts,
-  body: (t: Topology) => Effect.Effect<void, unknown, ProxyRecorder | SignalingNetwork | Scope.Scope>
+  body: (t: Topology) => Effect.Effect<void, unknown, ProxyParticipants | SignalingNetwork | Scope.Scope>
 ): void => {
   const transitMs = opts.defaults.transitDelayMs ?? DEFAULT_TRANSIT_MS
   const description = opts.description ?? name

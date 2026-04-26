@@ -17,7 +17,7 @@
  * dynamic membership lives in PR5's `kubernetesStatefulSet` impl.
  */
 
-import { Data, Effect, HashMap, Layer, Ref, Stream } from "effect"
+import { Data, Effect, HashMap, Layer, Option, Ref, Stream } from "effect"
 import type { SocketAddr } from "../RoutingStrategy.js"
 import {
   type RegistryEvent,
@@ -130,12 +130,28 @@ const makeFromEntries = (
     const resolve = (id: WorkerId) =>
       Ref.get(stateRef).pipe(Effect.map((map) => HashMap.get(map, id)))
 
+    const lookupByAddress = (addr: SocketAddr) =>
+      Ref.get(stateRef).pipe(
+        Effect.map((map) => {
+          for (const entry of HashMap.values(map)) {
+            if (
+              entry.address.host === addr.host &&
+              entry.address.port === addr.port
+            ) {
+              return Option.some(entry)
+            }
+          }
+          return Option.none<WorkerEntry>()
+        })
+      )
+
     // No dynamic membership in the static impl.
     const changes: Stream.Stream<RegistryEvent> = Stream.empty
 
     return {
       snapshot,
       resolve,
+      lookupByAddress,
       changes,
     } satisfies WorkerRegistryApi
   })

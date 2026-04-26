@@ -74,6 +74,7 @@ import {
   kubernetesStatefulSetLayer,
   kubernetesWatchClient,
 } from "../src/sip-front-proxy/registry/kubernetes.js"
+import { fromString as staticRegistryFromString } from "../src/sip-front-proxy/registry/static.js"
 import { kubernetesSecretLayer } from "../src/sip-front-proxy/security/HmacKeyProvider.js"
 
 const DEFAULT_BIND_HOST = "0.0.0.0"
@@ -155,8 +156,14 @@ const buildStaticLayer = () => {
         ForwardAllStrategyLive.pipe(
           Layer.provide(ForwardAllConfig.layer(target))
         ),
-        // ForwardAll doesn't need a registry / HMAC / probe; we still
-        // provide a no-op WorkerRegistryControl so any future code that
+        // ForwardAll doesn't use the registry for routing decisions, but
+        // ProxyCore needs `WorkerRegistry.lookupByAddress` to classify
+        // worker-sourced traffic as outbound. An empty static registry
+        // makes every lookup return `Option.none` — equivalent to the
+        // pre-loop-fix behaviour, since ForwardAll mode never has a
+        // worker fronted by us.
+        staticRegistryFromString(""),
+        // Provide a no-op WorkerRegistryControl so any future code that
         // reaches for it in this mode doesn't crash.
         workerRegistryControlNoopLayer
       )

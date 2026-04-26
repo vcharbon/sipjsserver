@@ -19,11 +19,13 @@ import * as TestClock from "effect/testing/TestClock"
 import type { AppConfigData } from "../../src/config/AppConfig.js"
 import type { Scenario, ScenarioResult } from "../fullcall/framework/types.js"
 import { executeScenario } from "../fullcall/framework/interpreter.js"
-import { createSimulatedTransport } from "../fullcall/framework/simulated-backend.js"
+import { createSimulatedTransport, type Sut } from "../fullcall/framework/simulated-backend.js"
 import { createLiveTransport } from "../fullcall/framework/live-backend.js"
 import { formatReport } from "../fullcall/framework/report.js"
 import { writeScenarioReport, writeIndexReport } from "../fullcall/framework/html-report.js"
 import { writeTextReports } from "../fullcall/framework/text-report.js"
+
+export type { Sut }
 
 // ---------------------------------------------------------------------------
 // Result collection (per output directory)
@@ -78,10 +80,19 @@ export function createSimulatedRunner(opts?: {
   configOverrides?: Partial<AppConfigData> | undefined
   realClock?: boolean
   outputDir?: string
+  /**
+   * SUT topology to run scenarios against. `b2bonly` (default) talks to
+   * a bare B2BUA; `proxy+b2b` puts a `ProxyCore` in front of one
+   * B2BUA worker on the same SignalingNetwork. Reports land under
+   * `<outputDir>/<sut>/` so the two runs don't overwrite each other.
+   */
+  sut?: Sut
 }) {
   const sipPort = opts?.sipPort ?? 15060
   const httpPort = opts?.httpPort ?? 13002
-  const outputDir = opts?.outputDir ?? "test-results"
+  const sut: Sut = opts?.sut ?? "b2bonly"
+  const baseOutputDir = opts?.outputDir ?? "test-results"
+  const outputDir = opts?.sut !== undefined ? `${baseOutputDir}/${sut}` : baseOutputDir
 
   // Use TestClock.adjust so scenario pauses are virtual — the B2BUA's
   // own timer fibers run inside the same Effect runtime and share this
@@ -109,8 +120,8 @@ export function createSimulatedRunner(opts?: {
   const realClock = opts?.realClock === true
   const transportOpts: Parameters<typeof createSimulatedTransport>[0] =
     opts?.configOverrides !== undefined
-      ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep, realClock }
-      : { sipPort, httpPort, clockSleep, realClock }
+      ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep, realClock, sut }
+      : { sipPort, httpPort, clockSleep, realClock, sut }
   const transport = createSimulatedTransport(transportOpts)
   const target = { host: "127.0.0.1", port: sipPort }
 

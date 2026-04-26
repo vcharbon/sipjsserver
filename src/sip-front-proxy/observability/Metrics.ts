@@ -139,6 +139,7 @@ export type RoutingDecisionKind =
   | "decode_unknown"
   | "cancel_lookup_hit"
   | "cancel_lookup_miss"
+  | "worker_outbound"
 
 export type HmacFailureReason = "missing" | "decode" | "mismatch" | "unknown_kid"
 

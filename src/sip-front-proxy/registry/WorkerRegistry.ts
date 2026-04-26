@@ -105,6 +105,16 @@ export interface WorkerRegistryApi {
    */
   readonly resolve: (id: WorkerId) => Effect.Effect<Option.Option<WorkerEntry>>
   /**
+   * Reverse lookup: find the worker bound at `(host, port)`. Strictly
+   * non-suspending; safe on the hot path. Used by the proxy when it
+   * receives a packet from a worker (the source address identifies which
+   * worker is initiating an outbound call) so it can stamp the matching
+   * stickiness cookie on the B-leg Record-Route. Returns `Option.none`
+   * if the address doesn't match any registered worker — which happens
+   * for any non-worker source (Alice, Bob, an external SBC).
+   */
+  readonly lookupByAddress: (addr: SocketAddr) => Effect.Effect<Option.Option<WorkerEntry>>
+  /**
    * Hot stream of registry deltas. Each subscriber sees events from the
    * point of subscription onwards (no backfill — subscribers that need
    * the current set should `snapshot` first, then process `changes`).

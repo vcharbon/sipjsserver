@@ -89,12 +89,12 @@ describe("sip-front-proxy/load-balancer — distribution", () => {
         },
         Effect.gen(function* () {
         const proxy = yield* ProxyCore
-        const alice = yield* fx.bindRecordedUac("alice", ALICE, /* queueMax */ 8)
+        const alice = yield* fx.bindNamedUac("alice", ALICE, /* queueMax */ 8)
         // Bind a UAS endpoint at every worker's address. We don't reply to
         // the INVITEs — the proxy is fire-and-forget — but we drain the
         // queue per worker to count receipts.
         const uases = yield* Effect.all(
-          workerIds.map((id) => fx.bindRecordedUasFor(id, id, /* queueMax */ N_INVITES))
+          workerIds.map((id) => fx.bindNamedUasFor(id, id, /* queueMax */ N_INVITES))
         )
 
         const rng = makeRng(0xfeed_face)

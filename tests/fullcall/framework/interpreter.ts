@@ -251,6 +251,52 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
   // No explicit teardown — the transport's setup is Scoped and its
   // finalizers run automatically when the surrounding scope closes.
 
+  // --- Splice internal hops from the network trace ---
+  // The agent-perspective entries pushed during executeStep only capture
+  // the *first hop* each agent talks to. Internal SIP nodes (proxy →
+  // worker) are invisible from the agent side. Drain the simulated
+  // fabric's delivery trace and add entries for hops where neither end
+  // is a known agent — these are the rows the report would otherwise
+  // miss. Hops involving an agent are skipped to avoid duplicating the
+  // existing send/receive entries.
+  if (transport.drainNetworkTrace !== undefined) {
+    const netTrace = yield* transport.drainNetworkTrace()
+    const agentNames = new Set(Object.keys(state.agentInfos))
+    const labelFor = (ip: string, port: number): string =>
+      transport.participantLabel?.(ip, port) ?? `${ip}:${port}`
+    const parsed = yield* Effect.gen(function* () {
+      const parser = yield* SipParser
+      const out: TraceEntry[] = []
+      for (const entry of netTrace) {
+        const from = labelFor(entry.src.ip, entry.src.port)
+        const to = labelFor(entry.dst.ip, entry.dst.port)
+        // Skip if either side is an agent — already captured at the
+        // step level. Internal hops (proxy↔worker, b2bua↔bob in
+        // b2bonly with a forwarding hop, ...) flow through.
+        if (agentNames.has(from) || agentNames.has(to)) continue
+        const result = yield* parser.parse(entry.raw).pipe(Effect.result)
+        if (result._tag === "Failure") continue
+        const msg = result.success
+        out.push({
+          timestamp: entry.deliveredMs,
+          sentMs: entry.sentMs,
+          receivedMs: entry.deliveredMs,
+          from,
+          to,
+          direction: "send",
+          stepIndex: -1,
+          status: "pass",
+          message: msg,
+        })
+      }
+      return out
+    }).pipe(Effect.provide(SipParser.layer))
+    state.trace.push(...parsed)
+    // Re-sort by timestamp so internal hops interleave correctly with
+    // the agent-perspective entries.
+    state.trace.sort((a, b) => a.timestamp - b.timestamp)
+  }
+
   // --- Aggregate results ---
   const passed = state.results.filter((r) => r.status === "pass").length
   const failed = state.results.filter((r) => r.status === "fail").length
@@ -359,8 +405,34 @@ function executeSend(
       ? state.resolvedMessages.get(resolvedInResponseTo.id)
       : undefined
 
-    // Build message context — use dialogState's callId (may have been updated)
-    const tgt = state.targetFor(step.agent)
+    // Build message context — use dialogState's callId (may have been updated).
+    //
+    // RFC 3261 §18.2.2 / §17.2.6: a UAS sends a response to the address in the
+    // top Via of the matched request (using `received` / `rport` when present).
+    // The default `targetFor` returns the SUT ingress, which is correct for
+    // requests but wrong for responses on a B-leg behind a proxy: the worker is
+    // the top Via, not the proxy. Honour the top Via for response sends so the
+    // test agent (Bob) replies to whichever SIP node forwarded the request to
+    // it, not blindly to the SUT ingress.
+    const baseTgt = state.targetFor(step.agent)
+    const tgt = (() => {
+      if (step.statusCode === undefined) return baseTgt
+      const reqMsg = inResponseToMsg
+      if (reqMsg === undefined || reqMsg.type !== "request") return baseTgt
+      const top = reqMsg.parsed.via
+      if (top === undefined) return baseTgt
+      const receivedRaw = top.params?.["received"]
+      const rportRaw = top.params?.["rport"]
+      const host =
+        typeof receivedRaw === "string" && receivedRaw.length > 0
+          ? receivedRaw
+          : top.host
+      const port =
+        typeof rportRaw === "string" && rportRaw.length > 0
+          ? Number.parseInt(rportRaw, 10)
+          : (top.port ?? baseTgt.port)
+      return { host, port }
+    })()
     const target = { ip: tgt.host, port: tgt.port }
     const currentAgentInfo = { ...agentInfo, callId: dialogState.callId }
     const ctx = buildMessageContext(
@@ -478,14 +550,20 @@ function executeSend(
     const durationMs = Date.now() - startTime
     const sendStatus: StepStatus = outboundOaErrors.length > 0 ? "fail" : "pass"
 
-    // Trace: agent → SUT
+    // Trace: agent → SUT. Prefer the SUT label resolved from the actual
+    // wire-level destination so the report shows e.g. `alice → proxy` on
+    // proxy+b2b, not the generic `B2BUA` precomputed label.
     const netDelay = transport.networkDelayMs ?? 0
+    const sutLabel =
+      transport.participantLabel?.(tgt.host, tgt.port)
+        ?? state.sutNames[step.agent]
+        ?? "B2BUA"
     state.trace.push(defined({
       timestamp: clockTs,
       sentMs: clockTs,
       receivedMs: clockTs + netDelay,
       from: step.agent,
-      to: state.sutNames[step.agent] ?? "B2BUA",
+      to: sutLabel,
       direction: "send" as const,
       stepIndex: index,
       status: sendStatus as TraceStatus,
@@ -540,6 +618,7 @@ function executeExpect(
     const deadline = Date.now() + timeout
     let matched: SipMessage | undefined
     let matchedArrivalMs: number | undefined
+    let matchedRinfo: { ip: string; port: number } | undefined
     const assertionErrors: string[] = []
 
     while (Date.now() < deadline) {
@@ -586,6 +665,7 @@ function executeExpect(
       // Message matches the expect step
       matched = msg
       matchedArrivalMs = packet.arrivalMs
+      matchedRinfo = { ip: packet.rinfo.address, port: packet.rinfo.port }
 
       // Run predicate if provided
       if (step.match.predicate) {
@@ -618,7 +698,14 @@ function executeExpect(
 
     const durationMs = Date.now() - startTime
 
-    const sutName = state.sutNames[step.agent] ?? "B2BUA"
+    // Resolve the SUT label from the actual sender's address when available
+    // (network-tap-aware; falls back to the precomputed per-agent name).
+    const sutName =
+      (matchedRinfo !== undefined
+        ? transport.participantLabel?.(matchedRinfo.ip, matchedRinfo.port)
+        : undefined)
+        ?? state.sutNames[step.agent]
+        ?? "B2BUA"
 
     if (!matched) {
       state.failedRefs.add(step.ref.id)
@@ -860,14 +947,29 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
     ds.remoteContact = contactUri
   }
 
-  // Populate route set from Record-Route in responses (RFC 3261 §12.1.2)
-  // UAC reverses the Record-Route order; UAS keeps it as-is.
-  // Since test agents act as UAC (they sent the INVITE and receive responses),
-  // we reverse the order to form the Route set for subsequent requests.
-  if (msg.type === "response" && ds.routeSet.length === 0) {
-    const rr = getHeaders(msg.headers, "record-route")
-    if (rr.length > 0) {
-      ds.routeSet = [...rr].reverse()
+  // Populate route set from Record-Route per RFC 3261 §12.1.
+  //   UAC (§12.1.2): build from response R-R in *reverse* order.
+  //   UAS (§12.1.1): build from request R-R in *received* order.
+  // The agent identity here is implicit — whichever side first observes a
+  // dialog-creating message captures its route set. UAC = first dialog-
+  // creating message is a response (the 200 OK to its outgoing INVITE).
+  // UAS = first dialog-creating message is a request (the incoming INVITE).
+  if (ds.routeSet.length === 0) {
+    if (msg.type === "response") {
+      // UAC side: reverse received order so routeSet[0] is the UAC's first
+      // hop downstream (the proxy that should be the top Route on outgoing
+      // in-dialog requests).
+      const rr = getHeaders(msg.headers, "record-route")
+      if (rr.length > 0) {
+        ds.routeSet = [...rr].reverse()
+      }
+    } else if (msg.type === "request" && msg.method === "INVITE") {
+      // UAS side: keep received order — routeSet[0] is the UAS's first hop
+      // downstream when initiating an in-dialog request (BYE, re-INVITE).
+      const rr = getHeaders(msg.headers, "record-route")
+      if (rr.length > 0) {
+        ds.routeSet = [...rr]
+      }
     }
   }
 }

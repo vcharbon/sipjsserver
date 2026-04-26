@@ -47,33 +47,24 @@ import {
   CancelBranchLru,
   HmacKeyProvider,
   type HmacKey,
-  hmacKeyProviderStaticLayer,
   LoadBalancerConfig,
   type LoadBalancerConfigData,
-  LoadBalancerStrategyLive,
-  ProxyBindConfig,
-  type ProxyBindConfigData,
   ProxyCore,
   type SocketAddr,
   type WorkerEntry,
   type WorkerHealth,
   type WorkerId,
   WorkerRegistrySimulatedControl,
-  workerRegistrySimulatedLayer,
 } from "../../src/sip-front-proxy/index.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../src/sip/SignalingNetwork.js"
 import {
-  bindRecordedEndpoint,
-  ProxyRecorder,
+  bindNamedEndpoint,
+  ProxyParticipants,
 } from "../sip-front-proxy/_report/runner.js"
+import { proxyStackLayer } from "./networkLeaves.js"
 
 /** Default simulated transit delay — same as the proxy-only fake stack. */
 export const DEFAULT_TRANSIT_DELAY_MS = 5
-/** Default test HMAC key — 32-byte 0xab pattern. Stable across tests. */
-const DEFAULT_HMAC_KEY: HmacKey = {
-  id: "test-k1",
-  bytes: new Uint8Array(32).fill(0xab),
-}
 
 export interface ProxyFakeStackOpts {
   /** ip:port the proxy binds (and advertises) on. */
@@ -148,28 +139,28 @@ export interface ProxyFakeStack {
 
   /**
    * Recording variant of {@link bindUac}: routes traffic through the
-   * `ProxyRecorder` so the test runner can dump per-scenario reports.
+   * `ProxyParticipants` so the test runner can dump per-scenario reports.
    * The `name` is the participant label that appears in the reports
    * (e.g. `"alice"`).
    */
-  readonly bindRecordedUac: (
+  readonly bindNamedUac: (
     name: string,
     addr: SocketAddr,
     queueMax?: number
-  ) => Effect.Effect<UdpEndpoint, never, SignalingNetwork | ProxyRecorder | Scope.Scope>
+  ) => Effect.Effect<UdpEndpoint, never, SignalingNetwork | ProxyParticipants | Scope.Scope>
   /**
    * Recording variant of {@link bindUasFor}: routes traffic through the
-   * `ProxyRecorder` so the test runner can dump per-scenario reports.
+   * `ProxyParticipants` so the test runner can dump per-scenario reports.
    * `name` is the participant label (e.g. `"w-0"`).
    */
-  readonly bindRecordedUasFor: (
+  readonly bindNamedUasFor: (
     name: string,
     id: WorkerId,
     queueMax?: number
   ) => Effect.Effect<
     UdpEndpoint,
     UnknownWorkerForBind,
-    SignalingNetwork | ProxyRecorder | Scope.Scope
+    SignalingNetwork | ProxyParticipants | Scope.Scope
   >
 }
 
@@ -190,46 +181,19 @@ export function proxyFakeStack(opts: ProxyFakeStackOpts): ProxyFakeStack {
   for (const w of initialWorkers) workerAddresses.set(w.id, w.address)
 
   const NetworkLayer = SignalingNetwork.simulated({ transitDelayMs })
-  const bindCfg: ProxyBindConfigData = {
-    bindHost: opts.proxyAddr.host,
-    bindPort: opts.proxyAddr.port,
-    advertisedHost: opts.proxyAddr.host,
-    advertisedPort: opts.proxyAddr.port,
-    queueMax: opts.proxyQueueMax ?? 1024,
-  }
-  const BindCfgLayer = ProxyBindConfig.layer(bindCfg)
-  const RegistryLayer = workerRegistrySimulatedLayer({ initial: initialWorkers })
-  const HmacLayer = hmacKeyProviderStaticLayer({
-    current: opts.hmacKey ?? DEFAULT_HMAC_KEY,
-    ...(opts.hmacPreviousKey !== undefined ? { previous: opts.hmacPreviousKey } : {}),
-  }).pipe(Layer.orDie) // bad key material is a test bug, not a runtime error.
-  const LbCfgLayer = LoadBalancerConfig.layer(opts.loadBalancer ?? {})
-  const LruLayer = CancelBranchLru.layer({
-    ...(opts.cancelLruTtlMs !== undefined ? { ttlMs: opts.cancelLruTtlMs } : {}),
+  const ProxyStack = proxyStackLayer({
+    proxyAddr: opts.proxyAddr,
+    workers: initialWorkers,
+    ...(opts.hmacKey !== undefined ? { hmacKey: opts.hmacKey } : {}),
+    ...(opts.hmacPreviousKey !== undefined ? { hmacPreviousKey: opts.hmacPreviousKey } : {}),
+    ...(opts.cancelLruTtlMs !== undefined ? { cancelLruTtlMs: opts.cancelLruTtlMs } : {}),
     ...(opts.cancelLruSweepIntervalMs !== undefined
-      ? { sweepIntervalMs: opts.cancelLruSweepIntervalMs }
+      ? { cancelLruSweepIntervalMs: opts.cancelLruSweepIntervalMs }
       : {}),
+    ...(opts.proxyQueueMax !== undefined ? { proxyQueueMax: opts.proxyQueueMax } : {}),
+    ...(opts.loadBalancer !== undefined ? { loadBalancer: opts.loadBalancer } : {}),
   })
-
-  // The strategy needs Registry + Hmac + Config; provide them.
-  const StrategyLayer = LoadBalancerStrategyLive.pipe(
-    Layer.provide(Layer.mergeAll(RegistryLayer, HmacLayer, LbCfgLayer))
-  )
-
-  // Compose all leaves once so every consumer reads from the same bundle
-  // (same "sharing rule" as `proxy-only-fakeStack`). We re-merge the
-  // Registry/Hmac/Lb leaves into the public bundle so tests can pull out
-  // `WorkerRegistrySimulatedControl` (and so on) without rebuilding them.
-  const Leaves = Layer.mergeAll(
-    NetworkLayer,
-    BindCfgLayer,
-    LruLayer,
-    StrategyLayer,
-    RegistryLayer,
-    HmacLayer,
-    LbCfgLayer
-  )
-  const layer = ProxyCore.Default.pipe(Layer.provideMerge(Leaves))
+  const layer = ProxyStack.pipe(Layer.provideMerge(NetworkLayer))
 
   // ── Mutators ────────────────────────────────────────────────────────────
   const addSimulatedWorker = (
@@ -273,15 +237,16 @@ export function proxyFakeStack(opts: ProxyFakeStackOpts): ProxyFakeStack {
         .pipe(Effect.orDie)
     })
 
-  // Recording variants — delegate to `bindRecordedEndpoint` so every
-  // send/receive is captured by the scenario `ProxyRecorder`.
-  const bindRecordedUac = (name: string, addr: SocketAddr, queueMax = 64) =>
-    bindRecordedEndpoint(name, addr, queueMax)
-  const bindRecordedUasFor = (name: string, id: WorkerId, queueMax = 64) =>
+  // Named variants — register `(host, port) → label` so the report
+  // renders participant names instead of raw addresses. Recording
+  // happens at the SignalingNetwork level (drainTrace), not here.
+  const bindNamedUac = (name: string, addr: SocketAddr, queueMax = 64) =>
+    bindNamedEndpoint(name, addr, queueMax)
+  const bindNamedUasFor = (name: string, id: WorkerId, queueMax = 64) =>
     Effect.gen(function* () {
       const addr = workerAddresses.get(id)
       if (addr === undefined) return yield* new UnknownWorkerForBind({ id })
-      return yield* bindRecordedEndpoint(name, addr, queueMax)
+      return yield* bindNamedEndpoint(name, addr, queueMax)
     })
 
   return {
@@ -294,8 +259,8 @@ export function proxyFakeStack(opts: ProxyFakeStackOpts): ProxyFakeStack {
     setWorkerHealth,
     bindUac,
     bindUasFor,
-    bindRecordedUac,
-    bindRecordedUasFor,
+    bindNamedUac,
+    bindNamedUasFor,
   }
 }
 

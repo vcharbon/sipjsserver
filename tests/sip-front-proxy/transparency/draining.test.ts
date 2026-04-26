@@ -76,8 +76,8 @@ describe("transparency: draining model (D5)", () => {
         },
         Effect.gen(function* () {
           yield* ProxyCore // force layer build
-          const alice = yield* fx.bindRecordedUac("alice", ALICE)
-          const wA = yield* fx.bindRecordedUasFor("w-A", W_A)
+          const alice = yield* fx.bindNamedUac("alice", ALICE)
+          const wA = yield* fx.bindNamedUasFor("w-A", W_A)
 
           // ── 1. Establish dialog with w-A ─────────────────────────
           const invite = Buffer.from(
@@ -144,11 +144,11 @@ describe("transparency: draining model (D5)", () => {
           // ── 3. Pre-grace: register w-B (alive) and flip w-A draining
           // We bind w-B's endpoint AND register it before flipping w-A,
           // so the proxy can fall back to it after grace.
-          const wB = yield* fx.bindRecordedUasFor("w-B", W_B).pipe(
+          const wB = yield* fx.bindNamedUasFor("w-B", W_B).pipe(
             Effect.catchTag("UnknownWorkerForBind", () =>
               Effect.gen(function* () {
                 yield* fx.addSimulatedWorker(W_B, W_B_ADDR)
-                return yield* fx.bindRecordedUasFor("w-B", W_B)
+                return yield* fx.bindNamedUasFor("w-B", W_B)
               })
             )
           )

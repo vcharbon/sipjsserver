@@ -23,9 +23,16 @@ export const basicCall = scenario("basic-call", (s) => {
   // Alice receives 100 Trying from B2BUA
   aliceInviteTxn.expect(100)
 
-  // Bob receives the INVITE from B2BUA — verify Max-Forwards decremented to 69
+  // Bob receives the INVITE from B2BUA — verify Max-Forwards decremented at
+  // least once (b2bonly: 70→69 at the worker; proxy+b2b: 70→69 at the proxy
+  // and 69→68 at the worker, total decrement = 2). Either way the value the
+  // peer sees must be strictly less than 70.
   const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite({
-    predicate: (msg) => getHeaderValue(msg.headers, "max-forwards") === "69",
+    predicate: (msg) => {
+      const mf = getHeaderValue(msg.headers, "max-forwards")
+      const n = mf !== undefined ? Number.parseInt(mf, 10) : NaN
+      return Number.isFinite(n) && n < 70
+    },
   })
 
   // Bob sends 180 Ringing

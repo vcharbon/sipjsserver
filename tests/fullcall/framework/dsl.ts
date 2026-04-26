@@ -15,8 +15,10 @@ import type {
   Scenario,
   ScenarioTier,
   Step,
+  Sut,
   SutTarget,
 } from "./types.js"
+import { ALL_SUTS } from "./types.js"
 import { record, type ScenarioContext } from "./recorder.js"
 
 // ---------------------------------------------------------------------------
@@ -47,7 +49,13 @@ export class ComposableScenario {
     /** Duration tier — metadata for `test:live:{short,medium,long}` gating. */
     readonly scenarioTier: ScenarioTier = "short",
     /** Opt out of the end-of-scenario 24h TestClock sweep + verifyCleanState. */
-    readonly skipFinalSweepFlag: boolean = false
+    readonly skipFinalSweepFlag: boolean = false,
+    /**
+     * SUT topologies this scenario applies to. Defaults to all SUTs;
+     * narrow via `.runOn(...)` for scenarios meaningful only on one
+     * topology (e.g. asserting B2BUA-only header semantics).
+     */
+    readonly applicableSuts: readonly Sut[] = ALL_SUTS,
   ) {}
 
   /** Attach a human-readable description. Returns a new immutable scenario. */
@@ -60,7 +68,8 @@ export class ComposableScenario {
       this.allowedExtras,
       description,
       this.scenarioTier,
-      this.skipFinalSweepFlag
+      this.skipFinalSweepFlag,
+      this.applicableSuts,
     )
   }
 
@@ -77,8 +86,33 @@ export class ComposableScenario {
       this.allowedExtras,
       this.description,
       t,
-      this.skipFinalSweepFlag
+      this.skipFinalSweepFlag,
+      this.applicableSuts,
     )
+  }
+
+  /**
+   * Restrict this scenario to a subset of SUT topologies. Default is
+   * both `b2bonly` and `proxy+b2b`. Pass a narrower list when the
+   * scenario codifies behavior only meaningful under one SUT.
+   */
+  runOn(suts: readonly Sut[]): ComposableScenario {
+    return new ComposableScenario(
+      this.name,
+      this.agents,
+      this.steps,
+      this.sippCompliant,
+      this.allowedExtras,
+      this.description,
+      this.scenarioTier,
+      this.skipFinalSweepFlag,
+      suts,
+    )
+  }
+
+  /** True if this scenario should run on the given SUT. */
+  appliesTo(sut: Sut): boolean {
+    return this.applicableSuts.includes(sut)
   }
 
   /**
@@ -97,7 +131,8 @@ export class ComposableScenario {
       this.allowedExtras,
       this.description,
       this.scenarioTier,
-      true
+      true,
+      this.applicableSuts,
     )
   }
 
@@ -119,7 +154,8 @@ export class ComposableScenario {
       [...this.allowedExtras, ...other.allowedExtras],
       mergedDescription,
       maxTier(this.scenarioTier, other.scenarioTier),
-      this.skipFinalSweepFlag || other.skipFinalSweepFlag
+      this.skipFinalSweepFlag || other.skipFinalSweepFlag,
+      intersectSuts(this.applicableSuts, other.applicableSuts),
     )
   }
 
@@ -146,7 +182,8 @@ export class ComposableScenario {
       renamedExtras,
       this.description,
       this.scenarioTier,
-      this.skipFinalSweepFlag
+      this.skipFinalSweepFlag,
+      this.applicableSuts,
     )
   }
 
@@ -164,7 +201,8 @@ export class ComposableScenario {
       this.allowedExtras,
       this.description,
       this.scenarioTier,
-      this.skipFinalSweepFlag
+      this.skipFinalSweepFlag,
+      this.applicableSuts,
     )
   }
 
@@ -179,6 +217,7 @@ export class ComposableScenario {
       description: this.description,
       tier: this.scenarioTier,
       skipFinalSweep: this.skipFinalSweepFlag || undefined,
+      runOn: this.applicableSuts,
     }
   }
 }
@@ -186,6 +225,14 @@ export class ComposableScenario {
 function maxTier(a: ScenarioTier, b: ScenarioTier): ScenarioTier {
   const rank = { short: 0, medium: 1, long: 2 } as const
   return rank[a] >= rank[b] ? a : b
+}
+
+/**
+ * Intersect two SUT applicability lists. Composition can only run on a
+ * SUT supported by every part — narrowing is monotonic.
+ */
+function intersectSuts(a: readonly Sut[], b: readonly Sut[]): readonly Sut[] {
+  return a.filter((s) => b.includes(s))
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +383,10 @@ export function parallel(
     "short"
   )
   const composedSkip = scenarios.some((s) => s.skipFinalSweepFlag)
+  const composedSuts = scenarios.reduce<readonly Sut[]>(
+    (acc, s) => intersectSuts(acc, s.applicableSuts),
+    ALL_SUTS,
+  )
 
   return new ComposableScenario(
     name,
@@ -345,7 +396,8 @@ export function parallel(
     mergedExtras,
     undefined,
     composedTier,
-    composedSkip
+    composedSkip,
+    composedSuts,
   )
 }
 

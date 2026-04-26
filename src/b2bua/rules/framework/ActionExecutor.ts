@@ -779,6 +779,29 @@ function relayResponseMsg(
     const toHeader = toWithTag ?? getHeader(resp.headers, "to") ?? ""
     // RFC 3261 §20.10: Contact on 2xx target-refreshes the peer to the B2BUA.
     const { contact: respContact } = legStackIdentity(state.call, targetLeg.legId, ctx.config)
+    // RFC 3261 §12.1.1 + §12.1.2: reflect the inbound A-leg INVITE's
+    // Record-Route on dialog-creating responses toward the A-leg so the
+    // UAC (Alice) can build its route set and route subsequent in-dialog
+    // requests through the upstream proxy. Reflection scope is narrow on
+    // purpose: route set is fixed at dialog creation, mid-dialog refresh
+    // is non-standard (see [docs/b2bua-sip-headers.md] B-leg traversal).
+    //   - status 200..299 with INVITE CSeq → confirmed dialog 2xx
+    //   - status 100..199 with INVITE CSeq AND a To-tag → early dialog
+    // Other A-leg responses (in-dialog 200, OPTIONS replies, …) and any
+    // B-leg response: omit; their dialogs are owned by the worker.
+    const isInviteResponse = cseqMethod === "INVITE"
+    const isDialogCreating2xx =
+      isInviteResponse && resp.status >= 200 && resp.status < 300
+    const isEarlyDialog1xx =
+      isInviteResponse &&
+      resp.status >= 100 &&
+      resp.status < 200 &&
+      toTag.length > 0
+    const reflectRecordRoute =
+      targetLeg.legId === "a" && (isDialogCreating2xx || isEarlyDialog1xx)
+    const aLegRecordRoutes = reflectRecordRoute
+      ? getHeaders(state.call.aLegInvite.headers, "record-route")
+      : undefined
     relayed = generateRelayedResponse(resp.status, resp.reason, {
       vias: viasForRelay,
       from: aLegInviteFrom,
@@ -788,6 +811,9 @@ function relayResponseMsg(
       body: resp.body,
       transparentHeaders: extractNonStructuralHeaders(resp),
       ...(sourceContentType !== undefined ? { contentType: sourceContentType } : {}),
+      ...(aLegRecordRoutes !== undefined && aLegRecordRoutes.length > 0
+        ? { recordRoutes: aLegRecordRoutes }
+        : {}),
       contact: respContact,
     })
 

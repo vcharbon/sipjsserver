@@ -31,6 +31,7 @@ import {
   Effect,
   HashMap,
   Layer,
+  Option,
   PubSub,
   Ref,
   ServiceMap,
@@ -133,6 +134,20 @@ export const simulatedLayer = (
         ),
         resolve: (id) =>
           Ref.get(stateRef).pipe(Effect.map((map) => HashMap.get(map, id))),
+        lookupByAddress: (addr) =>
+          Ref.get(stateRef).pipe(
+            Effect.map((map) => {
+              for (const entry of HashMap.values(map)) {
+                if (
+                  entry.address.host === addr.host &&
+                  entry.address.port === addr.port
+                ) {
+                  return Option.some(entry)
+                }
+              }
+              return Option.none<WorkerEntry>()
+            })
+          ),
         changes: Stream.fromPubSub(events),
       }
 

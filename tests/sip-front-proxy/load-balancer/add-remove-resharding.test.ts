@@ -99,9 +99,9 @@ describe("sip-front-proxy/load-balancer — add/remove resharding", () => {
         },
         Effect.gen(function* () {
         const proxy = yield* ProxyCore
-        const alice = yield* fx.bindRecordedUac("alice", ALICE)
-        const aEp = yield* fx.bindRecordedUasFor("worker-a", W_A)
-        const bEp = yield* fx.bindRecordedUasFor("worker-b", W_B)
+        const alice = yield* fx.bindNamedUac("alice", ALICE)
+        const aEp = yield* fx.bindNamedUasFor("worker-a", W_A)
+        const bEp = yield* fx.bindNamedUasFor("worker-b", W_B)
 
         // ── 1. INVITE for cid1 → A ────────────────────────────────────
         const cid1 = findCallIdMappingTo(W_A)
@@ -158,7 +158,7 @@ describe("sip-front-proxy/load-balancer — add/remove resharding", () => {
 
         // ── 2. Add C ──────────────────────────────────────────────────
         yield* fx.addSimulatedWorker(W_C, ADDR_C)
-        const cEp = yield* fx.bindRecordedUasFor("worker-c", W_C)
+        const cEp = yield* fx.bindNamedUasFor("worker-c", W_C)
 
         // ── 3. In-dialog BYE on cid1 — must still hit A (stickiness) ──
         const rrInner = rr.value.replace(/^</, "").replace(/>$/, "")

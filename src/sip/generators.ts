@@ -530,6 +530,15 @@ export interface GenerateRelayedResponseOpts {
   readonly contentType?: string
   /** Non-structural headers to carry through from the source response (§16.6). */
   readonly transparentHeaders?: ReadonlyArray<SipHeader>
+  /**
+   * Record-Route headers to reflect verbatim onto the response. Only meaningful
+   * for dialog-creating responses (RFC 3261 §12.1.1) — emit one per entry, in
+   * the same order the request received them. The B2BUA's a-leg responder
+   * passes `getHeaders(state.call.aLegInvite.headers, "record-route")` so the
+   * UAC can reverse-build its route set per §12.1.2 and route subsequent
+   * in-dialog requests through the upstream proxy.
+   */
+  readonly recordRoutes?: ReadonlyArray<string>
   /** Contact for the response. Required for dialog-creating 2xx (RFC 3261 §20.10). */
   readonly contact?: ContactSpec
 }
@@ -556,6 +565,13 @@ export function generateRelayedResponse(
 
   const headers: SipHeader[] = []
   for (const via of opts.vias) headers.push(h("Via", via))
+  // Record-Route reflected verbatim, in received order. Per RFC 3261
+  // §12.1.1 the UAS preserves the request's R-R order; the UAC reverses
+  // it (§12.1.2). Emitting before From/To groups it with the topology
+  // headers as Via does.
+  if (opts.recordRoutes) {
+    for (const rr of opts.recordRoutes) headers.push(h("Record-Route", rr))
+  }
   headers.push(h("From", opts.from))
   headers.push(h("To", opts.to))
   headers.push(h("Call-ID", opts.callId))

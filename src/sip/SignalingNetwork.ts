@@ -106,6 +106,26 @@ export interface UndeliveredPacket {
   readonly timestampMs: number
 }
 
+/**
+ * Network-level trace entry — captured by the simulated fabric on every
+ * successful delivery. Lets the test harness reconstruct the full
+ * end-to-end exchange (including internal proxy↔worker hops) without
+ * wrapping every endpoint at bind time.
+ *
+ * Real fabric returns an empty trace; this is a simulated-only feature.
+ */
+export interface NetworkTraceEntry {
+  readonly src: { readonly ip: string; readonly port: number }
+  readonly dst: { readonly ip: string; readonly port: number }
+  readonly raw: Buffer
+  /** Virtual-clock instant the sender called `send()`. */
+  readonly sentMs: number
+  /** Virtual-clock instant the packet was enqueued at the destination. */
+  readonly deliveredMs: number
+  /** False when no endpoint was bound at `dst`; the packet was dropped. */
+  readonly delivered: boolean
+}
+
 export type PreIngressAction = Data.TaggedEnum<{
   accept: {}
   drop: {}
@@ -170,6 +190,17 @@ export class SignalingNetwork extends ServiceMap.Service<
      */
     readonly drainUndeliverable: () => Effect.Effect<ReadonlyArray<UndeliveredPacket>>
     /**
+     * Drain network-level trace entries accumulated since last drain.
+     * Simulated implementation populates this on every delivery; real
+     * implementation returns an empty array (real-UDP recording lives
+     * elsewhere, if anywhere).
+     *
+     * Used by the test harness to reconstruct the full end-to-end
+     * exchange — including internal proxy↔worker hops that no agent
+     * endpoint would otherwise observe.
+     */
+    readonly drainTrace: () => Effect.Effect<ReadonlyArray<NetworkTraceEntry>>
+    /**
      * Simulated: configured endpoint-to-endpoint transit delay (ms). The
      * trace renderer reads this to compute the peer-side observation time
      * from a single captured send/receive clock.
@@ -183,9 +214,24 @@ export class SignalingNetwork extends ServiceMap.Service<
   // Real (dgram-backed) implementation
   // -------------------------------------------------------------------------
 
-  static readonly real: Layer.Layer<SignalingNetwork> = Layer.succeed(
+  static readonly real: Layer.Layer<SignalingNetwork> = Layer.sync(
     SignalingNetwork,
-    {
+    () => {
+      // Per-layer-instance recording buffer. Mirrors the simulated impl's
+      // `drainTrace`: every successful `send()` and every accepted recv
+      // pushes one entry. Real UDP gives us no cross-process clock, so
+      // `sentMs` and `deliveredMs` are stamped from the local `Date.now()`
+      // at the moment of send / recv respectively. For round-trips the
+      // sender's send-entry pairs with the receiver's recv-entry on the
+      // remote endpoint by `(src, dst, raw)` — but the trace renderer just
+      // sorts by timestamp, so the pair appears as two adjacent entries.
+      //
+      // `Layer.sync` (vs `Layer.succeed` with a literal) makes this state
+      // per-instance: each test that builds the layer gets its own buffer,
+      // matching the simulated layer's lifecycle and avoiding cross-test
+      // bleed.
+      const trace: NetworkTraceEntry[] = []
+      return ({
       bindUdp: (opts) =>
         Effect.gen(function* () {
           const queue = yield* Queue.bounded<UdpPacket, Cause.Done>(opts.queueMax)
@@ -253,6 +299,14 @@ export class SignalingNetwork extends ServiceMap.Service<
                       return
                     }
                     counters.enqueued++
+                    trace.push({
+                      raw,
+                      src: { ip: src.address, port: src.port },
+                      dst: { ip: localAddress.ip, port: localAddress.port },
+                      sentMs: arrivalMs,
+                      deliveredMs: arrivalMs,
+                      delivered: true,
+                    })
                   }
                 }
               }
@@ -278,7 +332,18 @@ export class SignalingNetwork extends ServiceMap.Service<
 
           const send: UdpEndpoint["send"] = (buf, dstPort, dstAddress) =>
             Effect.callback<void, SendError>((resume) => {
+              const sentMs = Date.now()
               socket.send(buf, 0, buf.length, dstPort, dstAddress, (err) => {
+                if (err === null || err === undefined) {
+                  trace.push({
+                    raw: buf,
+                    src: { ip: localAddress.ip, port: localAddress.port },
+                    dst: { ip: dstAddress, port: dstPort },
+                    sentMs,
+                    deliveredMs: sentMs,
+                    delivered: true,
+                  })
+                }
                 resume(
                   err
                     ? Effect.fail(new SendError({ message: err.message }))
@@ -305,7 +370,14 @@ export class SignalingNetwork extends ServiceMap.Service<
         }),
 
       drainUndeliverable: () => Effect.succeed([]),
+      drainTrace: () =>
+        Effect.sync(() => {
+          const out = trace.slice()
+          trace.length = 0
+          return out as ReadonlyArray<NetworkTraceEntry>
+        }),
       transitDelayMs: undefined,
+      })
     }
   )
 
@@ -333,6 +405,11 @@ export class SignalingNetwork extends ServiceMap.Service<
         const routingTable = MutableHashMap.empty<string, EndpointRecord>()
         // Undeliverable packet buffer; drained by the harness.
         const undeliverable: UndeliveredPacket[] = []
+        // Successful-delivery trace; drained by the harness for the
+        // network-view report. One entry per successful enqueue at
+        // destination — covers internal proxy↔worker hops that no agent
+        // endpoint observes directly.
+        const trace: NetworkTraceEntry[] = []
 
         const keyOf = (ip: string, port: number) => `${ip}:${port}`
 
@@ -362,8 +439,17 @@ export class SignalingNetwork extends ServiceMap.Service<
              * preIngress if configured. The preIngress-reply path forks
              * another delivery back to src through the same code path, so
              * reply packets honor the same transit delay and routing rules.
+             *
+             * `sentMs` is the wall-clock the *sender* called `send()`, kept
+             * for the network trace so the trace renderer can show the
+             * sent-vs-delivered gap (= transit delay) accurately.
              */
-            const deliver = (raw: Buffer, src: RemoteInfo, dst: RemoteInfo): Effect.Effect<void> =>
+            const deliver = (
+              raw: Buffer,
+              src: RemoteInfo,
+              dst: RemoteInfo,
+              sentMs: number,
+            ): Effect.Effect<void> =>
               Effect.gen(function* () {
                 const target = Option.getOrUndefined(
                   MutableHashMap.get(routingTable, keyOf(dst.address, dst.port))
@@ -375,6 +461,14 @@ export class SignalingNetwork extends ServiceMap.Service<
                     src: { ip: src.address, port: src.port },
                     dst: { ip: dst.address, port: dst.port },
                     timestampMs: nowMs,
+                  })
+                  trace.push({
+                    raw,
+                    src: { ip: src.address, port: src.port },
+                    dst: { ip: dst.address, port: dst.port },
+                    sentMs,
+                    deliveredMs: nowMs,
+                    delivered: false,
                   })
                   yield* Effect.logWarning(
                     `[SignalingNetwork.simulated] undeliverable ${src.address}:${src.port} → ${dst.address}:${dst.port} (no endpoint bound)`
@@ -397,15 +491,16 @@ export class SignalingNetwork extends ServiceMap.Service<
                     // profile. deliver() handles the lookup — if the source
                     // happened to close, the reply becomes undeliverable.
                     yield* Effect.forkDetach(
-                      Effect.sleep(`${transitDelayMs} millis`).pipe(
-                        Effect.andThen(
-                          deliver(
-                            action.buf,
-                            { address: dst.address, port: dst.port },
-                            src
-                          )
+                      Effect.gen(function* () {
+                        const replySentMs = yield* Clock.currentTimeMillis
+                        yield* Effect.sleep(`${transitDelayMs} millis`)
+                        yield* deliver(
+                          action.buf,
+                          { address: dst.address, port: dst.port },
+                          src,
+                          replySentMs,
                         )
-                      )
+                      })
                     )
                     return
                   }
@@ -416,22 +511,34 @@ export class SignalingNetwork extends ServiceMap.Service<
                       return
                     }
                     target.counters.enqueued++
+                    trace.push({
+                      raw,
+                      src: { ip: src.address, port: src.port },
+                      dst: { ip: dst.address, port: dst.port },
+                      sentMs,
+                      deliveredMs: arrivalMs,
+                      delivered: true,
+                    })
                   }
                 }
               })
 
             const send: UdpEndpoint["send"] = (buf, dstPort, dstAddress) =>
-              Effect.forkDetach(
-                Effect.sleep(`${transitDelayMs} millis`).pipe(
-                  Effect.andThen(
-                    deliver(
-                      buf,
-                      { address: localAddress.ip, port: localAddress.port },
-                      { address: dstAddress, port: dstPort }
+              Effect.gen(function* () {
+                const sentMs = yield* Clock.currentTimeMillis
+                yield* Effect.forkDetach(
+                  Effect.sleep(`${transitDelayMs} millis`).pipe(
+                    Effect.andThen(
+                      deliver(
+                        buf,
+                        { address: localAddress.ip, port: localAddress.port },
+                        { address: dstAddress, port: dstPort },
+                        sentMs,
+                      )
                     )
                   )
                 )
-              ).pipe(Effect.asVoid)
+              })
 
             const poll = () =>
               Effect.map(Queue.poll(queue), (opt) => Option.getOrNull(opt))
@@ -472,7 +579,19 @@ export class SignalingNetwork extends ServiceMap.Service<
             return drained as ReadonlyArray<UndeliveredPacket>
           })
 
-        return { bindUdp, drainUndeliverable, transitDelayMs: opts.transitDelayMs }
+        const drainTrace = () =>
+          Effect.sync(() => {
+            const drained = trace.slice()
+            trace.length = 0
+            return drained as ReadonlyArray<NetworkTraceEntry>
+          })
+
+        return {
+          bindUdp,
+          drainUndeliverable,
+          drainTrace,
+          transitDelayMs: opts.transitDelayMs,
+        }
       })
     )
 }

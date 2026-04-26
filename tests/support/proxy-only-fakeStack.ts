@@ -32,11 +32,13 @@ import {
   CancelBranchLru,
   ForwardAllConfig,
   ForwardAllStrategyLive,
+  workerRegistryControlNoopLayer,
   ProxyBindConfig,
   type ProxyBindConfigData,
   ProxyCore,
   type SocketAddr,
 } from "../../src/sip-front-proxy/index.js"
+import { fromString as staticRegistryFromString } from "../../src/sip-front-proxy/registry/static.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../src/sip/SignalingNetwork.js"
 
 /** Default simulated transit delay — same as the B2BUA fake stack. */
@@ -86,9 +88,23 @@ export function proxyOnlyFakeStackLayer(opts: ProxyOnlyFakeStackOpts) {
       : {}),
   })
 
+  // ProxyCore needs a `WorkerRegistry` to classify worker-sourced traffic
+  // as outbound (the cookie-decode loop fix). ForwardAll mode has no
+  // workers; an empty static registry makes `lookupByAddress` always
+  // return `Option.none`, restoring the pre-fix behaviour for these
+  // topology-only tests.
+  const RegistryLayer = staticRegistryFromString("")
+
   // Compose: every leaf provided once, every consumer reads from the same
   // bundle (the "sharing rule" lifted from `tests/support/fakeStack.ts`).
-  const Leaves = Layer.mergeAll(NetworkLayer, BindCfgLayer, LruLayer, StrategyLayer)
+  const Leaves = Layer.mergeAll(
+    NetworkLayer,
+    BindCfgLayer,
+    LruLayer,
+    StrategyLayer,
+    RegistryLayer,
+    workerRegistryControlNoopLayer
+  )
   return ProxyCore.Default.pipe(Layer.provideMerge(Leaves))
 }
 

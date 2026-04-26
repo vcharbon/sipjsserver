@@ -13,7 +13,7 @@ import { TestClock } from "effect/testing"
 import { customParser } from "../../../src/sip/parsers/custom/index.js"
 import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
 import { proxyOnlyFakeStackLayer } from "../../support/proxy-only-fakeStack.js"
-import { bindRecordedEndpoint, runProxyScenario } from "../_report/runner.js"
+import { bindNamedEndpoint, runProxyScenario } from "../_report/runner.js"
 
 const PROXY = { host: "10.0.0.1", port: 5060 }
 const ALICE = { host: "10.0.0.2", port: 5060 }
@@ -54,8 +54,8 @@ describe("sip-front-proxy/transit-only — malformed-message handling", () => {
       },
       Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* bindRecordedEndpoint("alice", ALICE)
-      const bob = yield* bindRecordedEndpoint("bob", BOB)
+      const alice = yield* bindNamedEndpoint("alice", ALICE)
+      const bob = yield* bindNamedEndpoint("bob", BOB)
 
       yield* alice.send(
         Buffer.from("THIS IS NOT A SIP MESSAGE\r\n\r\n"),
@@ -81,8 +81,8 @@ describe("sip-front-proxy/transit-only — malformed-message handling", () => {
       },
       Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* bindRecordedEndpoint("alice", ALICE)
-      const bob = yield* bindRecordedEndpoint("bob", BOB)
+      const alice = yield* bindNamedEndpoint("alice", ALICE)
+      const bob = yield* bindNamedEndpoint("bob", BOB)
 
       const invite = Buffer.from(
         [

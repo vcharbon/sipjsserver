@@ -81,9 +81,9 @@ describe("sip-front-proxy/load-balancer — unresolvable id falls back", () => {
         const proxy = yield* ProxyCore
         const callId = findCallIdMappingTo(W_A)
 
-        const alice = yield* fx.bindRecordedUac("alice", ALICE)
-        const aEp = yield* fx.bindRecordedUasFor("worker-a", W_A)
-        const bEp = yield* fx.bindRecordedUasFor("worker-b", W_B)
+        const alice = yield* fx.bindNamedUac("alice", ALICE)
+        const aEp = yield* fx.bindNamedUasFor("worker-a", W_A)
+        const bEp = yield* fx.bindNamedUasFor("worker-b", W_B)
 
         // ── 1. INVITE → A ────────────────────────────────────────────
         const invite = Buffer.from(

@@ -66,8 +66,8 @@ describe("sip-front-proxy/load-balancer — HMAC tampering rejected", () => {
       },
       Effect.gen(function* () {
       const proxy = yield* ProxyCore
-      const alice = yield* fx.bindRecordedUac("alice", ALICE)
-      const aEp = yield* fx.bindRecordedUasFor("worker-a", W_A)
+      const alice = yield* fx.bindNamedUac("alice", ALICE)
+      const aEp = yield* fx.bindNamedUasFor("worker-a", W_A)
 
       const callId = "tamper-call@alice"
 
