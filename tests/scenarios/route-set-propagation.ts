@@ -38,10 +38,12 @@ function getHeader(headers: ReadonlyArray<SipHeader>, name: string): string | un
 
 function isProxyStickinessRR(value: string | undefined): boolean {
   if (value === undefined) return false
-  // proxy advertises 127.0.0.1:15060 with cookie params w=, kid=, sig=, lr.
+  // proxy advertises 127.0.0.1:15060 with v2 cookie params w_pri=, w_bak=,
+  // kid=, sig=, lr (cookie format v2 — D8 of HA-resilience plan).
   return (
     value.includes("127.0.0.1:15060") &&
-    /;w=/.test(value) &&
+    /;w_pri=/.test(value) &&
+    /;w_bak=/.test(value) &&
     /;sig=/.test(value) &&
     /;lr/.test(value)
   )

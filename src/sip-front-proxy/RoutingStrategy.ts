@@ -22,8 +22,13 @@
  *
  *   - `decodeStickiness` — given a parsed top-Route URI's params (the one
  *     pointing at us, which the core just stripped per §16.4), recover the
- *     downstream target the strategy originally encoded. Three outcomes:
+ *     downstream target the strategy originally encoded. Four outcomes:
  *       - `forward { target }`: forward straight to that address;
+ *       - `forwardBackup { target }`: primary worker is dead/draining-post-grace,
+ *         strategy fell back to the cookie's backup ordinal which is alive.
+ *         The core forwards exactly like `forward` but counts a distinct
+ *         `decode_forward_backup` decision for HA observability (D8 of the
+ *         HA-resilience plan).
  *       - `reject { status, reason }`: synthesize a response (e.g. 403 on
  *         HMAC tamper detection in `LoadBalancer`);
  *       - `unknown`: stickiness couldn't be parsed; core falls back to
@@ -63,11 +68,13 @@ export type RouteParams = Record<string, string>
  */
 export type DecodeResult =
   | { readonly _tag: "forward"; readonly target: SocketAddr }
+  | { readonly _tag: "forwardBackup"; readonly target: SocketAddr }
   | { readonly _tag: "reject"; readonly status: number; readonly reason: string }
   | { readonly _tag: "unknown" }
 
 export const DecodeResult = {
   forward: (target: SocketAddr): DecodeResult => ({ _tag: "forward", target }),
+  forwardBackup: (target: SocketAddr): DecodeResult => ({ _tag: "forwardBackup", target }),
   reject: (status: number, reason: string): DecodeResult => ({ _tag: "reject", status, reason }),
   unknown: (): DecodeResult => ({ _tag: "unknown" }),
 }

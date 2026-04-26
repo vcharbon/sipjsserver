@@ -1,26 +1,32 @@
 /**
- * LoadBalancerStrategy — D2/D13/D14 of the SIP Front Proxy plan, PR3b.
- *
- * Routes new dialogs to a B2BUA worker pool by consistent (rendezvous /
- * HRW) hashing on Call-ID, and recovers stickiness on in-dialog requests
- * from an HMAC-signed cookie stamped into the Record-Route URI.
+ * LoadBalancerStrategy — D2/D13/D14 of the SIP Front Proxy plan, PR3b,
+ * extended with D8 of the HA-resilience plan (cookie format v2 carrying
+ * `w_pri` + `w_bak` ordinals so that a dead primary deterministically
+ * routes to the named backup, never via fresh HRW).
  *
  *   selectForNewDialog : Call-ID → snapshot WorkerRegistry → filter alive
  *                        → rendezvousSelect(callId, candidates) → addr
  *                        (NoTargetAvailable when the alive set is empty).
  *
  *   encodeStickiness   : (target, msg) → look the target up in the
- *                        snapshot to recover its WorkerId, sign
- *                        `v=1|w=<id>|c=<callId>` with HmacKeyProvider, and
- *                        return `{ w, v, kid, sig }` URI params. The proxy
- *                        core stamps these on the Record-Route it inserts.
+ *                        snapshot to recover its WorkerId (=`w_pri`), pick
+ *                        the second-best HRW winner across the remaining
+ *                        alive workers (=`w_bak`, empty when only one
+ *                        worker is alive), sign
+ *                        `v=2|w_pri=<id>|w_bak=<id>|c=<callId>` with
+ *                        HmacKeyProvider, and return `{ w_pri, w_bak, v,
+ *                        kid, sig }` URI params. The proxy core stamps
+ *                        these on the Record-Route it inserts.
  *
- *   decodeStickiness   : ({ w, v, kid, sig }, msg) → recompute the input
- *                        from the message's Call-ID and verify the MAC; on
- *                        success resolve `w` against the live registry.
- *                        Mismatch → reject 403; unknown id → unknown (the
- *                        core falls back to selectForNewDialog and the new
- *                        worker hydrates from Redis on its own).
+ *   decodeStickiness   : ({ w_pri, w_bak, v, kid, sig }, msg) → recompute
+ *                        the input from the message's Call-ID and verify
+ *                        the MAC; on success resolve `w_pri` against the
+ *                        live registry. Cookie version mismatch → reject
+ *                        403. If primary is alive: forward(primary). If
+ *                        primary is dead/post-grace AND `w_bak` resolves
+ *                        to an alive entry: `forwardBackup(backup)`.
+ *                        Otherwise: unknown (core falls back to
+ *                        selectForNewDialog).
  *
  * Non-blocking invariant (D4). All three methods read snapshots out of a
  * `Ref` (synchronously) and call HMAC sign/verify (CPU-bound,
@@ -60,7 +66,6 @@ import { DecodeResult, NoTargetAvailable } from "../RoutingStrategy.js"
 import { HmacKeyProvider } from "../security/HmacKeyProvider.js"
 import {
   type WorkerEntry,
-  type WorkerId,
   WorkerRegistry,
   WorkerId as makeWorkerId,
 } from "../registry/WorkerRegistry.js"
@@ -71,11 +76,6 @@ import { rendezvousSelect } from "./RendezvousHash.js"
 // ---------------------------------------------------------------------------
 
 export interface LoadBalancerConfigData {
-  /**
-   * URI-param name for the worker id cookie. Defaults to `"w"` per the plan.
-   * Configurable so an operator can rename it without code change.
-   */
-  readonly cookieName?: string
   /**
    * In-dialog grace window (ms) for in-flight requests when a worker enters
    * `draining`. Consumed in PR4; shipped here so the layer signature is
@@ -94,9 +94,10 @@ export class LoadBalancerConfig extends ServiceMap.Service<
   ): Layer.Layer<LoadBalancerConfig> => Layer.succeed(LoadBalancerConfig, cfg)
 }
 
-const DEFAULT_COOKIE_NAME = "w"
+const COOKIE_PRIMARY_NAME = "w_pri"
+const COOKIE_BACKUP_NAME = "w_bak"
 const DEFAULT_DRAIN_GRACE_MS = 5_000
-const COOKIE_VERSION = "1"
+const COOKIE_VERSION = "2"
 /** First 16 bytes (128 bits) of HMAC-SHA256 — see header comment. */
 const TRUNCATED_MAC_BYTES = 16
 
@@ -106,9 +107,22 @@ const TRUNCATED_MAC_BYTES = 16
 
 const utf8 = (s: string): Uint8Array => new TextEncoder().encode(s)
 
-/** Build the byte input fed to HMAC: `v=1|w=<id>|c=<callId>`. */
-const stickinessInput = (workerId: string, callId: string): Uint8Array =>
-  utf8(`v=${COOKIE_VERSION}|w=${workerId}|c=${callId}`)
+/**
+ * Build the byte input fed to HMAC:
+ * `v=2|w_pri=<id>|w_bak=<id>|c=<callId>`.
+ *
+ * `backupId` is the empty string when only one worker is alive at encode
+ * time. The HMAC binds the primary, backup, and call-id together, so a
+ * UA that swaps `w_bak` to a different worker breaks the MAC.
+ */
+const stickinessInput = (
+  primaryId: string,
+  backupId: string,
+  callId: string
+): Uint8Array =>
+  utf8(
+    `v=${COOKIE_VERSION}|${COOKIE_PRIMARY_NAME}=${primaryId}|${COOKIE_BACKUP_NAME}=${backupId}|c=${callId}`
+  )
 
 /** Truncate a digest to the first `n` bytes. */
 const truncate = (mac: Uint8Array, n: number): Uint8Array =>
@@ -182,7 +196,6 @@ export const LoadBalancerStrategyLive: Layer.Layer<
       return yield* ProxyMetrics
     }).pipe(Effect.provide(ProxyMetrics.Default)))
 
-    const cookieName = cfg.cookieName ?? DEFAULT_COOKIE_NAME
     const drainGraceMs = cfg.drainGracePolicyMs ?? DEFAULT_DRAIN_GRACE_MS
 
     // ---- selectForNewDialog -----------------------------------------------
@@ -234,14 +247,26 @@ export const LoadBalancerStrategyLive: Layer.Layer<
       if (callId === undefined) return Option.none()
       // @effect-diagnostics-next-line runEffectInsideEffect:off
       const snapshot = Effect.runSync(registry.snapshot)
-      const entry = findByAddress(snapshot, target)
-      if (entry === undefined) return Option.none()
-      const input = stickinessInput(entry.id, callId)
+      const primary = findByAddress(snapshot, target)
+      if (primary === undefined) return Option.none()
+      // D8: pick `w_bak` as the second-best HRW winner among the alive
+      // workers excluding the primary. Empty when the primary is the
+      // only alive worker (single-pod deployment / cluster scale-out
+      // edge case) — the cookie still verifies but recovery has no
+      // alternative target, which is the documented small-cluster
+      // limitation.
+      const backupCandidates = snapshot.filter(
+        (w) => w.health === "alive" && w.id !== primary.id
+      )
+      const backup = rendezvousSelect(callId, backupCandidates)
+      const backupId = backup?.id ?? ""
+      const input = stickinessInput(primary.id, backupId, callId)
       // @effect-diagnostics-next-line runEffectInsideEffect:off
       const signed = Effect.runSync(hmac.sign(input))
       const truncated = truncate(signed.mac, TRUNCATED_MAC_BYTES)
       return Option.some({
-        [cookieName]: entry.id,
+        [COOKIE_PRIMARY_NAME]: primary.id,
+        [COOKIE_BACKUP_NAME]: backupId,
         v: COOKIE_VERSION,
         kid: signed.kid,
         sig: base64urlEncode(truncated),
@@ -250,30 +275,48 @@ export const LoadBalancerStrategyLive: Layer.Layer<
 
     // ---- decodeStickiness -------------------------------------------------
     /**
-     * D5 (Draining model) wiring:
+     * Routing matrix:
      *
-     *   - When the resolved worker is `alive`: forward.
-     *   - When `draining` AND the request method is **NOT** ACK or CANCEL:
-     *     check `drainingSince` — if `(now - drainingSince) <= drainGraceMs`
-     *     forward to the original worker, otherwise return `unknown` so
-     *     the proxy core falls back via `selectForNewDialog` (a new live
-     *     worker hydrates from Redis on its own).
-     *   - When `dead`: same logic as draining-post-grace — return
-     *     `unknown` so the core picks a live worker. ACK/CANCEL still
-     *     hit the dead worker because we have nothing better to try and
-     *     the UAC's transaction will time out either way.
-     *   - When `draining`/`dead` AND method is ACK or CANCEL: forward
-     *     to the resolved worker regardless of grace. ACK on 2xx and
-     *     CANCEL must reach the worker that owns the INVITE
-     *     transaction (RFC 3261 §13.2.2.4 / §9.1, §16.10) — only that
-     *     worker can complete the handshake. Routing them to a fresh
-     *     worker would fabricate a 481 storm.
+     *   - Primary `alive`: forward(primary).
+     *   - Primary `draining`/`dead` AND method is ACK or CANCEL: forward
+     *     to the original primary regardless. ACK on 2xx and CANCEL must
+     *     reach the worker that owns the INVITE transaction (RFC 3261
+     *     §13.2.2.4 / §9.1, §16.10) — only that worker can complete the
+     *     handshake. Routing them to a fresh worker would fabricate a
+     *     481 storm.
+     *   - Primary `draining` within drain grace: forward(primary) so
+     *     in-flight re-INVITE / UPDATE / INFO completes (D5).
+     *   - Primary `draining` past grace OR `dead`: D8 — try the cookie's
+     *     `w_bak`. If the backup resolves to an alive entry, return
+     *     `forwardBackup(backup)`; the recovery worker reads its sidecar
+     *     Redis (which has been receiving dual-write) and takes over.
+     *     Otherwise return `unknown` so the core falls back to fresh
+     *     `selectForNewDialog` — the picked worker hydrates from Redis
+     *     and 481s on miss, the documented post-grace failure mode.
+     *   - Primary missing from registry (scaled down): same backup path.
      */
     const isAckOrCancel = (msg: SipMessage): boolean => {
       if (msg.type !== "request") return false
       const m = msg.method
       return m === "ACK" || m === "CANCEL"
     }
+
+    /**
+     * Resolve `w_bak` to a `forwardBackup` decision when the named
+     * backup is alive in the registry; otherwise yield `unknown` so the
+     * core falls through to a fresh selection.
+     */
+    const tryBackup = (
+      backupId: string
+    ): Effect.Effect<DecodeResult> =>
+      Effect.gen(function* () {
+        if (backupId.length === 0) return DecodeResult.unknown()
+        const opt = yield* registry.resolve(makeWorkerId(backupId))
+        if (Option.isNone(opt)) return DecodeResult.unknown()
+        const bak = opt.value
+        if (bak.health !== "alive") return DecodeResult.unknown()
+        return DecodeResult.forwardBackup(bak.address)
+      })
 
     const decodeStickiness = (
       routeParam: RouteParams,
@@ -282,16 +325,20 @@ export const LoadBalancerStrategyLive: Layer.Layer<
       Effect.gen(function* () {
         // Pull every required field; absence of any → unknown (the proxy
         // core falls back to selectForNewDialog).
-        const w = routeParam[cookieName]
+        const wPri = routeParam[COOKIE_PRIMARY_NAME]
+        const wBakRaw = routeParam[COOKIE_BACKUP_NAME]
         const v = routeParam["v"]
         const kid = routeParam["kid"]
         const sig = routeParam["sig"]
+        // `w_bak` may legitimately be present-but-empty (single-worker
+        // cluster at encode time); `w_pri` must be non-empty.
         if (
-          typeof w !== "string" ||
+          typeof wPri !== "string" ||
+          typeof wBakRaw !== "string" ||
           typeof v !== "string" ||
           typeof kid !== "string" ||
           typeof sig !== "string" ||
-          w.length === 0 ||
+          wPri.length === 0 ||
           kid.length === 0 ||
           sig.length === 0
         ) {
@@ -299,9 +346,9 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           return DecodeResult.unknown()
         }
         if (v !== COOKIE_VERSION) {
-          // Future-proofing: a cookie minted by a different version is not
-          // forgeable into the current grammar, so reject rather than fall
-          // back (which could silently re-route a hostile cookie).
+          // Cookie minted by a different version is not forgeable into
+          // the current grammar, so reject rather than fall back (which
+          // could silently re-route a hostile cookie).
           yield* metrics.recordHmacFailure("decode")
           return DecodeResult.reject(
             403,
@@ -323,7 +370,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           )
         }
 
-        const input = stickinessInput(w, callId)
+        const input = stickinessInput(wPri, wBakRaw, callId)
         const ok = yield* hmac.verifyTruncated(input, kid, decoded)
         if (!ok) {
           // Distinguish unknown_kid from mismatch: when the kid isn't
@@ -336,45 +383,38 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           return DecodeResult.reject(403, "stickiness signature mismatch")
         }
 
-        // MAC verified — resolve the worker.
-        const id: WorkerId = makeWorkerId(w)
-        const opt = yield* registry.resolve(id)
-        if (Option.isNone(opt)) {
-          // Worker disappeared (scaled down, deleted). Caller falls back to
-          // selectForNewDialog → new worker hydrates from Redis (D5).
-          return DecodeResult.unknown()
+        // MAC verified — resolve the primary.
+        const primaryOpt = yield* registry.resolve(makeWorkerId(wPri))
+        if (Option.isNone(primaryOpt)) {
+          // Primary scaled down / deleted: try the cookie's backup.
+          return yield* tryBackup(wBakRaw)
         }
-        const entry = opt.value
+        const primary = primaryOpt.value
 
-        // ── D5 (draining) routing matrix ────────────────────────────────
-        if (entry.health === "alive") {
-          return DecodeResult.forward(entry.address)
+        // ── Routing matrix ──────────────────────────────────────────────
+        if (primary.health === "alive") {
+          return DecodeResult.forward(primary.address)
         }
-        // ACK / CANCEL exemption: always reach the original worker.
+        // ACK / CANCEL exemption: always reach the original primary.
         if (isAckOrCancel(msg)) {
-          return DecodeResult.forward(entry.address)
+          return DecodeResult.forward(primary.address)
         }
-        if (entry.health === "draining") {
-          const since = entry.drainingSince
+        if (primary.health === "draining") {
+          const since = primary.drainingSince
           if (since !== undefined) {
             const nowMs = yield* Clock.currentTimeMillis
             if (nowMs - since <= drainGraceMs) {
-              // Pre-grace: still forward to the original worker so
-              // in-flight re-INVITE / UPDATE / INFO completes.
-              return DecodeResult.forward(entry.address)
+              // Pre-grace: forward to the original primary so in-flight
+              // re-INVITE / UPDATE / INFO completes.
+              return DecodeResult.forward(primary.address)
             }
           }
-          // Post-grace (or no `drainingSince` stamped) → fall back to
-          // a fresh selection via the core. The new worker hydrates
-          // from Redis; on hydration miss it 481s, which is the
-          // documented post-grace failure mode (D-RES).
-          return DecodeResult.unknown()
+          // Post-grace: fall through to the backup.
+          return yield* tryBackup(wBakRaw)
         }
-        // entry.health === "dead" or "unknown": same as post-grace.
-        // (`unknown` here is degenerate — a worker that's never been
-        // confirmed alive shouldn't own any in-dialog state — but
-        // falling back to a fresh selection is the right safety net.)
-        return DecodeResult.unknown()
+        // primary.health === "dead" or "unknown": fall through to the
+        // backup.
+        return yield* tryBackup(wBakRaw)
       })
 
     return {

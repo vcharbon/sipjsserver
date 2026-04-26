@@ -496,6 +496,38 @@ export type RuleStateEntry = typeof RuleStateEntry.Type
 export const CallModelState = Schema.Literals(["active", "terminating", "terminated"])
 export type CallModelState = typeof CallModelState.Type
 
+// ── HA topology hint ────────────────────────────────────────────────────────
+
+/**
+ * Persisted topology hint (D7 of the HA-resilience plan).
+ *
+ * Captures the worker pair the proxy stamped into the call's stickiness
+ * cookie at INVITE time, plus a monotonic generation that increments on
+ * every state flush. On recovery / reclaim:
+ *
+ *   - A peer scanning its sidecar Redis filters by `pri == self` (calls I
+ *     was primary for) or `bak == self` (calls I was backup for) to decide
+ *     which entries to rehydrate.
+ *   - On conflict (e.g. partition heal where two writers raced), the
+ *     newest `gen` wins — matches "lost-update" tolerance per F10.
+ *
+ * `pri` matches the cookie's `w_pri` (a `WorkerId` opaque string). `bak`
+ * matches `w_bak`; the empty string means "single-worker cluster, no
+ * backup chosen at encode time" (documented small-cluster limitation).
+ *
+ * Optional on the Call schema: a worker that hasn't yet decoded a v2
+ * cookie (e.g. tests using the legacy single-Redis path) leaves the
+ * field absent. Slice 4 of the implementation plan populates it on the
+ * dual-write path.
+ */
+export const CallTopology = Schema.Struct({
+  pri: Schema.String,
+  bak: Schema.String,
+  gen: Schema.Int,
+})
+
+export type CallTopology = typeof CallTopology.Type
+
 // ── Call ─────────────────────────────────────────────────────────────────────
 
 export const Call = Schema.Struct({
@@ -568,6 +600,13 @@ export const Call = Schema.Struct({
   sampled: Schema.optional(Schema.Boolean),
   /** Worker index that owns this call (for cluster-mode recovery). */
   workerIndex: Schema.optional(Schema.Int),
+  /**
+   * HA topology hint (D7 of HA-resilience plan): names the cookie's
+   * `{w_pri, w_bak}` pair plus a monotonic `gen`. Populated by the
+   * dual-write path (Slice 4); absent on legacy single-Redis flushes
+   * and on calls established before a v2 cookie was stamped.
+   */
+  _topology: Schema.optional(CallTopology),
   /**
    * True if this call carries an emergency Resource-Priority
    * (esnet.0 / wps.0 / q735.0). Set at initial INVITE time. Drives the

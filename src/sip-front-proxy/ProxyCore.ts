@@ -543,6 +543,14 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
             target = decoded.target
             decisionKind = "decode_forward"
             break
+          case "forwardBackup":
+            // D8 of the HA-resilience plan: cookie's primary worker is
+            // dead/draining-post-grace, strategy resolved the named
+            // `w_bak` to an alive entry. Forward exactly like a normal
+            // hit but emit a distinct decision class for HA dashboards.
+            target = decoded.target
+            decisionKind = "decode_forward_backup"
+            break
           case "reject":
             synthesizedReply = { status: decoded.status, reason: decoded.reason }
             decisionKind = "decode_reject"

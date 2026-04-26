@@ -3,7 +3,7 @@
  *
  * Flow:
  *   1. INVITE Alice → Proxy(LoadBalancer) → Worker A. The proxy stamps a
- *      Record-Route with `;w=<id>;v=1;kid=<kid>;sig=<base64url>`.
+ *      Record-Route with `;w_pri=<id>;w_bak=<id>;v=2;kid=<kid>;sig=<base64url>`.
  *   2. We extract the Record-Route from the INVITE that arrived at A,
  *      mint a 200 OK with that RR mirrored back, and route it through
  *      the proxy → Alice (so Alice "knows" the route set).
@@ -99,10 +99,12 @@ describe("sip-front-proxy/load-balancer — HMAC tampering rejected", () => {
         (h) => h.name.toLowerCase() === "record-route"
       )
       expect(rrHeader).toBeDefined()
-      // sanity: RR carries the cookie
+      // sanity: RR carries the v2 cookie
       expect(rrHeader!.value).toMatch(/sig=/)
       expect(rrHeader!.value).toMatch(/kid=/)
-      expect(rrHeader!.value).toMatch(/;w=/)
+      expect(rrHeader!.value).toMatch(/;w_pri=/)
+      expect(rrHeader!.value).toMatch(/;w_bak=/)
+      expect(rrHeader!.value).toMatch(/v=2/)
 
       // ── 2. 200 OK back through the proxy → Alice ─────────────────────
       const ok = Buffer.from(

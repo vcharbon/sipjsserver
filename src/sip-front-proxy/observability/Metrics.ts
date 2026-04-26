@@ -98,7 +98,7 @@ const baseRoutingDuration = Metric.histogram("sip_routing_duration_seconds", {
 
 const baseRoutingDecision = Metric.counter("sip_routing_decision_total", {
   description:
-    "Routing decisions taken by the core: select_new / decode_forward / decode_reject / decode_unknown / cancel_lookup_hit / cancel_lookup_miss.",
+    "Routing decisions taken by the core: select_new / decode_forward / decode_forward_backup / decode_reject / decode_unknown / cancel_lookup_hit / cancel_lookup_miss / worker_outbound.",
   incremental: true,
 })
 
@@ -135,6 +135,7 @@ export type MessageResult = "forwarded" | "rejected" | "dropped"
 export type RoutingDecisionKind =
   | "select_new"
   | "decode_forward"
+  | "decode_forward_backup"
   | "decode_reject"
   | "decode_unknown"
   | "cancel_lookup_hit"

@@ -108,7 +108,8 @@ topologyTest(
         expect(rr).toBeDefined()
         expect(rr!.value).toContain(`${PROXY.host}:${PROXY.port}`)
         expect(rr!.value).toContain(";lr")
-        expect(rr!.value).toContain(";w=") // load-balancer cookie
+        expect(rr!.value).toContain(";w_pri=") // load-balancer v2 cookie primary
+        expect(rr!.value).toContain(";w_bak=") // load-balancer v2 cookie backup (D8)
       } else {
         // Direct: only Alice's Via.
         expect(inviteParsed.parsed.vias.length).toBe(1)
