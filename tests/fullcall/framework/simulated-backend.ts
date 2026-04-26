@@ -13,8 +13,8 @@
  */
 
 import { Effect } from "effect"
-import * as TestClock from "effect/testing/TestClock"
 import type { AgentInfo, TestTransport } from "./types.js"
+import { pumpAll } from "../../support/pumpAll.js"
 import { TransportError } from "./types.js"
 import type { UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
 import { SignalingNetwork } from "../../../src/sip/SignalingNetwork.js"
@@ -317,42 +317,44 @@ export function createSimulatedTransport(opts?: {
       }),
 
     settle: () =>
-      // End-of-scenario sweep. Three concerns:
-      //   1. Yield the scheduler so TransactionLayer's auto-ACK (for non-
-      //      2xx final responses) and other fiber-deferred work actually
-      //      run before drain-for-unexpected.
-      //   2. Advance time far enough to fire every pending SIP retransmit,
-      //      Timer B/H (32s), CallState "terminating" drop, limiter window
-      //      migration, and keepalive interval. 24 virtual hours under
-      //      TestClock covers every finalization timer in the pipeline
-      //      with margin to spare; under a real clock we only need a short
-      //      ingress-gap sleep (the live backend is NOT tasked with
-      //      retransmit-sweep detection — fake owns that responsibility).
-      //   3. Yield again so any messages produced by step 2 land in the
-      //      endpoint queues before drain.
+      // End-of-scenario sweep — replaces the hand-tuned `20×yieldNow →
+      // 10×(adjust 50ms) → adjust 24h → 20×yieldNow` pattern. Two
+      // `pumpAll` rounds:
       //
-      // The first 500ms is advanced in 50ms steps so any in-flight responses
-      // (e.g., the BYE/200-OK round-trip on the proxy+b2b SUT, which spans
-      // four transits) get processed by their target fibers BEFORE the 24h
-      // jump fires the SIP retransmit timers. A single 24h leap would race
-      // Timer E retransmits against deliver fibers and produce spurious
-      // duplicate sends to bob. After the first 500ms everything in-flight
-      // has settled, so the long jump can clean up Timer B/F residue.
+      //   1. `within: 500ms` — drains in-flight transit + immediate
+      //      protocol responses without yet firing SIP retransmit timers
+      //      (T1=500ms is the smallest retransmit interval). This is what
+      //      the old "first 500ms in 50ms steps" comment was protecting:
+      //      transit must complete before retransmits race deliver fibers.
+      //
+      //   2. `within: 24 hours` — fires every pending finalization timer
+      //      (Timer B/H, CallState "terminating" drop, limiter window
+      //      migration, keepalive interval, ...) so verifyCleanState sees
+      //      a clean stack.
+      //
+      // Under realClock there's no virtual clock to advance — pumpAll's
+      // built-in 20ms real-clock probe handles the same role.
       Effect.gen(function* () {
-        for (let i = 0; i < 20; i++) {
-          yield* Effect.yieldNow
-        }
         if (opts?.realClock) {
           yield* Effect.sleep("100 millis")
-        } else {
-          for (let i = 0; i < 10; i++) {
-            yield* TestClock.adjust("50 millis")
-            yield* Effect.yieldNow
-          }
-          yield* TestClock.adjust("24 hours")
+          return
         }
-        for (let i = 0; i < 20; i++) {
-          yield* Effect.yieldNow
+        // Phase A: drain transit + immediate responses.
+        yield* pumpAll({ within: "500 millis" })
+        // Phase B: fire long-tail cleanup timers.
+        const r = yield* pumpAll({ within: "24 hours" })
+        if (r.realProbeWasUseful) {
+          yield* Effect.logWarning(
+            `[pumpAll/settle] real-clock probe surfaced new work — ` +
+            `test depends on external blocking I/O. Pending after probe: ` +
+            `${r.remainingDeadlines.length}`,
+          )
+        }
+        if (r.periodicSuspects.length > 0) {
+          yield* Effect.logWarning(
+            `[pumpAll/settle] periodic timer suspects (durationMs → fires): ` +
+            r.periodicSuspects.map((p) => `${p.durationMillis}→${p.count}`).join(", "),
+          )
         }
       }),
 

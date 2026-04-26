@@ -44,6 +44,7 @@ import { Layer } from "effect"
 import type { AppConfigData } from "../../src/config/AppConfig.js"
 import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { b2buaWorkerStackLayer, NoOpCdrLayer, NoOpTracingLayer } from "./networkLeaves.js"
+import { PumpableClockLayer } from "./PumpableClock.js"
 
 /**
  * Default simulated-network transit delay — picked high enough to expose
@@ -74,5 +75,6 @@ export function fakeStackLayer(opts: {
   })
   return b2buaWorkerStackLayer({ config: opts.config }).pipe(
     Layer.provideMerge(NetworkLayer),
+    Layer.provideMerge(PumpableClockLayer),
   )
 }

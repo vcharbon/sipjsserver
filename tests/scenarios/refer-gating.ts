@@ -42,6 +42,25 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true
 }
 
+/**
+ * Body-equality modulo the SDP `o=` line. The framework rewrites the
+ * `o=` line on outbound SDP to honour RFC 3264 §8 / RFC 4566 §5.2
+ * origin continuity (see `applyOutgoingSdpOriginRewrite` in
+ * [tests/fullcall/framework/message-builder.ts](../fullcall/framework/message-builder.ts)),
+ * so a precomputed `sdpOffer(...)` body no longer matches what the
+ * agent actually puts on the wire byte-for-byte once the agent has
+ * already emitted SDP earlier in the dialog. Comparing modulo the
+ * origin line preserves the original "proxy is body-transparent"
+ * intent of these predicates.
+ */
+function sdpBodyEqualIgnoringOrigin(actual: Uint8Array, expected: Uint8Array): boolean {
+  const stripOriginLine = (bytes: Uint8Array): string => {
+    const text = new TextDecoder().decode(bytes)
+    return text.split(/\r?\n/).filter((line) => !line.startsWith("o=")).join("\n")
+  }
+  return stripOriginLine(actual) === stripOriginLine(expected)
+}
+
 function contactHasLegTag(msg: SipMessage, legTag: string): boolean {
   const contact = headerValue(msg, "contact") ?? ""
   return contact.includes(`leg=${legTag}`)
@@ -115,7 +134,7 @@ export const referGatingAReinviteRefAuthorizing = scenario(
     const bobReinviteTxn = bobDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
       predicate: (msg) =>
-        msg.type === "request" && bytesEqual(msg.body, aliceReinviteSdp),
+        msg.type === "request" && sdpBodyEqualIgnoringOrigin(msg.body, aliceReinviteSdp),
     })
     bobReinviteTxn.reply(200, {
       overrides: { body: sdpAnswer(aliceReinviteSdp) },
@@ -199,7 +218,7 @@ export const referGatingAReinviteCRinging = scenario(
     const bobReinviteTxn = bobDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
       predicate: (msg) =>
-        msg.type === "request" && bytesEqual(msg.body, aliceReinviteSdp),
+        msg.type === "request" && sdpBodyEqualIgnoringOrigin(msg.body, aliceReinviteSdp),
     })
     bobReinviteTxn.reply(200, {
       overrides: { body: sdpAnswer(aliceReinviteSdp) },

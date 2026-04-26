@@ -48,7 +48,6 @@
 
 import { Effect, Layer, type Scope } from "effect"
 import { describe, it } from "@effect/vitest"
-import { TestClock } from "effect/testing"
 import {
   proxyFakeStack,
   type ProxyFakeStack,
@@ -64,6 +63,8 @@ import {
   ProxyParticipants,
   runProxyScenario,
 } from "../sip-front-proxy/_report/runner.js"
+import { pumpAll } from "./pumpAll.js"
+import { PumpableClock, PumpableClockLayer } from "./PumpableClock.js"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -101,8 +102,14 @@ export interface Topology {
     addr: SocketAddr,
     queueMax?: number
   ) => Effect.Effect<UdpEndpoint, never, SignalingNetwork | ProxyParticipants | Scope.Scope>
-  /** Advance the simulated clock enough for `cycles` round-trips. */
-  readonly pump: (cycles?: number) => Effect.Effect<void>
+  /**
+   * Drive the simulated clock and network forward until both are quiescent
+   * (no pending sleeps, no in-flight transit). The legacy `cycles` param
+   * is preserved for caller compatibility but is now a no-op — `pumpAll`
+   * advances exactly to the next deadline regardless of how many round-trips
+   * the scenario requires.
+   */
+  readonly pump: (cycles?: number) => Effect.Effect<void, never, PumpableClock | SignalingNetwork>
 }
 
 // ---------------------------------------------------------------------------
@@ -136,17 +143,13 @@ const DEFAULT_TRANSIT_MS = 5
 // Pump helpers
 // ---------------------------------------------------------------------------
 
-const makePump = (transitMs: number) =>
-  (cycles = 1): Effect.Effect<void> =>
-    Effect.gen(function* () {
-      for (let i = 0; i < cycles; i++) {
-        yield* Effect.yieldNow
-        yield* TestClock.adjust(`${transitMs + 1} millis`)
-        yield* Effect.yieldNow
-        yield* TestClock.adjust(`${transitMs + 1} millis`)
-        yield* Effect.yieldNow
-      }
-    })
+// `transitMs` is unused by pumpAll (which queries the next pending deadline
+// directly via PumpableClock) but kept in the signature so the existing
+// makePump call sites don't need refactoring. `cycles` is similarly preserved
+// as a no-op — pumpAll drains to quiescence on a single call.
+const makePump = (_transitMs: number) =>
+  (_cycles = 1): Effect.Effect<void, never, PumpableClock | SignalingNetwork> =>
+    Effect.asVoid(pumpAll())
 
 // ---------------------------------------------------------------------------
 // Direct topology
@@ -157,7 +160,9 @@ interface DirectTopologyArgs {
 }
 
 const directLayer = (transitMs: number) =>
-  SignalingNetwork.simulated({ transitDelayMs: transitMs })
+  SignalingNetwork.simulated({ transitDelayMs: transitMs }).pipe(
+    Layer.provideMerge(PumpableClockLayer),
+  )
 
 const directBody = (
   defaults: TopologyDefaults,

@@ -420,7 +420,7 @@ export interface TestTransport {
    * TransactionLayer has queued its auto-ACK (for non-2xx final responses)
    * would silently pass.
    */
-  readonly settle?: () => Effect.Effect<void>
+  readonly settle?: () => Effect.Effect<void, never, any>
   /**
    * Simulated propagation delay between an agent's wire-send and the peer's
    * observation of the packet. Used by the trace renderer to compute the

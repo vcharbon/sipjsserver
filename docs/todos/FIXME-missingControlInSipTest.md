@@ -29,3 +29,17 @@ Record-Route only contributes to a route set when echoed in a dialog-creating re
 
 (If violation #1 is fixed, this becomes purely cosmetic on the worker→proxy hop.)
 
+4. 🟡 B2BUA c-realigning re-INVITE to callee leg lacks Allow: / Supported: — RFC 3261 §13.2.1, §20.37 (SHOULD)
+
+In the `refer-allow-happy` flow (and any REFER-driven c-realign path) the B2BUA sends a re-INVITE to charlie with neither Allow: nor Supported: set. Caught by `rfc.allowSupportedOnInvite` (currently disabled in [tests/harness/refer-allow-happy.test.ts](../../tests/harness/refer-allow-happy.test.ts) until the B2BUA stamps both headers).
+
+## Detection
+
+Once the proxy/B2BUA fixes are made, the following rule pack rules in [tests/harness/rules/rfc/](../../tests/harness/rules/rfc/) will pass automatically — no scenario edits required:
+
+- `rfc.proxy100TryingNotForwarded` — covers item 1.
+- `rfc.rportEcho` — covers item 2.
+- `rfc.recordRoutePlacement` — covers item 3 (and its mid-dialog-response variant from the bob↔proxy review).
+- `rfc.allowSupportedOnInvite` — covers item 4.
+- `rfc.midDialogFromUri`, `rfc.midDialogRoute`, `rfc.sdpOriginContinuity` — surface the bob-reinvite-fragment violations from the dedicated callflow review (Bob's UA fixes shipped in `tests/fullcall/framework/`).
+

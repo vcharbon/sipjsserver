@@ -91,6 +91,16 @@ export interface AgentDialogState {
    * Ensures the To header preserves the user part across the dialog.
    */
   dialogRemoteUri: string
+  /**
+   * Local URI for the From header in in-dialog requests (RFC 3261 §12.2.1.1).
+   * For UAC: the From URI from the original INVITE sent.
+   * For UAS: the To URI from the received INVITE.
+   * Without this, a UAS sending a re-INVITE / BYE inside the dialog would
+   * default From to its agent identity (`ctx.local.uri`) rather than the
+   * dialog's local URI — a §12.2.1.1 violation that breaks any peer that
+   * authenticates / authorises on the From-URI.
+   */
+  dialogLocalUri: string
   /** True once callId has been confirmed by a received message (for B-side agents). */
   callIdConfirmed: boolean
   /** Request-URI from received INVITE (UAS side) — for CANCEL validation (RFC 3261 §9.1). */
@@ -112,6 +122,26 @@ export interface AgentDialogState {
     inviteCSeq: number
     statusCode: number
     branch: string
+  }>
+  /**
+   * Per-Call-ID outgoing SDP origin state — RFC 3264 §8 / RFC 4566 §5.2.
+   *
+   * The first SDP this agent emits in a session anchors `(username,
+   * sessionId, sessionAddr)`; subsequent emissions reuse them and bump
+   * `version` by 1 when the body changed (or keep it when byte-identical).
+   * Without this, scenarios that re-offer (e.g. Bob's re-INVITE after a
+   * prior 200-OK answer) emit a fresh `o=` tuple and trip
+   * `rfc.sdpOriginContinuity`.
+   */
+  outgoingSdpState: Map<string, {
+    username: string
+    sessionId: string
+    sessionAddr: string
+    nettype: string
+    addrtype: string
+    lastVersion: number
+    /** SDP body without the o= line — used to decide whether anything changed. */
+    lastDigestExcludingOrigin: string
   }>
 }
 
@@ -135,13 +165,107 @@ export function createAgentDialogState(localIp: string): AgentDialogState {
     lastInviteUri: "",
     remoteContact: "",
     dialogRemoteUri: "",
+    dialogLocalUri: "",
     callIdConfirmed: false,
     receivedInviteUri: "",
     receivedInviteBranch: "",
     pendingRequests: [],
     sentRequests: [],
     pendingReliableProvisionals: [],
+    outgoingSdpState: new Map(),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Outgoing SDP origin rewrite — RFC 3264 §8 / RFC 4566 §5.2.
+// ---------------------------------------------------------------------------
+
+const SDP_DECODER = new TextDecoder()
+const SDP_ENCODER = new TextEncoder()
+
+/**
+ * If `body` is an SDP, rewrite its `o=` line to honour origin continuity
+ * across this agent's emissions in the same session, and update
+ * `dialogState.outgoingSdpState` accordingly. No-op when `body` is empty
+ * or not SDP. The first emission anchors `(username, sessionId, addr)`
+ * from the body itself; subsequent emissions reuse those fields and pick
+ * the next monotonic version.
+ */
+function applyOutgoingSdpOriginRewrite(
+  body: Uint8Array,
+  dialogState: AgentDialogState,
+  callId: string
+): Uint8Array {
+  if (body.byteLength === 0) return body
+  const text = SDP_DECODER.decode(body)
+  if (!text.startsWith("v=0")) return body
+  const lines = text.split(/\r?\n/)
+  const oIdx = lines.findIndex((l) => l.startsWith("o="))
+  if (oIdx < 0) return body
+  const oLine = lines[oIdx]!
+  const parts = oLine.slice(2).trim().split(/\s+/)
+  if (parts.length < 6) return body
+  const incomingVersion = Number.parseInt(parts[2]!, 10)
+  if (!Number.isFinite(incomingVersion)) return body
+
+  const digestExcludingOrigin = lines.filter((_, i) => i !== oIdx).join("\n")
+  const prior = dialogState.outgoingSdpState.get(callId)
+
+  let username: string
+  let sessionId: string
+  let sessionAddr: string
+  let nettype: string
+  let addrtype: string
+  let version: number
+
+  if (!prior) {
+    // Anchor on the first emission — the helper-provided values become
+    // this agent's stable tuple for the rest of the session.
+    username = parts[0]!
+    sessionId = parts[1]!
+    nettype = parts[3]!
+    addrtype = parts[4]!
+    sessionAddr = parts[5]!
+    version = incomingVersion
+  } else {
+    username = prior.username
+    sessionId = prior.sessionId
+    nettype = prior.nettype
+    addrtype = prior.addrtype
+    sessionAddr = prior.sessionAddr
+    version = digestExcludingOrigin === prior.lastDigestExcludingOrigin
+      ? prior.lastVersion
+      : prior.lastVersion + 1
+  }
+
+  dialogState.outgoingSdpState.set(callId, {
+    username,
+    sessionId,
+    sessionAddr,
+    nettype,
+    addrtype,
+    lastVersion: version,
+    lastDigestExcludingOrigin: digestExcludingOrigin,
+  })
+
+  // If nothing differs from what's already on the wire, return the
+  // original bytes (preserves CRLF style + ordering exactly).
+  if (
+    prior === undefined &&
+    parts[0] === username &&
+    parts[1] === sessionId &&
+    parts[2] === String(version) &&
+    parts[3] === nettype &&
+    parts[4] === addrtype &&
+    parts[5] === sessionAddr
+  ) {
+    return body
+  }
+
+  const newOLine = `o=${username} ${sessionId} ${version} ${nettype} ${addrtype} ${sessionAddr}`
+  if (lines[oIdx] === newOLine) return body
+  const rewritten = lines.map((l, i) => (i === oIdx ? newOLine : l)).join("\r\n")
+  return SDP_ENCODER.encode(rewritten)
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +346,23 @@ function emptyLastInfo(): LastMessageInfo {
 // SIP message construction
 // ---------------------------------------------------------------------------
 
+/**
+ * Default Allow: methods advertised on every INVITE / 2xx-INVITE
+ * (RFC 3261 §13.2.1). Methods listed here are the ones the simulated UA
+ * is willing to accept from a peer; scenarios that test other methods
+ * can override via `HeaderOverrides.headers["Allow"]`.
+ */
+const DEFAULT_ALLOW = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, PRACK"
+
+/**
+ * Default Supported: extensions advertised on every INVITE / 2xx-INVITE
+ * (RFC 3261 §20.37). The simulated UA understands `100rel` (RFC 3262),
+ * `timer` (RFC 4028) and `replaces` (RFC 3891) — peers may Require any
+ * of these. Scenarios that need to advertise a different set override
+ * via `HeaderOverrides.headers["Supported"]`.
+ */
+const DEFAULT_SUPPORTED = "100rel, timer, replaces"
+
 function h(name: string, value: string): SipHeader {
   return { name, value }
 }
@@ -289,16 +430,29 @@ export function buildRequest(
     }
   }
 
+  // RFC 3261 §12.2.1.1: in-dialog requests must carry the dialog's local URI
+  // in From. dialogLocalUri is populated on the first sent INVITE (UAC) or
+  // first received INVITE (UAS). Out-of-dialog (no dialogLocalUri yet) falls
+  // back to the agent's configured identity.
+  const fromUri = dialogState.dialogLocalUri || ctx.local.uri
+
   // Compute defaults
   const defaultHeaders: SipHeader[] = [
     h("Via", `SIP/2.0/UDP ${ctx.local.ip}:${ctx.local.port};branch=${branch}`),
     h("Max-Forwards", "70"),
-    h("From", `<${ctx.local.uri}>;tag=${ctx.local.tag}`),
+    h("From", `<${fromUri}>;tag=${ctx.local.tag}`),
     h("To", buildToHeader(method, step.uri, ctx, dialogState)),
     h("Call-ID", ctx.local.callId),
     h("CSeq", `${cseqNumber} ${method}`),
     h("Contact", `<sip:${ctx.local.ip}:${ctx.local.port};transport=udp>`),
   ]
+
+  // RFC 3261 §13.2.1 / §20.37: INVITE SHOULD declare Allow: and Supported:
+  // so the peer can negotiate methods and Require-able extensions.
+  if (method === "INVITE") {
+    defaultHeaders.push(h("Allow", DEFAULT_ALLOW))
+    defaultHeaders.push(h("Supported", DEFAULT_SUPPORTED))
+  }
 
   // RFC 3261 §12.2.1 / §16.12: in-dialog request routing.
   //   - remoteTarget = peer's Contact URI (already tracked as `remoteContact`).
@@ -310,8 +464,12 @@ export function buildRequest(
   const remoteTarget = step.uri
     ?? (dialogState.remoteContact || undefined)
     ?? `sip:${ctx.remote.ip}:${ctx.remote.port}`
+  // RFC 3261 §12.2.1.1: every in-dialog request honours the route set.
+  // Initial INVITE has no remoteTag yet; re-INVITE does — distinguish by
+  // dialog state, not by method, so re-INVITE picks up Route headers.
+  const isInitialInvite = method === "INVITE" && dialogState.remoteTag === ""
   const inDialogWithRoutes =
-    method !== "INVITE" && method !== "CANCEL" && dialogState.routeSet.length > 0
+    method !== "CANCEL" && !isInitialInvite && dialogState.routeSet.length > 0
   let routeHeaders: SipHeader[] = []
   let uri = remoteTarget
   if (inDialogWithRoutes) {
@@ -349,6 +507,10 @@ export function buildRequest(
       }
     }
   }
+
+  // RFC 3264 §8 / RFC 4566 §5.2: keep the SDP origin tuple stable across
+  // this agent's emissions in the same Call-ID and bump version monotonically.
+  body = applyOutgoingSdpOriginRewrite(body, dialogState, ctx.local.callId)
 
   // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
   if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {
@@ -408,6 +570,13 @@ export function buildResponse(
     h("Contact", `<sip:${ctx.local.ip}:${ctx.local.port};transport=udp>`),
   ]
 
+  // RFC 3261 §13.2.1 / §20.37: 2xx to INVITE SHOULD declare Allow: and
+  // Supported: so the peer knows the UA's accepted methods and extensions.
+  if (statusCode >= 200 && statusCode < 300 && ctx.last.cseqMethod === "INVITE") {
+    defaultHeaders.push(h("Allow", DEFAULT_ALLOW))
+    defaultHeaders.push(h("Supported", DEFAULT_SUPPORTED))
+  }
+
   let headers = [...defaultHeaders]
   let body: Uint8Array = new Uint8Array(0)
 
@@ -417,6 +586,10 @@ export function buildResponse(
     headers = applyOverrides(headers, merged)
     if (merged.body) body = merged.body
   }
+
+  // RFC 3264 §8 / RFC 4566 §5.2: keep the SDP origin tuple stable across
+  // this agent's emissions in the same Call-ID and bump version monotonically.
+  body = applyOutgoingSdpOriginRewrite(body, dialogState, ctx.last.callId || ctx.local.callId)
 
   // RFC 3261 §7.4.1: Content-Type MUST be present when a body is included
   if (body.byteLength > 0 && !headers.some((hdr) => hdr.name.toLowerCase() === "content-type")) {

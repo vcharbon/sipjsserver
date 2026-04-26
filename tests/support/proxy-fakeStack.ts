@@ -62,6 +62,7 @@ import {
   ProxyParticipants,
 } from "../sip-front-proxy/_report/runner.js"
 import { proxyStackLayer } from "./networkLeaves.js"
+import { PumpableClock, PumpableClockLayer } from "./PumpableClock.js"
 
 /** Default simulated transit delay — same as the proxy-only fake stack. */
 export const DEFAULT_TRANSIT_DELAY_MS = 5
@@ -101,6 +102,7 @@ export interface ProxyFakeStack {
     | HmacKeyProvider
     | LoadBalancerConfig
     | WorkerRegistrySimulatedControl
+    | PumpableClock
   >
   readonly proxyAddr: SocketAddr
   readonly transitDelayMs: number
@@ -193,7 +195,10 @@ export function proxyFakeStack(opts: ProxyFakeStackOpts): ProxyFakeStack {
     ...(opts.proxyQueueMax !== undefined ? { proxyQueueMax: opts.proxyQueueMax } : {}),
     ...(opts.loadBalancer !== undefined ? { loadBalancer: opts.loadBalancer } : {}),
   })
-  const layer = ProxyStack.pipe(Layer.provideMerge(NetworkLayer))
+  const layer = ProxyStack.pipe(
+    Layer.provideMerge(NetworkLayer),
+    Layer.provideMerge(PumpableClockLayer),
+  )
 
   // ── Mutators ────────────────────────────────────────────────────────────
   const addSimulatedWorker = (

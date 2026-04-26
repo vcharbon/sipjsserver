@@ -26,6 +26,13 @@ import {
   createAgentDialogState,
   type AgentDialogState,
 } from "../../../fullcall/framework/message-builder.js"
+import { midDialogFromUriRule } from "./mid-dialog-from-uri.js"
+import { midDialogRouteRule } from "./mid-dialog-route.js"
+import { sdpOriginContinuityRule } from "./sdp-o-continuity.js"
+import { recordRoutePlacementRule } from "./record-route-placement.js"
+import { rportEchoRule } from "./rport-echo.js"
+import { allowSupportedOnInviteRule } from "./allow-supported-on-invite.js"
+import { proxy100TryingNotForwardedRule } from "./proxy-100-trying-not-forwarded.js"
 
 // ---------------------------------------------------------------------------
 // Recording → per-agent message stream + dialog state
@@ -289,4 +296,11 @@ export const rfcRules: ReadonlyArray<Rule> = [
   makeRfcRule("rfc.responseCorrelation", "responseCorrelation", "RFC 3261 §8.1.3.3: response CSeq echoes a sent request"),
   makeRfcRule("rfc.rackCorrelation", "rackCorrelation", "RFC 3262 §7.2: PRACK RAck correlates with reliable 1xx"),
   makeRfcRule("rfc.tagConsistency", "tagConsistency", "RFC 3261 §17.2.1: UAS final-response tag consistency"),
+  midDialogFromUriRule,
+  midDialogRouteRule,
+  sdpOriginContinuityRule,
+  recordRoutePlacementRule,
+  rportEchoRule,
+  allowSupportedOnInviteRule,
+  proxy100TryingNotForwardedRule,
 ]

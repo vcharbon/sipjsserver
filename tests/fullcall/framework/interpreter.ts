@@ -531,10 +531,13 @@ function executeSend(
       dialogState.callIdConfirmed = true
     }
 
-    // Track the To URI from sent INVITE as the dialog's remote URI (UAC side).
-    // RFC 3261 §12.1.2: remote URI = URI in the To field of the initial request.
+    // Track the dialog URIs from the sent INVITE (UAC side).
+    // RFC 3261 §12.1.2: remote URI = To, local URI = From of the initial request.
     if (msg.type === "request" && msg.method === "INVITE" && !dialogState.dialogRemoteUri) {
       dialogState.dialogRemoteUri = msg.parsed.to.uri
+    }
+    if (msg.type === "request" && msg.method === "INVITE" && !dialogState.dialogLocalUri) {
+      dialogState.dialogLocalUri = msg.parsed.from.uri
     }
 
     // Track sent requests for response correlation
@@ -890,10 +893,13 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
     }
   }
 
-  // Track the remote URI from received INVITE (UAS side).
-  // RFC 3261 §12.1.2: remote URI = URI in the From field of the initial request.
+  // Track the dialog URIs from received INVITE (UAS side).
+  // RFC 3261 §12.1.2: remote URI = From, local URI = To of the initial request.
   if (msg.type === "request" && msg.method === "INVITE" && !ds.dialogRemoteUri) {
     ds.dialogRemoteUri = msg.parsed.from.uri
+  }
+  if (msg.type === "request" && msg.method === "INVITE" && !ds.dialogLocalUri) {
+    ds.dialogLocalUri = msg.parsed.to.uri
   }
 
   if (msg.type === "response") {

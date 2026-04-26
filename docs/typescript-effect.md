@@ -70,9 +70,24 @@ All hot-path shared maps in services (`TransactionLayer`, `CallState`, `TimerSer
 
 ## TestClock vs real-time samplers / timers
 
-E2E tests use `@effect/vitest`'s `it.effect`, which runs under `TestClock`. `Effect.sleep` and any fiber that yields to the clock will **not** advance unless the test explicitly calls `TestClock.adjust`. This is a recurring landmine.
+E2E tests use `@effect/vitest`'s `it.effect`, which runs under `TestClock`. `Effect.sleep` and any fiber that yields to the clock will **not** advance on its own — virtual time only moves when something calls `TestClock.adjust` (or the new `pumpAll`).
 
-**Rule:** any background sampler, periodic gauge, or watchdog that must keep ticking in real wall-clock time under tests must use raw `setInterval` / `setTimeout` — not `Effect.sleep`.
+### Fake-stack tests: use `pumpAll`, not hand-tuned adjusts
+
+The fake-stack test layer (`tests/support/fakeStack.ts`, `tests/support/proxy-fakeStack.ts`, `tests/support/proxyB2bFakeStack.ts`) provides `PumpableClockLayer` ([tests/support/PumpableClock.ts](../tests/support/PumpableClock.ts)) under `Clock.Clock`. It satisfies the upstream `TestClock` contract (so `TestClock.adjust(...)` keeps working) AND exposes pending-sleep introspection used by `pumpAll`.
+
+`pumpAll` ([tests/support/pumpAll.ts](../tests/support/pumpAll.ts)) advances exactly to the next pending deadline, fires it, yields the scheduler, repeats — until the simulated network and pending-sleep queue are both empty. It is what powers:
+
+- `topology.pump()` in [tests/support/topologies.ts](../tests/support/topologies.ts)
+- `settle()` in [tests/fullcall/framework/simulated-backend.ts](../tests/fullcall/framework/simulated-backend.ts)
+
+**Rule for new fake-stack scenarios:** prefer `yield* Effect.sleep(...)` in scenario code and let the harness's between-step pump drive convergence. Reach for `TestClock.adjust("N millis")` only when the test deliberately needs to fire a *named* time boundary (e.g. registry watcher tests, draining grace tests).
+
+`pumpAll` returns a `PumpReport` — `realProbeWasUseful: true` means the test depends on real I/O (Redis / disk / live socket); `periodicSuspects` lists durations that fired more than the threshold. The simulated-backend `settle` surfaces both as warnings.
+
+### Real-time samplers must escape the virtual clock
+
+Any background sampler, periodic gauge, or watchdog that must keep ticking in real wall-clock time under tests must use raw `setInterval` / `setTimeout` — not `Effect.sleep`.
 
 ```typescript
 const interval = setInterval(() => { /* sample */ }, 100)

@@ -208,6 +208,18 @@ export class SignalingNetwork extends ServiceMap.Service<
      * Real: `undefined` — on real sockets each side stamps its own clock.
      */
     readonly transitDelayMs: number | undefined
+    /**
+     * Number of packets currently mid-transit on the simulated fabric — i.e.
+     * a `send()` was called but the destination-side `deliver` hasn't run
+     * yet. Synchronous getter; cheap.
+     *
+     * Used by `tests/support/pumpAll.ts` as a defense-in-depth signal that
+     * "no pending sleep" doesn't mean "no transit fiber waiting to run".
+     *
+     * Real impl: always returns 0 — real UDP has no notion of in-flight
+     * tracked here (the kernel owns it).
+     */
+    readonly inFlight: () => number
   }
 >()("@sipjsserver/SignalingNetwork") {
   // -------------------------------------------------------------------------
@@ -377,6 +389,7 @@ export class SignalingNetwork extends ServiceMap.Service<
           return out as ReadonlyArray<NetworkTraceEntry>
         }),
       transitDelayMs: undefined,
+      inFlight: () => 0,
       })
     }
   )
@@ -410,6 +423,10 @@ export class SignalingNetwork extends ServiceMap.Service<
         // destination — covers internal proxy↔worker hops that no agent
         // endpoint observes directly.
         const trace: NetworkTraceEntry[] = []
+        // Number of forked transit fibers currently between send() and
+        // deliver() completion. Read by `tests/support/pumpAll.ts` to know
+        // when the simulated fabric is fully drained.
+        let inFlightCount = 0
 
         const keyOf = (ip: string, port: number) => `${ip}:${port}`
 
@@ -490,6 +507,7 @@ export class SignalingNetwork extends ServiceMap.Service<
                     // Fork the reply back to the source on the same transit
                     // profile. deliver() handles the lookup — if the source
                     // happened to close, the reply becomes undeliverable.
+                    inFlightCount++
                     yield* Effect.forkDetach(
                       Effect.gen(function* () {
                         const replySentMs = yield* Clock.currentTimeMillis
@@ -500,7 +518,7 @@ export class SignalingNetwork extends ServiceMap.Service<
                           src,
                           replySentMs,
                         )
-                      })
+                      }).pipe(Effect.ensuring(Effect.sync(() => { inFlightCount-- })))
                     )
                     return
                   }
@@ -526,6 +544,7 @@ export class SignalingNetwork extends ServiceMap.Service<
             const send: UdpEndpoint["send"] = (buf, dstPort, dstAddress) =>
               Effect.gen(function* () {
                 const sentMs = yield* Clock.currentTimeMillis
+                inFlightCount++
                 yield* Effect.forkDetach(
                   Effect.sleep(`${transitDelayMs} millis`).pipe(
                     Effect.andThen(
@@ -535,7 +554,8 @@ export class SignalingNetwork extends ServiceMap.Service<
                         { address: dstAddress, port: dstPort },
                         sentMs,
                       )
-                    )
+                    ),
+                    Effect.ensuring(Effect.sync(() => { inFlightCount-- })),
                   )
                 )
               })
@@ -591,6 +611,7 @@ export class SignalingNetwork extends ServiceMap.Service<
           drainUndeliverable,
           drainTrace,
           transitDelayMs: opts.transitDelayMs,
+          inFlight: () => inFlightCount,
         }
       })
     )

@@ -38,6 +38,7 @@ import {
   WorkerId,
 } from "../../src/sip-front-proxy/index.js"
 import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
+import { PumpableClockLayer } from "./PumpableClock.js"
 
 /** Default simulated transit delay — same as `fakeStack`'s. */
 export const DEFAULT_TRANSIT_DELAY_MS = 15
@@ -53,7 +54,7 @@ export const INGRESS_ADDR: SocketAddr = { host: "127.0.0.1", port: 15060 }
  * Pinned worker bind. `sipLocalPort` in the worker's `AppConfigData`
  * matches; UDP packets the proxy forwards land here.
  */
-export const WORKER_ADDR: SocketAddr = { host: "127.0.0.1", port: 15061 }
+export const WORKER_ADDR: SocketAddr = { host: "10.0.0.1", port: 15061 }
 
 /** Stable WorkerId for the single registered worker. */
 export const WORKER_ID = WorkerId("test-worker-1")
@@ -99,6 +100,7 @@ export function proxyB2bFakeStackLayer(opts: ProxyB2bFakeStackOpts) {
 
   return Layer.mergeAll(WorkerStack, ProxyStack).pipe(
     Layer.provideMerge(NetworkLayer),
+    Layer.provideMerge(PumpableClockLayer),
   )
 }
 
