@@ -1,0 +1,59 @@
+# Test-only overrides for the sip-front-proxy production chart.
+# Production chart: deploy/helm/sip-front-proxy/
+
+# Match what we built + loaded into kind via tests/k8s/scripts/images.ts.
+image:
+  repository: sipjsserver
+  tag: dev
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+# Pin proxy pods to the edge tier nodes (kind worker labels in cluster.yaml).
+nodeSelector:
+  tier: edge
+
+# Prefer one proxy pod per edge node, but allow rolling updates (where
+# transiently both old + new pods need to coexist). Production uses
+# `required` for true HA placement.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: sip-front-proxy
+          topologyKey: kubernetes.io/hostname
+
+# Worker discovery: proxy watches the b2bua-worker StatefulSet in the
+# same namespace. The worker chart sets fullnameOverride so this name is
+# stable across installs.
+worker:
+  statefulSetName: b2bua-worker
+  podPort: 5060
+
+# Advertise the Service name in Record-Route so in-dialog ACK/BYE land
+# on a proxy via the Service ClusterIP. Without this the proxy stamps
+# its bind address (0.0.0.0:5060) into Record-Route and SIPp's [routes]
+# expansion produces an un-routable URI.
+bind:
+  host: "0.0.0.0"
+  port: 5060
+  advertisedHost: "sip-front-proxy"
+  advertisedPort: 5060
+
+# Keepalive cadence — keep the production defaults so we exercise the
+# real timing.
+healthProbe:
+  bindHost: "0.0.0.0"
+  bindPort: 5061
+  intervalMs: 2000
+  timeoutMs: 1500
+  threshold: 3
+
+# 32-byte ASCII test keys (test-only — do NOT use in production).
+# Helm's secret template `b64enc`s these into the K8s Secret, which
+# K8s then decodes back to the raw bytes on the file mount.
+hmacKey: "phaseA-test-hmac-CURRENT-PAD1234"
+previousHmacKey: "phaseA-test-hmac-PREVIOUS-PAD123"

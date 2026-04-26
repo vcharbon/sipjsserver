@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sipp-scenarios
+  labels:
+    app.kubernetes.io/name: sipp
+data:
+  uac-basic.xml: |-
+{{ .Files.Get "scenarios/uac-basic.xml" | indent 4 }}
+  uac-hold.xml: |-
+{{ .Files.Get "scenarios/uac-hold.xml" | indent 4 }}
+  uas-basic.xml: |-
+{{ .Files.Get "scenarios/uas-basic.xml" | indent 4 }}

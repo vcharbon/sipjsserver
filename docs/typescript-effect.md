@@ -11,6 +11,19 @@ If `<ide_diagnostics>` errors look stale or contradict `npm run typecheck`, trus
 - `npm run typecheck` must return zero errors and zero warnings after every change. Fix warnings — do not ignore them. Only suppress with a lint-disable comment as a last resort, always with an explanation.
 - for pure function that may return an error, use effect Result construct
 
+## Effect v4 vs v3
+
+Effect.fork → Effect.forkChild (or forkScoped / forkDetach per scope). The bare fork is gone; the language service tags it outdatedApi.
+Layer.scoped → Layer.effect, Layer.scopedDiscard → Layer.effectDiscard, Layer.scopedContext doesn't exist (use Layer.effectServices).
+Effect.async → Effect.callback (v3 → v4 rename).
+Effect.runFork inside an Effect surface loses parent service context; use Effect.runForkWith(parentServices)(...).
+Ref.unsafeSet doesn't exist in v4; for sync state use MutableRef + Effect.sync wrappers.
+Stream.runCollect returns Array<A>, not Chunk<A> — drop the Chunk.toReadonlyArray reflex.
+Effect.fail(new TaggedError(...)) is wrong; the v4 idiom is yield* new TaggedError({...}) directly.
+Effect.Logger.make's annotations moved to opts.fiber.getRef(References.CurrentLogAnnotations). Migration path is straightforward but undocumented.
+
+
+
 ## MutableHashMap for shared mutable state
 
 All hot-path shared maps in services (`TransactionLayer`, `CallState`, `TimerService`, transaction tables, SIP index, semaphores, timer fibers) use `MutableHashMap.empty<K, V>()` — **never** `Ref<Map<K, V>>`. `Ref.update` copies the entire Map on every write; at high CPS this causes GC thrashing and CPU climbing over time. `Ref` is fine for simple scalar counters.

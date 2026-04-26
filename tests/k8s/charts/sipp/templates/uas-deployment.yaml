@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sipp-uas
+  labels:
+    app.kubernetes.io/name: sipp-uas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sipp-uas
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sipp-uas
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: uas
+          image: {{ .Values.sipp.image | quote }}
+          imagePullPolicy: {{ .Values.sipp.imagePullPolicy }}
+          command: ["sipp"]
+          # -bg disabled (we keep it in foreground), -p 5060 listen, -sf
+          # the UAS scenario, -i bind on the pod IP so SDP/Contact are
+          # routable from inside the cluster.
+          args:
+            - "-sf"
+            - "/scenarios/uas-basic.xml"
+            - "-p"
+            - "5060"
+            - "-i"
+            - "$(POD_IP)"
+            - "-trace_err"
+            - "-error_file"
+            - "/tmp/uas-err.log"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - name: sip-udp
+              containerPort: 5060
+              protocol: UDP
+          volumeMounts:
+            - name: scenarios
+              mountPath: /scenarios
+      volumes:
+        - name: scenarios
+          configMap:
+            name: sipp-scenarios

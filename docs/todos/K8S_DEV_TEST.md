@@ -1,5 +1,133 @@
 # Plan — Kubernetes Test Environment for SIP Stack
- 
+
+## 0. Status (2026-04-26)
+
+This document is the long-term "north star" plan with full Redis dual-write
+topology, Chaos Mesh, observability stack, and 10 chaos scenarios. Phase A
+shipped a deliberate subset focused on the load-balancer mechanism in
+PR4–PR6. The rest is gated on the B2BUA Redis dual-write workstream.
+
+### Phase A — DELIVERED
+
+Operator guide: [docs/K8S_test.md](../K8S_test.md). Host setup:
+[docs/installation/k8s-test-prereqs.md](../installation/k8s-test-prereqs.md).
+
+Scope shipped:
+- 6-node `kind` cluster (1 control + 2 edge + 2 app + 1 load) at
+  [tests/k8s/cluster.yaml](../../tests/k8s/cluster.yaml)
+- TS/Effect harness fixtures at [tests/k8s/fixtures/](../../tests/k8s/fixtures/) —
+  cluster, images, helm, kubectl, sippJob, sipNamespace, proxyLogs, proxyMetrics
+- Reuse of production charts at [deploy/helm/](../../deploy/helm/) with test
+  overrides at [tests/k8s/values/](../../tests/k8s/values/)
+- Test-only charts at [tests/k8s/charts/](../../tests/k8s/charts/): single-pod
+  Redis, SIPp UAS + mock call-control + scenario ConfigMap
+- 5 invariant tests passing in isolation:
+  - **INV-1** sticky in-dialog routing — [tests/k8s/proxy-routing.test.ts](../../tests/k8s/proxy-routing.test.ts)
+  - **INV-2** HRW determinism under stable pool — same file
+  - **INV-3** drain handoff (b)+(c): new INVITEs avoid draining worker, pod
+    terminates within grace — [tests/k8s/proxy-drain.test.ts](../../tests/k8s/proxy-drain.test.ts)
+  - **INV-4** pool growth doesn't disrupt — [tests/k8s/proxy-scale.test.ts](../../tests/k8s/proxy-scale.test.ts)
+  - **INV-5** HMAC cookie validation success path — [tests/k8s/proxy-hmac.test.ts](../../tests/k8s/proxy-hmac.test.ts)
+- npm scripts: `test:k8s`, `test:k8s:up`, `test:k8s:down`, `test:k8s:fresh`,
+  `test:k8s:images`
+- Vitest config: [vitest.config.k8s.ts](../../vitest.config.k8s.ts) (single fork)
+
+### Phase A — DEFERRED to Phase B (Redis dual-write)
+
+These bullets in §6.2 / §10 below are NOT delivered. They depend on the
+B2BUA worker growing dual Redis-backed call-state replication.
+
+- Redis StatefulSet with two co-located instances on `app` nodes
+- CHAOS-1, CHAOS-3, CHAOS-4, CHAOS-5, CHAOS-10 (anything assuming dual-write,
+  hydration, or partial-write reconciliation)
+- INV-3(a): "ACK/BYE/CANCEL for existing dialogs continue to reach drained
+  worker." Without dual-write, when the StatefulSet replacement pod (same
+  name, new IP) comes up before all in-flight BYEs arrive, the proxy
+  correctly resolves the cookie's worker ID to the NEW pod IP — but the
+  new pod has no dialog state. This is the core problem dual-write solves.
+- "node-loss = host-loss" co-location story (Appendix A)
+
+### Phase A — DEFERRED to Phase A++ (no dual-write dependency)
+
+- **Chaos Mesh chart + scenarios (§3.5).** Tier-1 invariants don't need
+  Chaos Mesh — pod kill / scale via `kubectl` from the harness covers
+  them. Network/CPU chaos lands with Tier-2 invariants (network loss,
+  latency tolerance, CPU stress) whenever those become valuable.
+- **Grafana LGTM observability pod (§3.4).** Phase A uses kubectl-based
+  query helpers (`proxyLogs.ts`, `proxyMetrics.ts`) instead. Tests assert
+  via log parse + Prometheus exposition over `kubectl exec wget`. A
+  full LGTM stack is operator-ergonomic only — add when humans need
+  dashboards, not for assertion plumbing.
+- **Per-test namespace isolation.** Phase A shares one `sip-test`
+  namespace; each test passes in isolation but the suite-level run is
+  flaky because workers accumulate transaction-timeout state across
+  tests. The original plan's namespace-per-test pattern fixes this; not
+  yet implemented. See "Findings" below.
+- **Python pytest harness (§3.6).** Replaced with TS/Effect harness for
+  language consistency with the rest of the codebase.
+- **Tier-2 invariants (UDP loss tolerance, latency tolerance, CPU
+  stress).** SIP-stack RFC properties, not load-balancer properties —
+  defer until they have a concrete regression to catch.
+
+### Phase A — Findings (Phase A++ / Phase B work)
+
+Discovered while building/running Phase A — small follow-ups, none
+blocking:
+
+1. **`MetricsServer` not wired in [bin/proxy.ts](../../bin/proxy.ts).**
+   The proxy's `MetricsServer` (default port 9090) exists in
+   [src/sip-front-proxy/observability/MetricsServer.ts](../../src/sip-front-proxy/observability/MetricsServer.ts)
+   but the bin doesn't start it. Until wired, `proxyMetrics.fetchProxyMetrics`
+   returns empty; tests fall back to log-based assertions. Small
+   production-code follow-up.
+
+2. **B2BUA worker doesn't reflect Leg-A `Record-Route` in its 200 OK
+   response.** As a result, SIPp's `[routes]` macro expands empty in
+   subsequent in-dialog requests, and the proxy NEVER exercises the
+   cookie-decode path under the current scenarios — every routing
+   decision is `select_new` (HRW). INV-1 sticky routing is satisfied
+   by HRW determinism alone; the cookie path's success branch is
+   unverified end-to-end. Fix is independent of the load balancer:
+   teach the B2BUA to copy `Record-Route` from the inbound INVITE to
+   the response it generates back to the proxy. This is a B2BUA
+   workstream item.
+
+3. **HMAC test key inline in `values-test.yaml`.** Currently a 32-byte
+   ASCII literal (`"phaseA-test-hmac-CURRENT-PAD1234"`). Production
+   uses `--set-file hmacKey=path/to/key.bin` for raw bytes. Test value
+   is fine for Phase A; flag if a future test needs raw-byte parity.
+
+4. **Test-only divergences from production charts** in
+   [tests/k8s/values/](../../tests/k8s/values/):
+   - `terminationGracePeriodSeconds: 30` (vs production 200s) — faster
+     drain test loop
+   - `affinity.podAntiAffinity` switched to `preferred` (vs production
+     `required`) — lets INV-4 scale 2→3 worker pods without adding a
+     third app node
+   - `bind.advertisedHost: "sip-front-proxy"` (Service name) — needed
+     because the production chart doesn't auto-default to anything
+     routable (worth re-examining for prod ergonomics)
+
+5. **Drain `(a)` vs `drainGraceMs`.** The proxy's `drainingSince`
+   clock + 5s grace + StatefulSet replacement timing combine in ways
+   that need a Phase B test design. INV-3(a) is logged as a soft
+   signal, not asserted. See [src/sip-front-proxy/strategies/LoadBalancer.ts](../../src/sip-front-proxy/strategies/LoadBalancer.ts).
+
+6. **Suite-level flakiness from worker call-state debris.** Tests that
+   end with stuck transactions (notably INV-2 burst-B's deliberate
+   duplicate-Call-ID INVITEs) leave the worker chewing on timeout
+   cleanup for ~30s. Subsequent tests in the same `sip-test`
+   namespace see degraded throughput and SIPp jobs return `failed`
+   even though the *invariant* would still hold for completed calls.
+   Fix: per-test fresh namespace (the original §5 NFR-2 pattern).
+
+7. **`fs.inotify.max_user_instances=128` (default) blocks kind
+   multi-node clusters** — `kube-proxy` crashloops with "too many
+   open files", DNS becomes unreachable. One-time `sysctl` bump
+   documented in [docs/installation/k8s-test-prereqs.md](../installation/k8s-test-prereqs.md).
+
+---
+
 ## 1. Purpose and Scope
  
 Provide a reproducible, automated Kubernetes environment for end-to-end and chaos testing of the SIP stack (front proxy + B2BUA workers + Redis dual-write). Designed for local development and on-demand reproduction of failure scenarios.

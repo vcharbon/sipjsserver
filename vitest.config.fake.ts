@@ -17,6 +17,7 @@ export default defineConfig({
     exclude: [
       "tests/fullcall/e2e-real-clock.test.ts",
       "tests/harness/limiter-rejection.test.ts",
+      "tests/k8s/**",
       "node_modules/**",
       "dist/**",
     ],

@@ -1,0 +1,24 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: sip-e2e
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      tier: edge
+  - role: worker
+    labels:
+      tier: edge
+  - role: worker
+    labels:
+      tier: app
+  - role: worker
+    labels:
+      tier: app
+  - role: worker
+    labels:
+      tier: load
+    extraPortMappings:
+      - containerPort: 30060
+        hostPort: 5060
+        protocol: UDP

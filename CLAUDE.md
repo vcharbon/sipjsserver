@@ -36,7 +36,7 @@ When spawning subagents via Task(), always include in the task description:
 
 ## Commit policy
 
-Only create commits for complex tasks (multi-slice feature, architectural refactor, or when the user explicitly asks). For one-off edits, leave the changes uncommitted for user review. Commits land on the `main` branch with a clear message.
+On complex multi slice tasks with on line comment the intermediate slice.
 
 ## File creation
 

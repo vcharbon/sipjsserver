@@ -1,0 +1,54 @@
+# Test-only overrides for the b2bua-worker production chart.
+# Production chart: deploy/helm/b2bua-worker/
+
+# Match what we built + loaded into kind via tests/k8s/scripts/images.ts.
+image:
+  repository: sipjsserver
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Pin to the b2bua-worker name regardless of release name so the proxy's
+# worker.statefulSetName resolves predictably.
+fullnameOverride: b2bua-worker
+
+replicaCount: 2
+
+# Pin worker pods to the app tier nodes.
+nodeSelector:
+  tier: app
+
+# Prefer one worker pod per app node, but don't HARD-block scaling
+# beyond #nodes. Production charts can use `required` for true HA;
+# test env uses `preferred` so INV-4 can scale 2 → 3 replicas without
+# adding a third app node.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: b2bua-worker
+          topologyKey: kubernetes.io/hostname
+
+# Test-environment override: faster drain so INV-3 (drain preserves
+# in-flight calls) completes in ~30s instead of the production 200s.
+# Production stays at 200s for RFC 3261 Timer C math (180s + 20s safety).
+terminationGracePeriodSeconds: 30
+
+# Connect to the test Redis pod installed via tests/k8s/charts/redis/.
+# Single Redis (no dual-write) — Phase B will swap this for the dual
+# Redis StatefulSet topology. Short DNS name resolves via the pod's
+# in-namespace search domain.
+extraEnv:
+  - name: REDIS_URL
+    value: "redis://redis:6379"
+  # Worker uses sipLocalIp for both bind AND Contact/Via header
+  # construction. Bind to (and advertise) the pod IP so responses are
+  # routable. POD_IP is set by the chart from the downward API; K8s
+  # resolves $(POD_IP) against earlier env vars.
+  - name: SIP_LOCAL_IP
+    value: "$(POD_IP)"
+  # Mock backend installed by tests/k8s/charts/sipp/ (call-control:8080).
+  - name: CALL_CONTROL_URL
+    value: "http://call-control:8080"

@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: call-control-script
+  labels:
+    app.kubernetes.io/name: call-control
+data:
+  server.mjs: |
+    import http from "node:http"
+
+    // Always route every /call/new to the same destination. /call/failure and
+    // /call/refer return safe defaults so the worker never gets stuck on a
+    // missing-endpoint response.
+    const TARGET_HOST = process.env.TARGET_HOST || "sipp-uas"
+    const TARGET_PORT = parseInt(process.env.TARGET_PORT || "5060", 10)
+    const PORT = parseInt(process.env.PORT || "8080", 10)
+
+    function readBody(req) {
+      return new Promise((resolve, reject) => {
+        const chunks = []
+        req.on("data", (c) => chunks.push(c))
+        req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")))
+        req.on("error", reject)
+      })
+    }
+
+    function reply(res, status, body) {
+      res.statusCode = status
+      res.setHeader("content-type", "application/json")
+      res.end(JSON.stringify(body))
+    }
+
+    const server = http.createServer(async (req, res) => {
+      try {
+        await readBody(req) // drain
+        if (req.url === "/call/new" && req.method === "POST") {
+          return reply(res, 200, {
+            action: "route",
+            destination: { host: TARGET_HOST, port: TARGET_PORT, transport: "udp" },
+            new_ruri: `sip:test@${TARGET_HOST}:${TARGET_PORT}`,
+          })
+        }
+        if (req.url === "/call/failure" && req.method === "POST") {
+          return reply(res, 200, { action: "terminate" })
+        }
+        if (req.url === "/call/refer" && req.method === "POST") {
+          return reply(res, 200, { action: "deny", deny_code: 403, deny_reason: "no refer in tests" })
+        }
+        if (req.url === "/healthz") {
+          return reply(res, 200, { ok: true })
+        }
+        reply(res, 404, { error: "not found" })
+      } catch (err) {
+        reply(res, 500, { error: String(err) })
+      }
+    })
+    server.listen(PORT, "0.0.0.0", () => {
+      console.log(`mock call-control listening on :${PORT}, target=${TARGET_HOST}:${TARGET_PORT}`)
+    })
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: call-control
+  labels:
+    app.kubernetes.io/name: call-control
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: call-control
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: call-control
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: call-control
+          image: {{ .Values.callControl.image | quote }}
+          imagePullPolicy: {{ .Values.callControl.imagePullPolicy }}
+          command: ["node", "/script/server.mjs"]
+          env:
+            - name: PORT
+              value: {{ .Values.callControl.port | quote }}
+            - name: TARGET_HOST
+              value: {{ .Values.callControl.target.host | quote }}
+            - name: TARGET_PORT
+              value: {{ .Values.callControl.target.port | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.callControl.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          volumeMounts:
+            - name: script
+              mountPath: /script
+      volumes:
+        - name: script
+          configMap:
+            name: call-control-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: call-control
+  labels:
+    app.kubernetes.io/name: call-control
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: call-control
+  ports:
+    - name: http
+      port: {{ .Values.callControl.port }}
+      targetPort: http
+      protocol: TCP

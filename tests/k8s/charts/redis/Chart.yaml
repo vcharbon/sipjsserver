@@ -1,0 +1,6 @@
+apiVersion: v2
+name: redis
+description: Single-instance Redis for K8s tier tests (Phase A; no dual-write).
+type: application
+version: 0.1.0
+appVersion: "7.4"

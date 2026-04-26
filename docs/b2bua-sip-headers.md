@@ -85,9 +85,11 @@ Emergency calls add `;emerg=1`. `generateInDialogRequest` omits Contact for BYE 
 
 ### Call-ID
 
-Each leg has an independent Call-ID. a-leg uses Alice's original Call-ID; b-leg uses a generated one (`{legNumber}-{aLegCallId}` in standalone mode, hash-derived in cluster mode).
+Each leg has an independent Call-ID. a-leg uses Alice's original Call-ID; b-leg uses a generated one (`{legNumber}-{aLegCallId}-{localHost}` via [generateBLegCallId](src/b2bua/HashUtils.ts)).
 
 **Relay:** `generateRelayedResponse` is called with `targetLeg.callId`, restoring the a-leg Call-ID on b→a hops.
+
+**Historical note (cluster mode, deleted in PR6):** the legacy in-process `Dispatcher` byte-scanned `Call-ID` and ran `fnv1a(callId) % N` to pick a worker child process, so the b-leg Call-ID had to be **mined** (rejection-sampled) until it hashed to the same worker as the a-leg. That requirement is gone: the standalone SIP front proxy lives outside the worker pod entirely (see "Front-proxy stickiness" below), the b-leg never traverses the proxy (the worker is the b-leg UAC and talks to Bob directly), and `generateBLegCallId` is now a plain generator with no hash constraint.
 
 ### From
 
@@ -189,98 +191,195 @@ Re-INVITEs are relayed transparently in both directions (a→b and b→a) using 
 
 4. **Response interception:** `tryHandleReInviteResponse()` runs before the existing provisional/200OK/error handlers and intercepts all responses belonging to a pending re-INVITE, preventing misidentification (e.g. re-INVITE 200 OK vs retransmitted initial 200 OK).
 
-## Cluster routing via technical headers
+## Front-proxy stickiness and worker-side technical headers
 
-In cluster mode the main process is a thin **Dispatcher** that owns the UDP socket and shards each packet to one of N worker child processes by hashing the SIP Call-ID. Workers parse, run rules, and produce outbound buffers that the dispatcher then puts back on the wire. Three layers of B2BUA-stamped technical headers carry the identity information needed to make this routing deterministic and parse-free at the dispatcher hop.
+The B2BUA worker no longer owns the UDP socket. A standalone, stateless **SIP front proxy** (`src/sip-front-proxy/`, deployed as a K8s `Deployment` separate from the worker `StatefulSet`) sits between Alice and the workers, distributes initial INVITEs across the worker pool, and keeps in-dialog traffic pinned to the same worker via an HMAC-signed cookie inserted in `Record-Route`. The legacy in-process `cluster.fork()` Dispatcher (Call-ID byte-scan + `fnv1a % N` IPC sharding) was deleted in PR6; see [docs/sip-front-proxy/resilience-model.md](sip-front-proxy/resilience-model.md) and [docs/todos/SIP-Front-Proxy.md](todos/SIP-Front-Proxy.md) for the full architecture.
+
+**Two routing concerns, two distinct mechanisms:**
+
+1. **Proxy → worker routing** uses headers the **proxy** owns: a Record-Route URI param the proxy inserts and consumes. The worker doesn't see or care about it (it's stripped from the request before forwarding per RFC 3261 §16.4).
+2. **Worker-internal call+leg resolution** uses headers the **worker** owns: `cr` / `lg` on Via, `callRef` / `leg` on Contact. These are unchanged from cluster mode — they identify which `(call, leg)` an inbound message belongs to AT THE WORKER. The proxy is transparent to them.
 
 | Carrier | Param | Set by | Read by | Resolves |
 |---------|-------|--------|---------|----------|
-| `Call-ID` header | (whole value) | a-leg: Alice; b-leg: B2BUA via `generateBLegCallId` | Dispatcher byte-scan (`extractCallIdFromBuffer`) → `fnv1a(callId) % N` | which **worker process** |
-| Top `Via` of responses | `;cr=<callRef>;lg=<legId>` | `legStackIdentity` (every outbound request) | Worker — `parseViaParams` / `resolveFromResponse` | which **call + leg** the response belongs to |
-| Request-URI / `Contact` of in-dialog requests | `;callRef=<callRef>;leg=<legId>` | `legStackIdentity` (every outbound `Contact`; peers target-refresh and use it as Request-URI) | Worker — `parseUriParams` / `resolveFromRequest` | which **call + leg** the in-dialog request targets |
-| Top `Via` + `Contact` | `;em=1` / `;emerg=1` | `legStackIdentity` when `call.emergency` | Dispatcher byte-scan (`bufferHasEmergencyMarker`) | overload-protection class (Tier 1/2 — see [overload-protection.md](overload-protection.md)) |
-| Top `Via` of every request | `;branch=<z9hG4bK…>` | `legStackIdentity` (mints fresh) or `forceBranch` (replay) | UAS for transaction matching (RFC 3261 §17.2.3); B2BUA caches it on `InviteClientTransactionHandle` for CANCEL / ACK-for-2xx | the **transaction** |
+| `Record-Route` URI | `;w=<workerId>;v=1;kid=<kid>;sig=<128-bit base64url HMAC>;lr` | **SIP front proxy** on every dialog-creating request (INVITE, SUBSCRIBE) — `legStackIdentity` does NOT touch this | **SIP front proxy** on every in-dialog request (the cookie is now in the top `Route`); decoded by `LoadBalancer.decodeStickiness` after stripping the Route per §16.4 | which **worker pod** an in-dialog request must reach |
+| Top `Via` of responses | `;cr=<callRef>;lg=<legId>` | `legStackIdentity` (every outbound request from the worker) | Worker — `parseViaParams` / `resolveFromResponse` | which **call + leg** an inbound response belongs to |
+| Request-URI / `Contact` of in-dialog requests | `;callRef=<callRef>;leg=<legId>` | `legStackIdentity` (every outbound `Contact`; peers target-refresh and use it as Request-URI) | Worker — `parseUriParams` / `resolveFromRequest` | which **call + leg** an inbound in-dialog request targets |
+| Top `Via` + `Contact` | `;em=1` / `;emerg=1` | `legStackIdentity` when `call.emergency` | Worker `OverloadController` (Tier 1/2 — see [overload-protection.md](overload-protection.md)) | overload-protection class. *(Used to be byte-scanned at the cluster Dispatcher; with the Dispatcher gone the proxy ingress has no overload brake in Phase 1 — the worker's OverloadController is the only enforcement point.)* |
+| Top `Via` of every request | `;branch=<z9hG4bK…>` | `legStackIdentity` (mints fresh) or `forceBranch` (replay); the proxy adds its own top `Via` with its own branch on top | UAS for transaction matching (RFC 3261 §17.2.3); B2BUA caches the worker-side branch on `InviteClientTransactionHandle` for CANCEL / ACK-for-2xx; the proxy uses its OWN branch only to recognise its own Via for popping on responses | the **transaction** (worker side) and the **proxy hop** (proxy side) — the two are independent |
 
-### Worker affinity
+### Worker selection — rendezvous HRW (initial INVITEs only)
 
-The dispatcher's hash routes by Call-ID, but a B2BUA call has **two** Call-IDs (one per leg). To keep both legs on the same worker, the b-leg Call-ID is **mined** rather than randomly generated:
+The proxy's `LoadBalancerStrategy.selectForNewDialog` runs **rendezvous (HRW) hashing** over `(callId, [worker_id_0, …, worker_id_N])`:
 
 ```ts
-generateBLegCallId(legNumber, workerIndex, totalWorkers, localHost)
-//   tries `${legNumber}-${counter}-${localHost}` until
-//   fnv1a(candidate) % totalWorkers === workerIndex
+rendezvousSelect(callId, workers)
+//   for each worker, hash(callId + ":" + worker.id) → uint64 (top 8 bytes of SHA-1)
+//   pick the max
+//   filter out health !== 'alive' before selecting
 ```
 
-Average ~2-4 attempts for N=4-8 workers. The result: every packet of either leg of a given call lands on the same worker, so call state, timers, and tag mappings never need to migrate.
+Why HRW and not `fnv1a(callId) % N` (the old cluster scheme)? **Membership-change cost.** Modular hashing re-shards `~(N-1)/N` of keys when N changes (every key potentially moves). HRW moves only `~1/N`. Adding or draining a worker mid-load doesn't re-shard existing dialogs (they're already pinned by stickiness cookie — see below) and only `~1/N` of NEW dialogs land on the new worker. Validated by `tests/sip-front-proxy/load-balancer/{distribution,add-remove-resharding}.test.ts`.
+
+### In-dialog stickiness — HMAC-signed Record-Route cookie
+
+When the proxy forwards an initial INVITE, it inserts a Record-Route pointing at itself with URI params encoding the chosen worker:
+
+```
+Record-Route: <sip:proxy.host:5060;w=b2bua-worker-0;v=1;kid=k1;sig=AQIDBAUGBwgJCgsMDQ4PEA;lr>
+```
+
+- `w` — worker pod name (StatefulSet ordinal — D3).
+- `v` — cookie format version (currently `1`).
+- `kid` — HMAC key id (first 16 hex chars of `SHA-1(keyBytes)`, generated automatically per [HmacKeyProvider](src/sip-front-proxy/security/HmacKeyProvider.ts)).
+- `sig` — HMAC-SHA256 over `utf8("v=1|w=" + workerId + "|c=" + callId)`, **truncated to the first 16 bytes** (128 bits per RFC 4868 §2.6) and base64url-encoded.
+
+When Alice (or anyone in the dialog) sends an in-dialog request, RFC 3261 §12.2.1.1 puts the proxy's Record-Route into her `Route` header. The proxy:
+
+1. Strips the top `Route` per §16.4 (it's pointing at itself).
+2. Decodes the URI params via `LoadBalancer.decodeStickiness`.
+3. Verifies the `sig` against `(current, previous)` keys (`HmacKeyProvider.verifyTruncated` — NFR-8 1h overlap during rotation).
+4. Resolves `w` to a `WorkerEntry` via `WorkerRegistry.resolve`.
+5. Forwards to that worker's address.
+
+**ACK on 2xx and CANCEL exempt from drain-grace fallback** (D5 / RFC 3261 §13.2.2.4 + §9.1 + §16.10): they always reach the original worker regardless of the worker's current health, because only that worker holds the INVITE transaction. Other in-dialog requests fall back via `selectForNewDialog` once a draining worker has been past `drainGracePolicyMs` (default 5s).
+
+### CANCEL correlation — Call-ID + CSeq number
+
+CANCEL gets special handling: per RFC 3261 §9.1 the UAC reuses the INVITE's top-Via branch verbatim on CANCEL, but the proxy can't use the *upstream* branch as a routing key because it's not unique across worker rebalances. Instead the proxy keeps a small TTL'd LRU keyed on **`(Call-ID, CSeq number)`** — the §9.1-canonical pair the UAC mirrors — that maps INVITE → chosen worker. CANCEL lookups hit that LRU and route to the same worker as the INVITE, even if the worker pool changed since. Validated by `tests/sip-front-proxy/load-balancer/cancel-keyed-by-callid-cseq.test.ts`.
+
+### Worker identity stability — K8s StatefulSet pod ordinals
+
+`workerId = pod.metadata.name` (D3). The worker is a `StatefulSet` (NOT a `Deployment`) so pod names are stable ordinals (`b2bua-worker-0`, `b2bua-worker-1`) that survive pod restarts. A `Deployment`'s randomly-suffixed pod names would invalidate every stickiness cookie on every restart. The proxy's `WorkerRegistry.kubernetesStatefulSet` impl (PR5) tracks `(id, address)` as one unit and emits `address_changed` when the same `id` rebinds to a new podIP — preserving in-dialog routing across pod reschedules.
 
 ### Routing diagram
 
+Both legs traverse the proxy. The proxy is the *only* edge that external peers (Alice on a-leg, Bob on b-leg) ever see. This survives worker failure: an in-dialog request from Bob (or Alice) reaches the proxy regardless of the originating worker's health, so the proxy can re-route to drain-grace or fail cleanly rather than leaving the peer hanging on a dead worker socket. It also gives a single observability/policy choke point on both legs.
+
+How the b-leg is routed through the proxy: the worker is configured with `b2bOutboundProxy = <proxy-addr>`. On every B-leg dialog-creating outbound (initial INVITE, REFER, etc.) the worker pre-loads `Route: <sip:proxy.host:5060;lr;outbound>` and addresses the packet to the proxy (top-Route, RFC 3261 §16.12). The proxy strips the top Route (§16.4), recognizes the `;outbound` marker, identifies the source worker by `(srcIp, srcPort) → WorkerRegistry`, and inserts its own Record-Route with the *source* worker encoded in the cookie — symmetric to a-leg, but the resolution target is the worker that issued the call, not one selected via HRW. Bob's responses are routed by Via popping (no special path); Bob's in-dialog requests carry `Route: <sip:proxy;w=<source-worker>;…;lr>` and decode back to that worker, exactly like Alice's do on a-leg.
+
 ```
-Alice                      Dispatcher (main)                     Worker k                       Bob
-  │                              │                                  │                            │
-  │  INVITE                      │                                  │                            │
-  │  Call-ID: alice-xyz          │                                  │                            │
-  │ ───────────────────────────► │                                  │                            │
-  │                              │ extractCallIdFromBuffer (byte    │                            │
-  │                              │   scan, no SIP parse)            │                            │
-  │                              │ k = fnv1a("alice-xyz") % N       │                            │
-  │                              │ classifyPacket (em? toTag?)      │                            │
-  │                              │ ── IPC (raw Buffer) ───────────► │                            │
-  │                              │                                  │ resolveFromRequest:        │
-  │                              │                                  │   no callRef in R-URI      │
-  │                              │                                  │   → INITIAL INVITE         │
-  │                              │                                  │ create call, callRef=X     │
-  │                              │                                  │ generateBLegCallId →       │
-  │                              │                                  │   "1-42-h"  (hashes to k)  │
-  │                              │                                  │ legStackIdentity(call,b-1):│
-  │                              │                                  │   Via: ...;branch=z9..;    │
-  │                              │                                  │     cr=X;lg=b-1            │
-  │                              │                                  │   Contact: <sip:b2bua@h:p; │
-  │                              │                                  │     callRef=X;leg=b-1>     │
-  │                              │ ◄─ IPC "send" ───────────────── │                            │
-  │                              │      (raw Buffer)                │                            │
-  │                              │ ─────────────────────────────────────────────────► INVITE    │
-  │                              │                                  │                            │
-  │                              │                                  │            200 OK          │
-  │                              │                                  │            Call-ID: 1-42-h │
-  │                              │                                  │            Via: ...;cr=X;  │
-  │                              │                                  │              lg=b-1        │
-  │                              │ ◄────────────────────────────────────────────────────────────│
-  │                              │ k' = fnv1a("1-42-h") % N == k    │                            │
-  │                              │ ── IPC ────────────────────────► │                            │
-  │                              │                                  │ resolveFromResponse:       │
-  │                              │                                  │   Via.cr=X, Via.lg=b-1     │
-  │                              │                                  │ checkout(X) → run rules    │
-  │                              │                                  │ generateRelayedResponse →  │
-  │                              │                                  │   a-leg 200 OK             │
-  │                              │ ◄─ IPC "send" ─────────────────  │                            │
-  │ ◄─────────────────────────── │                                  │                            │
-  │                              │                                  │                            │
-  │                              │                                  │            BYE             │
-  │                              │                                  │            R-URI: sip:b2bua│
-  │                              │                                  │             @h:p;callRef=X;│
-  │                              │                                  │             leg=b-1        │
-  │                              │                                  │            Call-ID: 1-42-h │
-  │                              │ ◄────────────────────────────────────────────────────────────│
-  │                              │ k = fnv1a("1-42-h") % N          │                            │
-  │                              │ ── IPC ────────────────────────► │                            │
-  │                              │                                  │ resolveFromRequest:        │
-  │                              │                                  │   R-URI.callRef=X,leg=b-1  │
-  │                              │                                  │ no dialog-key lookup       │
-  │                              │                                  │   needed                   │
+Alice                     SIP front proxy                  Worker (b2bua-worker-k)               Bob
+  │                              │                                  │                              │
+  │  INVITE                      │                                  │                              │
+  │  Call-ID: alice-xyz          │                                  │                              │
+  │  no Route (no prior dialog)  │                                  │                              │
+  │ ───────────────────────────► │                                  │                              │
+  │                              │ parse                            │                              │
+  │                              │ no top-Route at us → §16.5/.6:   │                              │
+  │                              │   selectForNewDialog:            │                              │
+  │                              │     w = rendezvous(callId,       │                              │
+  │                              │         [w-0,w-1,...]_{alive})   │                              │
+  │                              │   encodeStickiness:              │                              │
+  │                              │     sig = HMAC(v=1|w=…|c=…)[:16] │                              │
+  │                              │   insert Record-Route:           │                              │
+  │                              │     <sip:proxy:5060;w=…;v=1;     │                              │
+  │                              │      kid=…;sig=…;lr>             │                              │
+  │                              │   push own Via with new branch   │                              │
+  │                              │   remember (callId,cseq)→addr    │                              │
+  │                              │     in CancelBranchLru           │                              │
+  │                              │ ─────────────────────────────────►                              │
+  │                              │                                  │ resolveFromRequest:          │
+  │                              │                                  │   no callRef in R-URI →      │
+  │                              │                                  │     INITIAL INVITE           │
+  │                              │                                  │ create call, callRef=X       │
+  │                              │                                  │ generateBLegCallId →         │
+  │                              │                                  │   "1-alice-xyz-h" (any value)│
+  │                              │                                  │ legStackIdentity(call,b-1):  │
+  │                              │                                  │   Via: ...;branch=z9..;      │
+  │                              │                                  │     cr=X;lg=b-1              │
+  │                              │                                  │   Contact: <sip:b2bua@h:p;   │
+  │                              │                                  │     callRef=X;leg=b-1>       │
+  │                              │                                  │ pre-load Route header:       │
+  │                              │                                  │   Route: <sip:proxy:5060;    │
+  │                              │                                  │     lr;outbound>             │
+  │                              │                                  │ send packet to proxy:5060    │
+  │                              │ ◄─────────────────────────────── │                              │
+  │                              │ strip top-Route (;outbound) §16.4│                              │
+  │                              │ source = (workerIp,workerPort)   │                              │
+  │                              │ → registry.lookupByAddress       │                              │
+  │                              │ → originatingWorker = w-k        │                              │
+  │                              │ encodeStickiness(w-k, req):      │                              │
+  │                              │   sig = HMAC(v=1|w=k|c=1-…)[:16] │                              │
+  │                              │ insert Record-Route:             │                              │
+  │                              │   <sip:proxy:5060;w=k;v=1;       │                              │
+  │                              │    kid=…;sig=…;lr>               │                              │
+  │                              │ push own top-Via (proxy branch)  │                              │
+  │                              │ ─────────────────────────────────────────────────────► INVITE   │
+  │                              │                                  │                              │
+  │                              │ ◄─────────────────────────────────────────────────── 200 OK     │
+  │                              │ pop our top Via; forward by next │                              │
+  │                              │ Via (= worker)                   │                              │
+  │                              │ ─────────────────────────────────►                              │
+  │                              │                                  │ resolveFromResponse:         │
+  │                              │                                  │   Via.cr=X, Via.lg=b-1       │
+  │                              │                                  │ b-leg dialog routeSet =      │
+  │                              │                                  │   [<sip:proxy;w=k;…;lr>]     │
+  │                              │                                  │   (reversed from 200 OK R-R) │
+  │                              │                                  │ checkout(X) → run rules      │
+  │                              │                                  │ generateRelayedResponse:     │
+  │                              │                                  │   a-leg 200 OK with          │
+  │                              │                                  │   Record-Route echoed back   │
+  │                              │                                  │   verbatim (RFC §12.1.1)     │
+  │                              │ ◄─────────────────────────────── │                              │
+  │                              │ pop our top Via;                 │                              │
+  │                              │ forward by next Via              │                              │
+  │ ◄─────────────────────────── │                                  │                              │
+  │                              │                                  │                              │
+  │  ACK                         │                                  │                              │
+  │  Route: <sip:proxy:5060;w=…  │                                  │                              │
+  │   v=1;kid=…;sig=…;lr>        │                                  │                              │
+  │ ───────────────────────────► │                                  │                              │
+  │                              │ strip top-Route per §16.4        │                              │
+  │                              │ decodeStickiness:                │                              │
+  │                              │   verify sig (current OR prev    │                              │
+  │                              │     kid for NFR-8 rotation)      │                              │
+  │                              │   resolve w → registry entry     │                              │
+  │                              │   ACK exempt from drain-grace —  │                              │
+  │                              │   always to original worker      │                              │
+  │                              │ ─────────────────────────────────►                              │
+  │                              │                                  │ resolveFromRequest:          │
+  │                              │                                  │   R-URI.callRef=X,leg=a      │
+  │                              │                                  │   (or via dialog-key lookup) │
+  │                              │                                  │ b-leg ACK uses dialog        │
+  │                              │                                  │ routeSet → Route header at   │
+  │                              │                                  │ top → packet to proxy:5060   │
+  │                              │ ◄─────────────────────────────── │                              │
+  │                              │ strip top-Route per §16.4        │                              │
+  │                              │ decode → forward to Bob          │                              │
+  │                              │ ─────────────────────────────────────────────────────► ACK      │
+  │                              │                                  │                              │
+  │  BYE  (same Route header)    │                                  │                              │
+  │ ───────────────────────────► │                                  │                              │
+  │                              │ same dance: strip, decode,       │                              │
+  │                              │ verify, resolve w, forward       │                              │
+  │                              │ ─────────────────────────────────►                              │
+  │                              │                                  │ b-leg BYE: same routeSet →   │
+  │                              │                                  │ Route to proxy → forward     │
+  │                              │ ◄─────────────────────────────── │                              │
+  │                              │ ─────────────────────────────────────────────────────► BYE      │
+  │                              │                                  │                              │
+  │                              │ ── Bob-initiated BYE (alt) ──    │                              │
+  │                              │ ◄────────────────────────────────────────────────── BYE         │
+  │                              │   Route: <sip:proxy;w=k;…;lr>    │                              │
+  │                              │   (Bob's UAS-side routeSet)      │                              │
+  │                              │ strip, decode → w=k → forward    │                              │
+  │                              │ ─────────────────────────────────►                              │
 ```
 
 ### Why each header is load-bearing
 
-- **Call-ID — process-level routing.** The dispatcher must shard *before* parsing (a full SIP parse per packet would cap throughput). A byte-scan for `\r\nCall-ID:` (or compact `\r\ni:`) plus FNV-1a is a few hundred nanoseconds per packet. Mining the b-leg Call-ID guarantees the b→a return path lands on the same worker as the original a-leg.
-- **Via `cr` / `lg` — response → call/leg resolution at the worker.** Response routing per RFC 3261 §18.1.2 is by branch, but the B2BUA needs *call+leg* identity, not just transaction identity (e.g. to pick the right b-leg dialog for forking). Stamping `cr` and `lg` in the top Via lets the worker resolve straight off `parsed.via.params` without consulting any in-memory map keyed by branch.
+- **`Record-Route ;w/v/kid/sig` — proxy-side stickiness.** Without the cookie, every in-dialog request from Alice would re-shard via `selectForNewDialog`, defeating the worker's in-memory call state. The HMAC defends against Alice (or any in-path attacker) forging a `;w=` to attack a specific worker — invalid `sig` is rejected with `403 Forbidden` and counted as `sip_routing_hmac_failure_total{reason=mismatch}`. The 128-bit truncation is the standard short-token tradeoff (RFC 4868 §2.6); attacker forgery budget is negligible while the cookie shrinks to ~22 base64url chars.
+- **Via `cr` / `lg` — response → call/leg resolution at the worker.** Response routing per RFC 3261 §18.1.2 is by branch, but the worker needs *call+leg* identity, not just transaction identity (e.g. to pick the right b-leg dialog for forking). Stamping `cr` and `lg` in the top Via lets the worker resolve straight off `parsed.via.params` without consulting any in-memory map keyed by branch.
 - **Contact `callRef` / `leg` — in-dialog request resolution at the worker.** A peer's in-dialog request (BYE, re-INVITE, NOTIFY, …) has its Request-URI set to whatever the B2BUA put in `Contact` on the dialog-creating 2xx (RFC 3261 §12.2.1.1 / §20.10). Embedding `callRef`/`leg` in the Contact URI means the worker resolves the request without a dialog-key (Call-ID + From-tag + To-tag) lookup — even after worker restart, before Redis-backed dialog state is hydrated.
-- **`em` / `emerg` — overload-protection classification at the dispatcher.** The dispatcher classifies packets into `emergency` / `inDialog` / `normalNewCall` queues by a byte-scan that recognises the `Resource-Priority` / `;em=1` / `;emerg=1` markers without parsing. Emergency calls are drained first and never silently dropped (Tier 2 in [overload-protection.md](overload-protection.md)).
-- **`branch` — transaction matching, RFC 3261 §17.2.3.** Distinct from the routing role of `cr`/`lg`: `branch` matches a response back to the client transaction it answers, and a CANCEL / ACK-for-2xx must echo (or in the ACK-for-2xx case, *not* echo, but cache its own) the right value (see "Branch capture lifecycle" above).
+- **`em` / `emerg` — overload-protection classification at the worker.** The worker's `OverloadController` (Tier 1/2 in [overload-protection.md](overload-protection.md)) reads these to drain emergency calls first and never silently drop them. The cluster-mode dispatcher used to byte-scan the same markers before parsing; with the dispatcher deleted, emergency classification is worker-only in Phase 1. The proxy's own ingress has no overload brake (D7).
+- **`branch` — transaction matching, RFC 3261 §17.2.3.** Distinct from the routing role of `cr`/`lg`: `branch` matches a response back to the client transaction it answers, and a CANCEL / ACK-for-2xx must echo (or in the ACK-for-2xx case, *not* echo, but cache its own) the right value (see "Branch capture lifecycle" above). The proxy adds its own top `Via` with its own branch on top — **independent** of the worker's branch — purely to recognise its own Via on responses (RFC 3261 §16.7.3 pop-by-Via).
 
 ### URL-encoding
 
 `callRef` / `leg` values can contain `;`, `=`, `@`, or whitespace — characters that would corrupt Via/URI parsing if emitted verbatim. `legStackIdentity` runs `encodeURIComponent` before stamping, and `resolveFromRequest` / `resolveFromResponse` run `decodeURIComponent` after parsing, so values round-trip safely.
+
+The proxy's `;w=` / `;kid=` are constrained by `WorkerId` (K8s pod-name charset, no special chars) and the kid generator (16 hex chars), so neither needs escaping. `;sig=` is base64url, also URL-safe.
 
 ## Known issues and gaps
 
