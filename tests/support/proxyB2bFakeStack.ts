@@ -175,6 +175,13 @@ export const HA_WORKER_ADDR = (n: number): SocketAddr => ({
 export interface SipproxyHAFakeStackOpts {
   readonly config: AppConfigData
   readonly transitDelayMs?: number
+  /**
+   * `HandlerRegistry` each worker's `SipRouter.start` runs with.
+   * Passed in (rather than imported) to keep the SUT layer free of
+   * the handler-registry construction logic, which lives in the
+   * harness layer (`tests/fullcall/framework`).
+   */
+  readonly handlers: HandlerRegistry
 }
 
 /** Build a per-worker `AppConfigData` from the test base config. */
@@ -189,18 +196,55 @@ const haWorkerConfig = (
 })
 
 /**
- * Build the `sipproxyHA` SUT layer: real `ProxyCore` + real B2BUA
- * primary worker (worker-1) + `HealthProbe`, all on a shared
- * `SignalingNetwork.simulated`. The **secondary worker (worker-2) is
- * NOT in this layer** — it is bootstrapped from the harness's
- * `setup()` via `Effect.forkScoped(haSecondaryWorkerEffect(...))` so
- * its UdpTransport binding stays alive for the test's full scope.
+ * Build a single B2BUA instance as a layer that **provides nothing
+ * outward** but keeps its `UdpTransport` binding + forked
+ * `SipRouter` ingress fiber alive for the surrounding (SUT) scope.
  *
- * (Putting it inside a `Layer.effectDiscard` with
- * `Effect.provide(b2buaWorkerStackLayer)` releases the inner layer's
- * UdpTransport binding the moment the wrapped effect completes — the
- * probe's OPTIONS packets to worker-2 then become undeliverable for
- * the rest of the test.)
+ * Why the `Layer.fresh` + `Layer.buildWithScope` + `Effect.forkIn`
+ * dance: composing two `b2buaWorkerStackLayer` instances at the
+ * outer level via `Layer.merge` would collide on every service tag
+ * (each provides `SipRouter`, `CallState`, `UdpTransport`, ...). The
+ * obvious workaround — wrapping the inner layer in
+ * `Effect.provide(stack)` inside a `Layer.effectDiscard` — releases
+ * the inner layer's UdpTransport binding the moment the wrapped
+ * effect returns (after `forkScoped`), so the probe's OPTIONS
+ * packets to that worker become undeliverable for the rest of the
+ * test. Binding the worker's layer resources to the *outer* scope
+ * via `buildWithScope` (and forking the router fiber into that same
+ * scope) is the only shape that keeps the binding alive without the
+ * service-tag collisions.
+ */
+const b2buaInstance = (
+  config: AppConfigData,
+  handlers: HandlerRegistry
+): Layer.Layer<never, never, SignalingNetwork> => {
+  // `Layer.fresh` gives this instance a distinct memo identity so a
+  // second composition with the same `config` materialises fresh
+  // resources rather than aliasing the first.
+  const stack = Layer.fresh(b2buaWorkerStackLayer({ config }))
+  return Layer.effectDiscard(
+    Effect.gen(function* () {
+      const scope = yield* Effect.scope
+      const services = yield* Layer.buildWithScope(stack, scope)
+      const router = ServiceMap.get(services, SipRouter)
+      yield* Effect.forkIn(router.start(handlers), scope)
+    })
+  )
+}
+
+/**
+ * Build the `sipproxyHA` SUT layer: real `ProxyCore` + two real
+ * B2BUA workers + `HealthProbe`, all on a shared
+ * `SignalingNetwork.simulated`.
+ *
+ * Both workers are wired symmetrically via `b2buaInstance` — neither
+ * exposes services outward (their `SipRouter`/`CallState`/etc. live
+ * inside the SUT layer's scope but are not visible to test code).
+ * Test code communicates with workers exclusively over UDP through
+ * the shared `SignalingNetwork`. `HealthProbe.start` is invoked from
+ * inside the SUT layer (also via `Layer.effectDiscard`) so the
+ * harness's `setup()` for sipproxyHA has nothing to do — every
+ * fiber bootstraps from the layer.
  */
 export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
   const transitDelayMs = opts.transitDelayMs ?? DEFAULT_TRANSIT_DELAY_MS
@@ -210,43 +254,11 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
 
   const NetworkLayer = SignalingNetwork.simulated({ transitDelayMs })
 
-  // Primary worker: services exposed outward — harness `setup()` yields
-  // `SipRouter` and forks `router.start(handlers)`, matching the
-  // existing 1-worker SUT pattern.
-  const PrimaryWorker = b2buaWorkerStackLayer({
-    config: haWorkerConfig(opts.config, w1Addr),
-  })
-
-  // Secondary worker: explicitly bind the worker's layer resources to
-  // the SUT's outer scope using `Layer.buildWithScope`, then fork the
-  // SipRouter ingress fiber `Effect.forkIn` that same scope. This is
-  // the only Effect-v4 shape that keeps a *second* b2buaWorkerStackLayer
-  // alive without service-tag collisions:
-  //
-  //   - `Layer.fresh` gives the inner stack a distinct memo identity
-  //     (so it materializes fresh resources rather than aliasing the
-  //     primary worker's instance).
-  //   - `Layer.buildWithScope(layer, outerScope)` ties UdpTransport's
-  //     binding lifetime to the outer scope (= SUT layer scope). The
-  //     `Effect.provide(layer)` shape would have tied them to the
-  //     wrapped-effect's sub-scope, which closes the moment forkScoped
-  //     returns.
-  //   - `Effect.forkIn(eff, outerScope)` keeps the SipRouter ingress
-  //     fiber alive for the same outer scope.
-  //
-  // Outcome: worker-2's UDP binding at 10.20.0.2:5060 stays bound for
-  // the entire test, the OPTIONS handler responds, and the proxy's
-  // HealthProbe transitions worker-2 from `unknown` to `alive`.
-  const SecondaryStack = Layer.fresh(
-    b2buaWorkerStackLayer({ config: haWorkerConfig(opts.config, w2Addr) })
-  )
-  const SecondaryWorker = Layer.effectDiscard(
-    Effect.gen(function* () {
-      const outerScope = yield* Effect.scope
-      const services = yield* Layer.buildWithScope(SecondaryStack, outerScope)
-      const router = ServiceMap.get(services, SipRouter)
-      yield* Effect.forkIn(router.start(secondaryHandlersGetter()), outerScope)
-    })
+  // Both workers — symmetric. Services hidden, resources scoped to
+  // the SUT layer.
+  const Workers = Layer.mergeAll(
+    b2buaInstance(haWorkerConfig(opts.config, w1Addr), opts.handlers),
+    b2buaInstance(haWorkerConfig(opts.config, w2Addr), opts.handlers),
   )
 
   // Proxy stack: both workers admitted as `unknown` per MS-1. The
@@ -271,36 +283,22 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
     bindPort: HA_PROBE_BIND.port,
   }).pipe(Layer.provideMerge(ControlAdapter))
 
-  return Layer.mergeAll(PrimaryWorker, SecondaryWorker, Probe).pipe(
+  // Auto-start the probe at layer-materialization time. Its tick
+  // loop is forked into the layer's scope (see HealthProbe.ts), so
+  // it runs for the full test lifetime without the harness having to
+  // yield the service.
+  const ProbeAutoStart = Layer.effectDiscard(
+    Effect.gen(function* () {
+      const probe = yield* HealthProbe
+      yield* probe.start
+    }),
+  ).pipe(Layer.provideMerge(Probe))
+
+  return Layer.mergeAll(Workers, ProbeAutoStart).pipe(
     Layer.provideMerge(NetworkLayer),
     Layer.provideMerge(PumpableClockLayer),
   )
 }
-
-// Lazy handler injection — keep handlers out of the layer factory to
-// avoid a tests/support → tests/fullcall import cycle. The harness
-// calls `setSipproxyHASecondaryHandlers(buildTestHandlers())` before
-// providing the SUT layer.
-let secondarySipproxyHAHandlers: HandlerRegistry | undefined
-const secondaryHandlersGetter = (): HandlerRegistry => {
-  if (secondarySipproxyHAHandlers === undefined) {
-    throw new Error(
-      "sipproxyHA secondary worker: handlers not registered. Call " +
-      "setSipproxyHASecondaryHandlers(buildTestHandlers()) before " +
-      "providing the SUT layer."
-    )
-  }
-  return secondarySipproxyHAHandlers
-}
-
-/** Inject the `HandlerRegistry` the secondary worker's `SipRouter` runs with. */
-export const setSipproxyHASecondaryHandlers = (handlers: HandlerRegistry) => {
-  secondarySipproxyHAHandlers = handlers
-}
-
-
-// Re-export so callers can yield it from the runtime context.
-export { HealthProbe }
 
 /**
  * Pump the simulated fabric: yield once, advance virtual time enough for

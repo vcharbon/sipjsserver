@@ -34,11 +34,9 @@ import { DEFAULT_TRANSIT_DELAY_MS, fakeStackLayer } from "../../support/fakeStac
 import {
   HA_PROXY_ADDR,
   HA_WORKER_ADDR,
-  HealthProbe,
   INGRESS_ADDR as PROXY_B2B_INGRESS,
   WORKER_ADDR as PROXY_B2B_WORKER,
   proxyB2bFakeStackLayer,
-  setSipproxyHASecondaryHandlers,
   sipproxyHAFakeStackLayer,
 } from "../../support/proxyB2bFakeStack.js"
 import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
@@ -147,14 +145,9 @@ export function createSimulatedTransport(opts?: {
   const sut: Sut = opts?.sut ?? "b2bonly"
 
   const config = testAppConfig(sipPort, httpPort, opts?.configOverrides)
-  // sipproxyHA secondary worker boots inside the SUT layer; inject
-  // its handler registry before the layer materializes.
-  if (sut === "sipproxyHA") {
-    setSipproxyHASecondaryHandlers(buildTestHandlers())
-  }
   const StackLayer =
     sut === "sipproxyHA"
-      ? sipproxyHAFakeStackLayer({ config })
+      ? sipproxyHAFakeStackLayer({ config, handlers: buildTestHandlers() })
       : sut === "proxy+b2b"
         ? proxyB2bFakeStackLayer({ config })
         : fakeStackLayer({ config })
@@ -213,33 +206,39 @@ export function createSimulatedTransport(opts?: {
         // setup returns and every subsequent packet would bounce as
         // undeliverable.
         const network = yield* SignalingNetwork
-        const callState = yield* CallState
-        const timerService = yield* TimerService
-        const router = yield* SipRouter
-
-        // Force ProxyCore to materialize when sut is `proxy+b2b` so its
-        // forked ingress fiber starts. The fiber is forked into the layer
-        // scope (see ProxyCore.ts:274), so all we need is to construct
-        // the service once — the layer wires the rest.
-        if (sut === "proxy+b2b") {
-          yield* ProxyCore
-        }
-
-        // sipproxyHA: force-materialize ProxyCore (forks ingress
-        // fiber). Worker-2's SipRouter is forked from inside the SUT
-        // layer's `Layer.effectDiscard`, so no extra fork is needed
-        // here. Start the OPTIONS health probe so workers transition
-        // `unknown → alive` via 200 OK to OPTIONS — scenarios pause
-        // ~5s to give the probe time to settle.
-        if (sut === "sipproxyHA") {
-          yield* ProxyCore
-          const probe = yield* HealthProbe
-          yield* probe.start
-        }
-
         mockState.network = network
-        mockState.callStateRef = callState
-        mockState.timerServiceRef = timerService
+
+        if (sut === "sipproxyHA") {
+          // The sipproxyHA SUT layer auto-starts both worker
+          // SipRouters and the HealthProbe internally — nothing to
+          // do here beyond force-materialising ProxyCore. The
+          // `CallState` / `TimerService` / `SipRouter` services are
+          // not exposed outward (each worker keeps its own scoped
+          // instances inside the SUT layer), so we don't yield them
+          // for verifyCleanState — sipproxyHA scenarios use
+          // `skipFinalSweep` for that reason.
+          yield* ProxyCore
+        } else {
+          // Legacy SUTs (b2bonly, proxy+b2b): the worker's SipRouter
+          // is exposed by the layer; yield it and fork
+          // `router.start` here. Snapshot CallState/TimerService for
+          // verifyCleanState while we have them.
+          const callState = yield* CallState
+          const timerService = yield* TimerService
+          const router = yield* SipRouter
+
+          if (sut === "proxy+b2b") {
+            // Force ProxyCore to materialize so its forked ingress
+            // fiber starts. (See ProxyCore.ts:274.)
+            yield* ProxyCore
+          }
+
+          mockState.callStateRef = callState
+          mockState.timerServiceRef = timerService
+
+          const testHandlers = buildTestHandlers()
+          yield* Effect.forkScoped(router.start(testHandlers))
+        }
 
         // Bind every agent on the fabric at its {ip, port}. Default ip
         // is 127.0.0.1 (matches legacy behavior — many scenarios hardcode
@@ -278,10 +277,9 @@ export function createSimulatedTransport(opts?: {
           }
         }
 
-        // Fork SipRouter inside the surrounding scope so it's cancelled
-        // automatically when the test scope closes.
-        const testHandlers = buildTestHandlers()
-        yield* Effect.forkScoped(router.start(testHandlers))
+        // (Per-SUT router-start handled above: legacy SUTs fork their
+        // single exposed `SipRouter` early; sipproxyHA auto-starts
+        // both workers inside the SUT layer.)
 
         // Wait via real setTimeout (NOT Effect.sleep) so the SipRouter
         // stream wiring completes before the first test step — under
