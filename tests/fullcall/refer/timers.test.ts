@@ -7,35 +7,44 @@
  * elsewhere — see scenarios/refer-timers.ts for cross-references. This file
  * adds the explicit `refer_overall_safety` test (the safety net that only
  * fires when no per-phase watchdog caught the stuck state).
+ *
+ * Runs against both SUT topologies (`b2bonly`, `proxy+b2b`).
  */
 
 import { describe, it } from "@effect/vitest"
 import { afterAll } from "vitest"
 import { referOverallSafetyFires } from "../../scenarios/refer-timers.js"
 import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
+import { ALL_SUTS } from "../framework/types.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 
 afterAll(() => {
   flushIndexReport(OUTPUT_DIR)
+  for (const sut of ALL_SUTS) {
+    flushIndexReport(`${OUTPUT_DIR}/${sut}`)
+  }
 })
 
-describe("E2E (fake clock) — REFER safety timers", () => {
-  const run = createSimulatedRunner({
-    sipPort: 15065,
-    httpPort: 13007,
-    outputDir: OUTPUT_DIR,
-    configOverrides: {
-      // Push the per-phase re-INVITE watchdog past the overall-safety timer
-      // so the overall-safety net trips first when c-realigning stalls.
-      referReinviteAnswerSec: 600,
-      referOverallSafetySec: 10,
-    },
+for (const sut of ALL_SUTS) {
+  describe(`E2E (fake clock) — REFER safety timers — ${sut}`, () => {
+    const run = createSimulatedRunner({
+      outputDir: OUTPUT_DIR,
+      sut,
+      configOverrides: {
+        // Push the per-phase re-INVITE watchdog past the overall-safety timer
+        // so the overall-safety net trips first when c-realigning stalls.
+        referReinviteAnswerSec: 600,
+        referOverallSafetySec: 10,
+      },
+    })
+
+    if (referOverallSafetyFires.appliesTo(sut)) {
+      it.effect(
+        "Stuck in c-realigning → overall-safety (10s) fires → rollback",
+        () => run(referOverallSafetyFires.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
   })
-
-  it.effect(
-    "Stuck in c-realigning → overall-safety (10s) fires → rollback",
-    () => run(referOverallSafetyFires.toScenario()),
-    { timeout: 30_000 },
-  )
-})
+}

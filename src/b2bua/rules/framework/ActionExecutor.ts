@@ -45,13 +45,14 @@ import {
   aLegInviteCSeqNum,
 } from "../../../call/CallModel.js"
 import {
+  extractContactUri,
   extractHostPort,
   getHeader,
   getHeaders,
   newTag,
   stripTag,
 } from "../../../sip/MessageHelpers.js"
-import { parseSipUriString } from "../../../sip/parsers/custom/structured-headers.js"
+import { parseSipUriString, parseVia } from "../../../sip/parsers/custom/structured-headers.js"
 import { Result } from "effect"
 import {
   extractNonStructuralHeaders,
@@ -670,7 +671,15 @@ function relayRequest(
   // any other in-dialog method get Route headers and, for loose routers, a
   // destination rewrite to the first route URI.
   let finalTarget = target
-  if (targetLeg.legId !== "a" && relayed.type === "request") {
+  if (relayed.type === "request") {
+    // RFC 3261 §12.2.1.1: in-dialog requests honor the dialog's route set
+    // on the way out — Route headers prepended, destination rewritten to
+    // the first route hop for loose routers. Applies to both legs:
+    // - B-leg (worker→bob via proxy when `b2bOutboundProxy` is set)
+    // - A-leg (worker→alice via proxy in `proxy+b2b` SUT, where the A-leg
+    //   dialog routeSet was seeded from the original INVITE's R-R)
+    // `applyRouteSet` is a no-op when `dialog.sip.routeSet` is empty, so
+    // b2bonly's A-leg (no R-R from alice) keeps its direct path.
     const routed = applyRouteSet(relayed, targetDialog, target)
     relayed = routed.msg
     finalTarget = routed.target
@@ -864,9 +873,30 @@ function relayResponseMsg(
       // proxy back to Alice — without it the proxy is bypassed and
       // Alice's UA either rejects the request or never sees it.
       const aLegRouteSet = getHeaders(state.call.aLegInvite.headers, "record-route")
+      // RFC 3261 §12.1.1: UAS remote target is the UAC's Contact URI from
+      // the request. Without this seeding, A-leg-originated in-dialog
+      // requests fall back to `legTarget(aLeg)` — which is the INVITE's
+      // SOURCE address. In b2bonly that's alice (correct); in proxy+b2b
+      // that's the proxy (wrong, would loop). Pull the Contact off the
+      // cached INVITE so the request URI is the UAC's real address.
+      const aLegInviteContactRaw = getHeader(
+        state.call.aLegInvite.headers,
+        "contact",
+      )
+      const aLegInviteContact = aLegInviteContactRaw !== undefined
+        ? extractContactUri(aLegInviteContactRaw)
+        : ""
+      const aLegDialog = makeDialogFromIncoming(
+        aLegCtx,
+        aLegInviteCSeqNum(state.call),
+        aLegRouteSet,
+      )
       state.call = updateLeg(state.call, "a", (l) => ({
         ...l,
-        dialogs: [makeDialogFromIncoming(aLegCtx, aLegInviteCSeqNum(state.call), aLegRouteSet)],
+        dialogs: [{
+          ...aLegDialog,
+          sip: { ...aLegDialog.sip, remoteTarget: aLegInviteContact },
+        }],
       }))
     }
 
@@ -889,9 +919,39 @@ function relayResponseMsg(
     relayed = applyBodyUpdate(relayed, transform.bodyUpdate)
   }
 
+  // RFC 3261 §8.2.6.2: a UAS routes responses to the address in the
+  // topmost Via, honoring `received` / `rport`. For pending-transparent
+  // relays (in-dialog re-INVITE/OPTIONS/INFO/UPDATE responses heading
+  // back to bob) the captured `pending.sourceVias[0]` is what the worker
+  // must follow — not `legTarget(targetLeg)`. Without this, a B-leg
+  // response in the proxy+b2b SUT would short-circuit to bob's contact
+  // and bypass the proxy entirely (the proxy then never sees the response
+  // and can't pop its own Via, which the agent-side test detects as a
+  // mis-routed packet).
+  const destinationFromTopVia = (vias: ReadonlyArray<string>) => {
+    const top = vias[0]
+    if (top === undefined) return undefined
+    const parsed = parseVia(top)
+    const receivedParam = parsed.params["received"]
+    const rportParam = parsed.params["rport"]
+    const host = typeof receivedParam === "string" && receivedParam.length > 0
+      ? receivedParam
+      : parsed.host
+    const rportNum = typeof rportParam === "string" && rportParam.length > 0
+      ? Number.parseInt(rportParam, 10)
+      : undefined
+    const port = rportNum !== undefined && Number.isFinite(rportNum)
+      ? rportNum
+      : parsed.port
+    if (port === undefined || !Number.isFinite(port)) return undefined
+    return { host, port }
+  }
+  const pendingDestination = pending !== undefined
+    ? destinationFromTopVia(pending.sourceVias)
+    : undefined
   const destination = targetLeg.legId === "a"
     ? { host: state.call.aLeg.source.address, port: state.call.aLeg.source.port }
-    : legTarget(targetLeg)
+    : pendingDestination ?? legTarget(targetLeg)
 
   state.outbound.push({
     message: relayed,
@@ -1071,9 +1131,23 @@ function executeStampDialogToTag(
     const aLegRouteSet = isALeg
       ? getHeaders(state.call.aLegInvite.headers, "record-route")
       : []
-    const dialog = isALeg
+    // RFC 3261 §12.1.1: UAS remote target is the UAC's Contact URI. For
+    // A-leg this is alice's Contact from the cached INVITE; without it,
+    // worker-originated A-leg in-dialog requests (BYE, UPDATE, NOTIFY)
+    // fall back to `legTarget(aLeg)` — the proxy's address in proxy+b2b
+    // — and loop. Mirrors the seeding in `executeRelayResponse`.
+    const aLegInviteContact = isALeg
+      ? (() => {
+          const raw = getHeader(state.call.aLegInvite.headers, "contact")
+          return raw !== undefined ? extractContactUri(raw) : ""
+        })()
+      : ""
+    const baseDialog = isALeg
       ? makeDialogFromIncoming(legCtx, aLegInviteCSeqNum(state.call), aLegRouteSet)
       : makeEmptyDialog(legCtx)
+    const dialog: Dialog = isALeg
+      ? { ...baseDialog, sip: { ...baseDialog.sip, remoteTarget: aLegInviteContact } }
+      : baseDialog
     state.call = updateLeg(state.call, legId, (l) => ({
       ...l,
       dialogs: [dialog],
@@ -1135,7 +1209,7 @@ function executeAckLeg(
       ext: { ...d.ext, ackBranch: branch },
     }))
   }
-  const routed = leg.legId !== "a" ? applyRouteSet(ackMsg, dialog, target) : { msg: ackMsg, target }
+  const routed = applyRouteSet(ackMsg, dialog, target)
 
   state.outbound.push({
     message: routed.msg,
@@ -1184,7 +1258,7 @@ function executeSendRequestToLeg(
     sip: newSip,
   }))
 
-  const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
+  const routed = applyRouteSet(request, dialog, target)
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
@@ -1365,7 +1439,7 @@ function executeDestroyLeg(
         ...d,
         sip: newSip,
       }))
-      const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
+      const routed = applyRouteSet(request, dialog, target)
       state.outbound.push({
         message: routed.msg,
         destination: routed.target,
@@ -1491,7 +1565,7 @@ function executeTerminateCall(
           ...d,
           sip: newSip,
         }))
-        const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
+        const routed = applyRouteSet(request, dialog, target)
         state.outbound.push({
           message: routed.msg,
           destination: routed.target,
@@ -1571,7 +1645,7 @@ function executeBeginTermination(
           ...d,
           sip: newSip,
         }))
-        const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
+        const routed = applyRouteSet(request, dialog, target)
         state.outbound.push({
           message: routed.msg,
           destination: routed.target,
@@ -1655,7 +1729,7 @@ function executeSendNotify(
     sip: newSip,
   }))
 
-  const routed = leg.legId !== "a" ? applyRouteSet(request, dialog, target) : { msg: request, target }
+  const routed = applyRouteSet(request, dialog, target)
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
@@ -1735,7 +1809,7 @@ function executeSendReinvite(
     ext: { ...d.ext, pendingInviteTxn: reInviteHandle },
   }))
 
-  const routed = leg.legId !== "a" ? applyRouteSet(reinvite, dialog, target) : { msg: reinvite, target }
+  const routed = applyRouteSet(reinvite, dialog, target)
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,

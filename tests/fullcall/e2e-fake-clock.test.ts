@@ -21,7 +21,6 @@ import { prackForkingCall } from "../scenarios/prack-forking.js"
 import { cancelCrossing200Ok } from "../scenarios/cancel-200ok-crossing.js"
 import { callerHangup, calleeHangup } from "../scenarios/bye-directions.js"
 import { aliceReInvite, bobReInvite, crossingReInvite } from "../scenarios/reinvite.js"
-import { explicitRouteCall, failoverWithHeaders } from "../scenarios/shared-port.js"
 import { suppress18xBasic, suppress18xFailoverNoAnswer, suppress18xFailoverReject, suppress18xDisabled } from "../scenarios/suppress-18x.js"
 import { unknownDialogReject } from "../scenarios/indialog-unknown-reject.js"
 import { indialogOptions } from "../scenarios/indialog-options.js"
@@ -58,6 +57,69 @@ for (const sut of ALL_SUTS) {
     if (routeSetPropagation.appliesTo(sut)) {
       it.effect("route-set propagation", () => run(routeSetPropagation.toScenario()), { timeout: 30_000 })
     }
+    if (callReject.appliesTo(sut)) {
+      it.effect("call rejection (403)", () => run(callReject.toScenario()), { timeout: 30_000 })
+    }
+    if (cancelCall.appliesTo(sut)) {
+      it.effect("CANCEL during early dialog", () => run(cancelCall.toScenario()), { timeout: 30_000 })
+    }
+    if (callerHangup.appliesTo(sut)) {
+      it.effect("caller hangup (composed)", () => run(callerHangup.toScenario()), { timeout: 30_000 })
+    }
+    if (calleeHangup.appliesTo(sut)) {
+      it.effect("callee hangup (composed)", () => run(calleeHangup.toScenario()), { timeout: 30_000 })
+    }
+    if (retransmit200.appliesTo(sut)) {
+      it.effect("retransmit-200: duplicate 200 OK on confirmed leg → re-ACK only", () => run(retransmit200.toScenario()), { timeout: 30_000 })
+    }
+    if (cancelCrossing200Ok.appliesTo(sut)) {
+      it.effect("CANCEL ↔ 200 OK crossing", () => run(cancelCrossing200Ok.toScenario()), { timeout: 30_000 })
+    }
+    if (prackCall.appliesTo(sut)) {
+      it.effect("PRACK flow", () => run(prackCall.toScenario()), { timeout: 30_000 })
+    }
+    if (prackForkingCall.appliesTo(sut)) {
+      it.effect("PRACK forking flow", () => run(prackForkingCall.toScenario()), { timeout: 30_000 })
+    }
+    if (aliceReInvite.appliesTo(sut)) {
+      it.effect("re-INVITE from caller (SDP in ACK)", () => run(aliceReInvite.toScenario()), { timeout: 30_000 })
+    }
+    if (bobReInvite.appliesTo(sut)) {
+      it.effect("re-INVITE from callee", () => run(bobReInvite.toScenario()), { timeout: 30_000 })
+    }
+    if (crossingReInvite.appliesTo(sut)) {
+      it.effect("crossing re-INVITEs (glare → 491)", () => run(crossingReInvite.toScenario()), { timeout: 30_000 })
+    }
+    if (suppress18xBasic.appliesTo(sut)) {
+      it.effect("suppress-18x: basic (183→180, suppression, 200 OK)", () => run(suppress18xBasic.toScenario()), { timeout: 30_000 })
+    }
+    if (suppress18xFailoverNoAnswer.appliesTo(sut)) {
+      it.effect("suppress-18x: failover no-answer (tag consistency)", () => run(suppress18xFailoverNoAnswer.toScenario()), { timeout: 30_000 })
+    }
+    if (suppress18xFailoverReject.appliesTo(sut)) {
+      it.effect("suppress-18x: failover reject (tag consistency)", () => run(suppress18xFailoverReject.toScenario()), { timeout: 30_000 })
+    }
+    if (suppress18xDisabled.appliesTo(sut)) {
+      it.effect("suppress-18x: disabled (normal 180 relay)", () => run(suppress18xDisabled.toScenario()), { timeout: 30_000 })
+    }
+    if (unknownDialogReject.appliesTo(sut)) {
+      it.effect("in-dialog unknown dialog → 481 reject", () => run(unknownDialogReject.toScenario()), { timeout: 30_000 })
+    }
+    if (indialogOptions.appliesTo(sut)) {
+      it.effect("in-dialog OPTIONS relayed end-to-end (payload preserved, both directions)", () => run(indialogOptions.toScenario()), { timeout: 30_000 })
+    }
+    if (indialogInfo.appliesTo(sut)) {
+      it.effect("in-dialog INFO relayed end-to-end (DTMF payload, both directions)", () => run(indialogInfo.toScenario()), { timeout: 30_000 })
+    }
+    if (delayedOfferFailure.appliesTo(sut)) {
+      it.effect("delayed-offer-failure: missing SDP answer in ACK", () => run(delayedOfferFailure.toScenario()), { timeout: 30_000 })
+    }
+    if (keepaliveHappy.appliesTo(sut)) {
+      it.effect("keepalive: OPTIONS to both legs, two cycles (TestClock 15 min)", () => run(keepaliveHappy.toScenario()), { timeout: 30_000 })
+    }
+    if (keepalive481.appliesTo(sut)) {
+      it.effect("keepalive + 481: bob rejects OPTIONS → begin-termination BYEs alice", () => run(keepalive481.toScenario()), { timeout: 30_000 })
+    }
   })
 }
 
@@ -67,48 +129,8 @@ for (const sut of ALL_SUTS) {
 // ready, move its `it.effect(...)` into the loop above.
 // ---------------------------------------------------------------------------
 
-describe("E2E (fake clock) — simulated backend", () => {
-  const run = createSimulatedRunner({ outputDir: OUTPUT_DIR })
-
-  it.effect("call rejection (403)", () => run(callReject.toScenario()), { timeout: 30_000 })
-  it.effect("CANCEL during early dialog", () => run(cancelCall.toScenario()), { timeout: 30_000 })
-  it.effect("CANCEL ↔ 200 OK crossing", () => run(cancelCrossing200Ok.toScenario()), { timeout: 30_000 })
-  it.effect("PRACK flow", () => run(prackCall.toScenario()), { timeout: 30_000 })
-  it.effect("PRACK forking flow", () => run(prackForkingCall.toScenario()), { timeout: 30_000 })
-  it.effect("caller hangup (composed)", () => run(callerHangup.toScenario()), { timeout: 30_000 })
-  it.effect("callee hangup (composed)", () => run(calleeHangup.toScenario()), { timeout: 30_000 })
-  it.effect("re-INVITE from caller (SDP in ACK)", () => run(aliceReInvite.toScenario()), { timeout: 30_000 })
-  it.effect("re-INVITE from callee", () => run(bobReInvite.toScenario()), { timeout: 30_000 })
-  it.effect("crossing re-INVITEs (glare → 491)", () => run(crossingReInvite.toScenario()), { timeout: 30_000 })
-
-  // suppress-18x policy tests
-  it.effect("suppress-18x: basic (183→180, suppression, 200 OK)", () => run(suppress18xBasic.toScenario()), { timeout: 30_000 })
-  it.effect("suppress-18x: failover no-answer (tag consistency)", () => run(suppress18xFailoverNoAnswer.toScenario()), { timeout: 30_000 })
-  it.effect("suppress-18x: failover reject (tag consistency)", () => run(suppress18xFailoverReject.toScenario()), { timeout: 30_000 })
-  it.effect("suppress-18x: disabled (normal 180 relay)", () => run(suppress18xDisabled.toScenario()), { timeout: 30_000 })
-  it.effect("in-dialog unknown dialog → 481 reject", () => run(unknownDialogReject.toScenario()), { timeout: 30_000 })
-  it.effect("in-dialog OPTIONS relayed end-to-end (payload preserved, both directions)", () => run(indialogOptions.toScenario()), { timeout: 30_000 })
-  it.effect("in-dialog INFO relayed end-to-end (DTMF payload, both directions)", () => run(indialogInfo.toScenario()), { timeout: 30_000 })
-  it.effect("delayed-offer-failure: missing SDP answer in ACK", () => run(delayedOfferFailure.toScenario()), { timeout: 30_000 })
-
-  // Coverage-driven scenarios for rules that were previously never fired
-  // under the fake-clock harness: retransmit-200, keepalive, handle-481.
-  it.effect("retransmit-200: duplicate 200 OK on confirmed leg → re-ACK only", () => run(retransmit200.toScenario()), { timeout: 30_000 })
-  it.effect("keepalive: OPTIONS to both legs, two cycles (TestClock 15 min)", () => run(keepaliveHappy.toScenario()), { timeout: 30_000 })
-  it.effect("keepalive + 481: bob rejects OPTIONS → begin-termination BYEs alice", () => run(keepalive481.toScenario()), { timeout: 30_000 })
-})
-
-// ---------------------------------------------------------------------------
-// Simulated backend tests — shared-port demuxing (separate B2BUA instance)
-// ---------------------------------------------------------------------------
-
-describe("E2E (fake clock) — simulated backend (shared-port)", () => {
-  const run = createSimulatedRunner({
-    sipPort: 15090,
-    httpPort: 13032,
-    outputDir: OUTPUT_DIR,
-  })
-
-  it.effect("explicit routing via X-Api-Call", () => run(explicitRouteCall.toScenario()), { timeout: 30_000 })
-  it.effect("failover with update_headers (bob1 reject → bob2)", () => run(failoverWithHeaders.toScenario()), { timeout: 30_000 })
-})
+// All scenarios run on both b2bonly and proxy+b2b via the SUT matrix
+// above. The previous "shared-port" describe block (explicit-route-call,
+// failover-with-headers) has been retired — once a real front proxy is
+// available, those tests will be re-implemented as a "test agent proxy +
+// register" topology rather than ad-hoc port-shifting.

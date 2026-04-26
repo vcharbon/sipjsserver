@@ -484,6 +484,11 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       // ── Pick the downstream target ────────────────────────────────────────
       let target: SocketAddr | undefined
       let synthesizedReply: { status: number; reason: string } | undefined
+      // RFC 3261 §9.1: a CANCEL must carry the same top-Via branch as the
+      // INVITE it cancels so the downstream's transaction layer matches
+      // them. When this proxy forwards an INVITE it stamps a fresh branch;
+      // we cache that branch in the LRU and reuse it on the CANCEL below.
+      let reuseBranch: string | undefined
 
       if (method === "CANCEL") {
         // §16.10: forward CANCEL to the same downstream as the matching
@@ -496,7 +501,8 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
         const found = yield* cancelLru.lookup(key)
         if (Option.isSome(found)) {
-          target = found.value
+          target = found.value.target
+          reuseBranch = found.value.branch
           counters.cancelMatched++
           decisionKind = "cancel_lookup_hit"
           yield* metrics.recordCancelLookup("hit")
@@ -606,18 +612,24 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         counters.recordRouteInserted++
       }
 
-      // ── §16.6.4 push our Via on top with a unique branch ──────────────────
-      const ourBranch = newBranch()
+      // ── §16.6.4 push our Via on top ───────────────────────────────────────
+      // For CANCEL we MUST reuse the branch we stamped on the matching
+      // INVITE so the downstream's transaction layer correlates them
+      // (RFC 3261 §9.1). For everything else, fresh `newBranch()`.
+      const ourBranch = reuseBranch ?? newBranch()
       const viaValue = `SIP/2.0/UDP ${advertisedAddress.ip}:${advertisedAddress.port};branch=${ourBranch};rport`
       nextHeaders = prependHeader(nextHeaders, "Via", viaValue)
 
-      // ── Remember (Call-ID, CSeq number)→target for CANCEL correlation ──
+      // ── Remember (Call-ID, CSeq number)→{target, branch} for CANCEL ──────
       // Per RFC 3261 §9.1 the CANCEL we may later receive will carry the
       // same Call-ID and CSeq number; that pair is the canonical correlator
       // independent of what branch the upstream UAC stamps on the CANCEL.
+      // We also cache `branch` so the CANCEL we forward downstream carries
+      // the same top-Via branch as the INVITE we forwarded — required for
+      // the downstream's transaction matching (§9.1, §17).
       if (method === "INVITE") {
         const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
-        yield* cancelLru.remember(key, target)
+        yield* cancelLru.remember(key, { target, branch: ourBranch })
         // Update active-dialog estimate from LRU size (best-effort, see
         // Metrics.ts header comment).
         yield* metrics.setActiveDialogsEstimate(cancelLru.size())

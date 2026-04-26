@@ -14,6 +14,8 @@
  *   - A re-INVITE during a-realigning → 491        (refer-full-transfer.ts)
  *   - B non-BYE during c-realigning  → 481         (refer-c-realign.ts)
  *   - Second REFER during refer-authorizing → 491  (refer-reject.ts)
+ *
+ * Runs against both SUT topologies (`b2bonly`, `proxy+b2b`).
  */
 
 import { describe, it } from "@effect/vitest"
@@ -29,65 +31,76 @@ import {
   referGatingSecondReferCRealigning,
 } from "../../scenarios/refer-gating.js"
 import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
+import { ALL_SUTS } from "../framework/types.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 
 afterAll(() => {
   flushIndexReport(OUTPUT_DIR)
+  for (const sut of ALL_SUTS) {
+    flushIndexReport(`${OUTPUT_DIR}/${sut}`)
+  }
 })
 
-describe("E2E (fake clock) — REFER Regime-1 transparency + Regime-2 gating", () => {
-  const run = createSimulatedRunner({
-    sipPort: 15066,
-    httpPort: 13008,
-    outputDir: OUTPUT_DIR,
+for (const sut of ALL_SUTS) {
+  describe(`E2E (fake clock) — REFER Regime-1 transparency + Regime-2 gating — ${sut}`, () => {
+    const run = createSimulatedRunner({ outputDir: OUTPUT_DIR, sut })
+
+    if (referGatingAReinviteRefAuthorizing.appliesTo(sut)) {
+      it.effect(
+        "A re-INVITE during refer-authorizing → relay to B",
+        () => run(referGatingAReinviteRefAuthorizing.toScenario()),
+        { timeout: 60_000 },
+      )
+    }
+    if (referGatingAReinviteCRinging.appliesTo(sut)) {
+      it.effect(
+        "A re-INVITE during c-ringing → relay to B",
+        () => run(referGatingAReinviteCRinging.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
+    if (referGatingAReinviteCRealigning.appliesTo(sut)) {
+      it.effect(
+        "A re-INVITE during c-realigning → 491",
+        () => run(referGatingAReinviteCRealigning.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
+    if (referGatingAInfoRefAuthorizing.appliesTo(sut)) {
+      it.effect(
+        "A INFO during refer-authorizing → relay to B",
+        () => run(referGatingAInfoRefAuthorizing.toScenario()),
+        { timeout: 60_000 },
+      )
+    }
+    if (referGatingAInfoCRinging.appliesTo(sut)) {
+      it.effect(
+        "A INFO during c-ringing → relay to B",
+        () => run(referGatingAInfoCRinging.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
+    if (referGatingBInfoRefAuthorizing.appliesTo(sut)) {
+      it.effect(
+        "B INFO during refer-authorizing → relay to A",
+        () => run(referGatingBInfoRefAuthorizing.toScenario()),
+        { timeout: 60_000 },
+      )
+    }
+    if (referGatingSecondReferCRinging.appliesTo(sut)) {
+      it.effect(
+        "Second REFER during c-ringing → 491",
+        () => run(referGatingSecondReferCRinging.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
+    if (referGatingSecondReferCRealigning.appliesTo(sut)) {
+      it.effect(
+        "Second REFER during c-realigning → 491",
+        () => run(referGatingSecondReferCRealigning.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
   })
-
-  it.effect(
-    "A re-INVITE during refer-authorizing → relay to B",
-    () => run(referGatingAReinviteRefAuthorizing.toScenario()),
-    { timeout: 60_000 },
-  )
-
-  it.effect(
-    "A re-INVITE during c-ringing → relay to B",
-    () => run(referGatingAReinviteCRinging.toScenario()),
-    { timeout: 30_000 },
-  )
-
-  it.effect(
-    "A re-INVITE during c-realigning → 491",
-    () => run(referGatingAReinviteCRealigning.toScenario()),
-    { timeout: 30_000 },
-  )
-
-  it.effect(
-    "A INFO during refer-authorizing → relay to B",
-    () => run(referGatingAInfoRefAuthorizing.toScenario()),
-    { timeout: 60_000 },
-  )
-
-  it.effect(
-    "A INFO during c-ringing → relay to B",
-    () => run(referGatingAInfoCRinging.toScenario()),
-    { timeout: 30_000 },
-  )
-
-  it.effect(
-    "B INFO during refer-authorizing → relay to A",
-    () => run(referGatingBInfoRefAuthorizing.toScenario()),
-    { timeout: 60_000 },
-  )
-
-  it.effect(
-    "Second REFER during c-ringing → 491",
-    () => run(referGatingSecondReferCRinging.toScenario()),
-    { timeout: 30_000 },
-  )
-
-  it.effect(
-    "Second REFER during c-realigning → 491",
-    () => run(referGatingSecondReferCRealigning.toScenario()),
-    { timeout: 30_000 },
-  )
-})
+}

@@ -62,18 +62,32 @@ export const DEFAULT_SWEEP_INTERVAL_MS = 16_000
 export const callIdCseqKey = (callId: string, cseqNum: number): string =>
   `${callId}|${cseqNum}`
 
+/**
+ * What we cache per remembered INVITE: the downstream target plus the
+ * branch we stamped on our outgoing Via. RFC 3261 §9.1 requires the
+ * matching CANCEL to carry the same top-Via branch as the INVITE so the
+ * downstream's transaction layer correlates them — a stateless proxy
+ * that newly-stamps the CANCEL would orphan it. We remember the branch
+ * here and reuse it when the matching CANCEL flows through.
+ */
+export interface CancelEntry {
+  readonly target: SocketAddr
+  readonly branch: string
+}
+
 export interface CancelBranchLruApi {
   /**
-   * Remember the downstream target we forwarded an INVITE to. The key is
-   * the `(Call-ID, CSeq number)` composite produced by `callIdCseqKey`.
+   * Remember the downstream target + outbound branch we used on an
+   * INVITE. The key is the `(Call-ID, CSeq number)` composite produced
+   * by `callIdCseqKey`.
    */
-  readonly remember: (key: string, target: SocketAddr) => Effect.Effect<void>
+  readonly remember: (key: string, entry: CancelEntry) => Effect.Effect<void>
   /**
-   * Look up the previously-remembered target for a CANCEL. The key is the
+   * Look up the previously-remembered entry for a CANCEL. The key is the
    * `(Call-ID, CSeq number)` composite produced by `callIdCseqKey` — the
    * CANCEL's Call-ID and CSeq number match the INVITE's per RFC 3261 §9.1.
    */
-  readonly lookup: (key: string) => Effect.Effect<Option.Option<SocketAddr>>
+  readonly lookup: (key: string) => Effect.Effect<Option.Option<CancelEntry>>
   /** Current map size — for tests and metrics. */
   readonly size: () => number
 }
@@ -105,6 +119,7 @@ export class CancelBranchLru extends ServiceMap.Service<CancelBranchLru, CancelB
 
 interface Entry {
   readonly target: SocketAddr
+  readonly branch: string
   readonly expiresAtMs: number
 }
 
@@ -123,24 +138,28 @@ function makeCancelBranchLru(opts: {
       return yield* ProxyMetrics
     }).pipe(Effect.provide(ProxyMetrics.Default)))
 
-    const remember = (key: string, target: SocketAddr) =>
+    const remember = (key: string, value: CancelEntry) =>
       Effect.gen(function* () {
         const nowMs = yield* Clock.currentTimeMillis
         yield* Effect.sync(() =>
-          MutableHashMap.set(table, key, { target, expiresAtMs: nowMs + ttlMs })
+          MutableHashMap.set(table, key, {
+            target: value.target,
+            branch: value.branch,
+            expiresAtMs: nowMs + ttlMs,
+          })
         )
       })
 
     const lookup = (key: string) =>
       Effect.gen(function* () {
         const entry = Option.getOrUndefined(MutableHashMap.get(table, key))
-        if (entry === undefined) return Option.none<SocketAddr>()
+        if (entry === undefined) return Option.none<CancelEntry>()
         const nowMs = yield* Clock.currentTimeMillis
         if (entry.expiresAtMs <= nowMs) {
           yield* Effect.sync(() => MutableHashMap.remove(table, key))
-          return Option.none<SocketAddr>()
+          return Option.none<CancelEntry>()
         }
-        return Option.some(entry.target)
+        return Option.some({ target: entry.target, branch: entry.branch })
       })
 
     const size = () => MutableHashMap.size(table)
