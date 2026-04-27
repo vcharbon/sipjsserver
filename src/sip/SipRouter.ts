@@ -34,12 +34,14 @@ import { TracingService } from "../tracing/TracingService.js"
 import { DrainingState } from "../b2bua/DrainingState.js"
 import {
   type Call,
+  type CallTopology,
   type Leg,
   type Dialog,
   type TimerEntry,
   type TimerType,
   deriveCallRef,
 } from "../call/CallModel.js"
+import { parseStickinessCookie } from "../cache/StickinessCookie.js"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -696,6 +698,19 @@ export class SipRouter extends ServiceMap.Service<
           const isEmergency = isEmergencyRequest(req)
           const nowMs = yield* Clock.currentTimeMillis
 
+          // Slice 5: parse the proxy's stickiness cookie out of the
+          // inbound INVITE's top-most Record-Route. The proxy already
+          // verified its HMAC; we just lift `(w_pri, w_bak)` so the
+          // dual-write path knows the backup peer. When no cookie is
+          // present (single-worker / dev / test without proxy), we
+          // self-name as primary and leave bak empty.
+          const cookie = parseStickinessCookie(req.headers)
+          const topology: CallTopology = {
+            pri: cookie?.pri ?? selfOrdinal,
+            bak: cookie?.bak ?? "",
+            gen: 0,
+          }
+
           const call: Call = {
             callRef,
             aLeg,
@@ -714,7 +729,8 @@ export class SipRouter extends ServiceMap.Service<
             tagMap: [],
             sampled,
             workerIndex: config.workerIndex >= 0 ? config.workerIndex : undefined,
-            emergency: isEmergency || undefined
+            emergency: isEmergency || undefined,
+            _topology: topology,
           }
 
           yield* callState.create(call)

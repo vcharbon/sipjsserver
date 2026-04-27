@@ -253,10 +253,31 @@ export class CallState extends ServiceMap.Service<
         const call = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
         if (call === undefined) return
 
-        const json = yield* Schema.encodeEffect(JsonCallSchema)(call).pipe(Effect.orDie)
+        // Slice 5: bump `_topology.gen` BEFORE encoding so the persisted
+        // value carries the new generation. Newest-`gen` wins on
+        // partition-heal conflict resolution (D7). When `_topology` is
+        // absent (legacy in-memory-only path), leave it absent — the
+        // dual-write logic only fires when topology is present anyway.
+        const bumped: Call =
+          call._topology !== undefined
+            ? {
+                ...call,
+                _topology: { ...call._topology, gen: call._topology.gen + 1 },
+              }
+            : call
+
+        if (bumped !== call) {
+          yield* Effect.sync(() =>
+            MutableHashMap.set(callsMap, callRef, bumped)
+          )
+        }
+
+        const json = yield* Schema.encodeEffect(JsonCallSchema)(bumped).pipe(
+          Effect.orDie
+        )
         const { role, primary } = partitionOf(callRef)
         yield* storage
-          .putCall(role, primary, callRef, json, callIndexKeys(call), ttl)
+          .putCall(role, primary, callRef, json, callIndexKeys(bumped), ttl)
           .pipe(Effect.mapError(toRedisErr))
 
         yield* Effect.logDebug(`Flushed call ${callRef} to cache`)
@@ -374,10 +395,22 @@ export class CallState extends ServiceMap.Service<
       const flushAllCalls = Effect.fnUntraced(function* () {
         let flushed = 0
         for (const [callRef, call] of callsMap) {
-          const json = yield* Schema.encodeEffect(JsonCallSchema)(call).pipe(Effect.orDie)
+          // Slice 5: same gen bump as flushToRedis — the persisted JSON
+          // must carry the bumped value.
+          const bumped: Call =
+            call._topology !== undefined
+              ? {
+                  ...call,
+                  _topology: { ...call._topology, gen: call._topology.gen + 1 },
+                }
+              : call
+          if (bumped !== call) {
+            MutableHashMap.set(callsMap, callRef, bumped)
+          }
+          const json = yield* Schema.encodeEffect(JsonCallSchema)(bumped).pipe(Effect.orDie)
           const { role, primary } = partitionOf(callRef)
           yield* storage
-            .putCall(role, primary, callRef, json, callIndexKeys(call), ttl)
+            .putCall(role, primary, callRef, json, callIndexKeys(bumped), ttl)
             .pipe(Effect.mapError(toRedisErr))
           flushed++
         }
