@@ -2,7 +2,7 @@
 
 ## Implementation status (as of session 2026-04-27)
 
-**Shipped: Slices 1, 2, 3, 4, 5** — 5 of 11 done. All 756 fake-stack tests pass. Typecheck clean.
+**Shipped: Slices 1, 2, 3, 4, 5, 6** — 6 of 11 done. All 776 fake-stack tests pass. Typecheck clean.
 
 | Slice | Commits | Summary |
 |-------|---------|---------|
@@ -11,14 +11,19 @@
 | 3 | `f09f710`, plus slice-4 cleanup | `PartitionedRelayStorage` (`{role}:{owner}:` keyspace) + `PeerCachePort` + HTTP relay (`PeerRelay`) + HTTP client (`PeerCacheClient`) + `PeerEndpointResolver` |
 | 4 | `e8c6c3e`, `3cc7c99` | callRef encodes primary ordinal (Option C); `CallState` migrated from `CallStateCache` to `PartitionedRelayStorage` with `partitionOf` deriving `(role, primary)` from callRef |
 | 5 | `fe952ed`, `8fea919`, `28742c2`, `1383cd4`, `48188ed` | `PeerFabric.simulated` + dual-write fan-out (D3, D16) + `_topology.gen` bump per flush + cookie parsing at INVITE + 4 named tests + `InfraStep`→`PeerFabricControl` |
+| 6 | this session | `WorkerReadiness` + `PeerEnumerator` (`staticSet`/`fromFabric`/`headlessStatefulSet`) + `ReclaimRunner` (Flow 1) + `callIndexKeys` extracted to `CallModel.ts` + 6 supporting tests + 4 named reclaim tests |
 
-**Remaining: Slices 6, 7, 8, 9, 10, 11** — see "Implementation slices" section.
+**Remaining: Slices 7, 8, 9, 10, 11** — see "Implementation slices" section.
 
 ## Design decisions added this session
 - **D17 — `AppConfig.workerOrdinalLabel`**: new optional config field bridging the integer `workerIndex` to the proxy's string `WorkerId` cookie value. Fallback chain: `workerOrdinalLabel` → `String(workerIndex)` → `"self"`. Production K8s wiring sets this from `HOSTNAME` (StatefulSet pod name). Without this, B2BUA's `selfOrdinal` would not match the cookie's `w_pri` and dual-write/lookup would mismatch.
 - **D18 — `PeerFabric.storageLayerOf(ordinal)`**: subagent deviation from the originally-sketched fabric API (which had `getLocal/putLocal/deleteLocal` directly on the fabric). Instead, the fabric exposes a per-peer `Layer<PartitionedRelayStorage>` so each fake worker reuses Slice 4's storage abstraction unchanged. Cleaner layering; same end-to-end semantics.
 - **D19 — Stickiness cookie parsing on B2BUA receive path**: `src/cache/StickinessCookie.ts` module parses URI params from inbound Record-Route headers at INVITE time. **No HMAC verification** on the B2BUA side — proxy already validated; B2BUA reads the trusted ordinals only.
 - **D20 — InfraStep `partition` deferred**: current scenario DSL `InfraStep` only carries one `target` field. Two-target partition needs a DSL extension; flagged for slice 7/8 where partition scenarios actually matter.
+- **D21 — Slice 6 module split (3 services, not 1)**: rather than fold readiness gating + DNS enumeration + reclaim into a single file, slice 6 ships three small services that compose: `WorkerReadiness` (mirrors `DrainingState.Default`'s shape), `PeerEnumerator` (three layers: `staticSet` / `fromFabric` / `headlessStatefulSet`), `ReclaimRunner` (the loop). Keeps each surface unit-testable in isolation and corrects an earlier draft of the plan that wrongly claimed Slice 5's `PeerFabric` already exposed `markReady`/`currentReady` (it does not — fabric `health` is the external view of a peer, distinct from a worker's own readiness).
+- **D22 — `callIndexKeys` lives on `CallModel.ts`**: extracted from `CallState` into `CallModel.ts` so `ReclaimRunner` (slice 6) can reuse it when copying entries into local storage on recovery — keeps the index-list shape in lock-step with the write path. Pure over the `Call` shape; safe to call on any decoded snapshot.
+- **D23 — Slice 6 single-shot peer enumeration**: ReclaimRunner snapshots `enumerator.currentPeers` once at run start. Periodic re-query during a running reclaim (so peers transitioning Ready mid-scan get picked up) is deferred — the natural insertion point is the `Effect.forEach` loop in `ReclaimRunner.layer`. None of the four named slice-6 tests exercise the dynamic-refresh case.
+- **D24 — Reclaim TTL preservation**: when copying an entry into local `pri:{self}:`, `ReclaimRunner` writes with the entry's reported `ttlSec` rather than resetting to a fresh `callContextTtlSec`. Preserves the original expiry; falls back to `callContextTtlSec` only when the peer reports `ttlSec=0` (entry on the verge of expiring) so the recovered worker has time to process the call.
 
 ## Context
 The B2BUA today writes call state to a single external Redis via [`CallStateCache.redisLayer`](src/call/CallStateCache.ts#L56-L126). When the K8s node hosting a B2BUA worker dies, calls owned by that worker are lost — the proxy will re-route via Rendezvous Hashing to a surviving worker that has no state, and `loadOwnedCalls()` only runs at startup of the original owner.
@@ -250,18 +255,36 @@ Combined the originally-deferred Slice 4 phase 3 (dual-write, gen-bump, cookie p
 - [`interpreter.ts`](tests/fullcall/framework/interpreter.ts) `InfraStep` `crash`/`restart` cases now dispatch to `PeerFabricControl.killWorker` / `rebootWorker`.
 - `partition` deferred (D20) — current single-target `InfraStep` shape can't carry two ordinals; DSL extension needed when partition scenarios actually land in slice 7/8.
 
-### Slice 6 — Reclaim-on-startup + K8s readiness gating + DNS-based peer enumeration ⏳ NEXT
-- New module: `src/cache/ReclaimRunner.ts`.
-- Consumes `PeerCachePort.scan` (slice 3) + `PeerEndpointResolver.headlessStatefulSet` (slice 3) + the `_topology.gen` already populated on stored values (slice 5).
-- The fabric (slice 5) already has the test-side `markReady(false)`/`currentReady` shape needed for K8s probe gating; reclaim runner toggles it at start/finish.
-- Peer enumeration: DNS query against headless StatefulSet service yields only currently-Ready peers. Re-queried every `reclaim.peerRefreshSec` (default 10s) so peers transitioning Ready mid-scan get scanned.
-- Reclaim algorithm: parallel-across-peers (`reclaim.peerConcurrency=8`), rate-limited within each peer (`reclaim.scanBatch=50`, `reclaim.scanPacingMs=50`).
-- **Two reclaim flows leveraging the partitioned keyspace**:
-  - **Flow 1 — Reclaim my primary calls**: ask each peer P → `GET /cache/bak/{self}/scan` → P walks `bak:{self}:call:*` and streams entries (calls where I was primary, P was backup). Copy each into local `pri:{self}:call:*`. Direct prefix scan, zero JSON-read on the peer side.
-  - **Flow 2 — Reclaim my backup duties**: harder problem (which peers' `pri:{P}:*` entries have me named as the backup?). Slice 6 ships a defensive implementation: skip reclaiming backup data on startup. Rationale: as soon as primaries resume their dual-write, my `bak:` partition repopulates naturally from new state events. If a primary doesn't write any new state for the full TTL after my restart, the backup data times out — accepted small loss class. A future optimization can add a server-side `bak-of:{worker}` secondary index to make Flow 2 cheap.
-- `gen`-comparison on copy-in: skip writes where the local entry already has higher `_topology.gen` (avoid clobbering newer values that the dual-write path may have backfilled mid-reclaim).
-- **Hard timeout**: `reclaim.maxDuration` (default 10min). At timeout: log warning, `markReady(true)`, accept that any unrecovered in-dialog requests will be answered with **481 Call/Transaction Does Not Exist** (UAs interpret this as call-ended).
-- Tests: `reclaim-on-restart.test.ts`, `reclaim-under-lan-stress.test.ts`, `reclaim-peer-down-mid-scan.test.ts`, `reclaim-timeout-481.test.ts`.
+
+### Slice 6 — Reclaim-on-startup + K8s readiness gating + DNS-based peer enumeration ✅ SHIPPED (this session)
+
+**Modules shipped:**
+- [WorkerReadiness.ts](../../src/cache/WorkerReadiness.ts) — `MutableRef<boolean>`-backed service mirroring `DrainingState.Default`'s shape. Defaults to `false` (D9). API: `currentReady` / `markReady`. Two layers: `Default` (production initial-false) and `test(initialReady?)` (tests can pre-flip for happy-path scenarios).
+- [PeerEnumerator.ts](../../src/cache/PeerEnumerator.ts) — `currentPeers: Effect<ReadonlyArray<WorkerOrdinal>>`. Three layers:
+  - `headlessStatefulSet({serviceName, namespace, portName, clusterSuffix?, refreshIntervalMs?, self?})` — production. Lazy-imports `node:dns/promises`, polls `resolveSrv("_${portName}._tcp.${serviceName}.${namespace}.${suffix}")` every `refreshIntervalMs` (default 10s), extracts the first DNS label of each SRV target as the pod ordinal. `ENOTFOUND`/`NXDOMAIN` resets the cached set; other DNS errors keep the prior snapshot and log a warning. Filters `self` if provided. Background fiber forked into the layer scope (`Layer.effect` → `Effect.forkScoped`).
+  - `staticSet(peers)` — fixed list captured at build time. For unit tests.
+  - `fromFabric(handle, self?)` — derives the live set from a `PeerFabric.simulatedBuilt` handle. Includes peers whose `health ∈ {alive, draining}`; excludes `dead`/`rebooting` (the latter matches K8s "not-Ready while reclaim runs" — D9). Filters `self` if provided.
+- [ReclaimRunner.ts](../../src/cache/ReclaimRunner.ts) — the main loop. `run: Effect<ReclaimResult>` with `{recoveredCalls, skippedByGen, peersScanned, peersFailed, timedOut, durationMs}`. Algorithm:
+  1. `markReady(false)`, snapshot start time.
+  2. `enumerator.currentPeers` → filter out self → `Effect.forEach(peers, reclaimPeer, {concurrency: peerConcurrency, discard: true})` racing against `Effect.timeoutOption(maxDuration)`.
+  3. Each `reclaimPeer` runs `Stream.runForEach` over `port.scan({peer, role: "bak", owner: self})`, decoding each entry, comparing `_topology.gen` against the local `pri:{self}:` entry (skip on equal-or-newer-local per D7), and writing recovered entries via `storage.putCall("pri", self, callRef, json, callIndexKeys, writeTtl)` so call + flat indexes both land. `writeTtl` preserves the peer's `entry.ttlSec` (D24); falls back to `callContextTtlSec` when `ttlSec=0`.
+  4. Pacing: `Effect.yieldNow` + `Effect.sleep(scanPacingMs)` between entries.
+  5. `markReady(true)` — even on timeout (D14). Errors per-peer (PeerScanError) increment `peersFailed` rather than aborting the whole run.
+- [CallModel.ts:callIndexKeys](../../src/call/CallModel.ts) — extracted from `CallState` so ReclaimRunner can reuse it (D22).
+
+**Tests shipped (20 new tests, total 756 → 776):**
+- [worker-readiness.test.ts](../../tests/cache/worker-readiness.test.ts) — 4 tests (default not-ready, mark transitions, idempotency, test-layer override).
+- [peer-enumerator.test.ts](../../tests/cache/peer-enumerator.test.ts) — 7 tests (`staticSet` round-trip + capture-at-build-time, `fromFabric` with/without self filter, kill drops then reboot restores, dead/rebooting excluded, draining included).
+- [reclaim-on-restart.test.ts](../../tests/cache/reclaim-on-restart.test.ts) — 3 tests (single-entry recovery + index landing + readiness flip; `_topology.gen` skip; no-peers no-op).
+- [reclaim-under-lan-stress.test.ts](../../tests/cache/reclaim-under-lan-stress.test.ts) — 2 tests (per-peer dispatch latency under TestClock; `scanPacingMs` advances virtual time).
+- [reclaim-peer-down-mid-scan.test.ts](../../tests/cache/reclaim-peer-down-mid-scan.test.ts) — 2 tests (dead peer counted as `peersFailed`, healthy peers still recover; `errorRate=1` peer same outcome).
+- [reclaim-timeout-481.test.ts](../../tests/cache/reclaim-timeout-481.test.ts) — 2 tests (`maxDuration` fires → `timedOut=true` + ready flipped + no recovery; `CallState.checkout` falls through to undefined for an unrecovered call — the existing 481 path).
+
+**Out of scope, still deferred to later slices:**
+- Production HTTP `/ready` endpoint wiring (StatusServer must AND `WorkerReadiness.currentReady` with `!DrainingState.isDraining`) — lands with Slice 9 alongside the StatefulSet manifest.
+- StatefulSet port-naming requirement for SRV records — flag in Slice 9 task list.
+- Periodic peer-refresh during a running reclaim (D23).
+- Flow 2 (reclaim my backup duties) — relies on the dual-write path repopulating `bak:` partitions naturally; accepted small TTL-window loss class.
 
 ### Slice 7 — Drain protocol on SIGTERM
 - Hook into existing shutdown path. On SIGTERM (real or fabric-injected):

@@ -697,6 +697,37 @@ export function parseCallRef(
   }
 }
 
+/**
+ * Compute the flat list of index keys associated with a call.
+ *
+ * Mirrors the wire format `CallState` uses when persisting via
+ * `PartitionedRelayStorage.putCall(role, owner, callRef, json,
+ * indexes, ttl)`: each index key is `idx:{key}` on the wire, with
+ * the `key` returned here. The list covers every leg-tag pair, every
+ * b-leg call-id, every dialog's remote tag, and the optional callback
+ * context.
+ *
+ * Used by both `CallState.flushToRedis` (write path) and
+ * `ReclaimRunner` (copy-into-local on recovery, slice 6) so the two
+ * stay in lock-step. Pure over the Call shape; safe to call on any
+ * decoded snapshot.
+ */
+export function callIndexKeys(call: Call): Array<string> {
+  const keys: Array<string> = [`leg:${call.aLeg.callId}|${call.aLeg.fromTag}`]
+  for (const bLeg of call.bLegs) {
+    keys.push(`leg:${bLeg.callId}|${bLeg.fromTag}`)
+    keys.push(`leg:${bLeg.callId}`)
+    for (const dialog of bLeg.dialogs) {
+      const bTag = dialog.sip.remoteTag
+      if (bTag) keys.push(`leg:${bLeg.callId}|${bTag}`)
+    }
+  }
+  if (call.callbackContext !== undefined) {
+    keys.push(`ctx:${call.callbackContext}`)
+  }
+  return keys
+}
+
 /** Parameters the dialog constructors need from the enclosing leg. */
 export interface MakeDialogLegCtx {
   readonly callId: string

@@ -34,7 +34,7 @@ import {
 import { AppConfig } from "../config/AppConfig.js"
 import { RedisError } from "../redis/RedisClient.js"
 import type { Call } from "./CallModel.js"
-import { Call as CallSchema, parseCallRef } from "./CallModel.js"
+import { Call as CallSchema, callIndexKeys, parseCallRef } from "./CallModel.js"
 
 const JsonCallSchema = Schema.fromJsonString(CallSchema)
 
@@ -48,10 +48,6 @@ function legKey(callId: string, tag: string): string {
 
 function legCallIdKey(callId: string): string {
   return `leg:${callId}`
-}
-
-function ctxKey(ctx: string): string {
-  return `ctx:${ctx}`
 }
 
 // ---------------------------------------------------------------------------
@@ -231,25 +227,13 @@ export class CallState extends ServiceMap.Service<
         return Effect.forkChild(remote).pipe(Effect.asVoid)
       }
 
-      // Slice 4: build the flat list of index keys associated with a
-      // call (collapses what used to be `writeCacheIndexes` /
-      // `refreshIndexTtl` index-writes into an array passed to the
-      // storage's all-at-once put/refresh/delete ops).
-      const callIndexKeys = (call: Call): Array<string> => {
-        const keys: Array<string> = [legKey(call.aLeg.callId, call.aLeg.fromTag)]
-        for (const bLeg of call.bLegs) {
-          keys.push(legKey(bLeg.callId, bLeg.fromTag))
-          keys.push(legCallIdKey(bLeg.callId))
-          for (const dialog of bLeg.dialogs) {
-            const bTag = dialog.sip.remoteTag
-            if (bTag) keys.push(legKey(bLeg.callId, bTag))
-          }
-        }
-        if (call.callbackContext !== undefined) {
-          keys.push(ctxKey(call.callbackContext))
-        }
-        return keys
-      }
+      // Slice 4: index-key computation collapses what used to be
+      // `writeCacheIndexes` / `refreshIndexTtl` into an array passed
+      // to the storage's all-at-once put/refresh/delete ops. The
+      // helper is exported from `CallModel.ts` so `ReclaimRunner`
+      // (slice 6) can reuse it when copying entries into local
+      // storage on recovery — keeps the index shape in lock-step with
+      // the write path.
 
       const getSemaphore = Effect.fnUntraced(function* (callRef: string) {
         const existing = Option.getOrUndefined(MutableHashMap.get(semaphores, callRef))
