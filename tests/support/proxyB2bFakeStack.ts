@@ -41,6 +41,8 @@ import {
   workerRegistryControlSimulatedAdapterLayer,
   WorkerId,
 } from "../../src/sip-front-proxy/index.js"
+import { PeerFabric } from "../../src/cache/PeerFabric.js"
+import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
 import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
 
@@ -187,12 +189,17 @@ export interface SipproxyHAFakeStackOpts {
 /** Build a per-worker `AppConfigData` from the test base config. */
 const haWorkerConfig = (
   base: AppConfigData,
-  addr: SocketAddr
+  addr: SocketAddr,
+  ordinalLabel: string
 ): AppConfigData => ({
   ...base,
   sipLocalIp: addr.host,
   sipLocalPort: addr.port,
   b2bOutboundProxy: { host: HA_PROXY_ADDR.host, port: HA_PROXY_ADDR.port },
+  // Slice 5: name the worker with the same string the proxy uses in
+  // the stickiness cookie (`w_pri`/`w_bak`). CallState reads this for
+  // its `partitionOf` decision so cookies and storage paths align.
+  workerOrdinalLabel: ordinalLabel,
 })
 
 /**
@@ -216,12 +223,21 @@ const haWorkerConfig = (
  */
 const b2buaInstance = (
   config: AppConfigData,
-  handlers: HandlerRegistry
+  handlers: HandlerRegistry,
+  storageLayer?: Layer.Layer<
+    import("../../src/cache/PartitionedRelayStorage.js").PartitionedRelayStorage
+  >
 ): Layer.Layer<never, never, SignalingNetwork> => {
   // `Layer.fresh` gives this instance a distinct memo identity so a
   // second composition with the same `config` materialises fresh
   // resources rather than aliasing the first.
-  const stack = Layer.fresh(b2buaWorkerStackLayer({ config }))
+  const stack = Layer.fresh(
+    b2buaWorkerStackLayer(
+      storageLayer === undefined
+        ? { config }
+        : { config, storageLayer }
+    )
+  )
   return Layer.effectDiscard(
     Effect.gen(function* () {
       const scope = yield* Effect.scope
@@ -254,11 +270,29 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
 
   const NetworkLayer = SignalingNetwork.simulated({ transitDelayMs })
 
+  // Slice 5: build a simulated peer fabric BEFORE materialising the
+  // workers so each worker's `PartitionedRelayStorage` is pinned to
+  // its peer slot in the fabric. The fabric also exposes the
+  // `PeerCachePort` impl that Phase D's dual-write fan-out will use.
+  const w1Ord = WorkerOrdinal(HA_WORKER_1 as unknown as string)
+  const w2Ord = WorkerOrdinal(HA_WORKER_2 as unknown as string)
+  const fabricBuilt = PeerFabric.simulatedBuilt([w1Ord, w2Ord])
+
   // Both workers — symmetric. Services hidden, resources scoped to
-  // the SUT layer.
+  // the SUT layer. Each worker's storage points at its fabric peer
+  // slot so writes/reads are observable through `snapshotPeer` and
+  // `PeerCachePort` round-trips between them.
   const Workers = Layer.mergeAll(
-    b2buaInstance(haWorkerConfig(opts.config, w1Addr), opts.handlers),
-    b2buaInstance(haWorkerConfig(opts.config, w2Addr), opts.handlers),
+    b2buaInstance(
+      haWorkerConfig(opts.config, w1Addr, w1Ord),
+      opts.handlers,
+      fabricBuilt.fabric.storageLayerOf(w1Ord),
+    ),
+    b2buaInstance(
+      haWorkerConfig(opts.config, w2Addr, w2Ord),
+      opts.handlers,
+      fabricBuilt.fabric.storageLayerOf(w2Ord),
+    ),
   )
 
   // Proxy stack: both workers admitted as `unknown` per MS-1. The
@@ -294,7 +328,10 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
     }),
   ).pipe(Layer.provideMerge(Probe))
 
-  return Layer.mergeAll(Workers, ProbeAutoStart).pipe(
+  // Slice 5: re-expose the fabric services outward so scenarios can
+  // pull `PeerFabricControl` (kill / partition / snapshot) without
+  // needing to thread it through `setup()`.
+  return Layer.mergeAll(Workers, ProbeAutoStart, fabricBuilt.layer).pipe(
     Layer.provideMerge(NetworkLayer),
     Layer.provideMerge(PumpableClockLayer),
   )

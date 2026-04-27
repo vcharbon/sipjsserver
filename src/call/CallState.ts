@@ -88,12 +88,18 @@ export class CallState extends ServiceMap.Service<
       const storage = yield* PartitionedRelayStorage
       const config = yield* AppConfig
       const ttl = config.callContextTtlSec
-      // Slice 4: this worker's ordinal, used to compute `(role, primary)`
-      // from a callRef. Mirrors the choice in SipRouter.ts when minting
-      // new callRefs: `String(workerIndex)` in production, `"self"` for
-      // single-worker tests / dev.
+      // Slice 4/5: this worker's ordinal, used to compute
+      // `(role, primary)` from a callRef. Prefers the explicit
+      // `workerOrdinalLabel` (production K8s pod hostname; matches the
+      // `WorkerId` string the proxy puts in the cookie); falls back to
+      // `String(workerIndex)` (clustered mode) and finally to "self"
+      // (single-worker tests / dev). Mirrors `SipRouter.ts`.
       const selfOrdinal =
-        config.workerIndex >= 0 ? String(config.workerIndex) : "self"
+        config.workerOrdinalLabel !== undefined
+          ? config.workerOrdinalLabel
+          : config.workerIndex >= 0
+            ? String(config.workerIndex)
+            : "self"
 
       // In-memory state
       const callsMap = MutableHashMap.empty<string, Call>()

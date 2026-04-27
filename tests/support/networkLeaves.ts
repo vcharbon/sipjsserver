@@ -108,13 +108,21 @@ export const DEFAULT_HMAC_KEY: HmacKey = {
  */
 export function b2buaWorkerStackLayer(opts: {
   readonly config: AppConfigData
+  /**
+   * Optional storage override. Defaults to a per-instance
+   * `PartitionedRelayStorage.memoryLayer` (single-worker tests). Slice 5's
+   * multi-peer SUTs pass `PeerFabric.simulated(...).storageLayerOf(self)`
+   * so each worker shares state with the fabric's peer dispatcher.
+   */
+  readonly storageLayer?: Layer.Layer<PartitionedRelayStorage>
 }) {
   const AppConfigLayer = Layer.succeed(AppConfig, opts.config)
   const MetricsLayer = MetricsRegistry.layer
+  const StorageLayer = opts.storageLayer ?? PartitionedRelayStorage.memoryLayer
 
   const Leaves = Layer.mergeAll(
     MetricsLayer,
-    PartitionedRelayStorage.memoryLayer,
+    StorageLayer,
     MockCallControlLayer,
     NoOpTracingLayer,
     NoOpCdrLayer,

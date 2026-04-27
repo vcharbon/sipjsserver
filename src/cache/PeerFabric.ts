@@ -149,17 +149,39 @@ export class PeerFabric extends ServiceMap.Service<PeerFabric, PeerFabricApi>()(
   static readonly simulated = (
     workers: ReadonlyArray<WorkerOrdinal>,
     opts?: { readonly rng?: () => number }
-  ): Layer.Layer<PeerFabric | PeerFabricControl> =>
-    Layer.effectServices(
-      Effect.sync(() => {
-        const inner = makeFabricInner(workers, opts?.rng ?? Math.random)
-        const fabricApi = makeFabricApi(inner, workers)
-        const controlApi = makeControlApi(inner)
-        return ServiceMap.make(PeerFabric, fabricApi).pipe(
-          ServiceMap.add(PeerFabricControl, controlApi)
-        )
-      })
+  ): Layer.Layer<PeerFabric | PeerFabricControl> => {
+    const built = PeerFabric.simulatedBuilt(workers, opts)
+    return built.layer
+  }
+
+  /**
+   * Variant of `simulated` that exposes the unboxed fabric handle in
+   * addition to the Layer. Tests building multi-worker SUTs use the
+   * handle to wire `storageLayerOf(ordinal)` into each worker's stack
+   * BEFORE the layer is run — the layer carries the same handle so
+   * `yield* PeerFabric` later returns the same object.
+   *
+   * The return shape is `{ layer, fabric, control }` where `fabric` is
+   * the `PeerFabricApi` and `control` is the `PeerFabricControlApi`.
+   */
+  static readonly simulatedBuilt = (
+    workers: ReadonlyArray<WorkerOrdinal>,
+    opts?: { readonly rng?: () => number }
+  ): {
+    readonly layer: Layer.Layer<PeerFabric | PeerFabricControl>
+    readonly fabric: PeerFabricApi
+    readonly control: PeerFabricControlApi
+  } => {
+    const inner = makeFabricInner(workers, opts?.rng ?? Math.random)
+    const fabricApi = makeFabricApi(inner, workers)
+    const controlApi = makeControlApi(inner)
+    const layer = Layer.succeedServices(
+      ServiceMap.make(PeerFabric, fabricApi).pipe(
+        ServiceMap.add(PeerFabricControl, controlApi)
+      )
     )
+    return { layer, fabric: fabricApi, control: controlApi }
+  }
 }
 
 // ---------------------------------------------------------------------------

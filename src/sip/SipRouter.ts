@@ -662,13 +662,20 @@ export class SipRouter extends ServiceMap.Service<
             return
           }
 
-          // Slice 4: encode the natural primary's ordinal into the callRef
-          // so any worker holding the ref can derive `(role, primary)` for
-          // storage path construction without consulting the proxy or the
-          // cookie. Falls back to "self" when `workerIndex` is unset
-          // (single-worker tests / dev).
+          // Slice 4/5: encode the natural primary's ordinal into the
+          // callRef so any worker holding the ref can derive
+          // `(role, primary)` for storage path construction without
+          // consulting the proxy or the cookie. Prefers the explicit
+          // `workerOrdinalLabel` (production K8s pod hostname; matches
+          // the `WorkerId` string the proxy puts in the cookie); falls
+          // back to `String(workerIndex)` (clustered mode) and finally
+          // to "self" (single-worker tests / dev).
           const selfOrdinal =
-            config.workerIndex >= 0 ? String(config.workerIndex) : "self"
+            config.workerOrdinalLabel !== undefined
+              ? config.workerOrdinalLabel
+              : config.workerIndex >= 0
+                ? String(config.workerIndex)
+                : "self"
           const callRef = deriveCallRef(selfOrdinal, callId, fromTag)
           const traceRateHeader = getHeader(req.headers, "X-Full-Trace-Sample-Rate")
           const overrideRate = traceRateHeader !== undefined ? parseFloat(traceRateHeader) : undefined

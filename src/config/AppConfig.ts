@@ -34,6 +34,17 @@ export const AppConfigData = Schema.Struct({
   clusterWorkers: Schema.Int,
   /** This worker's index (set by dispatcher in child process env). -1 = standalone. */
   workerIndex: Schema.Int,
+  /**
+   * Stable string identifier for this worker — matches the `WorkerId`
+   * the proxy uses in stickiness cookies. In production K8s this is
+   * the StatefulSet pod hostname (e.g. `b2bua-worker-1`). When set,
+   * `CallState`/`SipRouter` use this as the partition `owner` and the
+   * dual-write `self` ordinal; when unset, falls back to
+   * `String(workerIndex)` (legacy single-worker tests / dev).
+   *
+   * Slice 5 of the HA-resilience plan (D7 / D15).
+   */
+  workerOrdinalLabel: Schema.optional(Schema.String),
   /** TTL for Redis call context keys (seconds). Derived as keepaliveIntervalSec * 2. */
   callContextTtlSec: Schema.Int,
   /** Delay before deleting Redis keys after call termination (seconds). Covers SIP retransmissions. */
