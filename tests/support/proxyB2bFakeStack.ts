@@ -226,17 +226,24 @@ const b2buaInstance = (
   handlers: HandlerRegistry,
   storageLayer?: Layer.Layer<
     import("../../src/cache/PartitionedRelayStorage.js").PartitionedRelayStorage
+  >,
+  peerCacheLayer?: Layer.Layer<
+    import("../../src/cache/PeerCachePort.js").PeerCachePort
   >
 ): Layer.Layer<never, never, SignalingNetwork> => {
   // `Layer.fresh` gives this instance a distinct memo identity so a
   // second composition with the same `config` materialises fresh
-  // resources rather than aliasing the first.
+  // resources rather than aliasing the first. When a peer-cache layer
+  // is supplied, merge it INSIDE the freshness boundary so each
+  // worker pulls its own `self`-pinned port (`cachePortLayerOf` is
+  // per-worker).
+  const baseStack = b2buaWorkerStackLayer(
+    storageLayer === undefined ? { config } : { config, storageLayer }
+  )
   const stack = Layer.fresh(
-    b2buaWorkerStackLayer(
-      storageLayer === undefined
-        ? { config }
-        : { config, storageLayer }
-    )
+    peerCacheLayer === undefined
+      ? baseStack
+      : Layer.provideMerge(baseStack, peerCacheLayer)
   )
   return Layer.effectDiscard(
     Effect.gen(function* () {
@@ -281,17 +288,21 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
   // Both workers — symmetric. Services hidden, resources scoped to
   // the SUT layer. Each worker's storage points at its fabric peer
   // slot so writes/reads are observable through `snapshotPeer` and
-  // `PeerCachePort` round-trips between them.
+  // `PeerCachePort` round-trips between them. The per-worker peer
+  // cache port is pinned to its `self` ordinal so partition checks
+  // applied to outbound RPCs land on the right (self, peer) pair.
   const Workers = Layer.mergeAll(
     b2buaInstance(
       haWorkerConfig(opts.config, w1Addr, w1Ord),
       opts.handlers,
       fabricBuilt.fabric.storageLayerOf(w1Ord),
+      fabricBuilt.fabric.cachePortLayerOf(w1Ord),
     ),
     b2buaInstance(
       haWorkerConfig(opts.config, w2Addr, w2Ord),
       opts.handlers,
       fabricBuilt.fabric.storageLayerOf(w2Ord),
+      fabricBuilt.fabric.cachePortLayerOf(w2Ord),
     ),
   )
 
