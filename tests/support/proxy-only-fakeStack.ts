@@ -30,12 +30,14 @@
 import { Effect, Layer, type Scope } from "effect"
 import {
   CancelBranchLru,
+  CoreToExtRoutingStrategy,
   ForwardAllConfig,
   ForwardAllStrategyLive,
   workerRegistryControlNoopLayer,
   ProxyBindConfig,
   type ProxyBindConfigData,
   ProxyCore,
+  RegisterStrategy,
   type SocketAddr,
 } from "../../src/sip-front-proxy/index.js"
 import { fromString as staticRegistryFromString } from "../../src/sip-front-proxy/registry/static.js"
@@ -103,7 +105,12 @@ export function proxyOnlyFakeStackLayer(opts: ProxyOnlyFakeStackOpts) {
     LruLayer,
     StrategyLayer,
     RegistryLayer,
-    workerRegistryControlNoopLayer
+    workerRegistryControlNoopLayer,
+    // Slice 2 of REGISTER + double-stack: noop variants — this fixture
+    // never exercises the registrar path. REGISTER would surface as 501
+    // and the unused `core`-to-`ext` lookup is never reached.
+    RegisterStrategy.noopLayer,
+    CoreToExtRoutingStrategy.noopLayer,
   )
   return ProxyCore.Default.pipe(Layer.provideMerge(Leaves))
 }

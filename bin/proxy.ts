@@ -58,6 +58,7 @@ import { Effect, Layer } from "effect"
 import { SignalingNetwork } from "../src/sip/SignalingNetwork.js"
 import {
   CancelBranchLru,
+  CoreToExtRoutingStrategy,
   ForwardAllConfig,
   ForwardAllStrategyLive,
   HealthProbe,
@@ -67,6 +68,7 @@ import {
   ProxyBindConfig,
   ProxyCore,
   PROXY_VERSION,
+  RegisterStrategy,
   type SocketAddr,
   workerRegistryControlNoopLayer,
 } from "../src/sip-front-proxy/index.js"
@@ -126,6 +128,17 @@ const advertisedHost = process.env["PROXY_ADVERTISED_HOST"] ?? bindHost
 const advertisedPort = parsePort(process.env["PROXY_ADVERTISED_PORT"], bindPort)
 const mode = (process.env["PROXY_REGISTRY_MODE"] ?? "static").toLowerCase()
 
+// Both registrar-mode strategies default to `noop` for the K8s-LB binary.
+// Slice 2 of the REGISTER + double-stack work added them as required deps
+// of `ProxyCore.Default`; the noops mean REGISTER returns 501 and the
+// (never-bound-here) `core` lookup path returns 404. A future binary in
+// registrar mode swaps these for `inMemoryRegistrar` /
+// `registrarLookup` + `RegistrarProxyConfig.layer(...)`.
+const noopRegistrarLayers = Layer.mergeAll(
+  RegisterStrategy.noopLayer,
+  CoreToExtRoutingStrategy.noopLayer,
+)
+
 const baseBindLayer = Layer.mergeAll(
   SignalingNetwork.real,
   ProxyBindConfig.layer({
@@ -135,7 +148,8 @@ const baseBindLayer = Layer.mergeAll(
     advertisedPort,
     reusePort: true,
   }),
-  CancelBranchLru.Default
+  CancelBranchLru.Default,
+  noopRegistrarLayers,
 )
 
 const buildStaticLayer = () => {

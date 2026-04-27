@@ -33,7 +33,27 @@ export {
   ProxyBindConfig,
   type ProxyBindConfigData,
   type ProxyCoreApi,
+  type NetworkTag,
 } from "./ProxyCore.js"
+export {
+  Registrar,
+  type RegistrarApi,
+  type Binding,
+} from "./Registrar.js"
+export {
+  RegisterStrategy,
+  type RegisterStrategyApi,
+  DEFAULT_EXPIRES_SEC,
+} from "./RegisterStrategy.js"
+export {
+  CoreToExtRoutingStrategy,
+  type CoreToExtRoutingStrategyApi,
+  RouteOutcome as CoreToExtRouteOutcome,
+} from "./CoreToExtRoutingStrategy.js"
+export {
+  RegistrarProxyConfig,
+  type RegistrarProxyConfigData,
+} from "./RegistrarProxyConfig.js"
 export {
   RoutingStrategy,
   type RoutingStrategyApi,

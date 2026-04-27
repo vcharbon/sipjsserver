@@ -53,6 +53,10 @@ import {
   type CancelBranchLruApi,
   callIdCseqKey,
 } from "./CancelBranchLru.js"
+import {
+  CoreToExtRoutingStrategy,
+  type CoreToExtRoutingStrategyApi,
+} from "./CoreToExtRoutingStrategy.js"
 import { ProxyLogger, type ProxyLoggerApi } from "./observability/Logger.js"
 import {
   ProxyMetrics,
@@ -60,6 +64,11 @@ import {
   type RoutingDecisionKind,
 } from "./observability/Metrics.js"
 import { ProxyTracing, type ProxyTracingApi } from "./observability/Tracing.js"
+import { RegisterStrategy } from "./RegisterStrategy.js"
+import {
+  RegistrarProxyConfig,
+  type RegistrarProxyConfigData,
+} from "./RegistrarProxyConfig.js"
 import {
   type RouteParams,
   RoutingStrategy,
@@ -70,6 +79,16 @@ import {
   WorkerRegistry,
   type WorkerRegistryApi,
 } from "./registry/WorkerRegistry.js"
+
+/**
+ * Network tag for the dual-endpoint registrar mode. `ext` is the
+ * endpoint-facing fabric (Alice / Bob); `core` is the K8s-app-server-
+ * facing fabric. Single-endpoint deployments only ever see `"ext"`.
+ */
+export type NetworkTag = "ext" | "core"
+
+/** URI param name used to tag our own Via with the response-egress side. */
+const NET_PARAM = "net"
 
 // ---------------------------------------------------------------------------
 // Bind config
@@ -104,11 +123,22 @@ export class ProxyBindConfig extends ServiceMap.Service<
 // ---------------------------------------------------------------------------
 
 export interface ProxyCoreApi {
+  /** Primary (`ext`) endpoint — bound from `ProxyBindConfig`. Always present. */
   readonly endpoint: UdpEndpoint
   /** Final ip:port the proxy binds on (resolved from `ProxyBindConfig`). */
   readonly localAddress: { readonly ip: string; readonly port: number }
   /** ip:port advertised in our Via / Record-Route headers. */
   readonly advertisedAddress: { readonly ip: string; readonly port: number }
+  /**
+   * Optional `core` endpoint — present only when `RegistrarProxyConfig`
+   * was provided, i.e. the proxy is running in registrar / dual-stack
+   * mode. Absent for the legacy K8s-LB deployment.
+   */
+  readonly coreEndpoint?: UdpEndpoint
+  /** ip:port the `core` endpoint binds on, or `undefined` in single-stack mode. */
+  readonly coreLocalAddress?: { readonly ip: string; readonly port: number }
+  /** ip:port advertised on the `core` side, or `undefined` in single-stack mode. */
+  readonly coreAdvertisedAddress?: { readonly ip: string; readonly port: number }
 }
 
 export class ProxyCore extends ServiceMap.Service<ProxyCore, ProxyCoreApi>()(
@@ -122,6 +152,8 @@ export class ProxyCore extends ServiceMap.Service<ProxyCore, ProxyCoreApi>()(
     | CancelBranchLru
     | ProxyBindConfig
     | WorkerRegistry
+    | RegisterStrategy
+    | CoreToExtRoutingStrategy
   > = Layer.suspend(() =>
     Layer.effect(
       ProxyCore,
@@ -194,6 +226,8 @@ const makeProxyCore: Effect.Effect<
   | ProxyTracing
   | ProxyLogger
   | WorkerRegistry
+  | RegisterStrategy
+  | CoreToExtRoutingStrategy
   | Scope.Scope
 > = Effect.gen(function* () {
   const network = yield* SignalingNetwork
@@ -205,9 +239,14 @@ const makeProxyCore: Effect.Effect<
   const tracing = yield* ProxyTracing
   const logger = yield* ProxyLogger
   const registry = yield* WorkerRegistry
+  const registerStrategy = yield* RegisterStrategy
+  const coreToExtStrategy = yield* CoreToExtRoutingStrategy
+  // Optional: registrar deployments provide this; the K8s-LB binary
+  // doesn't and the proxy stays single-endpoint.
+  const registrarCfgOpt = yield* Effect.serviceOption(RegistrarProxyConfig)
 
   const queueMax = cfg.queueMax ?? 1024
-  const endpoint = yield* network
+  const extEndpoint = yield* network
     .bindUdp({
       ip: cfg.bindHost,
       port: cfg.bindPort,
@@ -216,19 +255,54 @@ const makeProxyCore: Effect.Effect<
     })
     .pipe(Effect.orDie)
 
-  const localAddress = endpoint.localAddress
+  const localAddress = extEndpoint.localAddress
   const advertisedAddress = {
     ip: cfg.advertisedHost ?? localAddress.ip,
     port: cfg.advertisedPort ?? localAddress.port,
   }
   const counters = newCounters()
 
+  // Optional core endpoint — bound only when running in registrar mode.
+  // `coreEndpoint === undefined` is the legacy K8s-LB single-endpoint
+  // shape; downstream dispatch checks it before stamping `;net=` on
+  // egress Vias / before consulting `coreToExtStrategy`.
+  let coreEndpoint: UdpEndpoint | undefined
+  let coreLocalAddress: { readonly ip: string; readonly port: number } | undefined
+  let coreAdvertisedAddress:
+    | { readonly ip: string; readonly port: number }
+    | undefined
+  let registrarCfg: RegistrarProxyConfigData | undefined
+  if (Option.isSome(registrarCfgOpt)) {
+    registrarCfg = registrarCfgOpt.value
+    coreEndpoint = yield* network
+      .bindUdp({
+        ip: registrarCfg.coreBind.host,
+        port: registrarCfg.coreBind.port,
+        queueMax,
+        reusePort: cfg.reusePort ?? false,
+      })
+      .pipe(Effect.orDie)
+    coreLocalAddress = coreEndpoint.localAddress
+    coreAdvertisedAddress = {
+      ip: registrarCfg.coreAdvertisedHost ?? coreLocalAddress.ip,
+      port: registrarCfg.coreAdvertisedPort ?? coreLocalAddress.port,
+    }
+  }
+
   yield* Effect.logInfo(
-    `[sip-front-proxy/ProxyCore] strategy=${strategy.name} bound=${localAddress.ip}:${localAddress.port} advertised=${advertisedAddress.ip}:${advertisedAddress.port}`
+    `[sip-front-proxy/ProxyCore] strategy=${strategy.name} bound=${localAddress.ip}:${localAddress.port} advertised=${advertisedAddress.ip}:${advertisedAddress.port}` +
+      (coreLocalAddress !== undefined && coreAdvertisedAddress !== undefined
+        ? ` coreBound=${coreLocalAddress.ip}:${coreLocalAddress.port} coreAdvertised=${coreAdvertisedAddress.ip}:${coreAdvertisedAddress.port} registerStrategy=${registerStrategy.name} coreToExtStrategy=${coreToExtStrategy.name}`
+        : "")
   )
 
-  const sendBuf = (buf: Buffer, dst: SocketAddr) =>
-    endpoint.send(buf, dst.port, dst.host).pipe(
+  /**
+   * Send a buffer on a specific endpoint. Catches `SendError`s into the
+   * existing counter — outbound failures are observed but never propagate
+   * (D4 of the proxy plan).
+   */
+  const sendOn = (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) =>
+    ep.send(buf, dst.port, dst.host).pipe(
       Effect.catchTag("SendError", (err) =>
         Effect.sync(() => {
           counters.sendErrors++
@@ -242,10 +316,29 @@ const makeProxyCore: Effect.Effect<
       )
     )
 
+  // Default-egress-on-ext helpers — keep the legacy single-endpoint code
+  // path byte-identical: every send goes out on `extEndpoint`.
+  const sendBuf = (buf: Buffer, dst: SocketAddr) => sendOn(extEndpoint, buf, dst)
   const replyToSource = (
     buf: Buffer,
     src: { readonly address: string; readonly port: number }
-  ) => sendBuf(buf, { host: src.address, port: src.port })
+  ) => sendOn(extEndpoint, buf, { host: src.address, port: src.port })
+
+  /**
+   * Network-aware reply: in dual-endpoint mode, replies (e.g. REGISTER 200
+   * OK, registrar `404 Not Found`, `403 Forbidden` on REGISTER from core)
+   * go out on the SAME endpoint the request arrived on. In single-endpoint
+   * mode there's only `ext` and this collapses to `replyToSource`.
+   */
+  const replyOnNet = (
+    net: NetworkTag,
+    buf: Buffer,
+    src: { readonly address: string; readonly port: number }
+  ) =>
+    sendOn(net === "core" && coreEndpoint !== undefined ? coreEndpoint : extEndpoint, buf, {
+      host: src.address,
+      port: src.port,
+    })
 
   // -------------------------------------------------------------------------
   // Per-packet handling — split by message type
@@ -253,72 +346,144 @@ const makeProxyCore: Effect.Effect<
 
   const handleRequest = (
     req: SipRequest,
-    src: { readonly address: string; readonly port: number }
-  ) =>
-    handleRequestImpl({
-      req,
-      src,
-      advertisedAddress,
-      strategy,
-      cancelLru,
-      counters,
-      sendBuf,
-      replyToSource,
-      metrics,
-      tracing,
-      logger,
-      registry,
+    src: { readonly address: string; readonly port: number },
+    net: NetworkTag
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      // REGISTER always hands off to RegisterStrategy. In K8s-LB mode the
+      // strategy is `noop` (501 Not Implemented). In registrar mode it is
+      // `inMemoryRegistrar` (200 OK with bindings). Either way we reply
+      // on the ingress endpoint.
+      if (req.method.toUpperCase() === "REGISTER") {
+        if (net === "ext") {
+          const resp = yield* registerStrategy.handle(req)
+          yield* replyOnNet("ext", serialize(resp), src)
+          return
+        }
+        // REGISTER on core only happens in dual-endpoint mode and is
+        // explicitly out of scope: the registrar lives on the ext side.
+        const resp = generateResponse(req, 403, "Forbidden", { toTag: newTag() })
+        yield* replyOnNet("core", serialize(resp), src)
+        return
+      }
+
+      // In dual-endpoint registrar mode, request dispatch differs from
+      // the K8s-LB shape: ext INVITEs always land at coreDestination,
+      // core INVITEs go through `coreToExtStrategy`. CANCEL still
+      // matches via the LRU. In-dialog requests follow Route headers.
+      if (registrarCfg !== undefined && coreEndpoint !== undefined) {
+        yield* handleRequestRegistrarMode({
+          req,
+          src,
+          net,
+          extEndpoint,
+          coreEndpoint,
+          extAdvertised: advertisedAddress,
+          coreAdvertised: coreAdvertisedAddress!,
+          registrarCfg,
+          coreToExtStrategy,
+          cancelLru,
+          counters,
+          sendOn,
+        })
+        return
+      }
+
+      // Single-endpoint (legacy K8s-LB) — unchanged. `net` is always "ext".
+      yield* handleRequestImpl({
+        req,
+        src,
+        advertisedAddress,
+        strategy,
+        cancelLru,
+        counters,
+        sendBuf,
+        replyToSource,
+        metrics,
+        tracing,
+        logger,
+        registry,
+      })
     })
 
-  const handleResponse = (msg: SipMessage) =>
+  const handleResponse = (msg: SipMessage, net: NetworkTag): Effect.Effect<void> =>
     handleResponseImpl({
       msg,
       advertisedAddress,
+      coreAdvertisedAddress,
       counters,
-      sendBuf,
+      sendOn,
+      extEndpoint,
+      coreEndpoint,
+      defaultEgressNet: net,
       metrics,
     })
 
   // -------------------------------------------------------------------------
-  // Ingress fiber — forked into the layer's scope (cancelled on shutdown)
+  // Ingress fiber(s) — forked into the layer's scope.
   // -------------------------------------------------------------------------
 
-  yield* Effect.forkScoped(
-    Stream.runForEach(endpoint.messages, (packet) =>
-      Effect.gen(function* () {
-        const parsed = yield* parser.parse(packet.raw).pipe(
-          Effect.catchTag("SipParseError", (err) =>
-            Effect.sync(() => {
-              counters.parseDropped++
-            }).pipe(
-              Effect.tap(() =>
-                Effect.logWarning(
-                  `[ProxyCore] dropped malformed packet from ${packet.rinfo.address}:${packet.rinfo.port}: ${err.reason}`
-                )
-              ),
-              Effect.as(undefined as SipMessage | undefined)
-            )
+  /**
+   * Process one packet from a tagged endpoint. Shared between ext and
+   * core ingress — only the `net` tag differs. Errors during parse get
+   * counted; defects get logged as unhandled.
+   */
+  const processPacket = (
+    packet: { raw: Buffer; rinfo: { address: string; port: number } },
+    net: NetworkTag
+  ) =>
+    Effect.gen(function* () {
+      const parsed = yield* parser.parse(packet.raw).pipe(
+        Effect.catchTag("SipParseError", (err) =>
+          Effect.sync(() => {
+            counters.parseDropped++
+          }).pipe(
+            Effect.tap(() =>
+              Effect.logWarning(
+                `[ProxyCore] dropped malformed packet from ${packet.rinfo.address}:${packet.rinfo.port} on ${net}: ${err.reason}`
+              )
+            ),
+            Effect.as(undefined as SipMessage | undefined)
           )
         )
-        if (parsed === undefined) return
-        if (parsed.type === "request") {
-          yield* handleRequest(parsed, packet.rinfo)
-        } else {
-          yield* handleResponse(parsed)
-        }
-      }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logError(`[ProxyCore] unhandled error during packet handling`, cause)
-        )
+      )
+      if (parsed === undefined) return
+      if (parsed.type === "request") {
+        yield* handleRequest(parsed, packet.rinfo, net)
+      } else {
+        yield* handleResponse(parsed, net)
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logError(`[ProxyCore] unhandled error during packet handling`, cause)
       )
     )
-  )
 
-  return {
-    endpoint,
-    localAddress,
-    advertisedAddress,
-  } satisfies ProxyCoreApi
+  yield* Effect.forkScoped(
+    Stream.runForEach(extEndpoint.messages, (packet) => processPacket(packet, "ext"))
+  )
+  if (coreEndpoint !== undefined) {
+    yield* Effect.forkScoped(
+      Stream.runForEach(coreEndpoint.messages, (packet) => processPacket(packet, "core"))
+    )
+  }
+
+  const api: ProxyCoreApi =
+    coreEndpoint !== undefined && coreLocalAddress !== undefined && coreAdvertisedAddress !== undefined
+      ? {
+          endpoint: extEndpoint,
+          localAddress,
+          advertisedAddress,
+          coreEndpoint,
+          coreLocalAddress,
+          coreAdvertisedAddress,
+        }
+      : {
+          endpoint: extEndpoint,
+          localAddress,
+          advertisedAddress,
+        }
+  return api
 })
 
 // ---------------------------------------------------------------------------
@@ -698,14 +863,30 @@ const tryStrategySelect = (
 interface HandleResponseArgs {
   readonly msg: SipMessage // narrowed below
   readonly advertisedAddress: { readonly ip: string; readonly port: number }
+  /** Present in dual-endpoint mode; the response may be ours via Via match here. */
+  readonly coreAdvertisedAddress?: { readonly ip: string; readonly port: number } | undefined
   readonly counters: ProxyCounters
-  readonly sendBuf: (buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
+  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
+  readonly extEndpoint: UdpEndpoint
+  readonly coreEndpoint?: UdpEndpoint | undefined
+  /** Ingress network — fallback when our top Via has no `;net=` tag. */
+  readonly defaultEgressNet: NetworkTag
   readonly metrics: ProxyMetricsApi
 }
 
 const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const { msg, advertisedAddress, counters, sendBuf, metrics } = args
+    const {
+      msg,
+      advertisedAddress,
+      coreAdvertisedAddress,
+      counters,
+      sendOn,
+      extEndpoint,
+      coreEndpoint,
+      defaultEgressNet,
+      metrics,
+    } = args
     if (msg.type !== "response") return
 
     yield* metrics.recordMessage({
@@ -715,8 +896,9 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
     })
 
     // RFC 3261 §16.7.3: pop the topmost Via (must be one we own — i.e. the
-    // sent-by host:port matches our advertised address). Forward to the
-    // *next* Via's address.
+    // sent-by host:port matches our advertised address on EITHER fabric).
+    // Forward to the *next* Via's address on the egress endpoint indicated
+    // by the popped Via's `;net=` tag (or fall back to the ingress fabric).
     const vias = msg.parsed.vias
     if (vias.length < 2) {
       counters.responseDroppedNoVia++
@@ -731,10 +913,21 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
       return
     }
     const top = vias[0]!
-    if (top.host !== advertisedAddress.ip || (top.port ?? 5060) !== advertisedAddress.port) {
+    const topPort = top.port ?? 5060
+    const matchesExt =
+      top.host === advertisedAddress.ip && topPort === advertisedAddress.port
+    const matchesCore =
+      coreAdvertisedAddress !== undefined &&
+      top.host === coreAdvertisedAddress.ip &&
+      topPort === coreAdvertisedAddress.port
+    if (!matchesExt && !matchesCore) {
       counters.responseDroppedNoVia++
       yield* Effect.logWarning(
-        `[ProxyCore] response dropped — top Via ${top.host}:${top.port ?? 5060} is not us (${advertisedAddress.ip}:${advertisedAddress.port})`
+        `[ProxyCore] response dropped — top Via ${top.host}:${topPort} is not us (ext=${advertisedAddress.ip}:${advertisedAddress.port}` +
+          (coreAdvertisedAddress !== undefined
+            ? ` core=${coreAdvertisedAddress.ip}:${coreAdvertisedAddress.port}`
+            : "") +
+          ")"
       )
       yield* metrics.recordMessage({
         direction: "outbound",
@@ -754,15 +947,217 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
         ? Number.parseInt(rportRaw, 10)
         : (next.port ?? 5060)
 
+    // Egress endpoint — read the `;net=` tag we stamped on the way out.
+    // Single-endpoint deployments never set the param; egress defaults
+    // to ext (the only endpoint). Dual-endpoint deployments use the
+    // tag explicitly so a response forwarded ext→core finds its way
+    // back across the fabric boundary.
+    const netParamRaw = top.params[NET_PARAM]
+    const egressNet: NetworkTag =
+      netParamRaw === "ext" || netParamRaw === "core"
+        ? netParamRaw
+        : defaultEgressNet
+    const egressEp =
+      egressNet === "core" && coreEndpoint !== undefined ? coreEndpoint : extEndpoint
+
     const headers = removeFirstHeader(msg.headers, "via")
     const outBuf = serialize({ ...msg, headers })
     counters.routedResponses++
-    yield* sendBuf(outBuf, { host, port })
+    yield* sendOn(egressEp, outBuf, { host, port })
     yield* metrics.recordMessage({
       direction: "outbound",
       methodOrStatus: String(msg.status),
       result: "forwarded",
     })
+  })
+
+// ---------------------------------------------------------------------------
+// Registrar-mode request dispatch (dual-endpoint)
+// ---------------------------------------------------------------------------
+
+interface HandleRegistrarRequestArgs {
+  readonly req: SipRequest
+  readonly src: { readonly address: string; readonly port: number }
+  readonly net: NetworkTag
+  readonly extEndpoint: UdpEndpoint
+  readonly coreEndpoint: UdpEndpoint
+  readonly extAdvertised: { readonly ip: string; readonly port: number }
+  readonly coreAdvertised: { readonly ip: string; readonly port: number }
+  readonly registrarCfg: RegistrarProxyConfigData
+  readonly coreToExtStrategy: CoreToExtRoutingStrategyApi
+  readonly cancelLru: CancelBranchLruApi
+  readonly counters: ProxyCounters
+  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
+}
+
+const handleRequestRegistrarMode = (
+  args: HandleRegistrarRequestArgs
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const {
+      req,
+      src,
+      net,
+      extEndpoint,
+      coreEndpoint,
+      extAdvertised,
+      coreAdvertised,
+      registrarCfg,
+      coreToExtStrategy,
+      cancelLru,
+      counters,
+      sendOn,
+    } = args
+    const method = req.method.toUpperCase()
+
+    // ── Max-Forwards check (RFC 3261 §16.3) ──────────────────────────────
+    const mfRaw = getHeader(req.headers, "max-forwards")
+    const mf = mfRaw === undefined ? 70 : Number.parseInt(mfRaw, 10)
+    if (Number.isFinite(mf) && mf <= 0) {
+      counters.maxForwardsRejected++
+      const resp = generateResponse(req, 483, "Too Many Hops", { toTag: newTag() })
+      yield* sendOn(net === "core" ? coreEndpoint : extEndpoint, serialize(resp), {
+        host: src.address,
+        port: src.port,
+      })
+      return
+    }
+    const mfNext = (Number.isFinite(mf) ? mf : 70) - 1
+
+    // ── §16.4 strip topmost Route if it points at us (either side) ───────
+    let headers: ReadonlyArray<SipHeader> = req.headers
+    const topRoute = getHeader(headers, "route")
+    if (topRoute !== undefined) {
+      const parsedRoute = parseSipUri(topRoute)
+      if (
+        parsedRoute !== undefined &&
+        ((parsedRoute.host === extAdvertised.ip &&
+          parsedRoute.port === extAdvertised.port) ||
+          (parsedRoute.host === coreAdvertised.ip &&
+            parsedRoute.port === coreAdvertised.port))
+      ) {
+        headers = removeFirstHeader(headers, "route")
+        counters.routeStripped++
+      }
+    }
+
+    // ── Pick egress endpoint + destination ───────────────────────────────
+    // Dispatch table:
+    //   REGISTER       — handled before this function runs.
+    //   CANCEL         — match the original INVITE in the LRU; reuse
+    //                    target + branch; egress = OPPOSITE of ingress.
+    //   INVITE on ext  — forward to coreDestination on core endpoint.
+    //   INVITE on core — coreToExtStrategy.resolve → forward via ext, OR reject.
+    //   In-dialog any  — follow Route header (already stripped above) or
+    //                    fall back to RURI; egress = OPPOSITE of ingress.
+    //
+    // The "egress = opposite of ingress" default is a deliberate v1
+    // simplification: every dialog goes ext↔core through the proxy with
+    // no ext↔ext or core↔core direct paths.
+    const egressNet: NetworkTag = net === "ext" ? "core" : "ext"
+    const egressEp = egressNet === "ext" ? extEndpoint : coreEndpoint
+    const egressAdvertised = egressNet === "ext" ? extAdvertised : coreAdvertised
+
+    let target: SocketAddr | undefined
+    let synthesizedReply: { status: number; reason: string } | undefined
+    let reuseBranch: string | undefined
+    let ruriOverride: string | undefined
+
+    if (method === "CANCEL") {
+      const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+      const found = yield* cancelLru.lookup(key)
+      if (Option.isSome(found)) {
+        target = found.value.target
+        reuseBranch = found.value.branch
+        counters.cancelMatched++
+      } else {
+        counters.cancelUnmatched++
+        // Without a recorded INVITE we can't re-derive the right hop —
+        // 481 is the spec-correct response (RFC 3261 §9.2).
+        synthesizedReply = { status: 481, reason: "Call/Transaction Does Not Exist" }
+      }
+    } else if (method === "INVITE" && net === "ext") {
+      target = registrarCfg.coreDestination
+    } else if (method === "INVITE" && net === "core") {
+      const outcome = yield* coreToExtStrategy.resolve(req)
+      if (outcome._tag === "reject") {
+        synthesizedReply = { status: outcome.status, reason: outcome.reason }
+      } else {
+        target = outcome.destination
+        ruriOverride = outcome.ruriOverride
+      }
+    } else {
+      // In-dialog (BYE, ACK, re-INVITE, OPTIONS, …): the (now stripped)
+      // top Route or the Request-URI tells us where to go. v1 trusts the
+      // R-URI — agents in our test fabric set it from the dialog's
+      // remote-target Contact, which in registrar mode is always either
+      // a registered ext contact or the core destination.
+      const parsedRuri = parseSipUri(req.uri)
+      if (parsedRuri === undefined) {
+        synthesizedReply = { status: 400, reason: "Bad Request" }
+      } else {
+        target = { host: parsedRuri.host, port: parsedRuri.port }
+      }
+    }
+
+    if (synthesizedReply !== undefined) {
+      const resp = generateResponse(req, synthesizedReply.status, synthesizedReply.reason, {
+        toTag: newTag(),
+      })
+      yield* sendOn(net === "core" ? coreEndpoint : extEndpoint, serialize(resp), {
+        host: src.address,
+        port: src.port,
+      })
+      return
+    }
+    if (target === undefined) {
+      // Defensive: dispatch fell through without a target and without a
+      // synthesized reply. 500 because that's a proxy-side bug, not the
+      // caller's.
+      counters.noTargetAvailable++
+      const resp = generateResponse(req, 500, "Server Internal Error", { toTag: newTag() })
+      yield* sendOn(net === "core" ? coreEndpoint : extEndpoint, serialize(resp), {
+        host: src.address,
+        port: src.port,
+      })
+      return
+    }
+
+    // ── Build outbound headers ───────────────────────────────────────────
+    let nextHeaders: SipHeader[] = [...headers]
+    nextHeaders = upsertHeader(nextHeaders, "Max-Forwards", String(mfNext))
+
+    if (DIALOG_CREATING.has(method)) {
+      // Stamp Record-Route on the egress side so the far party's
+      // in-dialog requests come back through us. The URI advertises the
+      // egress fabric's address — that's the side the far party can
+      // reach. v1 inserts a single RR (no double-RR for transport
+      // bridging — out of scope).
+      const rrUri = `<sip:${egressAdvertised.ip}:${egressAdvertised.port};lr>`
+      nextHeaders = prependHeader(nextHeaders, "Record-Route", rrUri)
+      counters.recordRouteInserted++
+    }
+
+    // ── Push our Via on top with `;net=<ingress>` tag ─────────────────────
+    // The tag tells `handleResponseImpl` which endpoint to send the
+    // response on when this Via gets popped: the response goes back to
+    // the ingress side of THIS request.
+    const ourBranch = reuseBranch ?? newBranch()
+    const viaValue = `SIP/2.0/UDP ${egressAdvertised.ip}:${egressAdvertised.port};branch=${ourBranch};rport;${NET_PARAM}=${net}`
+    nextHeaders = prependHeader(nextHeaders, "Via", viaValue)
+
+    if (method === "INVITE") {
+      const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+      yield* cancelLru.remember(key, { target, branch: ourBranch })
+    }
+
+    // ── Serialize + fire-and-forget send on egress endpoint ──────────────
+    const finalReq = ruriOverride !== undefined
+      ? ({ ...req, uri: ruriOverride, headers: nextHeaders } as SipRequest)
+      : ({ ...req, headers: nextHeaders } as SipRequest)
+    const outBuf = serialize(finalReq)
+    counters.routedRequests++
+    yield* sendOn(egressEp, outBuf, target)
   })
 
 // ---------------------------------------------------------------------------

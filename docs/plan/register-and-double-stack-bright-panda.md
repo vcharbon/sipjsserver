@@ -5,8 +5,35 @@
 | Slice | Title                                                            | Status |
 |-------|------------------------------------------------------------------|--------|
 | 1     | Test stack: dual networks + per-network trace/report + register DSL | ✅ done |
-| 2     | Proxy: Registrar + RegisterStrategy + CoreToExtRoutingStrategy + dual-endpoint ProxyCore | ⏳ pending |
+| 2     | Proxy: Registrar + RegisterStrategy + CoreToExtRoutingStrategy + dual-endpoint ProxyCore | ✅ done |
 | 3     | Integration tests under fake clock + reporting end-to-end        | ⏳ pending |
+
+### Slice 2 outcome (committed)
+
+Acceptance criteria all met:
+
+- `npm run typecheck`: zero errors, zero warnings.
+- `npm run test:fake`: 797 passed / 1 skipped (779 existing scenarios unchanged + 18 new registrar unit tests).
+- All four new services landed; existing K8s-LB consumers continue to work via `noop` defaults.
+
+What landed:
+
+- New service [src/sip-front-proxy/Registrar.ts](src/sip-front-proxy/Registrar.ts) — userpart-keyed AOR → Contact store. `noopLayer` (lookup always `none`) and `inMemoryLayer` (lazy-TTL on Effect `Clock`).
+- New strategy [src/sip-front-proxy/RegisterStrategy.ts](src/sip-front-proxy/RegisterStrategy.ts) — `noopLayer` returns 501; `inMemoryRegistrarLayer` parses To-URI userpart, computes effective Expires (header > Contact `;expires` param > default 3600), `Expires=0` removes, otherwise registers, and emits 200 OK with echoed Contact + Expires.
+- New strategy [src/sip-front-proxy/CoreToExtRoutingStrategy.ts](src/sip-front-proxy/CoreToExtRoutingStrategy.ts) — `noopLayer` always 404s; `registrarLookupLayer` resolves the RURI userpart to a registered Contact and returns `forward { destination, ruriOverride }` or `reject { 404 / 400 }`.
+- New config [src/sip-front-proxy/RegistrarProxyConfig.ts](src/sip-front-proxy/RegistrarProxyConfig.ts) — opt-in second-endpoint config (`coreBind`, `coreAdvertised*`, `coreDestination`); presence flips ProxyCore into dual-endpoint mode.
+- Modified [src/sip-front-proxy/ProxyCore.ts](src/sip-front-proxy/ProxyCore.ts) — now requires `RegisterStrategy` + `CoreToExtRoutingStrategy`; reads `RegistrarProxyConfig` via `Effect.serviceOption`; binds a `core` `UdpEndpoint` when configured; ingress is per-endpoint forked with a `NetworkTag` (`"ext" | "core"`); REGISTER on ext always hands off to `RegisterStrategy.handle`; in dual mode INVITE-on-ext forwards to `coreDestination`, INVITE-on-core delegates to `CoreToExtRoutingStrategy.resolve`, in-dialog requests forward across the fabric boundary; egress Vias are stamped with `;net=<ingress>` so response routing pops them and replies on the matching endpoint.
+- Consumer updates wired the noop strategy layers — every existing K8s-LB pathway still resolves without change in behaviour:
+  - [bin/proxy.ts](bin/proxy.ts)
+  - [tests/support/networkLeaves.ts](tests/support/networkLeaves.ts) — `proxyStackLayer` (used by sipproxyHA + proxy+b2b SUTs).
+  - [tests/support/proxy-only-fakeStack.ts](tests/support/proxy-only-fakeStack.ts) — transit-only test fixture.
+- New exports surfaced through [src/sip-front-proxy/index.ts](src/sip-front-proxy/index.ts) (`Registrar`, `RegisterStrategy`, `CoreToExtRoutingStrategy`, `RegistrarProxyConfig`, `NetworkTag`, `DEFAULT_EXPIRES_SEC`, `CoreToExtRouteOutcome`).
+- Unit coverage in [tests/sip-front-proxy/registrar/](tests/sip-front-proxy/registrar/):
+  - `Registrar.test.ts` — 7 tests (register/lookup round-trip, case-insensitive AOR, single-binding overwrite, remove, lazy expiry under `TestClock.adjust`, post-expiry re-register, noop contract).
+  - `RegisterStrategy.test.ts` — 7 tests (default Expires=3600, header > param > default precedence, persistence into the Registrar, `Expires=0` removal, noop returns 501).
+  - `CoreToExtRoutingStrategy.test.ts` — 4 tests (forward on hit, 404 on miss, 400 when RURI lacks userpart, noop always 404).
+
+The end-to-end dual-endpoint flow (Alice REGISTER → ext, core INVITE for unregistered AOR → 404, TTL-expiry → 404) is exercised by slice 3's scenario tests, not by slice 2.
 
 ### Slice 1 outcome (committed)
 

@@ -38,6 +38,7 @@ import { DrainingState } from "../../src/b2bua/DrainingState.js"
 import { MockCallControlLayer } from "../fullcall/framework/MockCallControlLayer.js"
 import {
   CancelBranchLru,
+  CoreToExtRoutingStrategy,
   type HmacKey,
   hmacKeyProviderStaticLayer,
   LoadBalancerConfig,
@@ -46,6 +47,7 @@ import {
   ProxyBindConfig,
   type ProxyBindConfigData,
   ProxyCore,
+  RegisterStrategy,
   type SocketAddr,
   type WorkerEntry,
   workerRegistrySimulatedLayer,
@@ -194,6 +196,12 @@ export function proxyStackLayer(opts: ProxyStackLayerOpts) {
     RegistryLayer,
     HmacLayer,
     LbCfgLayer,
+    // Slice 2 of REGISTER + double-stack: ProxyCore now requires the
+    // registrar-mode strategies. Proxy fixtures that don't exercise the
+    // registrar path wire the noop variants — REGISTER returns 501, the
+    // unused core-to-ext lookup is never called.
+    RegisterStrategy.noopLayer,
+    CoreToExtRoutingStrategy.noopLayer,
   )
   return ProxyCore.Default.pipe(Layer.provideMerge(Leaves))
 }
