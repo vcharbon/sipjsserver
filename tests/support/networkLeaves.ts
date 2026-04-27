@@ -26,7 +26,7 @@
 import { Effect, Layer } from "effect"
 import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
-import { CallStateCache } from "../../src/call/CallStateCache.js"
+import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 import { OverloadController } from "../../src/b2bua/OverloadController.js"
@@ -114,7 +114,7 @@ export function b2buaWorkerStackLayer(opts: {
 
   const Leaves = Layer.mergeAll(
     MetricsLayer,
-    CallStateCache.memoryLayer,
+    PartitionedRelayStorage.memoryLayer,
     MockCallControlLayer,
     NoOpTracingLayer,
     NoOpCdrLayer,

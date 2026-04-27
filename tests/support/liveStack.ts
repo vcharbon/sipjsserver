@@ -25,7 +25,7 @@ import { FetchHttpClient } from "effect/unstable/http"
 import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { HttpReferenceAdapterLayer } from "../../src/decision/adapters/http-reference/HttpReferenceAdapter.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
-import { CallStateCache } from "../../src/call/CallStateCache.js"
+import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 import { OverloadController } from "../../src/b2bua/OverloadController.js"
@@ -52,7 +52,7 @@ export function liveStackLayer(opts: {
 
   const RedisLayer = RedisClient.layer.pipe(Layer.provide(AppConfigLayer))
 
-  const CallStateCacheLayer = CallStateCache.redisLayer.pipe(Layer.provide(RedisLayer))
+  const CallStateCacheLayer = PartitionedRelayStorage.redisLayer.pipe(Layer.provide(RedisLayer))
   const CallLimiterLayer = CallLimiter.redisLayer.pipe(
     Layer.provide(AppConfigLayer),
     Layer.provide(RedisLayer)

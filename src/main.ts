@@ -20,7 +20,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http"
 import { SipRouter } from "./sip/SipRouter.js"
 import { AppConfig } from "./config/AppConfig.js"
 import { CallState } from "./call/CallState.js"
-import { CallStateCache } from "./call/CallStateCache.js"
+import { PartitionedRelayStorage } from "./cache/PartitionedRelayStorage.js"
 import { CallLimiter } from "./call/CallLimiter.js"
 import { CdrWriter } from "./cdr/CdrWriter.js"
 import { RedisClient } from "./redis/RedisClient.js"
@@ -51,7 +51,7 @@ const CallLimiterLayer = CallLimiter.redisLayer.pipe(
   Layer.provide(RedisLayer)
 )
 
-const CallStateCacheLayer = CallStateCache.redisLayer.pipe(
+const CallStateCacheLayer = PartitionedRelayStorage.redisLayer.pipe(
   Layer.provide(RedisLayer)
 )
 

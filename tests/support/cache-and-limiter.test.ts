@@ -11,13 +11,13 @@ import { Effect, Layer } from "effect"
 import { TestClock } from "effect/testing"
 import { AppConfig } from "../../src/config/AppConfig.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
-import { CallStateCache } from "../../src/call/CallStateCache.js"
+import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { CallState } from "../../src/call/CallState.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
 
 const limiterLayer = CallLimiter.memoryLayer.pipe(Layer.provideMerge(AppConfig.layer))
 const callStateLayer = CallState.layer.pipe(
-  Layer.provide(CallStateCache.memoryLayer),
+  Layer.provide(PartitionedRelayStorage.memoryLayer),
   Layer.provideMerge(AppConfig.layer)
 )
 
@@ -95,7 +95,7 @@ describe("CallLimiter.memoryLayer", () => {
   )
 })
 
-describe("CallStateCache.memoryLayer via real CallState", () => {
+describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
   it.effect("flushed call reloads via checkout from cache", () =>
     Effect.gen(function* () {
       const state = yield* CallState

@@ -133,7 +133,7 @@ export function proxyB2bFakeStackLayer(opts: ProxyB2bFakeStackOpts) {
 //   - 10.30.0.x — UAC side (alices)
 //   - 10.40.0.x — UAS side (bobs)
 //
-// Each worker keeps its **own in-memory `CallStateCache`** (no shared
+// Each worker keeps its **own in-memory `PartitionedRelayStorage`** (no shared
 // cache — HA design uses per-call dual-Redis backup, not replicated
 // shared state). Per-worker stacks are otherwise identical except for
 // `sipLocalIp` / `sipLocalPort`. The "primary" worker (worker-1) exposes

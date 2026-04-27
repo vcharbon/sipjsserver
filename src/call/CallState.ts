@@ -20,12 +20,16 @@
  * Semaphore is released before async cache flush.
  */
 
-import { Effect, Layer, MutableHashMap, Option, Ref, Schema, Semaphore, ServiceMap } from "effect"
+import { Effect, Layer, MutableHashMap, Option, Ref, Schema, Semaphore, ServiceMap, Stream } from "effect"
+import {
+  PartitionedRelayStorage,
+  type PartitionRole,
+  type StorageError,
+} from "../cache/PartitionedRelayStorage.js"
 import { AppConfig } from "../config/AppConfig.js"
-import type { RedisError } from "../redis/RedisClient.js"
+import { RedisError } from "../redis/RedisClient.js"
 import type { Call } from "./CallModel.js"
-import { Call as CallSchema } from "./CallModel.js"
-import { CallStateCache } from "./CallStateCache.js"
+import { Call as CallSchema, parseCallRef } from "./CallModel.js"
 
 const JsonCallSchema = Schema.fromJsonString(CallSchema)
 
@@ -81,9 +85,15 @@ export class CallState extends ServiceMap.Service<
   static readonly layer = Layer.effect(
     CallState,
     Effect.gen(function* () {
-      const cache = yield* CallStateCache
+      const storage = yield* PartitionedRelayStorage
       const config = yield* AppConfig
       const ttl = config.callContextTtlSec
+      // Slice 4: this worker's ordinal, used to compute `(role, primary)`
+      // from a callRef. Mirrors the choice in SipRouter.ts when minting
+      // new callRefs: `String(workerIndex)` in production, `"self"` for
+      // single-worker tests / dev.
+      const selfOrdinal =
+        config.workerIndex >= 0 ? String(config.workerIndex) : "self"
 
       // In-memory state
       const callsMap = MutableHashMap.empty<string, Call>()
@@ -92,6 +102,50 @@ export class CallState extends ServiceMap.Service<
       const totalRef = yield* Ref.make(0)
       // Plain mutable counter shadowing totalRef for sync reads (metrics interval).
       let totalSync = 0
+
+      // Slice 4: convert StorageError → RedisError to keep CallState's
+      // declared error type stable for downstream catchers.
+      const toRedisErr = (e: StorageError): RedisError =>
+        new RedisError({ reason: e.reason })
+
+      // Slice 4: for a given callRef, derive (role, primary) so the
+      // storage path is `{role}:{primary}:call:{callRef}`. callRef
+      // encodes the natural primary in its first segment (Option C of
+      // the HA-resilience plan, D15). Legacy refs without the primary
+      // segment fall back to `(pri, self)` so existing tests that build
+      // callRefs by hand keep working.
+      const partitionOf = (
+        callRef: string
+      ): { role: PartitionRole; primary: string } => {
+        const parsed = parseCallRef(callRef)
+        if (parsed === null) {
+          return { role: "pri", primary: selfOrdinal }
+        }
+        return {
+          role: parsed.primary === selfOrdinal ? "pri" : "bak",
+          primary: parsed.primary,
+        }
+      }
+
+      // Slice 4: build the flat list of index keys associated with a
+      // call (collapses what used to be `writeCacheIndexes` /
+      // `refreshIndexTtl` index-writes into an array passed to the
+      // storage's all-at-once put/refresh/delete ops).
+      const callIndexKeys = (call: Call): Array<string> => {
+        const keys: Array<string> = [legKey(call.aLeg.callId, call.aLeg.fromTag)]
+        for (const bLeg of call.bLegs) {
+          keys.push(legKey(bLeg.callId, bLeg.fromTag))
+          keys.push(legCallIdKey(bLeg.callId))
+          for (const dialog of bLeg.dialogs) {
+            const bTag = dialog.sip.remoteTag
+            if (bTag) keys.push(legKey(bLeg.callId, bTag))
+          }
+        }
+        if (call.callbackContext !== undefined) {
+          keys.push(ctxKey(call.callbackContext))
+        }
+        return keys
+      }
 
       const getSemaphore = Effect.fnUntraced(function* (callRef: string) {
         const existing = Option.getOrUndefined(MutableHashMap.get(semaphores, callRef))
@@ -117,41 +171,10 @@ export class CallState extends ServiceMap.Service<
           }
         })
 
-      /** Write all cache index keys for a call. */
-      const writeCacheIndexes = Effect.fnUntraced(function* (call: Call) {
-        yield* cache.putIndex(legKey(call.aLeg.callId, call.aLeg.fromTag), call.callRef, ttl)
-        for (const bLeg of call.bLegs) {
-          yield* cache.putIndex(legKey(bLeg.callId, bLeg.fromTag), call.callRef, ttl)
-          yield* cache.putIndex(legCallIdKey(bLeg.callId), call.callRef, ttl)
-          for (const dialog of bLeg.dialogs) {
-            const bTag = dialog.sip.remoteTag
-            if (bTag) {
-              yield* cache.putIndex(legKey(bLeg.callId, bTag), call.callRef, ttl)
-            }
-          }
-        }
-        if (call.callbackContext !== undefined) {
-          yield* cache.putIndex(ctxKey(call.callbackContext), call.callRef, ttl)
-        }
-      })
-
-      /** Refresh TTL on all cache index keys for a call. */
-      const refreshIndexTtl = Effect.fnUntraced(function* (call: Call) {
-        yield* cache.expireIndex(legKey(call.aLeg.callId, call.aLeg.fromTag), ttl)
-        for (const bLeg of call.bLegs) {
-          yield* cache.expireIndex(legKey(bLeg.callId, bLeg.fromTag), ttl)
-          yield* cache.expireIndex(legCallIdKey(bLeg.callId), ttl)
-          for (const dialog of bLeg.dialogs) {
-            const bTag = dialog.sip.remoteTag
-            if (bTag) {
-              yield* cache.expireIndex(legKey(bLeg.callId, bTag), ttl)
-            }
-          }
-        }
-        if (call.callbackContext !== undefined) {
-          yield* cache.expireIndex(ctxKey(call.callbackContext), ttl)
-        }
-      })
+      // Slice 4: writeCacheIndexes / refreshIndexTtl collapse into the
+      // single `storage.putCall` / `storage.refreshCall` calls that
+      // take the index-keys list inline. See `flushToRedis` and
+      // `flushAllCalls` below.
 
       const create = Effect.fnUntraced(function* (call: Call) {
         yield* Effect.sync(() => MutableHashMap.set(callsMap, call.callRef, call))
@@ -168,7 +191,10 @@ export class CallState extends ServiceMap.Service<
         const inMemory = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
         if (inMemory !== undefined) return inMemory
 
-        const json = yield* cache.getCall(callRef)
+        const { role, primary } = partitionOf(callRef)
+        const json = yield* storage
+          .getCall(role, primary, callRef)
+          .pipe(Effect.mapError(toRedisErr))
         if (json === null) {
           yield* Semaphore.release(sem, 1)
           return undefined
@@ -187,7 +213,9 @@ export class CallState extends ServiceMap.Service<
         if (decoded.state === "terminated" || decoded.state === "terminating") {
           if (decoded.state === "terminating") {
             yield* Effect.logWarning(`Checkout skipping terminating call ${callRef} from cache — stuck after crash, deleting`)
-            yield* cache.deleteCall(callRef)
+            yield* storage
+              .deleteCall(role, primary, callRef, callIndexKeys(decoded))
+              .pipe(Effect.mapError(toRedisErr))
           }
           yield* Semaphore.release(sem, 1)
           return undefined
@@ -226,8 +254,10 @@ export class CallState extends ServiceMap.Service<
         if (call === undefined) return
 
         const json = yield* Schema.encodeEffect(JsonCallSchema)(call).pipe(Effect.orDie)
-        yield* cache.putCall(callRef, json, ttl)
-        yield* refreshIndexTtl(call)
+        const { role, primary } = partitionOf(callRef)
+        yield* storage
+          .putCall(role, primary, callRef, json, callIndexKeys(call), ttl)
+          .pipe(Effect.mapError(toRedisErr))
 
         yield* Effect.logDebug(`Flushed call ${callRef} to cache`)
       })
@@ -258,23 +288,11 @@ export class CallState extends ServiceMap.Service<
         // the time remove() is called no more SIP messages will arrive for this
         // call. TransactionLayer still holds completed transactions for its 65s
         // sweep, so true retransmissions get cached responses replayed there.
-        if (call !== undefined) {
-          yield* cache.deleteCall(callRef)
-          yield* cache.deleteIndex(legKey(call.aLeg.callId, call.aLeg.fromTag))
-          for (const bLeg of call.bLegs) {
-            yield* cache.deleteIndex(legKey(bLeg.callId, bLeg.fromTag))
-            yield* cache.deleteIndex(legCallIdKey(bLeg.callId))
-            for (const dialog of bLeg.dialogs) {
-              const bTag = dialog.sip.remoteTag
-              if (bTag) yield* cache.deleteIndex(legKey(bLeg.callId, bTag))
-            }
-          }
-          if (call.callbackContext !== undefined) {
-            yield* cache.deleteIndex(ctxKey(call.callbackContext))
-          }
-        } else {
-          yield* cache.deleteCall(callRef)
-        }
+        const { role, primary } = partitionOf(callRef)
+        const indexes = call !== undefined ? callIndexKeys(call) : []
+        yield* storage
+          .deleteCall(role, primary, callRef, indexes)
+          .pipe(Effect.mapError(toRedisErr))
       })
 
       const resolveFromSipKey = Effect.fnUntraced(function* (
@@ -287,10 +305,18 @@ export class CallState extends ServiceMap.Service<
         const byCallId = Option.getOrUndefined(MutableHashMap.get(sipIndex, callId))
         if (byCallId !== undefined) return byCallId
 
-        const ref = yield* cache.getIndex(legKey(callId, tag))
+        // Slice 4: indexes are flat in the partitioned storage —
+        // `idx:{indexKey} → callRef`. The callRef itself encodes the
+        // primary, so a single hop here gives us everything we need
+        // for the subsequent `checkout` to derive the partition path.
+        const ref = yield* storage
+          .getIndex(legKey(callId, tag))
+          .pipe(Effect.mapError(toRedisErr))
         if (ref !== null) return ref
 
-        const refById = yield* cache.getIndex(legCallIdKey(callId))
+        const refById = yield* storage
+          .getIndex(legCallIdKey(callId))
+          .pipe(Effect.mapError(toRedisErr))
         return refById ?? undefined
       })
 
@@ -307,24 +333,30 @@ export class CallState extends ServiceMap.Service<
       })
 
       const loadOwnedCalls = Effect.fnUntraced(function* (workerIndex: number) {
-        const refs = yield* cache.scanCallRefs()
+        // Slice 4: with the partitioned keyspace, "calls owned by self
+        // as primary" live in `pri:{self.ordinal}:call:*`. The Option-C
+        // callRef encoding ensures every entry in this partition is
+        // by definition owned by `self`, so the redundant
+        // `decoded.workerIndex !== workerIndex` filter that the legacy
+        // single-flat-keyspace code needed is no longer required.
+        const entries = yield* Stream.runCollect(
+          storage.scanCalls("pri", selfOrdinal)
+        ).pipe(Effect.mapError(toRedisErr))
         const loaded: Call[] = []
 
-        for (const ref of refs) {
-          const json = yield* cache.getCall(ref)
-          if (json === null) continue
-
-          const decoded = yield* Schema.decodeUnknownEffect(JsonCallSchema)(json).pipe(
+        for (const entry of entries) {
+          const decoded = yield* Schema.decodeUnknownEffect(JsonCallSchema)(entry.json).pipe(
             Effect.orDie,
           )
-          if (decoded.workerIndex !== workerIndex) continue
 
           // Skip terminating calls on recovery — they were mid-teardown when
           // the worker crashed. All transaction state is lost, so BYE responses
           // will never arrive. Delete from cache to prevent permanent leaks.
           if (decoded.state === "terminating") {
             yield* Effect.logWarning(`Skipping terminating call ${decoded.callRef} on recovery — deleting from cache`)
-            yield* cache.deleteCall(ref)
+            yield* storage
+              .deleteCall("pri", selfOrdinal, decoded.callRef, callIndexKeys(decoded))
+              .pipe(Effect.mapError(toRedisErr))
             continue
           }
 
@@ -343,8 +375,10 @@ export class CallState extends ServiceMap.Service<
         let flushed = 0
         for (const [callRef, call] of callsMap) {
           const json = yield* Schema.encodeEffect(JsonCallSchema)(call).pipe(Effect.orDie)
-          yield* cache.putCall(callRef, json, ttl)
-          yield* writeCacheIndexes(call)
+          const { role, primary } = partitionOf(callRef)
+          yield* storage
+            .putCall(role, primary, callRef, json, callIndexKeys(call), ttl)
+            .pipe(Effect.mapError(toRedisErr))
           flushed++
         }
         yield* Effect.logInfo(`Flushed ${flushed} calls to cache`)
