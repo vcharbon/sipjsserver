@@ -1,5 +1,25 @@
 # Plan: Resilient call-context layer for K8s node failure
 
+## Implementation status (as of session 2026-04-27)
+
+**Shipped: Slices 1, 2, 3, 4, 5** — 5 of 11 done. All 756 fake-stack tests pass. Typecheck clean.
+
+| Slice | Commits | Summary |
+|-------|---------|---------|
+| 1 | `f09f710` (rolled into) | Cookie format v2 (`w_pri`, `w_bak`); proxy `forwardBackup` fallback for dead `w_pri` |
+| 2 | `f09f710` | `_topology` schema field on Call (optional `{pri, bak, gen}`) |
+| 3 | `f09f710`, plus slice-4 cleanup | `PartitionedRelayStorage` (`{role}:{owner}:` keyspace) + `PeerCachePort` + HTTP relay (`PeerRelay`) + HTTP client (`PeerCacheClient`) + `PeerEndpointResolver` |
+| 4 | `e8c6c3e`, `3cc7c99` | callRef encodes primary ordinal (Option C); `CallState` migrated from `CallStateCache` to `PartitionedRelayStorage` with `partitionOf` deriving `(role, primary)` from callRef |
+| 5 | `fe952ed`, `8fea919`, `28742c2`, `1383cd4`, `48188ed` | `PeerFabric.simulated` + dual-write fan-out (D3, D16) + `_topology.gen` bump per flush + cookie parsing at INVITE + 4 named tests + `InfraStep`→`PeerFabricControl` |
+
+**Remaining: Slices 6, 7, 8, 9, 10, 11** — see "Implementation slices" section.
+
+## Design decisions added this session
+- **D17 — `AppConfig.workerOrdinalLabel`**: new optional config field bridging the integer `workerIndex` to the proxy's string `WorkerId` cookie value. Fallback chain: `workerOrdinalLabel` → `String(workerIndex)` → `"self"`. Production K8s wiring sets this from `HOSTNAME` (StatefulSet pod name). Without this, B2BUA's `selfOrdinal` would not match the cookie's `w_pri` and dual-write/lookup would mismatch.
+- **D18 — `PeerFabric.storageLayerOf(ordinal)`**: subagent deviation from the originally-sketched fabric API (which had `getLocal/putLocal/deleteLocal` directly on the fabric). Instead, the fabric exposes a per-peer `Layer<PartitionedRelayStorage>` so each fake worker reuses Slice 4's storage abstraction unchanged. Cleaner layering; same end-to-end semantics.
+- **D19 — Stickiness cookie parsing on B2BUA receive path**: `src/cache/StickinessCookie.ts` module parses URI params from inbound Record-Route headers at INVITE time. **No HMAC verification** on the B2BUA side — proxy already validated; B2BUA reads the trusted ordinals only.
+- **D20 — InfraStep `partition` deferred**: current scenario DSL `InfraStep` only carries one `target` field. Two-target partition needs a DSL extension; flagged for slice 7/8 where partition scenarios actually matter.
+
 ## Context
 The B2BUA today writes call state to a single external Redis via [`CallStateCache.redisLayer`](src/call/CallStateCache.ts#L56-L126). When the K8s node hosting a B2BUA worker dies, calls owned by that worker are lost — the proxy will re-route via Rendezvous Hashing to a surviving worker that has no state, and `loadOwnedCalls()` only runs at startup of the original owner.
 
@@ -28,27 +48,44 @@ User-stated goal: **established calls must survive node failure**. User-proposed
 
 ### Local-cache key partitioning by role + owner (added during Slice 3 design review)
 
-Every entry in a sidecar Redis lives under a `{role}:{owner}:` namespace where:
+Calls live under a `{role}:{owner}:` namespace where:
 - `role ∈ {"pri", "bak"}` — whether THIS pod is primary or backup for this entry's call
 - `owner` = the cookie's `w_pri` ordinal (the "natural primary" for that call)
 
 Concretely, for a call X with cookie `{w_pri=A, w_bak=B}`:
-- On pod A's local Redis: `pri:A:call:X` and `pri:A:idx:{indexKey}` for each identifier
-- On pod B's local Redis: `bak:A:call:X` and `bak:A:idx:{indexKey}`
+- On pod A's local Redis: `pri:A:call:{callRef}`
+- On pod B's local Redis: `bak:A:call:{callRef}`
+
+**Indexes are flat** (no partition prefix) — `idx:{indexKey}` with value = the call's `callRef`. This pairs with **callRef encoding the primary** (see next section) so the partition path is derivable from the callRef alone, without needing to consult the proxy or scan multiple partitions.
 
 Benefits:
 - **Scan trivially partitioned**: `SCAN MATCH bak:A:call:*` filters by role+owner without reading any JSON values.
 - **Observability**: `redis-cli --scan --pattern 'pri:*:call:*' | wc -l` answers "calls I am primary for" instantly; per-peer breakdown for "as backup, for whom and how many" is one CLI command.
 - **No collisions**: a single sidecar can hold many `(role, owner)` partitions concurrently.
+- **Single-lookup receive path**: `idx:{leg} → callRef → derive partition path → read call`. No need for cookie info on the receive path.
+
+### CallRef encodes the natural primary (Option C — chosen during Slice 4 design review)
+
+`deriveCallRef` is changed from `{aLegCallId}|{aLegFromTag}` to **`{primaryOrdinal}|{aLegCallId}|{aLegFromTag}`** so the callRef is self-describing. Any worker holding a callRef can:
+1. Parse the primary ordinal (everything before the first `|`).
+2. Compare to `self.ordinal` → know whether self is `pri` or `bak`.
+3. Build the partition path `{role}:{primary}:call:{callRef}` deterministically.
+
+This eliminates the need for proxy header injection of cookie info on the receive path. The cookie still drives PROXY-side routing (slice 1, D8); it does not need to leak into the B2BUA's request handling.
+
+**`_topology.bak`** inside the JSON value carries the cookie's `w_bak` so the dual-write fan-out path (Slice 4) knows where to send the remote write.
 
 ### Lookup precedence on B2BUA in-dialog receive path
 
-When a worker receives an in-dialog request and must look up the call state, it tries (in order):
-1. **`pri:self:call:{callRef}`** — am I the natural primary for this call?
-2. **`bak:{cookie.w_pri}:call:{callRef}`** — am I the cookie's `w_bak` taking over because the primary is dead/draining?
-3. Miss → return 481 (after reclaim is complete) or 503-temp (during reclaim).
+When a worker receives an in-dialog request and must look up the call state:
+1. Build `legKey = "leg:{Call-ID}|{From-tag}"` from the request.
+2. Read local `idx:{legKey}` → returns `callRef` (or null on cold miss).
+3. Parse `primary` out of callRef (segment before first `|`).
+4. Determine `role`: `primary === self.ordinal ? "pri" : "bak"`.
+5. Read `{role}:{primary}:call:{callRef}` → JSON state.
+6. Miss → return 481 (after reclaim is complete) or 503-temp (during reclaim).
 
-The cookie's `w_pri` value is the authoritative source for the second lookup: it tells the recovery worker exactly which `bak:` partition holds the data.
+The receive path is **fully self-describing** — no cookie info or proxy headers needed beyond what slice 1 already provides at the proxy.
 
 ### Recovery write-back stays in `bak:{cookie.w_pri}` partition
 
@@ -93,7 +130,7 @@ The recovery worker's `pri:self:*` partition is reserved for calls where IT is t
 - **D12 — `PeerFabric.simulated` test infrastructure**: new component analogous to `SignalingNetwork.simulated`. Models N fake peers (each with own MutableHashMap as fake sidecar Redis + fake relay). `RedisFabricWire` simulates inter-peer LAN with per-peer configurable latency, error rate, partition state. All cross-pod operations pass through fabric; single fault-injection seam.
 - **D13 — Scenario DSL extensions**: `step.advanceTime`, `step.fabric.kill`, `step.fabric.reboot`, `step.fabric.sigterm` (graceful: triggers worker drain handler), `step.fabric.partition/heal`, `step.fabric.setLatency`, `step.fabric.setErrorRate`, plus `step.assertCallState(peer, …)` for cross-peer state assertions.
 - **D14 — Reclaim hard timeout + K8s-aware peer skipping**: `reclaim.maxDuration=10min`, peer enumeration via DNS on the headless StatefulSet service (which excludes not-Ready endpoints), DNS re-queried every `reclaim.peerRefreshSec=10s`. Past `maxDuration`: worker marks K8s-ready anyway and answers 481 to in-dialog requests for unrecovered calls.
-- **D15 — Receive-path lookup precedence**: on every in-dialog request, the B2BUA tries `pri:self:call:{callRef}` first (am I primary?), then on miss `bak:{cookie.w_pri}:call:{callRef}` (am I the backup taking over?). The cookie's `w_pri` value drives the second key — no scan or registry consult required.
+- **D15 — Receive-path lookup precedence (Option C — callRef encodes primary)**: callRef format is `{primaryOrdinal}|{aLegCallId}|{aLegFromTag}`. Lookup is `idx:{legKey} → callRef → parse primary → role = (primary == self) ? "pri" : "bak" → read {role}:{primary}:call:{callRef}`. Single index lookup, single call read, no proxy headers, no cookie info needed on receive path.
 - **D16 — Recovery write-back stays in `bak:{cookie.w_pri}` partition**: when serving as recovery worker, all subsequent writes for that call go to `bak:{cookie.w_pri}:`, not to `pri:self:`. This preserves the invariant that the cookie's `w_pri` ordinal permanently names "where this call's primary copy lives" — when the original primary returns, its reclaim scan against peers' `bak:{self}:*` finds the most-recent state. Writing to `pri:self:` on a recovery worker would orphan the data from the original primary's reclaim path.
 
 ## Failure-mode enumeration (HA doc seed)
@@ -124,140 +161,99 @@ The recovery worker's `pri:self:*` partition is reserved for calls where IT is t
 
 ## Implementation slices (in dependency order)
 
-**Reordering note**: `PeerFabric.simulated` is built **after** the relay + dual-write to learn from the real implementation. Slices 4-5 ship with mock-based unit tests; multi-peer scenario coverage lands in Slice 6 onward.
+**Slices 1-5 shipped**; Slices 6-11 remain. The dual-write work originally planned for Slice 4 phase 3 was folded into Slice 5 because the four named dual-write tests (`multi-peer-write`, `backup-write-fails`, `gen-monotonicity`, `recovery-write-back-to-bak`) need `PeerFabric.simulated` to exist — combining avoids the chicken-and-egg.
 
-### Slice 1 — Cookie format v2 + proxy fallback to `w_bak`
-- Modify [LoadBalancer.ts](src/sip-front-proxy/strategies/LoadBalancer.ts):
-  - `encodeStickiness` (line 229+): emit `{w_pri, w_bak, v: "2", kid, sig}`. `w_bak` chosen via second-best HRW excluding `w_pri`.
-  - `decodeStickiness` (line 250+): parse `w_pri`, `w_bak`. Reject `v != 2` (no production usage of v1 yet).
-- Modify proxy routing in [LoadBalancer.ts:349-377](src/sip-front-proxy/strategies/LoadBalancer.ts#L349-L377): on `decode_unknown` (was: HRW fallback) → first try `w_bak` if alive, otherwise current HRW path. New `DecodeResult.forwardBackup(addr)` return variant.
-- Modify [ProxyCore.ts:597-613](src/sip-front-proxy/ProxyCore.ts#L597-L613): no-op (cookie payload changes are inside `encodeStickiness`'s return value).
-- Tests: `cookie-route-fallback.test.ts` (fake) — extends the existing `sipproxyHA` SUT in [proxyB2bFakeStack.ts](tests/fullcall/framework/proxyB2bFakeStack.ts); unit tests for HRW second-best selection.
+### Slice 1 — Cookie format v2 + proxy fallback to `w_bak` ✅ SHIPPED (`f09f710`)
+- [LoadBalancer.ts](src/sip-front-proxy/strategies/LoadBalancer.ts):
+  - `encodeStickiness` emits `{w_pri, w_bak, v: "2", kid, sig}`. `w_bak` chosen via second-best HRW excluding `w_pri`.
+  - `decodeStickiness` parses both ordinals. Rejects `v != "2"`.
+  - On dead/draining-post-grace `w_pri`, internal `tryBackup(wBakRaw)` returns `DecodeResult.forwardBackup(backupAddr)` if `w_bak` resolves to an alive entry.
+- [RoutingStrategy.ts](src/sip-front-proxy/RoutingStrategy.ts) — added `DecodeResult.forwardBackup` variant.
+- [ProxyCore.ts](src/sip-front-proxy/ProxyCore.ts) — handles `forwardBackup` like `forward` but counts a distinct `decode_forward_backup` decision class.
+- [Metrics.ts](src/sip-front-proxy/observability/Metrics.ts) — new `decode_forward_backup` decision kind.
+- Tests shipped: [cookie-route-fallback.test.ts](tests/sip-front-proxy/load-balancer/cookie-route-fallback.test.ts) — 2 tests (D8 verification + ACK exemption per RFC 3261 §13.2.2.4); [hmac-tampering-rejected.test.ts](tests/sip-front-proxy/load-balancer/hmac-tampering-rejected.test.ts), [route-set-propagation.ts](tests/scenarios/route-set-propagation.ts), [happy-call.test.ts](tests/sip-front-proxy/transparency/happy-call.test.ts) — updated for v2 cookie shape.
 
-### Slice 2 — Storage value extension (`_topology` field)
-- Extend Call schema in [CallModel.ts:501-600](src/call/CallModel.ts#L501-L600) with `_topology: { pri: number, bak: number, gen: number }`.
-- `gen` increments on every state event flush. On conflict (concurrent writers, e.g. during partition heal), max-gen wins.
-- Migration: not needed, no production data.
+### Slice 2 — Storage value extension (`_topology` field) ✅ SHIPPED (`f09f710`)
+- [CallModel.ts](src/call/CallModel.ts) — added `CallTopology = Schema.Struct({ pri: Schema.String, bak: Schema.String, gen: Schema.Int })` and optional `_topology` field on `Call`.
+- `pri`/`bak` use `Schema.String` (matches `WorkerId` opaque-string brand), not `Schema.Number` as the original sketch suggested — keeps the cookie's worker-ordinal type space consistent across the codebase.
+- Slice 5 phase A (commit `fe952ed`) wires the gen-bump-per-flush logic.
 
-### Slice 3 — Relay service + peer client (HTTP, no auth, partitioned keyspace)
-- New file `src/cache/PeerCachePort.ts` — port interface (already in tree from initial slice-3 work). Surface:
-  - `putCall(role, owner, callRef, json, indexes, ttlSec)`
-  - `refreshCall(role, owner, callRef, indexes, ttlSec)`
-  - `deleteCall(role, owner, callRef, indexes)`
-  - `scan(role, owner)` returning `Stream<{callRef, json, ttlSec}, PeerScanError>`
-- New `src/cache/PeerRelay.ts` — Effect HTTP route layer (alongside StatusServer pattern at [src/http/StatusServer.ts](src/http/StatusServer.ts)). Routes per D10. Handlers:
-  - `PUT /cache/{role}/{owner}/calls/{callRef}` — parse body `{ state, indexes[], ttlSec }`; for each index in the list call `cache.putIndex("{role}:{owner}:idx:" + indexKey, callRef, ttlSec)`; then `cache.putCall("{role}:{owner}:call:" + callRef, state, ttlSec)`. Writes are issued sequentially through the existing `CallStateCache`, no MULTI — per F10 we accept lost-update on mid-write crash.
-  - `POST /cache/{role}/{owner}/calls/{callRef}/refresh` — issues `expireCall` on the partitioned call key + `expireIndex` on each named index key.
-  - `POST /cache/{role}/{owner}/calls/{callRef}/delete` — issues `deleteCall` + `deleteIndex × N` on partitioned keys.
-  - `GET /cache/{role}/{owner}/scan` — chunked-encoded stream. Server walks `SCAN cursor=0 MATCH {role}:{owner}:call:* COUNT={relayScanBatch}`. After each batch, `Effect.yieldNow` so other Redis ops on the local sidecar can interleave (existing `redis.scanKeys` does NOT yield — see [RedisClient.ts:152-168](src/redis/RedisClient.ts#L152-L168)). For each key in the batch, GET its value, emit `{callRef, json, ttlSec}` line. Continue until cursor==0.
-- New `src/cache/PeerCacheClient.ts` — `PeerCachePort` impl using `effect/unstable/http` HttpClient. Calls relay endpoints with the (role, owner) URL paths. Configurable per-request timeout (`AppConfig.peerRelayRequestTimeoutMs`, default 2000ms).
-- New `src/cache/PeerEndpointResolver.ts` — small Service that maps `WorkerOrdinal → URL`. Production layer reads `AppConfig.peerServiceName`, `AppConfig.peerNamespace`, `AppConfig.peerRelayPort` and builds `http://{ordinal}.{svc}.{ns}.svc.cluster.local:{port}`. Test layer takes a static map.
-- **Slice 3 does NOT migrate B2BUA local writes** — existing `call:{callRef}` keys keep working for legacy paths. Relay's keyspace `{role}:{owner}:*` is additive; zero collision with legacy.
-- Tests (in-process round-trip via @effect/platform-node test HTTP):
-  - `peer-relay-roundtrip.test.ts` — PUT then scan returns the inserted entry; refresh extends TTL; delete removes call + indexes.
-  - `peer-relay-scan-yields.test.ts` — assert that during a long scan, concurrent local `putCall` ops complete (no head-of-line blocking).
-  - `peer-relay-partition-isolation.test.ts` — assert `pri:A:` and `bak:A:` writes do not interfere; scan of one partition doesn't return entries from the other.
+### Slice 3 — Relay service + peer client (HTTP, no auth, partitioned keyspace) ✅ SHIPPED (`f09f710`, flat-index cleanup in `e8c6c3e`)
 
-### Slice 4 — Dual-write logic in B2BUA + cutover to partitioned local writes
-- **Migrate B2BUA local writes from legacy `call:*` keys to `pri:self:` partition** (or `bak:{cookie.w_pri}:` when serving as recovery worker per D16). Touch [CallState.ts:113-154,224-278](src/call/CallState.ts#L113-L278) — every `cache.putCall` / `cache.putIndex` / `cache.expireCall` / `cache.expireIndex` / `cache.deleteCall` / `cache.deleteIndex` call gets a partition prefix derived from the call's effective `(role, owner)`.
-- **Lookup precedence (D15)**: `checkout` and `resolveFromSipKey` paths try `pri:self:` first, then `bak:{cookie.w_pri}:` on miss. Cookie's `w_pri` comes from the request that triggered the lookup (decoded by SipRouter from the Route header) and is threaded through to CallState.
-- **Dual-write fan-out**: alongside every local write, fire-and-forget a parallel relay call to the cookie's `w_bak` peer (via `PeerCachePort`). Best-effort — failures are logged + metric'd, NEVER block the local write. Per D3 "throw away" semantics.
-- Increment `_topology.gen` on each flush; embed `_topology` (pri, bak, gen) in the JSON so reclaim's gen-comparison and post-mortem diagnostics can see it.
-- Tests (use `PeerFabric.simulated` from Slice 5 — Slice 4 ships with mocked `PeerCachePort` for unit-level coverage; full multi-peer scenarios land in Slice 5):
-  - `multi-peer-write.test.ts` — local write + remote write both observed
-  - `backup-write-fails.test.ts` — remote write fails, local write succeeds, call event proceeds
-  - `gen-monotonicity.test.ts` — `_topology.gen` strictly increases per call across flushes
-  - `recovery-write-back-to-bak.test.ts` — recovery worker writing for a cookie-pinned call lands in `bak:{w_pri}:`, not `pri:self:` (D16)
+**Modules shipped:**
+- [PartitionedRelayStorage.ts](src/cache/PartitionedRelayStorage.ts) — service with `redisLayer` + `memoryLayer`. Surface: `getCall`, `getIndex`, `putCall`, `refreshCall`, `deleteCall`, `scanCalls`. `redisLayer` uses cursor-walked SCAN with `Effect.yieldNow` between batches (existing `redis.scanKeys` does NOT yield — see [RedisClient.ts:152-168](src/redis/RedisClient.ts#L152-L168)). `memoryLayer` mirrors semantics deterministically under TestClock.
+- [PeerCachePort.ts](src/cache/PeerCachePort.ts) — abstract contract: `putCall({peer, role, owner, callRef, state, indexes, ttlSec})`, `refreshCall(...)`, `deleteCall(...)`, `scan({peer, role, owner})` returning `Stream<ScanEntry, PeerScanError>`.
+- [PeerRelay.ts](src/cache/PeerRelay.ts) — HTTP routes:
+  - `PUT /cache/:role/:owner/calls/:callRef` body `{state, indexes[], ttlSec}` → `storage.putCall`
+  - `POST /cache/:role/:owner/calls/:callRef/refresh` body `{indexes[], ttlSec}` → `storage.refreshCall`
+  - `POST /cache/:role/:owner/calls/:callRef/delete` body `{indexes[]}` → `storage.deleteCall`
+  - `GET /cache/:role/:owner/scan` → `Stream.runCollect(storage.scanCalls)` rendered as `{items: [...]}`
+- [PeerCacheClient.ts](src/cache/PeerCacheClient.ts) — HTTP client implementing `PeerCachePort` via `effect/unstable/http` `HttpClient`. Maps `HttpClientError.reason._tag` to `PeerWriteError`/`PeerScanError` reason classes.
+- [PeerEndpointResolver.ts](src/cache/PeerEndpointResolver.ts) — `WorkerOrdinal → URL`. `headlessStatefulSet({serviceName, namespace, relayPort, clusterSuffix?})` for production, `staticMap(Map)` for tests.
 
-### Slice 5 — `PeerFabric.simulated` test infrastructure
-**Built now, informed by the real shape from Slices 3-4.** Located at `src/cache/PeerFabric.ts`. Replaces the per-worker isolated `CallStateCache.memoryLayer` in [proxyB2bFakeStack.ts:136](tests/fullcall/framework/proxyB2bFakeStack.ts#L136) with a fabric-backed cache + simulated relay.
+**Key design property**: indexes are **flat** (`idx:{key} → callRef`), NOT partitioned. The callRef value itself encodes the primary ordinal (D15 / Option C, finalized in Slice 4 phase 1). A reader picks up the callRef from a flat index hop and derives `(role, primary)` deterministically — single index hop, single call read, no proxy headers.
 
-**Public interface** (the contract — write this in code as the PR's first concrete artifact):
+**Storage key namespaces** (no collision):
+- `pri:{ordinal}:call:{callRef}` — primary partition
+- `bak:{ordinal}:call:{callRef}` — backup partition
+- `idx:{indexKey}` — flat index, value = callRef
 
-```typescript
-// src/cache/PeerFabric.ts
+**Tests shipped:**
+- [partitioned-relay-storage.test.ts](tests/cache/partitioned-relay-storage.test.ts) — 7 tests: round-trip, partition isolation, owner isolation, delete, TTL expiry, refresh-extends-or-no-op, multi-entry scan
+- [peer-relay-roundtrip.test.ts](tests/cache/peer-relay-roundtrip.test.ts) — 2 real-HTTP tests against a Node http server on ephemeral port (PUT+scan and refresh+delete)
 
-export type WorkerOrdinal = number
+### Slice 4 — Partition-aware lookup (callRef + CallState migration) ✅ SHIPPED (phases 1+2)
 
-export interface CacheKey {
-  readonly store: "calls" | "indexes"
-  readonly key: string
-}
+**Phase 1** — `e8c6c3e` — callRef encodes primary, flat indexes:
+- `deriveCallRef(primaryOrdinal, callId, fromTag)` returns `{primary}|{callId}|{fromTag}`.
+- `parseCallRef(ref)` splits into `{primary, callId, fromTag}` or returns `null` for malformed/legacy two-segment refs.
+- [SipRouter.ts](src/sip/SipRouter.ts) feeds `String(workerIndex)` (or `"self"` when unset) at INVITE time.
+- `PartitionedRelayStorage.indexKey` simplified from `{role}:{owner}:idx:{key}` to flat `idx:{key}`.
 
-export interface CacheValue {
-  readonly raw: string             // JSON-encoded Call (or index value)
-  readonly topology: { pri: WorkerOrdinal; bak: WorkerOrdinal; gen: number }
-  readonly expiresAtMs: number
-}
+**Phase 2** — `3cc7c99` — CallState fully migrated:
+- `CallState.layer` swapped from `CallStateCache` to `PartitionedRelayStorage`.
+- New `partitionOf(callRef)` helper: parses callRef, sets `role = primary === selfOrdinal ? "pri" : "bak"`, returns `{role, primary}`.
+- New `callIndexKeys(call)` helper: collapses what was `writeCacheIndexes` / `refreshIndexTtl` into a single index-key array.
+- All 6 cache ops (`putCall`/`putIndex`/`expireCall`/`expireIndex`/`deleteCall`/`deleteIndex`) collapse to 3 storage ops (`putCall(role, primary, callRef, json, indexes, ttl)` / `refreshCall(...)` / `deleteCall(...)`).
+- `loadOwnedCalls` now calls `storage.scanCalls("pri", selfOrdinal)` — partition prefix already enforces "owned by self", so the redundant `decoded.workerIndex !== workerIndex` filter is gone.
+- `StorageError → RedisError` wrapper preserves `CallState`'s declared error type for downstream `Effect.catchTag("RedisError", ...)` consumers.
+- Test fixtures ([networkLeaves.ts](tests/support/networkLeaves.ts), [liveStack.ts](tests/support/liveStack.ts), [cache-and-limiter.test.ts](tests/support/cache-and-limiter.test.ts)) and [main.ts](src/main.ts) swap to `PartitionedRelayStorage`. All 746 fake tests pass.
 
-export class PeerWriteError extends Schema.TaggedError<PeerWriteError>("PeerWriteError")({
-  peer: Schema.Number,
-  reason: Schema.Literal("timeout", "connection_refused", "http_error", "auth_failed", "fabric_partitioned"),
-}) {}
+**Phase 3 work folded into Slice 5** (dual-write fan-out, gen-bump, cookie parsing, named tests).
 
-export class PeerScanError extends Schema.TaggedError<PeerScanError>("PeerScanError")({
-  peer: Schema.Number,
-  reason: Schema.Literal("timeout", "connection_refused", "stream_aborted"),
-}) {}
+### Slice 5 — `PeerFabric.simulated` + dual-write fan-out + cookie parsing ✅ SHIPPED (5 phases)
 
-// Service used by B2BUA application code
-export interface PeerFabric {
-  readonly self: WorkerOrdinal
-  // Local-only ops (always go to own sidecar Redis or its fake)
-  readonly getLocal: (key: CacheKey) => Effect.Effect<Option<CacheValue>>
-  readonly putLocal: (key: CacheKey, value: CacheValue) => Effect.Effect<void>
-  readonly deleteLocal: (key: CacheKey) => Effect.Effect<void>
-  // Cross-peer ops (go through relay or simulated fabric wire)
-  readonly putRemote: (peer: WorkerOrdinal, key: CacheKey, value: CacheValue) => Effect.Effect<void, PeerWriteError>
-  readonly deleteRemote: (peer: WorkerOrdinal, key: CacheKey) => Effect.Effect<void, PeerWriteError>
-  readonly scanRemote: (peer: WorkerOrdinal, filter: { role: "primary" | "backup"; worker: WorkerOrdinal }) => Stream.Stream<CacheValue, PeerScanError>
-  // K8s-readiness signal (consumed by the kubelet probe handler)
-  readonly markReady: (ready: boolean) => Effect.Effect<void>
-  readonly currentReady: Effect.Effect<boolean>
-}
+Combined the originally-deferred Slice 4 phase 3 (dual-write, gen-bump, cookie parsing, 4 named tests) with the fabric infrastructure to break the chicken-and-egg dependency.
 
-// Test-only control API (separate Service so production code cannot reach it)
-export interface PeerFabricControl {
-  // Lifecycle injection — implements the "fake SIGTERM" requirement
-  readonly killWorker: (peer: WorkerOrdinal) => Effect.Effect<void>      // hard kill: drops all conns, fake sidecar Redis cleared
-  readonly sigtermWorker: (peer: WorkerOrdinal) => Effect.Effect<void>   // graceful: invokes the worker's drain handler (Slice 7), then like killWorker
-  readonly rebootWorker: (peer: WorkerOrdinal) => Effect.Effect<void>    // sigterm + boot fresh layer (rerun reclaim)
-  // Topology faults
-  readonly partition: (a: WorkerOrdinal, b: WorkerOrdinal) => Effect.Effect<void>
-  readonly heal: (a: WorkerOrdinal, b: WorkerOrdinal) => Effect.Effect<void>
-  // Per-peer fault tuning
-  readonly setLatency: (peer: WorkerOrdinal, ms: number) => Effect.Effect<void>
-  readonly setErrorRate: (peer: WorkerOrdinal, rate: number) => Effect.Effect<void>     // 0..1, applies to all relay ops to this peer
-  readonly setThroughputCap: (peer: WorkerOrdinal, bytesPerSec: number) => Effect.Effect<void>
-  // Inspection / assertions
-  readonly snapshotPeer: (peer: WorkerOrdinal) => Effect.Effect<PeerSnapshot>
-}
+**Phase A** — `fe952ed` — Cookie parse + `_topology` populate + gen bump:
+- New [`StickinessCookie.ts`](src/cache/StickinessCookie.ts) — parses `w_pri`/`w_bak` URI params from the inbound INVITE's Record-Route header. **No HMAC verify** on the B2BUA side (proxy already validated; B2BUA reads trusted ordinals only — D19).
+- [`SipRouter.ts`](src/sip/SipRouter.ts) at INVITE time: reads cookie, sets `Call._topology = { pri, bak, gen: 0 }`. Falls back to `(self, "")` when no cookie present (single-worker / dev / direct UA→B2BUA).
+- [`CallState.flushToRedis`](src/call/CallState.ts) increments `_topology.gen` BEFORE encoding JSON, so the persisted value carries the bumped gen. Same in `flushAllCalls`.
 
-export interface PeerSnapshot {
-  readonly health: "alive" | "draining" | "dead" | "rebooting"
-  readonly ready: boolean
-  readonly calls: ReadonlyMap<string, CacheValue>
-  readonly indexes: ReadonlyMap<string, CacheValue>
-  readonly inboundConnectionCount: number
-}
+**Phase B** — `8fea919` — `PeerFabric.simulated` + `PeerCachePort` fabric impl:
+- New [`PeerFabric.ts`](src/cache/PeerFabric.ts) — fabric service modeling N fake peers. Each peer gets its own `MutableHashMap` "fake sidecar Redis".
+- [`PartitionedRelayStorage.ts`](src/cache/PartitionedRelayStorage.ts) refactored to expose `makeMemoryApi()` factory — both the existing `memoryLayer` and the fabric reuse this so semantics stay identical.
+- **Subagent deviation from the plan's sketched interface (D18)**: instead of `getLocal/putLocal/deleteLocal` on the fabric directly, the fabric exposes `storageLayerOf(ordinal): Layer<PartitionedRelayStorage>` for each peer. Cleaner reuse of Slice 4's storage abstraction.
+- `PeerFabric.simulatedBuilt` companion exposes the unboxed handle so multi-worker SUTs get fabric API at layer-construction time (before `Effect.run`).
+- 6 fabric smoke tests.
 
-export namespace PeerFabric {
-  // Production: localRedisLayer + httpRelayClient
-  export const productionLayer: Layer.Layer<PeerFabric, never, RedisClient | HttpClient>
-  // Test: in-memory simulation with N fake peers (PeerFabricControl also exposed)
-  export const simulated: (workers: ReadonlyArray<WorkerOrdinal>) => Layer.Layer<PeerFabric | PeerFabricControl, never, never>
-}
-```
+**Phase C** — `28742c2` — Fabric wired into `sipproxyHA` SUT:
+- [`proxyB2bFakeStack.ts`](tests/support/proxyB2bFakeStack.ts) `sipproxyHA` SUT — each of the two workers wired to a fabric peer slot via `storageLayerOf`. Per-worker `b2buaWorkerStackLayer` now accepts an optional `storageLayer` override (defaults to `PartitionedRelayStorage.memoryLayer` for single-worker tests; multi-peer SUTs pass the fabric's per-peer layer).
+- New `AppConfig.workerOrdinalLabel` (D17) bridges integer `workerIndex` to the proxy's string `WorkerId` so `selfOrdinal` matches the cookie. Fallback chain `workerOrdinalLabel` → `String(workerIndex)` → `"self"`.
 
-- `CallStateCache` is rewritten as a thin adapter over `PeerFabric` (writes go to `putLocal` + `putRemote(bak)`; reads are local).
-- Existing single-peer `CallStateCache.memoryLayer` becomes `PeerFabric.simulated([self]).provideMerge(CallStateCache.peerLayer)` — backward-compatible for existing unit tests.
-- Wires into [proxyB2bFakeStack.ts:217-301](tests/fullcall/framework/proxyB2bFakeStack.ts#L217-L301) so the existing `sipproxyHA` SUT becomes fabric-backed.
-- Implements `InfraStep` in [interpreter.ts:347-355](tests/fullcall/framework/interpreter.ts#L347-L355) by dispatching to `PeerFabricControl`.
-- Tests: `multi-peer-write.test.ts`, `backup-write-fails.test.ts`, `peer-fabric-control.test.ts` (asserts that `sigtermWorker` triggers the worker's drain handler).
+**Phase D** — `1383cd4` — Dual-write fan-out + the 4 named tests:
+- [`CallState.ts`](src/call/CallState.ts): `PeerCachePort` consumed via `Effect.serviceOption` (optional dep). New helpers: `backupTarget(call)` (returns `Some` only when `_topology.bak` is set, non-empty, and not equal to self), `fanOutPut(call)`, `fanOutDelete(call)`. Fan-out is fire-and-forget after every successful local write — failures logged + metric'd, NEVER block the local op (D3 throw-away).
+- D16 write-back semantics: when self ≠ primary (recovery worker), writes stay in `bak:{primary}:` partition, NOT `pri:self:`. Driven purely by `partitionOf` parsing the callRef.
+- Tests shipped: `multi-peer-write.test.ts`, `backup-write-fails.test.ts`, `gen-monotonicity.test.ts`, `recovery-write-back-to-bak.test.ts`.
 
-### Slice 6 — Reclaim-on-startup + K8s readiness gating + DNS-based peer enumeration
+**Phase E** — `48188ed` — `InfraStep` → `PeerFabricControl`:
+- [`interpreter.ts`](tests/fullcall/framework/interpreter.ts) `InfraStep` `crash`/`restart` cases now dispatch to `PeerFabricControl.killWorker` / `rebootWorker`.
+- `partition` deferred (D20) — current single-target `InfraStep` shape can't carry two ordinals; DSL extension needed when partition scenarios actually land in slice 7/8.
+
+### Slice 6 — Reclaim-on-startup + K8s readiness gating + DNS-based peer enumeration ⏳ NEXT
 - New module: `src/cache/ReclaimRunner.ts`.
-- On B2BUA start: K8s readiness probe answers 503 until reclaim completes (via `PeerFabric.markReady(false)` initially).
+- Consumes `PeerCachePort.scan` (slice 3) + `PeerEndpointResolver.headlessStatefulSet` (slice 3) + the `_topology.gen` already populated on stored values (slice 5).
+- The fabric (slice 5) already has the test-side `markReady(false)`/`currentReady` shape needed for K8s probe gating; reclaim runner toggles it at start/finish.
 - Peer enumeration: DNS query against headless StatefulSet service yields only currently-Ready peers. Re-queried every `reclaim.peerRefreshSec` (default 10s) so peers transitioning Ready mid-scan get scanned.
 - Reclaim algorithm: parallel-across-peers (`reclaim.peerConcurrency=8`), rate-limited within each peer (`reclaim.scanBatch=50`, `reclaim.scanPacingMs=50`).
 - **Two reclaim flows leveraging the partitioned keyspace**:
