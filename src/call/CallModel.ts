@@ -656,9 +656,45 @@ export type Call = typeof Call.Type
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Derive a deterministic callRef from the a-leg identifiers. */
-export function deriveCallRef(aLegCallId: string, aLegFromTag: string): string {
-  return `${aLegCallId}|${aLegFromTag}`
+/**
+ * Derive a deterministic callRef from the natural primary's worker
+ * ordinal + a-leg identifiers.
+ *
+ * Format: `{primaryOrdinal}|{aLegCallId}|{aLegFromTag}`
+ *
+ * Encoding the primary in the callRef itself (Option C of the
+ * HA-resilience plan, slice 4) makes every callRef self-describing:
+ * any worker holding a callRef can parse the primary ordinal, compare
+ * to its own, and derive whether it should read/write under the
+ * `pri:{primary}:` or `bak:{primary}:` partition without consulting
+ * the proxy or scanning multiple namespaces.
+ */
+export function deriveCallRef(
+  primaryOrdinal: string,
+  aLegCallId: string,
+  aLegFromTag: string
+): string {
+  return `${primaryOrdinal}|${aLegCallId}|${aLegFromTag}`
+}
+
+/**
+ * Parse a callRef produced by `deriveCallRef` back into its three
+ * segments. Returns `null` on malformed input — legacy two-segment
+ * refs (pre-Slice-4) round-trip as `null` so callers can detect and
+ * upgrade them at the boundary.
+ */
+export function parseCallRef(
+  ref: string
+): { primary: string; callId: string; fromTag: string } | null {
+  const i1 = ref.indexOf("|")
+  if (i1 <= 0) return null
+  const i2 = ref.indexOf("|", i1 + 1)
+  if (i2 <= i1 + 1 || i2 >= ref.length - 1) return null
+  return {
+    primary: ref.slice(0, i1),
+    callId: ref.slice(i1 + 1, i2),
+    fromTag: ref.slice(i2 + 1),
+  }
 }
 
 /** Parameters the dialog constructors need from the enclosing leg. */

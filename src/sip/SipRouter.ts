@@ -660,7 +660,14 @@ export class SipRouter extends ServiceMap.Service<
             return
           }
 
-          const callRef = deriveCallRef(callId, fromTag)
+          // Slice 4: encode the natural primary's ordinal into the callRef
+          // so any worker holding the ref can derive `(role, primary)` for
+          // storage path construction without consulting the proxy or the
+          // cookie. Falls back to "self" when `workerIndex` is unset
+          // (single-worker tests / dev).
+          const selfOrdinal =
+            config.workerIndex >= 0 ? String(config.workerIndex) : "self"
+          const callRef = deriveCallRef(selfOrdinal, callId, fromTag)
           const traceRateHeader = getHeader(req.headers, "X-Full-Trace-Sample-Rate")
           const overrideRate = traceRateHeader !== undefined ? parseFloat(traceRateHeader) : undefined
           const sampled = tracing.decideSampling(

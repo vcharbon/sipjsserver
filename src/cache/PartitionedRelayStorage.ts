@@ -1,17 +1,24 @@
 /**
  * PartitionedRelayStorage — local-side storage for the cross-pod relay.
  *
- * Slice 3 of the HA-resilience plan. Owns the `{role}:{owner}:`
- * key namespace on each pod's sidecar Redis (D7 / D10 / D15 / D16):
+ * Slice 3 of the HA-resilience plan. Calls live under
+ * `{role}:{owner}:call:{callRef}`; indexes are flat (D7 / D10 / D15 / D16):
  *
  *   {role}:{owner}:call:{callRef}     → opaque JSON state, with TTL
- *   {role}:{owner}:idx:{indexKey}     → callRef, with TTL
+ *   idx:{indexKey}                    → callRef, with TTL  (flat, NOT partitioned)
  *
  * `role ∈ {"pri","bak"}` and `owner` is the worker ordinal that the
  * stickiness cookie names as the natural primary for the call. A
  * single sidecar can hold many partitions side by side without
  * collision (e.g. a pod that is primary for some calls and backup
  * for several other primaries).
+ *
+ * Indexes are FLAT (not partitioned) — the index value is the
+ * callRef, and Slice 4's `deriveCallRef` encodes the primary ordinal
+ * in the callRef itself (Option C). So a worker holding a callRef
+ * can derive `(role, primary)` deterministically and build the
+ * partition path on the fly. Single index hop, single call read, no
+ * proxy headers needed on the receive path.
  *
  * This service is intentionally separate from `CallStateCache` — that
  * service still owns the legacy `call:{callRef}` flat keyspace used by
@@ -65,6 +72,27 @@ export class StorageError extends Data.TaggedError("PartitionedRelayStorageError
 // ---------------------------------------------------------------------------
 
 export interface PartitionedRelayStorageApi {
+  /**
+   * Read the call's JSON state from the (role, owner) partition.
+   * Returns `null` if missing or expired (sweep-on-touch in
+   * memoryLayer; Redis natively expires keys).
+   */
+  readonly getCall: (
+    role: PartitionRole,
+    owner: string,
+    callRef: string
+  ) => Effect.Effect<string | null, StorageError>
+
+  /**
+   * Read a flat index entry. Returns the stored callRef value, or
+   * `null` if missing/expired. Index keys are unpartitioned per
+   * Slice 4 design (callRef itself encodes the primary, so the
+   * partition is derivable downstream).
+   */
+  readonly getIndex: (
+    indexKey: string
+  ) => Effect.Effect<string | null, StorageError>
+
   /**
    * Full create/overwrite. Writes the call's state JSON + every
    * index entry with the supplied TTL. Sequential, not atomic — F10
@@ -129,12 +157,14 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
     callRef: string
   ): string => `${role}:${owner}:call:${callRef}`
 
-  /** Build a partitioned storage key for an index entry. */
-  static readonly indexKey = (
-    role: PartitionRole,
-    owner: string,
-    indexKey: string
-  ): string => `${role}:${owner}:idx:${indexKey}`
+  /**
+   * Build a FLAT storage key for an index entry. Indexes are not
+   * partitioned — the value carries the callRef which itself encodes
+   * the primary ordinal (Option C, Slice 4). A worker reading this
+   * index gets the callRef, derives the primary, and builds the
+   * partition path on the fly.
+   */
+  static readonly indexKey = (indexKey: string): string => `idx:${indexKey}`
 
   /** Match pattern for partition-wide scan of call keys. */
   static readonly scanPattern = (
@@ -160,6 +190,22 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
       const wrapErr = (err: RedisError): StorageError =>
         new StorageError({ reason: err.reason })
 
+      const getCall = (
+        role: PartitionRole,
+        owner: string,
+        callRef: string
+      ): Effect.Effect<string | null, StorageError> =>
+        redis
+          .get(PartitionedRelayStorage.callKey(role, owner, callRef))
+          .pipe(Effect.mapError(wrapErr))
+
+      const getIndex = (
+        indexKey: string
+      ): Effect.Effect<string | null, StorageError> =>
+        redis
+          .get(PartitionedRelayStorage.indexKey(indexKey))
+          .pipe(Effect.mapError(wrapErr))
+
       const putCall = (
         role: PartitionRole,
         owner: string,
@@ -176,7 +222,7 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
           ).pipe(Effect.mapError(wrapErr))
           for (const idx of indexes) {
             yield* redis.setex(
-              PartitionedRelayStorage.indexKey(role, owner, idx),
+              PartitionedRelayStorage.indexKey(idx),
               ttlSec,
               callRef
             ).pipe(Effect.mapError(wrapErr))
@@ -197,7 +243,7 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
           ).pipe(Effect.mapError(wrapErr))
           for (const idx of indexes) {
             yield* redis.expire(
-              PartitionedRelayStorage.indexKey(role, owner, idx),
+              PartitionedRelayStorage.indexKey(idx),
               ttlSec
             ).pipe(Effect.mapError(wrapErr))
           }
@@ -214,7 +260,7 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
             PartitionedRelayStorage.callKey(role, owner, callRef),
           ]
           for (const idx of indexes) {
-            keys.push(PartitionedRelayStorage.indexKey(role, owner, idx))
+            keys.push(PartitionedRelayStorage.indexKey(idx))
           }
           yield* redis.del(...keys).pipe(Effect.mapError(wrapErr))
         })
@@ -272,6 +318,8 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
       }
 
       return {
+        getCall,
+        getIndex,
         putCall,
         refreshCall,
         deleteCall,
@@ -329,6 +377,33 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
         }
       }
 
+      const getCall = (
+        role: PartitionRole,
+        owner: string,
+        callRef: string
+      ): Effect.Effect<string | null, StorageError> =>
+        Effect.gen(function* () {
+          const ms = yield* Clock.currentTimeMillis
+          return yield* Effect.sync(() => {
+            const opt = sweep(
+              PartitionedRelayStorage.callKey(role, owner, callRef),
+              ms
+            )
+            return Option.isSome(opt) ? opt.value.value : null
+          })
+        })
+
+      const getIndex = (
+        indexKey: string
+      ): Effect.Effect<string | null, StorageError> =>
+        Effect.gen(function* () {
+          const ms = yield* Clock.currentTimeMillis
+          return yield* Effect.sync(() => {
+            const opt = sweep(PartitionedRelayStorage.indexKey(indexKey), ms)
+            return Option.isSome(opt) ? opt.value.value : null
+          })
+        })
+
       const putCall = (
         role: PartitionRole,
         owner: string,
@@ -343,7 +418,7 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
             put(PartitionedRelayStorage.callKey(role, owner, callRef), json, ttlSec, ms)
             for (const idx of indexes) {
               put(
-                PartitionedRelayStorage.indexKey(role, owner, idx),
+                PartitionedRelayStorage.indexKey(idx),
                 callRef,
                 ttlSec,
                 ms
@@ -369,7 +444,7 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
             )
             for (const idx of indexes) {
               expireExisting(
-                PartitionedRelayStorage.indexKey(role, owner, idx),
+                PartitionedRelayStorage.indexKey(idx),
                 ttlSec,
                 ms
               )
@@ -391,7 +466,7 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
           for (const idx of indexes) {
             MutableHashMap.remove(
               store,
-              PartitionedRelayStorage.indexKey(role, owner, idx)
+              PartitionedRelayStorage.indexKey(idx)
             )
           }
         })
@@ -421,6 +496,8 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
       }
 
       return {
+        getCall,
+        getIndex,
         putCall,
         refreshCall,
         deleteCall,
