@@ -334,177 +334,211 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
    */
   static readonly memoryLayer = Layer.effect(
     PartitionedRelayStorage,
+    Effect.sync(() => makeMemoryApi().api)
+  )
+
+  /**
+   * Build a fresh in-memory `PartitionedRelayStorageApi` instance plus a
+   * handle to the underlying store. Slice 5's `PeerFabric.simulated`
+   * uses this to materialise N independent peer "sidecars" while still
+   * sharing the exact memoryLayer semantics — every peer's storage is
+   * the same object the rest of the codebase already exercises.
+   *
+   * The returned `store` reference is exposed so the fabric's
+   * `snapshotPeer` test API can read every entry without going through
+   * the public surface (snapshots include expired entries that the
+   * sweep-on-touch ops would otherwise hide).
+   */
+  static readonly makeMemoryApi = (): MemoryApiHandle => makeMemoryApi()
+}
+
+// ---------------------------------------------------------------------------
+// Memory-API factory (shared between memoryLayer and PeerFabric.simulated)
+// ---------------------------------------------------------------------------
+
+interface MemoryEntry {
+  readonly value: string
+  readonly expiresAtMs: number
+}
+
+/**
+ * Materialised in-memory storage handle. The `api` is the public
+ * service surface; `store` is exposed for snapshot inspection by
+ * `PeerFabric.simulated`'s test control API.
+ */
+export interface MemoryApiHandle {
+  readonly api: PartitionedRelayStorageApi
+  readonly store: MutableHashMap.MutableHashMap<string, MemoryEntry>
+}
+
+const makeMemoryApi = (): MemoryApiHandle => {
+  const store = MutableHashMap.empty<string, MemoryEntry>()
+
+  const sweep = (key: string, nowMs: number): Option.Option<MemoryEntry> => {
+    const opt = MutableHashMap.get(store, key)
+    if (Option.isNone(opt)) return Option.none()
+    if (opt.value.expiresAtMs <= nowMs) {
+      MutableHashMap.remove(store, key)
+      return Option.none()
+    }
+    return opt
+  }
+
+  const put = (
+    key: string,
+    value: string,
+    ttlSec: number,
+    nowMs: number
+  ): void => {
+    MutableHashMap.set(store, key, {
+      value,
+      expiresAtMs: nowMs + ttlSec * 1000,
+    })
+  }
+
+  const expireExisting = (
+    key: string,
+    ttlSec: number,
+    nowMs: number
+  ): void => {
+    const opt = sweep(key, nowMs)
+    if (Option.isSome(opt)) {
+      MutableHashMap.set(store, key, {
+        value: opt.value.value,
+        expiresAtMs: nowMs + ttlSec * 1000,
+      })
+    }
+  }
+
+  const getCall = (
+    role: PartitionRole,
+    owner: string,
+    callRef: string
+  ): Effect.Effect<string | null, StorageError> =>
     Effect.gen(function* () {
-      interface Entry {
-        readonly value: string
-        readonly expiresAtMs: number
-      }
-      const store = MutableHashMap.empty<string, Entry>()
+      const ms = yield* Clock.currentTimeMillis
+      return yield* Effect.sync(() => {
+        const opt = sweep(
+          PartitionedRelayStorage.callKey(role, owner, callRef),
+          ms
+        )
+        return Option.isSome(opt) ? opt.value.value : null
+      })
+    })
 
-      const sweep = (key: string, nowMs: number): Option.Option<Entry> => {
-        const opt = MutableHashMap.get(store, key)
-        if (Option.isNone(opt)) return Option.none()
-        if (opt.value.expiresAtMs <= nowMs) {
-          MutableHashMap.remove(store, key)
-          return Option.none()
-        }
-        return opt
-      }
+  const getIndex = (
+    indexKey: string
+  ): Effect.Effect<string | null, StorageError> =>
+    Effect.gen(function* () {
+      const ms = yield* Clock.currentTimeMillis
+      return yield* Effect.sync(() => {
+        const opt = sweep(PartitionedRelayStorage.indexKey(indexKey), ms)
+        return Option.isSome(opt) ? opt.value.value : null
+      })
+    })
 
-      const put = (
-        key: string,
-        value: string,
-        ttlSec: number,
-        nowMs: number
-      ): void => {
-        MutableHashMap.set(store, key, {
-          value,
-          expiresAtMs: nowMs + ttlSec * 1000,
-        })
-      }
-
-      const expireExisting = (
-        key: string,
-        ttlSec: number,
-        nowMs: number
-      ): void => {
-        const opt = sweep(key, nowMs)
-        if (Option.isSome(opt)) {
-          MutableHashMap.set(store, key, {
-            value: opt.value.value,
-            expiresAtMs: nowMs + ttlSec * 1000,
-          })
-        }
-      }
-
-      const getCall = (
-        role: PartitionRole,
-        owner: string,
-        callRef: string
-      ): Effect.Effect<string | null, StorageError> =>
-        Effect.gen(function* () {
-          const ms = yield* Clock.currentTimeMillis
-          return yield* Effect.sync(() => {
-            const opt = sweep(
-              PartitionedRelayStorage.callKey(role, owner, callRef),
-              ms
-            )
-            return Option.isSome(opt) ? opt.value.value : null
-          })
-        })
-
-      const getIndex = (
-        indexKey: string
-      ): Effect.Effect<string | null, StorageError> =>
-        Effect.gen(function* () {
-          const ms = yield* Clock.currentTimeMillis
-          return yield* Effect.sync(() => {
-            const opt = sweep(PartitionedRelayStorage.indexKey(indexKey), ms)
-            return Option.isSome(opt) ? opt.value.value : null
-          })
-        })
-
-      const putCall = (
-        role: PartitionRole,
-        owner: string,
-        callRef: string,
-        json: string,
-        indexes: ReadonlyArray<string>,
-        ttlSec: number
-      ): Effect.Effect<void, StorageError> =>
-        Effect.gen(function* () {
-          const ms = yield* Clock.currentTimeMillis
-          yield* Effect.sync(() => {
-            put(PartitionedRelayStorage.callKey(role, owner, callRef), json, ttlSec, ms)
-            for (const idx of indexes) {
-              put(
-                PartitionedRelayStorage.indexKey(idx),
-                callRef,
-                ttlSec,
-                ms
-              )
-            }
-          })
-        })
-
-      const refreshCall = (
-        role: PartitionRole,
-        owner: string,
-        callRef: string,
-        indexes: ReadonlyArray<string>,
-        ttlSec: number
-      ): Effect.Effect<void, StorageError> =>
-        Effect.gen(function* () {
-          const ms = yield* Clock.currentTimeMillis
-          yield* Effect.sync(() => {
-            expireExisting(
-              PartitionedRelayStorage.callKey(role, owner, callRef),
-              ttlSec,
-              ms
-            )
-            for (const idx of indexes) {
-              expireExisting(
-                PartitionedRelayStorage.indexKey(idx),
-                ttlSec,
-                ms
-              )
-            }
-          })
-        })
-
-      const deleteCall = (
-        role: PartitionRole,
-        owner: string,
-        callRef: string,
-        indexes: ReadonlyArray<string>
-      ): Effect.Effect<void, StorageError> =>
-        Effect.sync(() => {
-          MutableHashMap.remove(
-            store,
-            PartitionedRelayStorage.callKey(role, owner, callRef)
+  const putCall = (
+    role: PartitionRole,
+    owner: string,
+    callRef: string,
+    json: string,
+    indexes: ReadonlyArray<string>,
+    ttlSec: number
+  ): Effect.Effect<void, StorageError> =>
+    Effect.gen(function* () {
+      const ms = yield* Clock.currentTimeMillis
+      yield* Effect.sync(() => {
+        put(PartitionedRelayStorage.callKey(role, owner, callRef), json, ttlSec, ms)
+        for (const idx of indexes) {
+          put(
+            PartitionedRelayStorage.indexKey(idx),
+            callRef,
+            ttlSec,
+            ms
           )
-          for (const idx of indexes) {
-            MutableHashMap.remove(
-              store,
-              PartitionedRelayStorage.indexKey(idx)
-            )
-          }
-        })
+        }
+      })
+    })
 
-      const scanCalls = (
-        role: PartitionRole,
-        owner: string
-      ): Stream.Stream<ScanEntry, StorageError> => {
-        const callPrefix = `${role}:${owner}:call:`
-        return Stream.unwrap(
-          Effect.gen(function* () {
-            const ms = yield* Clock.currentTimeMillis
-            const matches: Array<ScanEntry> = []
-            for (const [key, entry] of store) {
-              if (!key.startsWith(callPrefix)) continue
-              if (entry.expiresAtMs <= ms) continue
-              const callRef = key.slice(callPrefix.length)
-              const ttlSec = Math.max(
-                0,
-                Math.ceil((entry.expiresAtMs - ms) / 1000)
-              )
-              matches.push({ callRef, json: entry.value, ttlSec })
-            }
-            return Stream.fromIterable(matches)
-          })
+  const refreshCall = (
+    role: PartitionRole,
+    owner: string,
+    callRef: string,
+    indexes: ReadonlyArray<string>,
+    ttlSec: number
+  ): Effect.Effect<void, StorageError> =>
+    Effect.gen(function* () {
+      const ms = yield* Clock.currentTimeMillis
+      yield* Effect.sync(() => {
+        expireExisting(
+          PartitionedRelayStorage.callKey(role, owner, callRef),
+          ttlSec,
+          ms
+        )
+        for (const idx of indexes) {
+          expireExisting(
+            PartitionedRelayStorage.indexKey(idx),
+            ttlSec,
+            ms
+          )
+        }
+      })
+    })
+
+  const deleteCall = (
+    role: PartitionRole,
+    owner: string,
+    callRef: string,
+    indexes: ReadonlyArray<string>
+  ): Effect.Effect<void, StorageError> =>
+    Effect.sync(() => {
+      MutableHashMap.remove(
+        store,
+        PartitionedRelayStorage.callKey(role, owner, callRef)
+      )
+      for (const idx of indexes) {
+        MutableHashMap.remove(
+          store,
+          PartitionedRelayStorage.indexKey(idx)
         )
       }
-
-      return {
-        getCall,
-        getIndex,
-        putCall,
-        refreshCall,
-        deleteCall,
-        scanCalls,
-      }
     })
-  )
+
+  const scanCalls = (
+    role: PartitionRole,
+    owner: string
+  ): Stream.Stream<ScanEntry, StorageError> => {
+    const callPrefix = `${role}:${owner}:call:`
+    return Stream.unwrap(
+      Effect.gen(function* () {
+        const ms = yield* Clock.currentTimeMillis
+        const matches: Array<ScanEntry> = []
+        for (const [key, entry] of store) {
+          if (!key.startsWith(callPrefix)) continue
+          if (entry.expiresAtMs <= ms) continue
+          const callRef = key.slice(callPrefix.length)
+          const ttlSec = Math.max(
+            0,
+            Math.ceil((entry.expiresAtMs - ms) / 1000)
+          )
+          matches.push({ callRef, json: entry.value, ttlSec })
+        }
+        return Stream.fromIterable(matches)
+      })
+    )
+  }
+
+  return {
+    api: {
+      getCall,
+      getIndex,
+      putCall,
+      refreshCall,
+      deleteCall,
+      scanCalls,
+    },
+    store,
+  }
 }
 
 // ---------------------------------------------------------------------------
