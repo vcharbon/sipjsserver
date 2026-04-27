@@ -7,10 +7,12 @@
  * Shared by both simulated and live backends — only the transport differs.
  */
 
-import { Clock, Effect, Result } from "effect"
+import { Clock, Effect, Option, Result } from "effect"
 import type { SipMessage, SipRequest } from "../../../src/sip/types.js"
 import { SipParser } from "../../../src/sip/Parser.js"
 import { hydrateRequest } from "../../../src/sip/parsers/extract-fields.js"
+import { PeerFabricControl } from "../../../src/cache/PeerFabric.js"
+import { WorkerOrdinal } from "../../../src/cache/PeerCachePort.js"
 
 /**
  * Build a synthetic placeholder request for trace entries that record an
@@ -345,15 +347,57 @@ function executeStep(
     case "pause":
       return executePause(step, index, state)
     case "infra":
-      return Effect.sync(() => {
+      return executeInfra(step, index, state)
+  }
+}
+
+// Slice 5 phase E: dispatch InfraStep against `PeerFabricControl` when
+// it's in the environment (sipproxyHA SUT provides it). For
+// non-fabric scenarios, fall back to the original "skip" behaviour so
+// existing tests keep working. The chaos primitives that need extra
+// args (latency / errorRate / partition between two named peers) are
+// out of scope here — those are slice 7/8 territory and need a
+// richer DSL surface than the current InfraStep type carries.
+function executeInfra(
+  step: import("./types.js").InfraStep,
+  index: number,
+  state: InterpreterState
+): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const ctlOpt = yield* Effect.serviceOption(PeerFabricControl)
+    if (Option.isNone(ctlOpt)) {
+      state.results.push(makeStepResult({
+        stepIndex: index,
+        step,
+        status: "skip",
+        error: "PeerFabricControl not provided — InfraStep skipped",
+      }))
+      return
+    }
+    const ctl = ctlOpt.value
+    const peer = WorkerOrdinal(step.target)
+    switch (step.action) {
+      case "crash":
+        yield* ctl.killWorker(peer)
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "ok" }))
+        return
+      case "restart":
+        yield* ctl.rebootWorker(peer)
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "ok" }))
+        return
+      case "partition":
+        // The current InfraStep type carries only one `target`. Real
+        // partition between two named peers needs (a, b) — defer to
+        // a future DSL extension. Mark skip for visibility.
         state.results.push(makeStepResult({
           stepIndex: index,
           step,
           status: "skip",
-          error: "Infrastructure steps not yet implemented",
+          error: "InfraStep partition needs two targets — DSL extension pending",
         }))
-      })
-  }
+        return
+    }
+  })
 }
 
 function executeSend(
