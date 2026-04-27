@@ -122,6 +122,28 @@ export interface ReceiveInviteResult {
 // Agent proxy (returned by s.agent())
 // ---------------------------------------------------------------------------
 
+/** Options accepted by `agent.register(...)`. */
+export interface RegisterOpts {
+  /**
+   * Request-URI for the REGISTER. RFC 3261 §10.2 says the registrar's
+   * address (no userpart, e.g. `sip:registrar.example`). Defaults to
+   * `sip:<registrar-host>` resolved at execute time from the agent's
+   * configured remote (the SUT target).
+   */
+  readonly uri?: string
+  /**
+   * `Expires` header value in seconds. When omitted no `Expires` header
+   * is added — the registrar applies its default (3600s in slice 2's
+   * registrar). Pass `0` for the single-Contact de-registration shape
+   * the slice 2 registrar accepts.
+   */
+  readonly expires?: number
+  readonly delay?: number
+  readonly overrides?: HeaderOverrides
+  readonly build?: (ctx: MessageContext) => HeaderOverrides
+  readonly skipValidation?: ValidationCheckName[]
+}
+
 export interface AgentProxy {
   readonly name: string
 
@@ -140,6 +162,17 @@ export interface AgentProxy {
 
   /** Expect an initial INVITE. Returns both a dialog handle and a UAS INVITE transaction. */
   receiveInitialInvite(opts?: ExpectOpts): ReceiveInviteResult
+
+  /**
+   * Send a REGISTER (RFC 3261 §10). Returns a UAC transaction so the
+   * test can `.expect(200)` (or any other status) and chain assertions.
+   *
+   * The framework defaults the To header to the agent's own AOR
+   * (`<${agentConfig.uri}>`) — the conventional shape for self-
+   * registration, where the AOR being registered is the agent itself.
+   * Override `opts.overrides.to` to register a different AOR.
+   */
+  register(opts?: RegisterOpts): UacTransaction
 
   /** Access the current dialog (for composed sequences via andThen). */
   readonly dialog: DialogRef
@@ -343,6 +376,34 @@ export function record(
       }
     }
 
+    const register: AgentProxy["register"] = (opts) => {
+      if (opts?.build) hasBuildCallbacks = true
+      // Default To to the agent's own AOR — this is a self-registration
+      // and RFC 3261 §10.1 keys the registration off the To-URI userpart.
+      // Default From also matches; that mirrors how a real UA registers
+      // itself ("the AOR I'm advertising IS me").
+      const aor = agents[agentName]?.uri ?? `sip:${agentName}@unknown`
+      const baseOverrides: HeaderOverrides = opts?.overrides ?? {}
+      const overrides: HeaderOverrides = {
+        to: baseOverrides.to ?? `<${aor}>`,
+        from: baseOverrides.from ?? `<${aor}>`,
+        ...(baseOverrides.cseq !== undefined ? { cseq: baseOverrides.cseq } : {}),
+        ...(baseOverrides.contact !== undefined ? { contact: baseOverrides.contact } : {}),
+        ...(opts?.expires !== undefined
+          ? { headers: { ...(baseOverrides.headers ?? {}), Expires: String(opts.expires) } }
+          : baseOverrides.headers !== undefined ? { headers: baseOverrides.headers } : {}),
+        ...(baseOverrides.extraHeaders !== undefined ? { extraHeaders: baseOverrides.extraHeaders } : {}),
+        ...(baseOverrides.body !== undefined ? { body: baseOverrides.body } : {}),
+      }
+      const sendOpts: Record<string, unknown> = { overrides }
+      if (opts?.uri !== undefined) sendOpts.uri = opts.uri
+      if (opts?.delay !== undefined) sendOpts.delay = opts.delay
+      if (opts?.build !== undefined) sendOpts.build = opts.build
+      if (opts?.skipValidation !== undefined) sendOpts.skipValidation = opts.skipValidation
+      send("REGISTER", sendOpts as InternalSendOpts)
+      return makeUacTransaction()
+    }
+
     const receiveInitialInvite: AgentProxy["receiveInitialInvite"] = (opts) => {
       const expRef = expect("INVITE", opts)
       return {
@@ -364,6 +425,7 @@ export function record(
       name: agentName,
       invite,
       receiveInitialInvite,
+      register,
       get dialog() { return makeDialogRef() },
       allowExtra,
     }

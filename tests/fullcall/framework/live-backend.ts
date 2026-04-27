@@ -15,15 +15,16 @@
  * automatically when the surrounding test scope closes.
  */
 
-import { Effect } from "effect"
-import type { AgentInfo, TestTransport } from "./types.js"
-import { TransportError } from "./types.js"
+import { Effect, Layer, ServiceMap } from "effect"
+import type { AgentInfo, NetworkTag, TestTransport } from "./types.js"
+import { DEFAULT_NETWORK, TransportError } from "./types.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
 
 interface LiveAgent {
   readonly ip: string
   readonly port: number
   readonly endpoint: UdpEndpoint
+  readonly network: NetworkTag
 }
 
 /** Per-agent ingress queue capacity — see simulated-backend for rationale. */
@@ -37,17 +38,41 @@ export function createLiveTransport(opts?: {
   const bindIp = opts?.bindIp ?? "127.0.0.1"
   const agents = new Map<string, LiveAgent>()
 
+  // Lazy: the `core` real fabric is built only if any agent declares
+  // `network: "core"`. Each `SignalingNetwork.real` Layer creates an
+  // independent dgram socket pool, so the two networks are physically
+  // distinct (process-wide) — exactly the shape the dual-stack proxy
+  // wants, without coupling them to the same kernel-side state.
+  const participantNetworks = new Map<string, NetworkTag>()
+  const labelKey = (ip: string, port: number) => `${ip}:${port}`
+
   return {
     setup: (agentConfigs, _b2buaTarget) =>
       Effect.gen(function* () {
-        const network = yield* SignalingNetwork
+        const extNetwork = yield* SignalingNetwork
         const agentInfos: Record<string, AgentInfo> = {}
+
+        const needsCore = Object.values(agentConfigs).some(
+          (c) => (c.network ?? DEFAULT_NETWORK) === "core",
+        )
+        let coreNetwork: SignalingNetwork["Service"] | undefined
+        if (needsCore) {
+          const coreCtx = yield* Layer.build(SignalingNetwork.real)
+          coreNetwork = ServiceMap.get(coreCtx, SignalingNetwork)
+        }
 
         for (const [name, config] of Object.entries(agentConfigs)) {
           const requestedIp = config.ip ?? bindIp
+          const agentNetwork: NetworkTag = config.network ?? DEFAULT_NETWORK
+          const fabric = agentNetwork === "core" ? coreNetwork : extNetwork
+          if (fabric === undefined) {
+            return yield* new TransportError({
+              message: `Agent "${name}" requested network "${agentNetwork}" but the fabric was not materialized`,
+            })
+          }
           // Port 0 = let the OS pick. The real endpoint reports the
           // actual bound port via endpoint.localAddress.
-          const endpoint = yield* network.bindUdp({
+          const endpoint = yield* fabric.bindUdp({
             ip: requestedIp,
             port: config.port ?? 0,
             queueMax: AGENT_QUEUE_MAX,
@@ -55,14 +80,15 @@ export function createLiveTransport(opts?: {
             Effect.catch((err) =>
               new TransportError({
                 message:
-                  `Failed to bind agent "${name}" at ${requestedIp}:${config.port ?? 0}: ${err.message}`,
+                  `Failed to bind agent "${name}" at ${requestedIp}:${config.port ?? 0} on network ${agentNetwork}: ${err.message}`,
                 cause: err,
               })
             )
           )
 
           const { ip, port } = endpoint.localAddress
-          agents.set(name, { ip, port, endpoint })
+          agents.set(name, { ip, port, endpoint, network: agentNetwork })
+          participantNetworks.set(labelKey(ip, port), agentNetwork)
           agentInfos[name] = {
             ip,
             port,
@@ -102,5 +128,8 @@ export function createLiveTransport(opts?: {
           Effect.sleep(`${timeoutMs} millis`).pipe(Effect.as(null))
         )
       }),
+
+    participantNetwork: (ip: string, port: number) =>
+      participantNetworks.get(labelKey(ip, port)),
   }
 }

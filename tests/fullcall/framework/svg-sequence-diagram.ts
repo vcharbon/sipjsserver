@@ -7,7 +7,7 @@
  */
 
 import type { SipMessage } from "../../../src/sip/types.js"
-import type { TraceEntry } from "./types.js"
+import type { NetworkTag, Participant, TraceEntry } from "./types.js"
 
 // ---------------------------------------------------------------------------
 // Layout constants
@@ -166,9 +166,26 @@ export function serializeMessage(msg: SipMessage): string {
 // SVG renderer
 // ---------------------------------------------------------------------------
 
+/**
+ * Pastel background tints used to colour-band participant lanes by
+ * `NetworkTag`. Soft colours so the sequence-diagram text and arrows
+ * stay legible. `ext` keeps the existing white-ish background;
+ * `core` gets a faint amber so dual-stack scenarios make the
+ * cross-fabric hop visually obvious.
+ */
+const NETWORK_LANE_COLORS: Record<NetworkTag, string> = {
+  ext: "#ffffff",
+  core: "#fef9c3", // amber-100
+}
+
+const NETWORK_LANE_LABEL_COLORS: Record<NetworkTag, string> = {
+  ext: "#6b7280", // gray-500
+  core: "#a16207", // amber-700
+}
+
 export function renderSequenceDiagram(
   trace: readonly TraceEntry[],
-  participants: readonly string[]
+  participants: readonly Participant[]
 ): string {
   if (participants.length === 0 || trace.length === 0) {
     return `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="100">
@@ -178,6 +195,7 @@ export function renderSequenceDiagram(
 
   const callIdColorMap = new Map<string, string>()
   const participantX = new Map<string, number>()
+  const participantNetwork = new Map<string, NetworkTag>()
 
   // Base timestamp for T+ annotations — the first trace entry's
   // virtual-clock time. Everything downstream is rendered as an offset
@@ -186,7 +204,9 @@ export function renderSequenceDiagram(
 
   // Compute participant X positions
   for (let i = 0; i < participants.length; i++) {
-    participantX.set(participants[i]!, MARGIN_LEFT + i * PARTICIPANT_SPACING + PARTICIPANT_BOX_WIDTH / 2)
+    const p = participants[i]!
+    participantX.set(p.name, MARGIN_LEFT + i * PARTICIPANT_SPACING + PARTICIPANT_BOX_WIDTH / 2)
+    participantNetwork.set(p.name, p.network)
   }
 
   // Compute SVG dimensions
@@ -222,6 +242,36 @@ export function renderSequenceDiagram(
 
   // --- Background ---
   svgParts.push(`<rect width="${totalWidth}" height="${totalHeight}" fill="#ffffff"/>`)
+
+  // --- Per-network lane bands ---
+  // For each contiguous run of participants that share a NetworkTag,
+  // paint a coloured background band. With `ext`-only scenarios this
+  // reduces to a no-op (white over white). Bands are drawn UNDER the
+  // participant boxes / lifelines so arrow text stays readable.
+  {
+    const distinctNetworks = new Set<NetworkTag>()
+    for (const p of participants) distinctNetworks.add(p.network)
+    if (distinctNetworks.size > 1) {
+      let i = 0
+      while (i < participants.length) {
+        const net = participants[i]!.network
+        let j = i
+        while (j + 1 < participants.length && participants[j + 1]!.network === net) j++
+        const leftP = participants[i]!
+        const rightP = participants[j]!
+        const xStart = (participantX.get(leftP.name) ?? 0) - PARTICIPANT_BOX_WIDTH / 2 - 8
+        const xEnd = (participantX.get(rightP.name) ?? 0) + PARTICIPANT_BOX_WIDTH / 2 + 8
+        const width = Math.max(0, xEnd - xStart)
+        const fill = NETWORK_LANE_COLORS[net]
+        svgParts.push(`<rect x="${xStart}" y="0" width="${width}" height="${totalHeight}" fill="${fill}" opacity="0.6"/>`)
+        // Network label, rendered just above the participant boxes.
+        const midX = (xStart + xEnd) / 2
+        const labelColor = NETWORK_LANE_LABEL_COLORS[net]
+        svgParts.push(`<text x="${midX}" y="${MARGIN_TOP - 4}" text-anchor="middle" font-family="monospace" font-size="${LABEL_FONT_SIZE - 1}" fill="${labelColor}" font-weight="bold">${escapeXml(net)}</text>`)
+        i = j + 1
+      }
+    }
+  }
 
   // --- Participant boxes ---
   for (const [name, x] of participantX) {

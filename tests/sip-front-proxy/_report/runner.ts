@@ -38,9 +38,11 @@ import {
 } from "../../fullcall/framework/html-report.js"
 import { writeTextReports } from "../../fullcall/framework/text-report.js"
 import type {
+  Participant,
   ScenarioResult,
   TraceEntry,
 } from "../../fullcall/framework/types.js"
+import { DEFAULT_NETWORK } from "../../fullcall/framework/types.js"
 import { ProxyParticipants, ProxyParticipantsLive } from "./recorder.js"
 
 export {
@@ -103,6 +105,10 @@ const finalize = (
         stepIndex: -1,
         status: e.delivered ? "pass" : "unexpected",
         message: msg,
+        // sip-front-proxy report runner is single-network; tag every
+        // entry with the default fabric. Slice 2's registrar tests
+        // build the participant registry with explicit network info.
+        network: DEFAULT_NETWORK,
       })
     }
     trace.sort((a, b) => a.timestamp - b.timestamp)
@@ -112,9 +118,16 @@ const finalize = (
     // endpoint that showed up in the trace (e.g. the proxy listen
     // address when the test didn't name it) gets appended so the SVG
     // renderer doesn't drop arrows that touch it.
-    const orderedParticipants: string[] = [...names]
+    const orderedParticipants: Participant[] = names.map((n) => ({
+      name: n,
+      network: DEFAULT_NETWORK,
+    }))
+    const seenInOrdered = new Set<string>(orderedParticipants.map((p) => p.name))
     for (const p of seenParticipants) {
-      if (!orderedParticipants.includes(p)) orderedParticipants.push(p)
+      if (!seenInOrdered.has(p)) {
+        orderedParticipants.push({ name: p, network: DEFAULT_NETWORK })
+        seenInOrdered.add(p)
+      }
     }
 
     // Proxy tests don't run a step-based scenario DSL, so there are no

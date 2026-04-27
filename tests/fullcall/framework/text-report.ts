@@ -118,6 +118,11 @@ function renderHeader(
 /**
  * Write per-scenario .txt reports (global + per-endpoint).
  * Returns the list of generated filenames (relative to outputDir).
+ *
+ * Per-agent files live in a `<network>/` subfolder (`ext/alice.txt`,
+ * `core/coreServer.txt`) so dual-stack scenarios surface the fabric
+ * boundary at the file system level. Slice 1: every agent is on `ext`,
+ * so output materialises under `outputDir/ext/...`.
  */
 export function writeTextReports(
   result: ScenarioResult,
@@ -146,19 +151,25 @@ export function writeTextReports(
     else agentNames.add(entry.to)
   }
 
-  for (const agent of result.participants) {
-    if (!agentNames.has(agent)) continue // skip SUT-only participants
+  for (const participant of result.participants) {
+    if (!agentNames.has(participant.name)) continue // skip SUT-only participants
 
     const filtered = result.trace.filter(
-      (e) => e.from === agent || e.to === agent
+      (e) => e.from === participant.name || e.to === participant.name
     )
     if (filtered.length === 0) continue
 
-    const header = renderHeader(result.scenarioName, `${agent} (endpoint)`, result)
+    const header = renderHeader(
+      result.scenarioName,
+      `${participant.name} (endpoint, network=${participant.network})`,
+      result,
+    )
     const body = renderTraceEntries(filtered, baseTs)
-    const filename = `${result.scenarioName}.${agent}.txt`
-    writeFileSync(join(outputDir, filename), header + body, "utf-8")
-    filenames.push(filename)
+    const subdir = participant.network
+    mkdirSync(join(outputDir, subdir), { recursive: true })
+    const relPath = `${subdir}/${result.scenarioName}.${participant.name}.txt`
+    writeFileSync(join(outputDir, relPath), header + body, "utf-8")
+    filenames.push(relPath)
   }
 
   return filenames

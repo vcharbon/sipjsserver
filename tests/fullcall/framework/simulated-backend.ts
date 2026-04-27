@@ -12,8 +12,9 @@
  * real UDP stack would expose them.
  */
 
-import { Effect } from "effect"
-import type { AgentInfo, TestTransport } from "./types.js"
+import { Effect, Layer, ServiceMap } from "effect"
+import type { AgentInfo, NetworkTag, TestTransport } from "./types.js"
+import { DEFAULT_NETWORK } from "./types.js"
 import { pumpAll } from "../../support/pumpAll.js"
 import { TransportError } from "./types.js"
 import type { UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
@@ -84,6 +85,7 @@ interface AgentRecord {
   readonly ip: string
   readonly port: number
   readonly endpoint: UdpEndpoint
+  readonly network: NetworkTag
 }
 
 // ---------------------------------------------------------------------------
@@ -92,8 +94,20 @@ interface AgentRecord {
 
 interface MockTransportState {
   readonly agents: Map<string, AgentRecord>
-  /** Shared fabric reference — captured at setup, drained by verifyCleanState. */
-  network: SignalingNetwork["Service"] | undefined
+  /**
+   * `ext` fabric — the SignalingNetwork from the FakeStackLayer the
+   * B2BUA / front-proxy bind on. Captured at setup, drained by
+   * verifyCleanState.
+   */
+  extNetwork: SignalingNetwork["Service"] | undefined
+  /**
+   * `core` fabric — lazily materialized in setup() if any agent declares
+   * `network: "core"`. Slice 1: nothing in production code uses this
+   * fabric yet (no proxy is bound on it); the harness builds it so the
+   * report path round-trips traces tagged with the `core` network.
+   * Slice 2 wires the registrar proxy's K8s-facing endpoint here.
+   */
+  coreNetwork: SignalingNetwork["Service"] | undefined
   callStateRef: CallState["Service"] | undefined
   timerServiceRef: TimerService["Service"] | undefined
 }
@@ -154,10 +168,17 @@ export function createSimulatedTransport(opts?: {
 
   const mockState: MockTransportState = {
     agents: new Map(),
-    network: undefined,
+    extNetwork: undefined,
+    coreNetwork: undefined,
     callStateRef: undefined,
     timerServiceRef: undefined,
   }
+
+  // (ip,port) → NetworkTag. Slice 1: every entry is "ext" (the SUT's
+  // ingress and every test agent live there). Slice 2 will register
+  // proxy participants on "core" too. Built alongside `participantLabels`
+  // and queried by the report renderer to colour lanes by fabric.
+  const participantNetworks = new Map<string, NetworkTag>()
 
   // Participant registry: (ip,port) → label. Seeded with SUT-side
   // participants (proxy / worker / b2bua) up-front, then extended in
@@ -166,25 +187,28 @@ export function createSimulatedTransport(opts?: {
   const participantLabels = new Map<string, string>()
   const labelKey = (ip: string, port: number) => `${ip}:${port}`
   if (sut === "proxy+b2b") {
-    participantLabels.set(
-      labelKey(PROXY_B2B_INGRESS.host, PROXY_B2B_INGRESS.port),
-      "proxy",
-    )
-    participantLabels.set(
-      labelKey(PROXY_B2B_WORKER.host, PROXY_B2B_WORKER.port),
-      "worker-1",
-    )
+    const proxyKey = labelKey(PROXY_B2B_INGRESS.host, PROXY_B2B_INGRESS.port)
+    const workerKey = labelKey(PROXY_B2B_WORKER.host, PROXY_B2B_WORKER.port)
+    participantLabels.set(proxyKey, "proxy")
+    participantLabels.set(workerKey, "worker-1")
+    participantNetworks.set(proxyKey, "ext")
+    participantNetworks.set(workerKey, "ext")
   } else if (sut === "sipproxyHA") {
-    participantLabels.set(
-      labelKey(HA_PROXY_ADDR.host, HA_PROXY_ADDR.port),
-      "proxy",
-    )
+    const proxyKey = labelKey(HA_PROXY_ADDR.host, HA_PROXY_ADDR.port)
+    participantLabels.set(proxyKey, "proxy")
+    participantNetworks.set(proxyKey, "ext")
     const w1 = HA_WORKER_ADDR(1)
     const w2 = HA_WORKER_ADDR(2)
-    participantLabels.set(labelKey(w1.host, w1.port), "b2b-1")
-    participantLabels.set(labelKey(w2.host, w2.port), "b2b-2")
+    const w1Key = labelKey(w1.host, w1.port)
+    const w2Key = labelKey(w2.host, w2.port)
+    participantLabels.set(w1Key, "b2b-1")
+    participantLabels.set(w2Key, "b2b-2")
+    participantNetworks.set(w1Key, "ext")
+    participantNetworks.set(w2Key, "ext")
   } else {
-    participantLabels.set(labelKey("127.0.0.1", sipPort), "B2BUA")
+    const k = labelKey("127.0.0.1", sipPort)
+    participantLabels.set(k, "B2BUA")
+    participantNetworks.set(k, "ext")
   }
 
   return {
@@ -206,7 +230,31 @@ export function createSimulatedTransport(opts?: {
         // setup returns and every subsequent packet would bounce as
         // undeliverable.
         const network = yield* SignalingNetwork
-        mockState.network = network
+        mockState.extNetwork = network
+
+        // Lazily materialize a second simulated SignalingNetwork for the
+        // `core` fabric IFF any agent declared `network: "core"`. Slice 1:
+        // no production code yet binds on this fabric — agents on it just
+        // exchange packets among themselves; the fabric's `drainTrace`
+        // still flows through the report path. Slice 2 will bind the
+        // registrar proxy's K8s-facing endpoint here so the same harness
+        // exercises the cross-fabric forward path.
+        //
+        // Build the layer with `Layer.build` so its scoped resources hang
+        // off the *surrounding* scope (the test runner's outer
+        // `runScoped`) — same lifetime as `extNetwork`. An `Effect.scoped`
+        // wrapper here would close the fabric the moment setup returned.
+        const needsCore = Object.values(agentConfigs).some(
+          (c) => (c.network ?? DEFAULT_NETWORK) === "core",
+        )
+        let coreNetwork: SignalingNetwork["Service"] | undefined
+        if (needsCore) {
+          const coreCtx = yield* Layer.build(
+            SignalingNetwork.simulated({ transitDelayMs: DEFAULT_TRANSIT_DELAY_MS }),
+          )
+          coreNetwork = ServiceMap.get(coreCtx, SignalingNetwork)
+          mockState.coreNetwork = coreNetwork
+        }
 
         if (sut === "sipproxyHA") {
           // The sipproxyHA SUT layer auto-starts both worker
@@ -249,8 +297,18 @@ export function createSimulatedTransport(opts?: {
         for (const [name, agentConfig] of Object.entries(agentConfigs)) {
           const ip = agentConfig.ip ?? "127.0.0.1"
           const port = agentConfig.port ?? portCounter++
+          const agentNetwork: NetworkTag = agentConfig.network ?? DEFAULT_NETWORK
+          const fabric =
+            agentNetwork === "core"
+              ? coreNetwork
+              : network
+          if (fabric === undefined) {
+            return yield* new TransportError({
+              message: `Agent "${name}" requested network "${agentNetwork}" but the fabric was not materialized`,
+            })
+          }
 
-          const endpoint = yield* network.bindUdp({
+          const endpoint = yield* fabric.bindUdp({
             ip,
             port,
             queueMax: AGENT_QUEUE_MAX,
@@ -258,7 +316,7 @@ export function createSimulatedTransport(opts?: {
             Effect.catch((err) =>
               new TransportError({
                 message:
-                  `Failed to bind agent "${name}" at ${ip}:${port}: ${err.message}`,
+                  `Failed to bind agent "${name}" at ${ip}:${port} on network ${agentNetwork}: ${err.message}`,
                 cause: err,
               })
             )
@@ -267,8 +325,9 @@ export function createSimulatedTransport(opts?: {
           // No per-agent ReceivedPacket queue: arrivalMs is stamped at
           // ingress by SignalingNetwork, and the harness reads straight
           // off endpoint.poll() / endpoint.take().
-          mockState.agents.set(name, { ip, port, endpoint })
+          mockState.agents.set(name, { ip, port, endpoint, network: agentNetwork })
           participantLabels.set(labelKey(ip, port), name)
+          participantNetworks.set(labelKey(ip, port), agentNetwork)
           agentInfos[name] = {
             ip,
             port,
@@ -292,7 +351,8 @@ export function createSimulatedTransport(opts?: {
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
             mockState.agents.clear()
-            mockState.network = undefined
+            mockState.extNetwork = undefined
+            mockState.coreNetwork = undefined
             mockState.callStateRef = undefined
             mockState.timerServiceRef = undefined
           })
@@ -343,9 +403,18 @@ export function createSimulatedTransport(opts?: {
 
     drainNetworkTrace: () =>
       Effect.gen(function* () {
-        const network = mockState.network
-        if (network === undefined) return []
-        return yield* network.drainTrace()
+        // Concatenate trace from both fabrics. Slice 1: only `ext` ever
+        // has traffic; slice 2's cross-fabric registrar tests will fill
+        // the `core` side too. Order isn't guaranteed across fabrics —
+        // the interpreter re-sorts by timestamp anyway.
+        const ext = mockState.extNetwork
+        const core = mockState.coreNetwork
+        const out = ext === undefined ? [] : [...(yield* ext.drainTrace())]
+        if (core !== undefined) {
+          const coreEntries = yield* core.drainTrace()
+          for (const e of coreEntries) out.push(e)
+        }
+        return out
       }),
 
     settle: () =>
@@ -414,15 +483,18 @@ export function createSimulatedTransport(opts?: {
             )
           }
         }
-        const network = mockState.network
-        if (network) {
+        for (const [tag, network] of [
+          ["ext", mockState.extNetwork] as const,
+          ["core", mockState.coreNetwork] as const,
+        ]) {
+          if (!network) continue
           const undelivered = yield* network.drainUndeliverable()
           if (undelivered.length > 0) {
             const summary = undelivered
               .map((p) => `${p.src.ip}:${p.src.port} → ${p.dst.ip}:${p.dst.port}`)
               .join(", ")
             errors.push(
-              `SignalingNetwork: ${undelivered.length} undeliverable packet(s) ` +
+              `SignalingNetwork[${tag}]: ${undelivered.length} undeliverable packet(s) ` +
               `(no endpoint bound at destination): ${summary}`
             )
           }
@@ -433,9 +505,13 @@ export function createSimulatedTransport(opts?: {
     // M3: read transit delay off the service instead of a file-local
     // constant. The simulated layer always sets it; if someone later
     // swaps in a layer without a transit delay, we fall back to the
-    // default so the trace renderer has a usable value.
+    // default so the trace renderer has a usable value. Both fabrics use
+    // the same configured delay so reading from `ext` is sufficient.
     get networkDelayMs() {
-      return mockState.network?.transitDelayMs ?? DEFAULT_TRANSIT_DELAY_MS
+      return mockState.extNetwork?.transitDelayMs ?? DEFAULT_TRANSIT_DELAY_MS
     },
+
+    participantNetwork: (ip: string, port: number) =>
+      participantNetworks.get(labelKey(ip, port)),
   }
 }

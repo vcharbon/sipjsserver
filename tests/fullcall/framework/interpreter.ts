@@ -40,6 +40,8 @@ import type {
   AgentConfig,
   AgentInfo,
   ExpectStep,
+  NetworkTag,
+  Participant,
   Scenario,
   ScenarioResult,
   SendStep,
@@ -50,6 +52,7 @@ import type {
   TraceEntry,
   TraceStatus,
 } from "./types.js"
+import { DEFAULT_NETWORK } from "./types.js"
 import { setCurrentScenario } from "./rule-usage-collector.js"
 import {
   buildMessageContext,
@@ -86,6 +89,12 @@ interface InterpreterState {
   readonly sleep: (ms: number) => Effect.Effect<void>
   /** Resolved SUT participant name per agent. */
   readonly sutNames: Record<string, string>
+  /**
+   * Resolve a participant name (an agent name, an SUT label like "B2BUA"
+   * or "proxy", or an internal-hop label) to its `NetworkTag`. Used by
+   * the trace-stamping path to record which fabric carried each hop.
+   */
+  readonly networkOf: (participantName: string) => NetworkTag
   /** Messages received during expect steps that didn't match the expected pattern. */
   readonly unexpectedMessages: Array<{ agent: string; msg: SipMessage }>
   /** Patterns marked allowedReemission — matching messages are silently ignored in the unexpected check. */
@@ -174,6 +183,20 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     }
   }
 
+  // Pre-compute participant → network. Agents come straight from their
+  // config (default `"ext"`); SUT-side labels are the proxy / worker
+  // names exposed by the transport — slice 1 places all of them on
+  // `"ext"` and slice 2 will surface a `"core"` proxy-side endpoint.
+  // We compute it lazily so unknown labels (e.g. `<ip>:<port>` for
+  // unrecognised hops) still resolve to the safe default.
+  const networkOf = (participantName: string): NetworkTag => {
+    const cfg = scenario.agents[participantName]
+    if (cfg !== undefined) {
+      return cfg.network ?? DEFAULT_NETWORK
+    }
+    return DEFAULT_NETWORK
+  }
+
   const state: InterpreterState = {
     agentInfos,
     agentConfigs: scenario.agents,
@@ -186,6 +209,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     targetFor: resolveTarget,
     sleep: sleepMs,
     sutNames,
+    networkOf,
     unexpectedMessages: [],
     allowedReemission: [...(scenario.allowedExtras ?? [])],
     offerAnswer: new OfferAnswerTracker(),
@@ -287,6 +311,14 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
         const result = yield* parser.parse(entry.raw).pipe(Effect.result)
         if (result._tag === "Failure") continue
         const msg = result.success
+        // Internal hops live entirely on the SUT side; both endpoints
+        // share the fabric the source is bound on. Resolve via the
+        // transport's per-(ip,port) network registry (slice 1: every
+        // SUT participant is on `ext`).
+        const hopNet: NetworkTag =
+          transport.participantNetwork?.(entry.src.ip, entry.src.port)
+            ?? transport.participantNetwork?.(entry.dst.ip, entry.dst.port)
+            ?? DEFAULT_NETWORK
         out.push({
           timestamp: entry.deliveredMs,
           sentMs: entry.sentMs,
@@ -297,6 +329,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
           stepIndex: -1,
           status: "pass",
           message: msg,
+          network: hopNet,
         })
       }
       return out
@@ -613,6 +646,9 @@ function executeSend(
       transport.participantLabel?.(tgt.host, tgt.port)
         ?? state.sutNames[step.agent]
         ?? "B2BUA"
+    const sendNetwork: NetworkTag =
+      transport.participantNetwork?.(tgt.host, tgt.port)
+        ?? state.networkOf(step.agent)
     state.trace.push(defined({
       timestamp: clockTs,
       sentMs: clockTs,
@@ -624,6 +660,7 @@ function executeSend(
       status: sendStatus as TraceStatus,
       message: msg,
       durationMs,
+      network: sendNetwork,
     }) as TraceEntry)
 
     if (sendStatus === "fail") {
@@ -848,6 +885,11 @@ function executeExpect(
     // saw the message — not the moment executeExpect started polling.
     const netDelayR = transport.networkDelayMs ?? 0
     const arrivalTs = matchedArrivalMs ?? clockTs
+    const recvNetwork: NetworkTag =
+      (matchedRinfo !== undefined
+        ? transport.participantNetwork?.(matchedRinfo.ip, matchedRinfo.port)
+        : undefined)
+        ?? state.networkOf(step.agent)
     state.trace.push(defined({
       timestamp: arrivalTs,
       sentMs: arrivalTs - netDelayR,
@@ -859,6 +901,7 @@ function executeExpect(
       status: status as TraceStatus,
       message: matched,
       durationMs,
+      network: recvNetwork,
     }) as TraceEntry)
 
     if (assertionErrors.length > 0) {
@@ -1044,29 +1087,40 @@ function describeMessage(msg: SipMessage): string {
  * Build an ordered participant list from the trace.
  * Order: by first appearance in trace entries, preserving from→to ordering.
  * SUT participants with the same host:port are collapsed into one name.
+ *
+ * Each participant is tagged with its `network` (so the renderer can
+ * group / colour lanes by fabric). The network of a participant is
+ * inferred from the first trace entry that mentions it — both ends of
+ * a single hop always share a fabric, so either side gives the right
+ * answer.
  */
-function buildParticipantList(state: InterpreterState): string[] {
-  const seen = new Set<string>()
-  const ordered: string[] = []
+function buildParticipantList(state: InterpreterState): Participant[] {
+  const seen = new Map<string, NetworkTag>()
+  const ordered: Participant[] = []
 
   for (const entry of state.trace) {
     for (const name of [entry.from, entry.to]) {
       if (!seen.has(name)) {
-        seen.add(name)
-        ordered.push(name)
+        seen.set(name, entry.network)
+        ordered.push({ name, network: entry.network })
       }
     }
   }
 
-  // If trace is empty, fall back to agent names with SUT in the middle
+  // If trace is empty, fall back to agent names with SUT in the middle.
   if (ordered.length === 0) {
     const agentNames = Object.keys(state.agentInfos)
     const sutNamesSet = new Set(Object.values(state.sutNames))
-    // Interleave: first agent, then SUTs, then remaining agents
     if (agentNames.length > 0) {
-      ordered.push(agentNames[0]!)
-      for (const sut of sutNamesSet) ordered.push(sut)
-      for (let i = 1; i < agentNames.length; i++) ordered.push(agentNames[i]!)
+      const first = agentNames[0]!
+      ordered.push({ name: first, network: state.networkOf(first) })
+      // SUTs land on `ext` in slice 1; slice 2 will surface a `core` SUT
+      // participant via `transport.participantNetwork`.
+      for (const sut of sutNamesSet) ordered.push({ name: sut, network: DEFAULT_NETWORK })
+      for (let i = 1; i < agentNames.length; i++) {
+        const name = agentNames[i]!
+        ordered.push({ name, network: state.networkOf(name) })
+      }
     }
   }
 
@@ -1113,6 +1167,7 @@ function checkDanglingOffers(state: InterpreterState): Effect.Effect<void> {
         stepIndex,
         status: "unexpected",
         message: makePlaceholderRequest("SDP-ANSWER"),
+        network: state.networkOf(pending.party),
       })
     }
   })
@@ -1145,6 +1200,7 @@ function checkDanglingReliableProvisionals(state: InterpreterState): Effect.Effe
           stepIndex,
           status: "unexpected",
           message: makePlaceholderRequest("PRACK"),
+          network: state.networkOf(agent),
         })
       }
     }
@@ -1185,6 +1241,7 @@ function checkUnexpectedMessages(
         stepIndex,
         status: "unexpected",
         message: msg,
+        network: state.networkOf(agent),
       })
     }
 
@@ -1214,6 +1271,9 @@ function checkUnexpectedMessages(
         // via allowExtra("ACK")), but they do NOT fail the test.
         if (parseResult._tag === "Success" && isAllowedReemission(state, agentName, parseResult.success)) {
           const dD = transport.networkDelayMs ?? 0
+          const reemNet =
+            transport.participantNetwork?.(packet.rinfo.address, packet.rinfo.port)
+              ?? state.networkOf(agentName)
           state.trace.push({
             timestamp: packet.arrivalMs,
             sentMs: packet.arrivalMs - dD,
@@ -1224,6 +1284,7 @@ function checkUnexpectedMessages(
             stepIndex: -1,
             status: "pass",
             message: parseResult.success,
+            network: reemNet,
           })
           continue
         }
@@ -1248,6 +1309,9 @@ function checkUnexpectedMessages(
         // Trace: unexpected drained message
         if (parseResult._tag === "Success") {
           const dD2 = transport.networkDelayMs ?? 0
+          const drainNet =
+            transport.participantNetwork?.(packet.rinfo.address, packet.rinfo.port)
+              ?? state.networkOf(agentName)
           state.trace.push({
             timestamp: packet.arrivalMs,
             sentMs: packet.arrivalMs - dD2,
@@ -1258,6 +1322,7 @@ function checkUnexpectedMessages(
             stepIndex: drainStepIndex,
             status: "unexpected",
             message: parseResult.success,
+            network: drainNet,
           })
         }
       }

@@ -197,6 +197,32 @@ export interface SutTarget {
 }
 
 // ---------------------------------------------------------------------------
+// Network tag (slice 1 of REGISTER + double-stack proxy)
+// ---------------------------------------------------------------------------
+
+/**
+ * Identifies which signalling fabric a participant lives on.
+ *
+ *   - `"ext"`  — endpoint-facing fabric (Alice / Bob and the legacy
+ *                K8s-LB front-proxy ingress all live here).
+ *   - `"core"` — K8s-server-facing fabric used by the registrar proxy
+ *                slice 2 introduces. Slice 1 plumbs the type through
+ *                every layer; no production scenario uses `"core"` yet.
+ *
+ * Defaulted everywhere to `"ext"` so existing scenarios stay byte-
+ * identical until they explicitly opt in.
+ */
+export type NetworkTag = "ext" | "core"
+
+export const DEFAULT_NETWORK: NetworkTag = "ext"
+
+/** Participant entry in `ScenarioResult.participants` — name + network. */
+export interface Participant {
+  readonly name: string
+  readonly network: NetworkTag
+}
+
+// ---------------------------------------------------------------------------
 // Agent configuration
 // ---------------------------------------------------------------------------
 
@@ -218,6 +244,14 @@ export interface AgentConfig {
    * framework auto-generates a random Call-ID (existing behavior).
    */
   readonly callId?: string
+  /**
+   * Which signalling fabric this agent binds on. Defaults to `"ext"` so
+   * every existing scenario runs unchanged. Slice 2 of the REGISTER +
+   * double-stack proxy work wires `"core"` end-to-end; slice 1 only
+   * exposes the type through the harness so the API and trace shape
+   * are stable when slice 2 lands.
+   */
+  readonly network?: NetworkTag
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +381,13 @@ export interface TraceEntry {
   readonly status: TraceStatus
   readonly message: SipMessage
   readonly durationMs?: number
+  /**
+   * Which signalling fabric carried this packet. Both endpoints of a
+   * single hop always share a fabric, so a single tag suffices. Slice 1
+   * stamps every entry with `"ext"` (only fabric in use); slice 2 uses
+   * `"core"` for traffic on the K8s-facing side.
+   */
+  readonly network: NetworkTag
 }
 
 export interface ScenarioResult {
@@ -354,7 +395,13 @@ export interface ScenarioResult {
   readonly scenarioDescription?: string | undefined
   readonly stepResults: readonly StepResult[]
   readonly trace: readonly TraceEntry[]
-  readonly participants: readonly string[]
+  /**
+   * Ordered participant list for the sequence-diagram lifelines. Each
+   * entry carries its `network` so the HTML renderer can group / colour
+   * lanes by fabric. Order is "first appearance in the trace" so the
+   * SVG lays out columns in the order the conversation flows.
+   */
+  readonly participants: ReadonlyArray<Participant>
   readonly passed: number
   readonly failed: number
   readonly skipped: number
@@ -406,6 +453,13 @@ export interface TestTransport {
    * `<ip>:<port>` in that case.
    */
   readonly participantLabel?: (ip: string, port: number) => string | undefined
+  /**
+   * Optional: map an `(ip, port)` pair to a `NetworkTag`. Returns
+   * `undefined` for unknown addresses (the interpreter falls back to the
+   * default network). Slice 1 only exposes `"ext"`; slice 2 lets the
+   * registrar proxy expose participants on `"core"` as well.
+   */
+  readonly participantNetwork?: (ip: string, port: number) => NetworkTag | undefined
   /**
    * Optional: drain the simulated network's delivery trace at the end
    * of a scenario. Only implemented by the simulated backend; lets the

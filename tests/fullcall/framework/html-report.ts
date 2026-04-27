@@ -263,7 +263,11 @@ export function writeScenarioReport(
     ${statusBadge}
     <span class="summary">${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped</span>
     ${(textFilenames && textFilenames.length > 0) ? `<div class="txt-links">${textFilenames.map((f) => {
-      const label = f.replace(/\.txt$/, "").split(".").slice(1).join(".") || f
+      // `f` is either a flat name (`scenario.global.txt`) or a network-
+      // prefixed path (`ext/scenario.alice.txt`). Strip leading subdir
+      // and the scenario prefix so the link label stays terse.
+      const stripped = f.includes("/") ? f.slice(f.indexOf("/") + 1) : f
+      const label = stripped.replace(/\.txt$/, "").split(".").slice(1).join(".") || stripped
       return `<a href="${escapeHtml(f)}" title="${escapeHtml(f)}">${escapeHtml(label)}.txt</a>`
     }).join("")}</div>` : ""}
   </header>
@@ -328,9 +332,15 @@ export function writeIndexReport(
     const badge = status === "fail"
       ? `<span class="badge fail">FAIL</span>`
       : `<span class="badge pass">PASS</span>`
+    // Distinct networks the scenario touched — sorted so the column is
+    // stable across runs. A pure-`ext` scenario shows just `ext`; a
+    // dual-stack scenario shows both.
+    const networks = Array.from(new Set(r.participants.map((p) => p.network))).sort()
+    const networksLabel = networks.length > 0 ? networks.join(", ") : "—"
     return `<tr>
       <td>${badge}</td>
       <td><a href="${escapeHtml(r.scenarioName)}.html">${escapeHtml(r.scenarioName)}</a></td>
+      <td>${escapeHtml(networksLabel)}</td>
       <td>${r.passed}</td>
       <td>${r.failed}</td>
       <td>${r.skipped}</td>
@@ -385,7 +395,7 @@ export function writeIndexReport(
   <div class="summary">${results.length} scenarios | ${totalPassed} passed, ${totalFailed} failed, ${totalSkipped} skipped</div>
   <table>
     <thead>
-      <tr><th>Status</th><th>Scenario</th><th>Passed</th><th>Failed</th><th>Skipped</th></tr>
+      <tr><th>Status</th><th>Scenario</th><th>Networks</th><th>Passed</th><th>Failed</th><th>Skipped</th></tr>
     </thead>
     <tbody>
       ${rows.join("\n      ")}
