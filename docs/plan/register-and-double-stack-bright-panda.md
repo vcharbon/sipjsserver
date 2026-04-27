@@ -6,7 +6,32 @@
 |-------|------------------------------------------------------------------|--------|
 | 1     | Test stack: dual networks + per-network trace/report + register DSL | ✅ done |
 | 2     | Proxy: Registrar + RegisterStrategy + CoreToExtRoutingStrategy + dual-endpoint ProxyCore | ✅ done |
-| 3     | Integration tests under fake clock + reporting end-to-end        | ⏳ pending |
+| 3     | Integration tests under fake clock + reporting end-to-end        | ✅ done |
+
+### Slice 3 outcome (committed)
+
+Acceptance criteria all met:
+
+- `npm run typecheck`: zero errors, zero warnings.
+- `npm run test:fake`: **800 passed / 1 skipped** (797 prior + 3 new registrar e2e scenarios).
+- HTML reports under `test-results/fake-clock/registrarFrontProxy/` show two-lane diagrams with `ext` (gray) and `core` (amber) network band labels. Per-network TXT files written to `ext/` and `core/` subfolders.
+
+Reconciliation note: slice 1 had wired a *separate* simulated `SignalingNetwork` for `core` agents. Slice 2's `ProxyCore` registrar mode binds both endpoints on a *single* fabric (different IPs). Slice 3 collapsed slice 1's dual-fabric runtime to single-fabric — `agentConfig.network` now drives only the trace / report tag, not a different fabric instance. The "real-ext + simulated-core" hybrid the user originally flagged is preserved in the *type* surface but deferred until a deployment actually needs it.
+
+What landed:
+
+- New SUT layer [tests/support/registrarFrontProxyFakeStack.ts](tests/support/registrarFrontProxyFakeStack.ts) — composes `ProxyCore.Default` with `Registrar.inMemoryLayer` (single shared instance), `RegisterStrategy.inMemoryRegistrarLayer`, `CoreToExtRoutingStrategy.registrarLookupLayer`, and `RegistrarProxyConfig.layer({ coreBind, coreDestination })`. Fixed addresses: ext ingress `10.30.0.1:15060`, core ingress `10.40.0.1:15060`, core destination `10.40.0.10:5060`. Helpers `extIp(n)` / `coreIp(n)` for agent placement.
+- `Sut` type in [tests/fullcall/framework/types.ts](tests/fullcall/framework/types.ts) gained `"registrarFrontProxy"`. Added to `ALL_SUTS`; deliberately excluded from `DEFAULT_APPLICABLE_SUTS` so legacy scenarios don't try to run on a SUT without a B2BUA.
+- [tests/fullcall/framework/simulated-backend.ts](tests/fullcall/framework/simulated-backend.ts) — new SUT branch instantiates the registrar fake-stack and seeds participant labels `proxy(ext)` (network=ext) and `proxy(core)` (network=core) so the renderer paints both lanes correctly. `setup()` materialises only `ProxyCore` (no B2BUA/SipRouter/CallState).
+- [tests/support/harness.ts](tests/support/harness.ts) — per-agent `targetFor` for the registrar SUT routes `network: "core"` agents to the proxy's core ingress; ext agents keep the ext ingress as the default destination.
+- Three scenarios under [tests/scenarios/registrar/](tests/scenarios/registrar/), all `.runOn(["registrarFrontProxy"])`:
+  - [register-happy-path.ts](tests/scenarios/registrar/register-happy-path.ts) — Alice (ext) `agent.register()`; expects 200 OK with echoed Contact at her IP and `Expires: 3600`.
+  - [deregister-via-expires-zero.ts](tests/scenarios/registrar/deregister-via-expires-zero.ts) — Alice REGISTER → re-REGISTER `Expires: 0` (200 OK on both); core agent INVITE for `sip:alice@…` → 404 Not Found.
+  - [ttl-expiry-under-testclock.ts](tests/scenarios/registrar/ttl-expiry-under-testclock.ts) — Alice REGISTER (default 3600s) → `s.pause(3601s)` → core agent INVITE for `sip:alice@…` → 404 Not Found via the lazy-expiry sweep.
+- [tests/fullcall/e2e-fake-clock.test.ts](tests/fullcall/e2e-fake-clock.test.ts) — three new `it.effect` cases that run only on the `registrarFrontProxy` SUT.
+- [tests/fullcall/framework/live-backend.ts](tests/fullcall/framework/live-backend.ts) — also reconciled to single-fabric for symmetry; drops the lazy second `SignalingNetwork.real`.
+
+The headline bidirectional flow (Alice → core → proxy(bob) → Bob with full INVITE/200/ACK/BYE round-trip) the original plan flagged as a v1.1 follow-up remains deferred — slice 3 covers REGISTER + the rejection paths but not a successful cross-fabric call. That's the natural next ticket.
 
 ### Slice 2 outcome (committed)
 

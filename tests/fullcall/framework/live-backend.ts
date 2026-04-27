@@ -15,7 +15,7 @@
  * automatically when the surrounding test scope closes.
  */
 
-import { Effect, Layer, ServiceMap } from "effect"
+import { Effect } from "effect"
 import type { AgentInfo, NetworkTag, TestTransport } from "./types.js"
 import { DEFAULT_NETWORK, TransportError } from "./types.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
@@ -49,30 +49,20 @@ export function createLiveTransport(opts?: {
   return {
     setup: (agentConfigs, _b2buaTarget) =>
       Effect.gen(function* () {
-        const extNetwork = yield* SignalingNetwork
+        const network = yield* SignalingNetwork
         const agentInfos: Record<string, AgentInfo> = {}
-
-        const needsCore = Object.values(agentConfigs).some(
-          (c) => (c.network ?? DEFAULT_NETWORK) === "core",
-        )
-        let coreNetwork: SignalingNetwork["Service"] | undefined
-        if (needsCore) {
-          const coreCtx = yield* Layer.build(SignalingNetwork.real)
-          coreNetwork = ServiceMap.get(coreCtx, SignalingNetwork)
-        }
 
         for (const [name, config] of Object.entries(agentConfigs)) {
           const requestedIp = config.ip ?? bindIp
           const agentNetwork: NetworkTag = config.network ?? DEFAULT_NETWORK
-          const fabric = agentNetwork === "core" ? coreNetwork : extNetwork
-          if (fabric === undefined) {
-            return yield* new TransportError({
-              message: `Agent "${name}" requested network "${agentNetwork}" but the fabric was not materialized`,
-            })
-          }
+          // Slice 3 reconciliation: live-backend uses a single
+          // `SignalingNetwork.real` fabric. The "core" agents are routed
+          // via distinct IP subnets, not via a separate fabric. Mixing
+          // real-ext + simulated-core is a future requirement; document
+          // it via the `network` tag on the trace until that lands.
           // Port 0 = let the OS pick. The real endpoint reports the
           // actual bound port via endpoint.localAddress.
-          const endpoint = yield* fabric.bindUdp({
+          const endpoint = yield* network.bindUdp({
             ip: requestedIp,
             port: config.port ?? 0,
             queueMax: AGENT_QUEUE_MAX,

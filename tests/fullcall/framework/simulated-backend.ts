@@ -12,7 +12,7 @@
  * real UDP stack would expose them.
  */
 
-import { Effect, Layer, ServiceMap } from "effect"
+import { Effect } from "effect"
 import type { AgentInfo, NetworkTag, TestTransport } from "./types.js"
 import { DEFAULT_NETWORK } from "./types.js"
 import { pumpAll } from "../../support/pumpAll.js"
@@ -40,9 +40,14 @@ import {
   proxyB2bFakeStackLayer,
   sipproxyHAFakeStackLayer,
 } from "../../support/proxyB2bFakeStack.js"
+import {
+  CORE_INGRESS as REGISTRAR_CORE_INGRESS,
+  EXT_INGRESS as REGISTRAR_EXT_INGRESS,
+  registrarFrontProxyFakeStackLayer,
+} from "../../support/registrarFrontProxyFakeStack.js"
 import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
 
-export type Sut = "b2bonly" | "proxy+b2b" | "sipproxyHA"
+export type Sut = "b2bonly" | "proxy+b2b" | "sipproxyHA" | "registrarFrontProxy"
 
 // ---------------------------------------------------------------------------
 // Test rule registry: disable-on-env + handle-firing tracker
@@ -164,7 +169,9 @@ export function createSimulatedTransport(opts?: {
       ? sipproxyHAFakeStackLayer({ config, handlers: buildTestHandlers() })
       : sut === "proxy+b2b"
         ? proxyB2bFakeStackLayer({ config })
-        : fakeStackLayer({ config })
+        : sut === "registrarFrontProxy"
+          ? registrarFrontProxyFakeStackLayer({ config })
+          : fakeStackLayer({ config })
 
   const mockState: MockTransportState = {
     agents: new Map(),
@@ -193,6 +200,17 @@ export function createSimulatedTransport(opts?: {
     participantLabels.set(workerKey, "worker-1")
     participantNetworks.set(proxyKey, "ext")
     participantNetworks.set(workerKey, "ext")
+  } else if (sut === "registrarFrontProxy") {
+    // Registrar mode: the proxy participates on BOTH fabrics. Seed
+    // distinct labels so the report renderer can identify the same
+    // logical proxy at two different (ip,port) pairs and paint each
+    // lane with the corresponding network.
+    const extKey = labelKey(REGISTRAR_EXT_INGRESS.host, REGISTRAR_EXT_INGRESS.port)
+    const coreKey = labelKey(REGISTRAR_CORE_INGRESS.host, REGISTRAR_CORE_INGRESS.port)
+    participantLabels.set(extKey, "proxy(ext)")
+    participantLabels.set(coreKey, "proxy(core)")
+    participantNetworks.set(extKey, "ext")
+    participantNetworks.set(coreKey, "core")
   } else if (sut === "sipproxyHA") {
     const proxyKey = labelKey(HA_PROXY_ADDR.host, HA_PROXY_ADDR.port)
     participantLabels.set(proxyKey, "proxy")
@@ -232,29 +250,16 @@ export function createSimulatedTransport(opts?: {
         const network = yield* SignalingNetwork
         mockState.extNetwork = network
 
-        // Lazily materialize a second simulated SignalingNetwork for the
-        // `core` fabric IFF any agent declared `network: "core"`. Slice 1:
-        // no production code yet binds on this fabric — agents on it just
-        // exchange packets among themselves; the fabric's `drainTrace`
-        // still flows through the report path. Slice 2 will bind the
-        // registrar proxy's K8s-facing endpoint here so the same harness
-        // exercises the cross-fabric forward path.
-        //
-        // Build the layer with `Layer.build` so its scoped resources hang
-        // off the *surrounding* scope (the test runner's outer
-        // `runScoped`) — same lifetime as `extNetwork`. An `Effect.scoped`
-        // wrapper here would close the fabric the moment setup returned.
-        const needsCore = Object.values(agentConfigs).some(
-          (c) => (c.network ?? DEFAULT_NETWORK) === "core",
-        )
-        let coreNetwork: SignalingNetwork["Service"] | undefined
-        if (needsCore) {
-          const coreCtx = yield* Layer.build(
-            SignalingNetwork.simulated({ transitDelayMs: DEFAULT_TRANSIT_DELAY_MS }),
-          )
-          coreNetwork = ServiceMap.get(coreCtx, SignalingNetwork)
-          mockState.coreNetwork = coreNetwork
-        }
+        // Slice 3 reconciliation: the registrar proxy SUT binds BOTH its
+        // ext and core endpoints on the single layer-provided
+        // `SignalingNetwork`, with the "fabric" boundary encoded in IP
+        // subnets (10.30/10.40, like sipproxyHA's encoding). So core
+        // agents share the same fabric as ext agents — the
+        // `agentConfig.network` tag is purely informational for trace /
+        // report partitioning. A future "real-ext + simulated-core"
+        // hybrid would re-introduce a second materialised
+        // `SignalingNetwork`; that's out of scope until a deployment
+        // actually needs it.
 
         if (sut === "sipproxyHA") {
           // The sipproxyHA SUT layer auto-starts both worker
@@ -265,6 +270,14 @@ export function createSimulatedTransport(opts?: {
           // instances inside the SUT layer), so we don't yield them
           // for verifyCleanState — sipproxyHA scenarios use
           // `skipFinalSweep` for that reason.
+          yield* ProxyCore
+        } else if (sut === "registrarFrontProxy") {
+          // Registrar mode: ProxyCore-only. No B2BUA, no SipRouter,
+          // no CallState — force-materialise the proxy so its dual-
+          // endpoint ingress fibers (ext + core) bind on the shared
+          // simulated fabric. Scenarios opt into `skipFinalSweep` so
+          // the harness doesn't try to verifyCleanState on
+          // CallState/TimerService that don't exist in this SUT.
           yield* ProxyCore
         } else {
           // Legacy SUTs (b2bonly, proxy+b2b): the worker's SipRouter
@@ -298,17 +311,8 @@ export function createSimulatedTransport(opts?: {
           const ip = agentConfig.ip ?? "127.0.0.1"
           const port = agentConfig.port ?? portCounter++
           const agentNetwork: NetworkTag = agentConfig.network ?? DEFAULT_NETWORK
-          const fabric =
-            agentNetwork === "core"
-              ? coreNetwork
-              : network
-          if (fabric === undefined) {
-            return yield* new TransportError({
-              message: `Agent "${name}" requested network "${agentNetwork}" but the fabric was not materialized`,
-            })
-          }
 
-          const endpoint = yield* fabric.bindUdp({
+          const endpoint = yield* network.bindUdp({
             ip,
             port,
             queueMax: AGENT_QUEUE_MAX,

@@ -25,6 +25,10 @@ import { formatReport } from "../fullcall/framework/report.js"
 import { writeScenarioReport, writeIndexReport } from "../fullcall/framework/html-report.js"
 import { writeTextReports } from "../fullcall/framework/text-report.js"
 import { HA_PROXY_ADDR } from "./proxyB2bFakeStack.js"
+import {
+  CORE_INGRESS as REGISTRAR_CORE_INGRESS,
+  EXT_INGRESS as REGISTRAR_EXT_INGRESS,
+} from "./registrarFrontProxyFakeStack.js"
 
 export type { Sut }
 
@@ -127,11 +131,14 @@ export function createSimulatedRunner(opts?: {
   // SUT ingress address — used by scenario steps that send their
   // initial INVITE without specifying a destination explicitly. The
   // sipproxyHA SUT exposes its proxy on a non-loopback subnet IP; the
-  // legacy SUTs keep 127.0.0.1.
+  // registrarFrontProxy SUT exposes its ext-side ingress on a 10.30
+  // subnet IP; the legacy SUTs keep 127.0.0.1.
   const target =
     sut === "sipproxyHA"
       ? { host: HA_PROXY_ADDR.host, port: HA_PROXY_ADDR.port }
-      : { host: "127.0.0.1", port: sipPort }
+      : sut === "registrarFrontProxy"
+        ? { host: REGISTRAR_EXT_INGRESS.host, port: REGISTRAR_EXT_INGRESS.port }
+        : { host: "127.0.0.1", port: sipPort }
 
   return (scenario: Scenario): Effect.Effect<void> => {
     // Provide the simulated stack at the *outer* runScoped scope — NOT
@@ -139,12 +146,26 @@ export function createSimulatedRunner(opts?: {
     // resource; if we provided the layer only around setup, its scope
     // would close the moment setup returned and the bound endpoint
     // would vanish out from under every agent's subsequent `send`.
+    //
+    // Per-agent target resolution (slice 3 of REGISTER + double-stack):
+    // for the registrar SUT, agents on `network: "core"` send to the
+    // proxy's core-side ingress, not the ext-side default. Other SUTs
+    // route every agent to the same SUT ingress.
+    const targetFor: ((agent: string) => { host: string; port: number }) | undefined =
+      sut === "registrarFrontProxy"
+        ? (agentName) => {
+            const agentNet = scenario.agents[agentName]?.network
+            return agentNet === "core"
+              ? { host: REGISTRAR_CORE_INGRESS.host, port: REGISTRAR_CORE_INGRESS.port }
+              : target
+          }
+        : undefined
     const program = Effect.gen(function* () {
       const result = yield* executeScenario(
         scenario,
         transport,
         target,
-        undefined,
+        targetFor,
         clockSleep
       )
       console.log(formatReport(result))

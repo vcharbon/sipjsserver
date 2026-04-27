@@ -279,23 +279,36 @@ export type ScenarioTier = "short" | "medium" | "long"
 /**
  * SUT topologies the matrix-driven runner can exercise.
  *
- *   - `b2bonly`     — single B2BUA, no proxy.
- *   - `proxy+b2b`   — `ProxyCore` in front of one B2BUA worker.
- *   - `sipproxyHA`  — `ProxyCore` in front of TWO B2BUA workers, with
- *                     `HealthProbe` wired so workers admit as `unknown`
- *                     and transition to `alive` after the first OPTIONS
- *                     round-trip. Used for HA / takeover scenarios.
+ *   - `b2bonly`              — single B2BUA, no proxy.
+ *   - `proxy+b2b`            — `ProxyCore` in front of one B2BUA worker.
+ *   - `sipproxyHA`           — `ProxyCore` in front of TWO B2BUA workers,
+ *                              with `HealthProbe` wired so workers admit
+ *                              as `unknown` and transition to `alive`
+ *                              after the first OPTIONS round-trip. Used
+ *                              for HA / takeover scenarios.
+ *   - `registrarFrontProxy`  — `ProxyCore` in registrar mode (dual ext +
+ *                              core endpoints, in-memory `Registrar`,
+ *                              `inMemoryRegistrar` + `registrarLookup`
+ *                              strategies). No B2BUA. Slice 3 of the
+ *                              REGISTER + double-stack work; scenarios
+ *                              opt in via `.runOn(["registrarFrontProxy"])`.
  *
  * `ALL_SUTS` is the full matrix iterated by `e2e-fake-clock.test.ts`.
  * `DEFAULT_APPLICABLE_SUTS` is what a scenario opts into by default
- * when no explicit `.runOn(...)` is supplied — sipproxyHA is excluded
- * because legacy scenarios hardcode the loopback ingress address and
- * would not reach the subnet-addressed HA proxy. HA-specific
- * scenarios opt into `sipproxyHA` via `.runOn(["sipproxyHA"])`.
+ * when no explicit `.runOn(...)` is supplied — sipproxyHA and
+ * registrarFrontProxy are excluded because legacy scenarios hardcode
+ * the loopback ingress address (and registrarFrontProxy doesn't run a
+ * B2BUA at all). Topology-specific scenarios opt in via
+ * `.runOn([...])`.
  */
-export type Sut = "b2bonly" | "proxy+b2b" | "sipproxyHA"
+export type Sut = "b2bonly" | "proxy+b2b" | "sipproxyHA" | "registrarFrontProxy"
 
-export const ALL_SUTS: readonly Sut[] = ["b2bonly", "proxy+b2b", "sipproxyHA"]
+export const ALL_SUTS: readonly Sut[] = [
+  "b2bonly",
+  "proxy+b2b",
+  "sipproxyHA",
+  "registrarFrontProxy",
+]
 
 export const DEFAULT_APPLICABLE_SUTS: readonly Sut[] = ["b2bonly", "proxy+b2b"]
 

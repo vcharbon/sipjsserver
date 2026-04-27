@@ -30,6 +30,9 @@ import { retransmit200 } from "../scenarios/retransmit-200.js"
 import { keepaliveHappy } from "../scenarios/keepalive-happy.js"
 import { keepalive481 } from "../scenarios/keepalive-481.js"
 import { twoCallsRoutedToTwoWorkers } from "../scenarios/ha/two-calls-routed-to-two-workers.js"
+import { registerHappyPath } from "../scenarios/registrar/register-happy-path.js"
+import { deregisterViaExpiresZero } from "../scenarios/registrar/deregister-via-expires-zero.js"
+import { ttlExpiryUnderTestClock } from "../scenarios/registrar/ttl-expiry-under-testclock.js"
 import { createSimulatedRunner, flushIndexReport } from "../support/harness.js"
 import { ALL_SUTS } from "./framework/types.js"
 
@@ -129,6 +132,33 @@ for (const sut of ALL_SUTS) {
       it.effect(
         "HA: two calls routed to two workers (alice-BYE + bob-BYE)",
         () => run(twoCallsRoutedToTwoWorkers.toScenario()),
+        { timeout: 60_000 },
+      )
+    }
+    if (registerHappyPath.appliesTo(sut)) {
+      // registrarFrontProxy-only: Alice REGISTERs and gets a 200 OK
+      // with default Expires=3600.
+      it.effect(
+        "registrar: REGISTER happy path (200 OK with Contact + Expires)",
+        () => run(registerHappyPath.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
+    if (deregisterViaExpiresZero.appliesTo(sut)) {
+      // registrarFrontProxy-only: REGISTER → re-REGISTER Expires=0 →
+      // core-side INVITE for alice gets 404.
+      it.effect(
+        "registrar: deregister via Expires=0 (core INVITE → 404)",
+        () => run(deregisterViaExpiresZero.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
+    if (ttlExpiryUnderTestClock.appliesTo(sut)) {
+      // registrarFrontProxy-only: REGISTER → TestClock.adjust(3601s) →
+      // core-side INVITE for alice gets 404 from the lazy-expiry sweep.
+      it.effect(
+        "registrar: TTL expiry under TestClock (core INVITE → 404)",
+        () => run(ttlExpiryUnderTestClock.toScenario()),
         { timeout: 60_000 },
       )
     }
