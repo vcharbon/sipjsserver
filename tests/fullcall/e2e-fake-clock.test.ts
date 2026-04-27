@@ -33,6 +33,8 @@ import { twoCallsRoutedToTwoWorkers } from "../scenarios/ha/two-calls-routed-to-
 import { registerHappyPath } from "../scenarios/registrar/register-happy-path.js"
 import { deregisterViaExpiresZero } from "../scenarios/registrar/deregister-via-expires-zero.js"
 import { ttlExpiryUnderTestClock } from "../scenarios/registrar/ttl-expiry-under-testclock.js"
+import { extCallToCoreDestination } from "../scenarios/registrar/ext-call-to-core-destination.js"
+import { coreCallToRegisteredExt } from "../scenarios/registrar/core-call-to-registered-ext.js"
 import { createSimulatedRunner, flushIndexReport } from "../support/harness.js"
 import { ALL_SUTS } from "./framework/types.js"
 
@@ -160,6 +162,26 @@ for (const sut of ALL_SUTS) {
         "registrar: TTL expiry under TestClock (core INVITE → 404)",
         () => run(ttlExpiryUnderTestClock.toScenario()),
         { timeout: 60_000 },
+      )
+    }
+    if (extCallToCoreDestination.appliesTo(sut)) {
+      // registrarFrontProxy-only: Alice (ext) → INVITE → proxy →
+      // bobCore (hardcoded at coreDestination) → 200/ACK/BYE/200.
+      // Exercises the headline ext→core forwarding path.
+      it.effect(
+        "registrar: ext→core call (alice → proxy → bobCore@coreDestination)",
+        () => run(extCallToCoreDestination.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
+    if (coreCallToRegisteredExt.appliesTo(sut)) {
+      // registrarFrontProxy-only: bobExt registers → aliceCore (core)
+      // INVITE for sip:bob → proxy registrar lookup → bobExt → 200/
+      // ACK/BYE/200. Exercises the headline core→ext forwarding path.
+      it.effect(
+        "registrar: core→ext call (aliceCore → proxy registrar lookup → bobExt)",
+        () => run(coreCallToRegisteredExt.toScenario()),
+        { timeout: 30_000 },
       )
     }
   })

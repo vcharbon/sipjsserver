@@ -611,8 +611,16 @@ function executeSend(
       }
     }
 
-    // Confirm Call-ID on first sent request (A-side agents use their own Call-ID)
-    if (msg.type === "request" && !dialogState.callIdConfirmed) {
+    // Confirm Call-ID on first sent dialog-establishing request — that pins
+    // the A-side agent's Call-ID for the rest of the dialog. Out-of-dialog
+    // sends (REGISTER, OPTIONS) MUST NOT pin it: if they did, an agent that
+    // registers and then later acts as a UAS for an unrelated incoming
+    // INVITE would reject the new dialog's Call-ID via the validator.
+    if (
+      msg.type === "request" &&
+      msg.method === "INVITE" &&
+      !dialogState.callIdConfirmed
+    ) {
       dialogState.callIdConfirmed = true
     }
 
@@ -999,7 +1007,13 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
 
   if (msg.type === "response") {
     const toTag = msg.parsed.to.tag
-    if (toTag && !ds.remoteTag) {
+    // Only adopt remoteTag from responses to dialog-establishing requests
+    // (RFC 3261 §12.1: INVITE establishes a dialog; REGISTER/OPTIONS/MESSAGE
+    // do not). Without this guard the To-tag stamped by a registrar on the
+    // 200 OK to REGISTER would leak into a subsequent out-of-dialog INVITE
+    // sent by the same agent.
+    const cseqMethod = msg.parsed.cseq.method
+    if (toTag && !ds.remoteTag && cseqMethod === "INVITE") {
       ds.remoteTag = toTag
     }
     // Also adopt Call-ID from first response if not already set from an INVITE
@@ -1007,7 +1021,11 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
     // No need to change — we keep our own Call-ID
   } else {
     const fromTag = msg.parsed.from.tag
-    if (fromTag && !ds.remoteTag) {
+    // UAS side: only adopt remoteTag when receiving a dialog-establishing
+    // INVITE. A prior out-of-dialog REGISTER/OPTIONS round-trip on the same
+    // agent would otherwise have already populated `remoteTag` and the
+    // `!ds.remoteTag` guard would block the correct INVITE-side capture.
+    if (fromTag && !ds.remoteTag && msg.method === "INVITE") {
       ds.remoteTag = fromTag
     }
   }
@@ -1042,9 +1060,20 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
     }
   }
 
-  // Track remote Contact URI for in-dialog request routing
+  // Track remote Contact URI for in-dialog request routing.
+  // Per RFC 3261 §12.2.1.1, the dialog's remote target is the Contact of the
+  // dialog-establishing INVITE (UAC reads from the response, UAS from the
+  // request). Out-of-dialog REGISTER/OPTIONS responses also carry a Contact
+  // (the registrar echoes the binding, the UA advertises its own) but those
+  // must NOT seed the dialog target — otherwise a subsequent in-dialog
+  // request on the same agent would address its own contact instead of the
+  // peer's.
   const contactUri = msg.parsed.contact?.uri
-  if (contactUri && !ds.remoteContact) {
+  const cseqForContact = msg.type === "response" ? msg.parsed.cseq.method : undefined
+  const isDialogEstablishingMessage =
+    (msg.type === "response" && cseqForContact === "INVITE") ||
+    (msg.type === "request" && msg.method === "INVITE")
+  if (contactUri && !ds.remoteContact && isDialogEstablishingMessage) {
     ds.remoteContact = contactUri
   }
 
@@ -1055,8 +1084,10 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
   // dialog-creating message captures its route set. UAC = first dialog-
   // creating message is a response (the 200 OK to its outgoing INVITE).
   // UAS = first dialog-creating message is a request (the incoming INVITE).
+  // Gate on dialog-establishing methods so a Record-Route reflected on a
+  // REGISTER/OPTIONS response can't seed an unrelated dialog's route set.
   if (ds.routeSet.length === 0) {
-    if (msg.type === "response") {
+    if (msg.type === "response" && msg.parsed.cseq.method === "INVITE") {
       // UAC side: reverse received order so routeSet[0] is the UAC's first
       // hop downstream (the proxy that should be the top Route on outgoing
       // in-dialog requests).
