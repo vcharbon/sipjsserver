@@ -1,0 +1,718 @@
+# Call Cache Backup Mechanism
+
+**Status:** Slice 0 spec for the data-replication-layer refactor
+([plan](../plan/data-replication-layer-refactor-starry-cocke.md)).
+This document is the *contract* for slices 1–6. When the implementation
+disagrees with what is written here, this doc wins; if reality forces a
+deviation, the doc is updated in the same slice.
+
+**Audience:** anyone touching `src/cache/`, `src/call/CallState.ts`,
+`src/replication/`, or worker-lifecycle code; oncall operators reading
+the metrics.
+
+**Companion docs:**
+- [resilience-model.md](../sip-front-proxy/resilience-model.md) — the front-proxy side of the same picture (worker selection, cookie, OPTIONS, drain).
+- [TODO_doubleWrite.md](../todos/TODO_doubleWrite.md) — historical decision log (D-numbers cited below) for the dual-write design this refactor replaces.
+- [CallModel.md](../CallModel.md) — Call/Leg/Dialog data model that is being persisted.
+
+---
+
+## 1. What problem this layer solves
+
+A B2BUA worker pod can die at any time (K8s eviction, node drain, OOM, crash). When it does, the calls that worker was handling must be **recoverable** by another worker so that:
+
+- In-dialog SIP requests (re-INVITE, UPDATE, INFO, BYE, REFER) that the front proxy reroutes to a surviving worker land on a worker that *has the call's state* and can answer correctly. RFC 3261 §12.2.2 says the fall-back is `481 Call/Transaction Does Not Exist`; we want 481 to be the rare exception, not the common path.
+- The recovering worker, when it restarts, can pick up calls it owned before the crash without losing dialogs the cluster successfully kept alive while it was down.
+
+The mechanism described here is **not** a general-purpose distributed database. It is purpose-built around three SIP timer constraints:
+
+| Constraint                                     | Source                                       | Consequence for this design                                              |
+|------------------------------------------------|----------------------------------------------|--------------------------------------------------------------------------|
+| Replication latency must be sub-second         | RFC 3261 Timer T1 (500 ms), T2 (4 s)          | No synchronous cross-pod ack on the SIP hot path. Long-poll, not 2PC.    |
+| Calls live up to 180 s in INVITE state         | RFC 3261 Timer C                             | K8s `terminationGracePeriodSeconds` ≥ 200 s; in-flight calls drain.      |
+| Dialog can live for hours (UPDATE refreshes)   | RFC 3261 §13                                 | TTL on cache entries must exceed inactivity window; refresh is a write.  |
+
+Redis async replication was rejected (memory note `project_ha_backup_design.md`) because its consistency profile cannot be bounded against these timers. The model below is a per-call **dual-write across two Redis sidecars** (one per worker) coordinated by the workers themselves.
+
+---
+
+## 2. Glossary
+
+| Term                | Meaning                                                                                          |
+|---------------------|--------------------------------------------------------------------------------------------------|
+| **Worker (N, P, Q)**| A B2BUA pod. Each has its own Redis sidecar pod.                                                 |
+| **Sidecar**         | A Redis instance colocated with one worker, in-memory only (no AOF, no RDB).                     |
+| **Call's primary** | The worker the front proxy stamped as `w_pri` in the stickiness cookie at INVITE time. Per-call. |
+| **Call's backup**  | The worker stamped as `w_bak` in the cookie. Per-call; may differ from one call to the next.     |
+| **`callRef`**       | Deterministic call identifier derived from a-leg `Call-ID + From-tag`. The atomic unit of state. |
+| **`epoch`**         | Monotonic counter incremented on each worker process boot. Identifies a worker incarnation.      |
+| **`seq`**           | Monotonic counter per `(self, peer)` direction; incremented inside the atomic Lua write.         |
+| **Propagate stream**| A Redis sorted set on a worker's sidecar listing callRefs whose state needs the named peer to pull. |
+| **Ready gate**      | Boot-time handshake that drains relevant propagate streams from peers before flipping `ready=true`. |
+
+---
+
+## 3. End-to-end picture
+
+```
+   ┌────────── Worker N (pod) ──────────┐         ┌────────── Worker B (pod) ──────────┐
+   │                                    │         │                                    │
+   │  Effect runtime (CallState, …)     │         │  Effect runtime (CallState, …)     │
+   │            │                       │         │            │                       │
+   │            │ writes via            │         │            │                       │
+   │            ▼ AtomicWriter          │         │            │                       │
+   │     ┌──────────────┐               │         │            │                       │
+   │     │  Redis side- │               │         │     ┌──────────────┐               │
+   │     │  car (in-mem)│               │         │     │  Redis side- │               │
+   │     │              │               │         │     │  car (in-mem)│               │
+   │     │ pri:N:call:* │               │         │     │ pri:B:call:* │               │
+   │     │ bak:?:call:* │               │         │     │ bak:N:call:* │◀── populated  │
+   │     │ idx:*        │               │         │     │ idx:*        │   by ReplPuller│
+   │     │ propagate:B  │ ─── ZADD ─┐   │         │     │ propagate:N  │               │
+   │     │ epoch:N      │           │   │         │     │ epoch:B      │               │
+   │     └──────────────┘           │   │         │     └──────────────┘               │
+   │            ▲                   │   │         │            ▲                       │
+   │            │                   │   │         │            │                       │
+   │     ReplLog HTTP (long-poll)◀──┘   │         │     ReplPuller (long-poll client)──┼──── HTTP ────┐
+   │     GET /replog?caller=B&since=Y   │         │                                    │              │
+   │                                    │         │                                    │              │
+   └────────────────────────────────────┘         └────────────────────────────────────┘              │
+                                                                                                      │
+                                                          (B's puller GETs from N's ReplLog)──────────┘
+```
+
+Symmetric in the other direction: B has its own `propagate:N` stream that N's puller consumes from B.
+
+---
+
+## 4. Storage layout
+
+Every worker N's sidecar holds the following key families. **Only N writes to N's sidecar.** Other workers read from it via the HTTP `/replog` endpoint that N's process serves; they never touch N's Redis directly.
+
+| Key pattern                  | Type        | Lifetime                         | Purpose                                                                           |
+|------------------------------|-------------|----------------------------------|-----------------------------------------------------------------------------------|
+| `pri:N:call:{callRef}`       | string (JSON)| call-ttl while live; **`DELETE_RETENTION_SEC` (≈300 s) as tombstone after delete** | Authoritative copy for calls N is the cookie's primary on. **Source of truth.** |
+| `bak:P:call:{callRef}`       | string (JSON)| call-ttl while live; tombstone retention on delete | N's backup-role copy of calls primary P owns. Used on takeover.                  |
+| `idx:{indexKey}`             | string (callRef)| call-ttl; **DEL'd at delete-time** (NO tombstone — indexes are recoverable from the tombstone JSON if needed) | Index → callRef. Index keys come from `callIndexKeys()` in CallModel.ts. |
+| `propagate:{peer}`           | sorted set  | sliding TTL on whole set         | "Hey peer, these callRefs of mine changed; come pull them." Member=callRef, score=seq. |
+| `propagate_seq:{peer}`       | counter (INT)| sliding TTL                      | INCR'd inside the Lua script; produces the score for `propagate:{peer}`.         |
+| `epoch:N`                    | string (INT) | persists for sidecar lifetime    | Worker process boot counter. Read from Lua, sent to consumers, drives full-resync. |
+| `replpos:{peer}`             | hash         | persists for sidecar lifetime    | N's puller bookkeeping: `{epoch, lastSeq}` it last consumed from peer.           |
+
+### 4.1 Why `idx:` is flat, not partitioned
+
+Index keys come from `callIndexKeys(call)` ([src/call/CallModel.ts:715](../../src/call/CallModel.ts#L715)) — leg-tag pairs, b-leg call-IDs, dialog remote tags, optional callback context. Each *uniquely identifies* a single call by SIP-protocol construction (Call-ID + tag is dialog-unique per RFC 3261 §12). So a flat namespace is safe: there is never a scenario where the same `idx:` value should map to two different callRefs.
+
+Index lookups happen on inbound SIP requests where the worker has only a Call-ID/tag and needs the callRef. Keeping the namespace flat lets the worker do a single `GET idx:leg:{callId}|{fromTag}` regardless of whether the call is one we own (`pri:`) or one we hold as backup (`bak:`).
+
+### 4.2 The propagate sorted set
+
+`propagate:{peer}` uses `ZADD` with `score=seq, member=callRef`. ZADD on an existing member **updates the score in place**, not appending — this gives us automatic compaction. 50 writes to the same callRef result in *one* member with the latest seq. Memory grows with active calls, not with write rate.
+
+The whole set has a sliding TTL bumped on every write (`EXPIRE propagate:{peer} long_ttl`). When the worker has had no calls in either direction with `peer` for the configured idle window, the whole set drops. This bounds the index of "peers I have any business with" without explicit cleanup.
+
+### 4.3 How deletes propagate (short-TTL tombstone)
+
+Deletes **are** announced in the propagate stream — same atomic Lua call as a put or refresh. The mechanism is a **short-lived tombstone** on the call key, not a hard `DEL`:
+
+- At delete time, the Lua script overwrites `pri:N:call:{callRef}` with a tombstone JSON value (`{"_deleted": true, "indexes": [...the call's index keys at delete time]}`) and sets a short TTL `DELETE_RETENTION_SEC` (default ≈ 300 s).
+- The same Lua `DEL`s every `idx:{key}` for that call (indexes don't need a tombstone — they are recoverable from the tombstone JSON's `indexes` field if a backup needs to clean its own index pointers).
+- The same Lua does the standard `ZADD propagate:{peer}` so the backup's puller sees the change.
+- After `DELETE_RETENTION_SEC`, the tombstone auto-expires; the periodic sweep removes the now-orphaned propagate entry.
+
+**Why a finite tombstone retention works:**
+
+If the backup pulls within `DELETE_RETENTION_SEC` (typical case — long-poll lag is sub-second), it dereferences the callRef, sees `_deleted: true`, removes its own `bak:P:call:{callRef}` plus the indexes listed in the tombstone JSON. Convergence within seconds.
+
+If the backup is down for longer than `DELETE_RETENTION_SEC` and misses the tombstone, the assumption is that **the backup has restarted with an empty Redis sidecar by the time it returns**. In that case the backup's epoch will mismatch on its first pull, the `replpos` is reset to `(0, 0)`, and the puller does a full resync against the primary's *current* state — which no longer mentions the deleted call. The deleted call is simply absent from the resync set; nothing to do.
+
+The `DELETE_RETENTION_SEC` is not chosen to cover hours-long downtime — it is the cooldown after which we assume "if the backup hasn't picked this up by now, it's gone and will full-resync on its way back." 5 minutes is a comfortable margin: well over the long-poll heartbeat cadence (10 s) and reconnect ceiling (25 s), small enough that orphaned tombstones don't accumulate.
+
+**TTL alignment is still the safety net** for the case where the propagate-side delete genuinely doesn't reach the backup (network partition over the retention window, then backup recovers from disk after the partition heals): the backup's `bak:P:call:{callRef}` stops being refreshed when the primary stops writing, and expires within one call-TTL. No ghost survives long.
+
+---
+
+## 5. Atomic write path
+
+Every state-changing operation on a call goes through one Lua script: `atomic_call_write.lua`. The script is the only place we touch `pri:`/`bak:` + `idx:` + `propagate:*` together. Sequential `SETEX` loops in `PartitionedRelayStorage.putCall` are removed by Slice 1.
+
+### 5.1 Inputs
+
+```
+KEYS[1]   = call key             e.g. "pri:N:call:abc" or "bak:P:call:abc"
+KEYS[2..K] = idx keys             e.g. "idx:leg:CID|tag", "idx:leg:CID2", ...
+KEYS[K+1] = propagate set         e.g. "propagate:B"
+KEYS[K+2] = propagate seq counter e.g. "propagate_seq:B"
+KEYS[K+3] = epoch                 e.g. "epoch:N"
+
+ARGV[1]   = mode                  "put" | "refresh" | "delete"
+ARGV[2]   = ttl_seconds
+ARGV[3]   = json (state)          (only for "put")
+ARGV[4]   = callRef               (the value indexes point to)
+ARGV[5]   = propagate_set_ttl     (sliding ttl on the whole set)
+```
+
+### 5.2 Output
+
+```
+[seq, epoch]    -- the seq used and the epoch witnessed; caller persists into Call._repl
+```
+
+### 5.3 Mode `put` (create or update)
+
+```lua
+local seq   = redis.call("INCR", KEYS[K+2])             -- propagate_seq:{peer}
+local epoch = redis.call("GET",  KEYS[K+3])             -- epoch:N
+
+redis.call("SETEX", KEYS[1], ARGV[2], ARGV[3])          -- call body
+for i = 2, K do
+  redis.call("SETEX", KEYS[i], ARGV[2], ARGV[4])        -- each idx → callRef
+end
+redis.call("ZADD",   KEYS[K+1], seq, ARGV[4])           -- ZADD propagate:{peer} seq callRef
+redis.call("EXPIRE", KEYS[K+1], ARGV[5])                -- sliding TTL on whole set
+
+return { seq, epoch }
+```
+
+### 5.4 Mode `refresh` (TTL bump on every key, no body rewrite)
+
+Same shape but uses `EXPIRE` instead of `SETEX` and writes only the bumped `seq` (refresh is also a propagate event so the backup keeps its TTL parity).
+
+### 5.5 Mode `delete`
+
+```lua
+local seq   = redis.call("INCR", KEYS[K+2])
+local epoch = redis.call("GET",  KEYS[K+3])
+
+-- Tombstone: short-TTL marker rather than DEL, so the puller can dereference
+-- the propagate entry within DELETE_RETENTION_SEC and see the delete event.
+redis.call("SETEX", KEYS[1], ARGV[6], ARGV[3])          -- tombstone JSON, ARGV[6]=DELETE_RETENTION_SEC
+for i = 2, K do redis.call("DEL", KEYS[i]) end          -- indexes hard-deleted
+redis.call("ZADD",   KEYS[K+1], seq, ARGV[4])
+redis.call("EXPIRE", KEYS[K+1], ARGV[5])
+
+return { seq, epoch }
+```
+
+`ARGV[3]` for delete mode is the tombstone payload — a small JSON `{"_deleted": true, "indexes": [...]}` carrying the index keys the call had at delete-time so the puller can clean its own `idx:` pointers without re-deriving them. `ARGV[6]` is the tombstone retention (default ~300 s; configurable as `DELETE_RETENTION_SEC`).
+
+After `DELETE_RETENTION_SEC` the tombstone expires naturally; the periodic propagate-set sweep then removes the orphaned member (call key returns nil and seq is below the lowest active consumer ack low-water — see §6).
+
+A backup whose downtime exceeds `DELETE_RETENTION_SEC` does **not** rely on this path: it has either re-fetched its `replpos` from a wiped sidecar (epoch mismatch ⇒ full resync from scratch) or is otherwise expected to reconcile via TTL alignment. See §4.3 for the rationale.
+
+### 5.6 What atomicity guarantees
+
+A single Lua script in Redis runs to completion before any other command on that Redis instance — this is unconditional Redis semantics. Therefore:
+
+- **No reader on N's sidecar ever sees half-state.** Either the call body and all indexes and the propagate ZADD are visible, or none are.
+- **The propagate ZADD cannot be lost while the local write succeeds.** This was the F4/F11 hole in the old fire-and-forget model; closed.
+- **Sequence is monotonic per peer-direction** because `INCR` is a single atomic step within the same script.
+
+The script runs in a single round-trip (`EVALSHA` after first invocation). Latency is bounded by the local socket to the sidecar — sub-millisecond on the typical K8s pod-local hop.
+
+### 5.7 In-memory layer parity
+
+`PartitionedRelayStorage.memoryLayer` is used by every fake-stack test. It must offer the same atomicity contract or tests would observe behaviours real Redis cannot produce. The memory layer wraps the equivalent operation in an `Effect.Mutex` per partition, executing the call/idx/propagate updates as one critical section. Tests assert no observer ever sees half-state.
+
+---
+
+## 6. Propagate stream lifecycle
+
+A worked example, walking the whole life of one callRef's propagate entry.
+
+```
+T=0     Worker N receives initial INVITE for callRef X. Cookie says w_pri=N, w_bak=B.
+        AtomicWriter("put", peer=B, ...) runs:
+          INCR propagate_seq:B            -> seq = 17
+          SETEX pri:N:call:X ttl=600 ...
+          SETEX idx:leg:CID|tag ttl=600 ...
+          ZADD  propagate:B 17 X
+          EXPIRE propagate:B 3600
+        Local view of propagate:B: { (X, 17) }
+
+T=12    B's ReplPuller's long-poll connection (already open since B's boot) picks up
+        the new entry. Server emits {seq:17, callRef:X, state:<json>}. B applies:
+          AtomicWriter("put", peer=N, role="bak", owner=N, ...) on B's own sidecar.
+          (B's seq counter for propagate:N moves; B's apply path replaces
+           bak:N:call:X with the new state.)
+
+T=42    Worker N receives a re-INVITE for X. AtomicWriter("put", peer=B, ...) again:
+          INCR propagate_seq:B            -> seq = 23
+          SETEX pri:N:call:X ttl=600 ...   (refreshed body + ttl)
+          ZADD  propagate:B 23 X           (member X already exists; score 17 → 23)
+        Local view of propagate:B: still { (X, 23) }. Compaction in action.
+
+T=45    B picks it up (same long-poll), B's bak:N:call:X is overwritten with new state.
+
+T=300   The call is updated 50 more times by re-INVITE/refresh-timer. Each time,
+        propagate:B's member X is the same; only its score advances.
+        Memory cost on N's sidecar: 1 sorted-set member, regardless of update count.
+
+T=600   BYE arrives, AtomicWriter("delete", peer=B, ...):
+          INCR propagate_seq:B            -> seq = 998
+          DEL pri:N:call:X
+          DEL idx:...
+          ZADD propagate:B 998 X           (still announces; value X but call gone)
+        Local view: { (X, 998) }, but call:X is now nil.
+
+T=601   B picks up seq 998, dereferences -> GET fails -> DEL bak:N:call:X locally.
+        B can also remove X from its own propagate:N if it had bumped one (it
+        won't have, since N owned it; B never wrote bak side independently).
+
+T=??    Stale propagate:B entry (X, 998) where call is gone is GC'd by a
+        periodic sweep that removes members below the lowest delivered_seq across
+        active consumers when call:{callRef} returns nil.
+```
+
+ASCII state machine for one entry in `propagate:{peer}`:
+
+```
+                       ZADD on put / refresh
+                       (score update, no new member)
+                                │
+                                ▼
+   ┌────────────────────────────────────────────────────┐
+   │  alive: member X with latest score; call:X exists │
+   └────────────────────────────────────────────────────┘
+                │                                │
+       BYE / delete                       sliding-set TTL elapses
+                │                          (no peer activity for hours)
+                ▼                                │
+   ┌────────────────────────────────────────────┐│
+   │  zombie: member X exists, call:X is nil   ││
+   └────────────────────────────────────────────┘│
+                │                                │
+      periodic sweep                             │
+      (member-callRef gone +                     │
+       below low-water of consumer ack)          │
+                │                                │
+                ▼                                ▼
+                ┌──────────── removed ────────────┐
+                │  member dropped; if last member, │
+                │  whole sorted set may TTL out    │
+                └──────────────────────────────────┘
+```
+
+---
+
+## 7. Pull protocol (long-poll)
+
+### 7.1 Endpoint
+
+`GET /replog?caller={callerOrdinal}&epoch={callerEpoch}&since={lastSeq}` on the primary's HTTP port (served by `ReplLog` in the same Node process as the SIP worker).
+
+### 7.2 Server response framing
+
+The response is an HTTP/1.1 chunked stream of newline-delimited JSON objects.
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/x-ndjson
+Cache-Control: no-store
+
+{"type":"hello","epoch":42,"head_at_open":12345}\n
+{"type":"entry","seq":12346,"callRef":"abc","state":<json>|null}\n
+{"type":"entry","seq":12347,"callRef":"def","state":<json>|null}\n
+... (drain of pre-existing backlog above 'since') ...
+{"type":"caught_up","at_seq":12345}\n
+... (long-poll: server holds connection open) ...
+{"type":"heartbeat","seq":12347}\n   <── every ~10 s when idle
+{"type":"entry","seq":12348,"callRef":"ghi","state":<json>}\n
+... (continues until 25 s max-age timeout, then server closes) ...
+```
+
+Client behaviour:
+
+- `hello` arrives first. Client compares `epoch` to its stored `(peer, epoch, lastSeq)`. Mismatch → reset `lastSeq=0`, immediately re-open with `since=0`.
+- `entry` updates `state` for `callRef`. `state=null` ⇒ delete locally. Client's stored `lastSeq` advances to `seq` after each successfully-applied entry.
+- `caught_up` ⇒ client has reached the head as of connection-open. **For the ready-gate, this is the gating signal.**
+- `heartbeat` ⇒ keep-alive, no state change.
+- Connection close (max-age timeout, network error, or server going down) ⇒ client reconnects with `since=lastSeq`.
+
+### 7.3 Re-entrancy
+
+The protocol is idempotent: re-applying an entry whose `seq ≤ lastSeq` is a safe no-op (state matches, indexes match, TTL re-bumps). The client never has to track partial-application state. A pull that fails mid-entry just reconnects and re-reads the entry.
+
+### 7.4 Steady-state latency
+
+Server-side, a write on the primary fires an in-process Effect `Hub` notification that the open `/replog` handler is subscribed to. New entries land on subscriber connections within milliseconds. Lag in steady state is dominated by network RTT, typically ≤ 5 ms in-cluster.
+
+---
+
+## 8. Ready gate (boot handshake)
+
+The `ReadyGate` service is what sits between worker process boot and `WorkerReadiness.markReady(true)`. K8s readinessProbe doesn't return 200 until ready=true, so the worker doesn't enter the Service ⇒ no SIP traffic lands.
+
+### 8.1 Sequence on boot
+
+```
+1. EpochCounter:    INCR epoch:N                     -- bump to fresh value
+2. PeerEnumerator:  resolve DNS SRV for headless StatefulSet
+                    → list of K8s-Ready peers [P1, P2, P3, ...]
+3. Read replpos:Pi for each Pi from local sidecar.
+   Each entry is { epoch_we_saw_last, lastSeq } or absent (treat as {0, 0}).
+4. For each Pi in parallel:
+       open GET http://{Pi}/replog?caller=N&epoch={replpos.epoch}&since={replpos.lastSeq}
+       read 'hello' → if epoch differs from stored, reset lastSeq=0, re-open with since=0
+       capture HEAD_AT_OPEN_Pi from hello frame
+       drain entries on this connection, applying each via AtomicWriter("put", ..., role="bak", owner=Pi)
+       (also pulls our own primary calls back in if Pi was holding bak:N: copies for us)
+       when we observe seq ≥ HEAD_AT_OPEN_Pi → mark Pi as 'synced'
+       leave connection open for steady-state freshness
+5. When all Pi are 'synced'  OR  30 s wall-clock has elapsed:
+       set unreconciled = [Pi for Pi if not synced]
+       persist replpos:Pi for each Pi (epoch + lastSeq we reached)
+       WorkerReadiness.markReady(true)
+6. Connections opened in step 4 keep streaming; no separate steady-state init.
+```
+
+### 8.2 What "synced with Pi" means precisely
+
+At the moment N's GET response arrived, Pi's `propagate:N` head was at seq `HEAD_AT_OPEN_Pi`. N is "synced with Pi" the moment N's `lastSeq[Pi] ≥ HEAD_AT_OPEN_Pi`. New entries Pi writes after the GET opened are *also* streamed on the same long-poll, but they do not gate readiness — they are steady-state freshness. This makes the gate a finite, decidable target.
+
+### 8.3 30-second ceiling
+
+The hard ceiling exists because a partial cluster outage must not block the entire fleet from coming back. Without it, a single dead pod that DNS hadn't yet evicted could keep every other rebooting pod stuck.
+
+A peer in the `unreconciled[]` list at gate completion has consequences:
+- The metric `sipjsserver_ready_gate_unreconciled_count` is non-zero (operator alert).
+- For every callRef where `_topology.bak == unreconciled-peer`, if a SIP request lands and the call is not in `pri:N:`, the worker emits `481 Call/Transaction Does Not Exist` (RFC 3261 §12.2.2) — same loss class as the existing `D14` reclaim-timeout-481 contract from the previous design.
+- The puller loop continues to retry the unreconciled peer in the background; if it later comes back, the pull resumes naturally.
+
+### 8.4 Brand-new pod (cold start)
+
+If `epoch:N` doesn't exist (first sidecar boot ever), it is initialised to 1 by the Lua script the first time it runs. `replpos:Pi` is absent for every Pi (this is N's first pull from any peer). The gate runs the same way; with no historical data on N's side, every peer's drain is just whatever currently lives in their `propagate:N` set (typically nothing, since Pi has never had a relationship with N).
+
+### 8.5 Bidirectional gate
+
+The gate does not require N to push anything outbound. It is purely "drain peers' propagate:N streams." The reason: peers that were holding *backup* copies of N's primary calls during N's downtime have written their takeover state into *their own* `propagate:N` (under takeover semantics, see §10). When N drains those, it picks up the back-edits. There is no asymmetry between "calls I owned" and "calls I held as backup" — both flow over the same propagate streams.
+
+---
+
+## 9. Primary-side signaling walk-through
+
+This section walks every SIP message type for a call where the local worker N is the call's primary (the cookie's `w_pri` matches N).
+
+### 9.1 Initial INVITE
+
+```
+Inbound INVITE arrives at N.
+  ↓
+Front proxy has stamped Record-Route: ;w_pri=N;w_bak=B;v=2;…;sig=…
+SipRouter.withCall reads parseStickinessCookie → { pri:N, bak:B }.
+  ↓
+Worker creates Call object (CallModel.ts): callRef = digest(aLeg.callId + aLeg.fromTag).
+Sets call._topology = { pri:N, bak:B, gen:0 } (topology stays in JSON for backward compat
+through Slices 1–4; gen will be replaced by _repl.{epoch,seq} in Slice 6).
+  ↓
+Rules execute, decision returned, b-leg constructed.
+  ↓
+CallState.flushToRedis kicks in:
+  AtomicWriter.write({
+    role:    "pri",
+    owner:   N,
+    callRef,
+    json:    JSON.stringify(call),
+    indexes: callIndexKeys(call),  // leg:CID|tag, leg:bCID|btag, etc.
+    peer:    B,                    // _topology.bak
+    ttlSec:  config.callTtlSec,
+  })
+  ↓
+Lua script atomically:
+  - SETEX pri:N:call:{callRef} ttl json
+  - SETEX idx:leg:{aCID}|{atag} ttl callRef
+  - SETEX idx:leg:{bCID}|{btag} ttl callRef
+  - INCR  propagate_seq:B → seq
+  - ZADD  propagate:B seq callRef
+  - EXPIRE propagate:B long_ttl
+returns (seq, epoch). Call._repl.{writerEpoch,writerSeq} updated for next reconcile.
+  ↓
+B's open long-poll picks up the entry. B's ReplPuller does its own AtomicWriter on B's
+sidecar, role="bak", owner=N, writing bak:N:call:{callRef} + idx + own propagate:N entry.
+```
+
+Steady-state replication latency: typically < 10 ms in-cluster.
+
+### 9.2 In-dialog request (re-INVITE / UPDATE / INFO / REFER / NOTIFY)
+
+The proxy decodes the cookie, sees `w_pri=N`, forwards to N. Worker hydrates the call from `pri:N:call:{callRef}` (or via `idx:` lookup if only the leg headers are known). After rule processing:
+
+```
+Mutated Call → AtomicWriter.write(...) — exactly the same path as 9.1.
+seq advances on propagate:B; B's puller receives the new state.
+```
+
+### 9.3 Refresh-timer fire
+
+Calls that are confirmed but otherwise idle still need TTL to be bumped on both sides, otherwise the backup's `bak:N:call:{callRef}` would expire while the call is still live. The refresh timer is already scheduled by `CallLimiter` / framework code; the change is that its handler now calls `AtomicWriter.write(mode="refresh", ...)` which:
+
+- Bumps TTL on `pri:N:call:{callRef}` and every index.
+- INCRs propagate_seq:B and ZADDs `propagate:B` (compacted; same member).
+- EXPIRES `propagate:B` (sliding).
+
+The puller on B receives the bumped seq, applies a refresh on `bak:N:call:{callRef}`. TTL parity is maintained.
+
+### 9.4 BYE
+
+```
+BYE arrives → rules drive Call.state = "terminating" → eventually "terminated".
+The terminal flush calls AtomicWriter.write(mode="delete", peer=B, ...):
+  - DEL pri:N:call:{callRef}, all idx keys
+  - INCR propagate_seq:B → seq
+  - ZADD propagate:B seq callRef
+  - EXPIRE propagate:B long_ttl
+B's puller receives the entry, GETs callRef on N's storage view → null (deleted),
+applies a corresponding delete on bak:N:call:{callRef} + indexes.
+```
+
+If B is unreachable when the BYE happens, the propagate entry (seq, callRef) sits in N's sorted set. B's `bak:N:call:{callRef}` will TTL-expire on its own (no more refreshes). When B comes back up, the propagate entry is still there (call body is null) — B picks it up, sees null, and removes its (already TTL-expired or not) backup copy. Cleanup either way.
+
+### 9.5 ACK on 2xx / CANCEL
+
+These are exempt from the drain-grace window (per resilience-model.md §1) — they always go to the original worker. From the cache POV they are normal in-dialog writes (ACK transitions the leg to confirmed; CANCEL terminates an in-flight INVITE). Same `AtomicWriter.write` path as 9.2.
+
+---
+
+## 10. Backup-side signaling walk-through
+
+This is the path executed when SIP traffic for a call lands on a worker that is *not* the call's primary. This happens when:
+
+- The original primary is dead/draining-post-grace and the proxy fell back via `selectForNewDialog`.
+- The cookie was lost or rejected and the proxy rerouted to a fresh worker.
+
+In either case the receiving worker R consults its sidecar:
+
+### 10.1 Hydration
+
+```
+SipRouter.withCall first does an idx: lookup using the inbound dialog identifiers
+(typically idx:leg:{Call-ID}|{tag}). Returns a callRef.
+  ↓
+GET pri:R:call:{callRef}  → null (R is not primary).
+GET bak:?:call:{callRef}   ← needs to find the right partition; R scans
+                            its own sidecar's bak:*:call:{callRef} keys (cheap
+                            because the keyspace partition is named).
+  ↓
+If found: R has a backup copy.  Decode → Call object with _topology.{pri:P, bak:R}.
+If not found: 481 Call/Transaction Does Not Exist (RFC 3261 §12.2.2) — hydration miss.
+```
+
+### 10.2 Takeover decision
+
+R then has to decide whether to *take over* — i.e. process the SIP request authoritatively, write back, and act as the primary going forward — or refuse.
+
+The rule is straightforward:
+- If R's view of the cluster says P (the call's original primary, per `_topology.pri`) is **not K8s-Ready** (not in DNS enumeration), R takes over.
+- If P is K8s-Ready, R refuses (`481`). The proxy should not have routed here; the assumption is transient (cookie lost / DNS races) and the UAC retry will land on P.
+
+This decision is encapsulated in the `RouterPolicy` layer and is unchanged from the previous design — the cache mechanism doesn't influence it.
+
+### 10.3 Takeover write
+
+When R takes over, the rule processing runs as normal; the resulting Call must be flushed back. R's flush uses the same AtomicWriter, but with crucial role/peer differences:
+
+```
+AtomicWriter.write({
+  role:    "bak",     // R writes into bak:P:call:{callRef}, NOT pri:R:
+  owner:   P,         // The original primary, per _topology.pri
+  callRef,
+  json:    JSON.stringify(updatedCall),
+  indexes: callIndexKeys(updatedCall),
+  peer:    P,         // R announces to P (so P recovers on its restart)
+  ttlSec:  config.callTtlSec,
+})
+```
+
+Two invariants this preserves:
+
+- **D16 (existing)**: The primary partition `pri:P:call:{callRef}` is NEVER written by anyone but P. R writes to `bak:P:call:{callRef}` even when R is now de-facto driving the call. The cookie's `w_pri` permanently names "where this call's primary copy lives" if it's anywhere; there is no race for primary rights.
+- **Bidirectional propagate**: R announces the takeover write into `propagate:P`. When P comes back, P's ReadyGate drains `propagate:P` from R, picks up the takeover-state, and merges it into P's own `pri:P:call:{callRef}` via gen comparison (`_repl.writerEpoch / writerSeq`).
+
+### 10.4 What if R never takes over?
+
+Pure-backup R (whose `bak:P:call:*` is just sitting there, no SIP request has hit) does *no* SIP-driven writes. The puller is the only thing keeping `bak:P:call:{callRef}` fresh — every `put`/`refresh`/`delete` from P flows through `propagate:P` → R's puller → R's AtomicWriter on R's own `bak:P:` partition. The backup copy lives or expires entirely under TTL alignment.
+
+---
+
+## 11. Recovery walk-throughs
+
+### 11.1 Worker process restart, sidecar persists
+
+This is the common case (the worker container crashes and K8s restarts the same pod; the colocated Redis sidecar pod stays up).
+
+```
+Before crash:  N has pri:N:call:* populated; epoch:N=42; replpos:Pi entries from puller.
+N crashes (process death). Sidecar untouched.
+  ↓
+K8s restarts the worker container. Process boot:
+  EpochCounter: INCR epoch:N → 43.
+  ReadyGate runs (§8.1).
+  PeerEnumerator finds Pi peers.
+  For each Pi:
+    GET /replog?caller=N&epoch=<replpos.epoch>&since=<replpos.lastSeq>
+    Pi's hello: epoch=Pi's_epoch, head_at_open=...
+    Drain entries above replpos.lastSeq (which captures what we missed during downtime).
+  All peers synced or 30 s elapsed → ready=true.
+  ↓
+Steady state resumes. SIP traffic flows.
+```
+
+Key points:
+- N's own `pri:N:call:*` data is preserved in the sidecar across the worker process crash. N does not need to re-hydrate its own primary calls from peers; they were already on disk, still valid TTL-wise.
+- N **does** need to drain peers because while N was down, peers' takeover writes (if any) accumulated in their `propagate:N` streams. Those takeover writes contain the *latest* state for calls N owned where another worker had to step in.
+- Conflict resolution: if both N's local `pri:N:call:X` (pre-crash) and a takeover copy from peer R exist, the one with higher `(epoch, seq)` wins. Since the takeover happened *after* N's crash, R's epoch/seq pair is strictly newer than N's pre-crash pair.
+
+### 11.2 Worker pod restart with Redis sidecar wiped
+
+Less common but expected (full pod replace, sidecar pod also recreated, `emptyDir` volume cleared).
+
+```
+Before: N had pri:N:call:*, epoch:N=42, replpos:* entries.
+Pod replaced. Sidecar fresh, no keys.
+  ↓
+Process boot:
+  EpochCounter: epoch:N missing → set to 1 (or to a UUID; equivalent for our purposes).
+                Anyway: NEW epoch.
+  ReadyGate runs:
+    PeerEnumerator finds Pi peers.
+    replpos:Pi entries are absent (sidecar fresh). Treat as {epoch:0, lastSeq:0}.
+    For each Pi:
+      GET /replog?caller=N&epoch=0&since=0
+      Pi's hello: epoch=Pi's_epoch, head_at_open=...
+        (Note: from Pi's perspective, N is asking for ALL state. This is correct.)
+      Drain ALL members of Pi's propagate:N (this includes any of N's pre-crash
+        primary calls Pi was holding as bak:N:, plus any takeover writes Pi made
+        while N was down).
+    all synced or 30 s → ready=true.
+  ↓
+N's pri:N:call:* is repopulated from peers' bak: copies.
+```
+
+The crucial property: even with a wiped sidecar, the *active* calls survive because peers held them. The wiped-sidecar scenario degrades to "full resync from peers."
+
+### 11.3 Long downtime (hours)
+
+```
+Before: N has 1000 active calls. Goes down (rolling upgrade, infra event, etc.).
+N is down for 2 hours.
+During downtime:
+  - 800 of N's calls receive BYE (TTL expires anyway since no refreshes).
+    Their pri:N:call:* entries TTL out from N's sidecar.
+    Peers' bak:N:call:* entries TTL out symmetrically (no refreshes from N's puller —
+    actually N's puller is dead, but the peers' own write loop for their bak side
+    is what keeps it fresh; with N's primary writes paused and no takeover, the
+    backup copy on a peer drifts then dies via TTL).
+  - 200 calls are taken over by peer R. R writes to bak:N:call:* on R's side; those
+    are alive on R but not on N (N is down).
+  ↓
+N comes back. Sidecar may or may not be wiped; same path either way.
+ReadyGate runs. Drains propagate:N from each Pi.
+  Most propagate:N entries from when N was up have TTL'd out (sliding TTL on
+  the whole sorted set; if Pi had no calls in either direction with N for hours,
+  Pi's propagate:N may be gone entirely).
+  Active entries: the 200 calls R took over. Those are propagated back to N.
+  ↓
+After ready: N has 200 calls in pri:N:call:* (the ones R took over and R wrote
+back into propagate:N). The 800 BYE'd calls are gone everywhere — exactly as
+desired.
+  ↓
+Steady state: N continues primary duty for the 200 surviving calls, with R
+holding them as backup again per cookie.
+```
+
+The design's cardinal property — *the propagate stream is bounded by active calls, not by event history* — is what makes 2-hour downtimes tolerable. There is no replay log to grow during the outage.
+
+### 11.4 Bidirectional restart (both sides of a buddy pair)
+
+The worst-case scenario for any per-pair HA: both N and B (some buddy pair) go down at the same time, neither can hold backup for the other.
+
+```
+Before: N has calls X, Y, Z with bak=B. B has the bak: copies.
+Both N and B go down at ~T=0. Neither's sidecar holds anything for the
+peer (they're both rebooting).
+  ↓
+N comes back at T=10. ReadyGate runs:
+  PeerEnumerator: B is not in DNS yet (still rebooting). Pi list excludes B.
+  For all other Pi: drain their propagate:N. Likely empty since N had no
+  business with them for these calls.
+  After 30 s ceiling (or sooner if all Pi drained): ready=true.
+  unreconciled[] possibly contains B if B isn't back yet.
+  ↓
+N starts answering SIP. For calls X, Y, Z if a request hits N:
+  GET pri:N:call:X → empty (N's sidecar fresh; X's data was at B).
+  GET bak:?:call:X → empty.
+  → 481 Call/Transaction Does Not Exist.
+  ↓
+B comes back at T=40. ReadyGate runs on B's side; drains propagate:B from Pi.
+B picks up nothing for X, Y, Z either.
+  ↓
+Calls X, Y, Z are LOST. Loss class F4/F11 from the prior design — accepted
+because the alternative (block ready until B is back, which could be forever)
+is worse for cluster availability.
+```
+
+This is the single accepted loss class in the new design, identical to the prior design's accepted loss. Rate is bounded by the probability of two specific pods going down within a recovery window; in production this corresponds to AZ-level events.
+
+---
+
+## 12. Loss class enumeration
+
+| ID  | Scenario                                                 | Loss bound                                                                              | Mitigation                          |
+|-----|----------------------------------------------------------|-----------------------------------------------------------------------------------------|-------------------------------------|
+| L1  | Primary process crash mid-INVITE before flush            | The current INVITE state. UAC's Timer A retransmits; if the recovered/replacement worker has nothing, 481. | Fast restart + replication latency. |
+| L2  | Primary process crash between BYE and propagate          | BYE may not be observable to backup; backup TTL-expires within one TTL window.          | TTL alignment.                      |
+| L3  | Both primary and backup down for a single call's TTL window | Call lost. F4/F11 accepted.                                                            | None. AZ-level concern.             |
+| L4  | Long-poll TCP drop, immediate reconnect                  | None — re-entrant resume from `lastSeq`.                                                | Built-in.                           |
+| L5  | Long-poll TCP drop, reconnect delayed by N seconds       | Backup sees state up to N seconds stale.                                                | Heartbeat + reconnect monitoring.   |
+| L6  | Backup's sidecar wiped while primary up                  | Backup re-fetches from primary on next pull (epoch advance triggers full resync).        | Built-in.                           |
+| L7  | Primary's sidecar wiped while primary up                 | Epoch advances; backups detect and re-replicate primary's state from THEIR backup copy. ReadyGate handles it. | Built-in.                           |
+| L8  | Network partition between primary and backup             | Both sides advance independently. On heal, propagate streams converge. Conflict resolution by `(epoch, seq)`. | Gen-based reconciliation.           |
+| L9  | Concurrent takeover by two peers                         | Should not happen — `_topology.bak` is per-call and unique. If it does (cookie tampering, bug), `(epoch, seq)` resolves. | Unique cookie + asserted in tests.  |
+| L10 | Lua script runtime error                                 | Write fails; CallState.flushToRedis surfaces the error; rule processing fails the request. | Tests + metric `repl_lua_eval_total{outcome=err}`. |
+| L11 | Periodic GC removes a propagate entry mid-pull           | The pull might miss a member that was just deleted. Acceptable: that means the call is gone; the puller would have applied a delete anyway. | GC only removes when call:{ref} is null AND below all consumer ack low-water. |
+
+---
+
+## 13. RFC and source cross-references
+
+| Reference                                                                | Used for                                                                  |
+|--------------------------------------------------------------------------|---------------------------------------------------------------------------|
+| RFC 3261 §12 (Dialog)                                                    | Call-ID + tag uniqueness justification for flat `idx:` namespace          |
+| RFC 3261 §12.2.2 (481 Call/Transaction Does Not Exist)                   | Hydration miss + ready-gate-ceiling fallback semantics                    |
+| RFC 3261 §13 (INVITE behaviour, Timer C)                                 | TTL choice; K8s `terminationGracePeriodSeconds` ≥ 200 s                   |
+| RFC 3261 §17 (Transaction layer)                                         | ACK/CANCEL must hit original worker — backup-side hydration considerations |
+| [`docs/sip-front-proxy/resilience-model.md`](../sip-front-proxy/resilience-model.md) | Per-message-type behaviour in front of this layer                         |
+| [`docs/CallModel.md`](../CallModel.md)                                   | Call/Leg/Dialog structure being persisted                                 |
+| [`docs/todos/TODO_doubleWrite.md`](../todos/TODO_doubleWrite.md)         | Historical D7/D9/D14/D16 decisions; this doc supersedes the model         |
+| [`src/call/CallModel.ts:715`](../../src/call/CallModel.ts#L715)          | `callIndexKeys()` — index keys this layer SETEXes                         |
+| [`src/cache/StickinessCookie.ts`](../../src/cache/StickinessCookie.ts)    | Cookie → `_topology.{pri,bak}` derivation                                  |
+
+---
+
+## 14. What changes from the previous (D-prefixed) design
+
+| Previous (Slices 1–6 of `TODO_doubleWrite.md`)               | This refactor (Slices 0–6 of `data-replication-layer-refactor`) |
+|--------------------------------------------------------------|--------------------------------------------------------------|
+| Dual-write fan-out via `Effect.forkChild` HTTP push           | Pull-based long-poll consumed by backup                      |
+| `_topology.gen` bumped per flush, lives in JSON               | Replaced by `_repl.{writerEpoch, writerSeq}` produced by Lua |
+| Sequential `SETEX` loop in `putCall`, accepted F10            | Single Lua, atomic across call+idx+propagate                 |
+| `ReclaimRunner` scans every peer's `bak:N:` partition         | `ReadyGate` drains `propagate:N` from each peer              |
+| `PeerCacheClient` + `PeerRelay` HTTP push API                 | Deleted; replaced by `ReplLog` server + `ReplPuller` client  |
+| Push-side fanout in `CallState.fanOutPut/fanOutDelete`        | Deleted; CallState writes only locally via AtomicWriter      |
+| No Prometheus metrics on per-peer drift                       | Required in Slice 3 (`repl_delay_seq{peer}` etc.)            |
+
+---
+
+## 15. Status tracking
+
+| Slice | Description                                                    | Status      | PR / Notes                       |
+|-------|----------------------------------------------------------------|-------------|----------------------------------|
+| 0     | This document                                                  | DRAFT v1    | Awaiting review before Slice 1.  |
+| 1     | AtomicWriter + Lua (call+idx; no propagate)                    | not started |                                  |
+| 2     | PropagateStream + extend Lua + EpochCounter                    | not started |                                  |
+| 3     | `/replog` long-poll service + ReplLog + Prometheus `/metrics`  | not started |                                  |
+| 4     | ReplPuller client + steady-state replication                   | not started |                                  |
+| 5     | ReadyGate replaces ReclaimRunner                               | not started |                                  |
+| 6     | Delete legacy push-side; tidy CallState                        | not started |                                  |
+
+This table is the source of truth for slice status. Each slice's PR updates the row and any sections this document needs to reflect implementation reality.
