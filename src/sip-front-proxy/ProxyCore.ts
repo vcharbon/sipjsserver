@@ -1095,16 +1095,29 @@ const handleRequestRegistrarMode = (
         ruriOverride = outcome.ruriOverride
       }
     } else {
-      // In-dialog (BYE, ACK, re-INVITE, OPTIONS, …): the (now stripped)
-      // top Route or the Request-URI tells us where to go. v1 trusts the
-      // R-URI — agents in our test fabric set it from the dialog's
-      // remote-target Contact, which in registrar mode is always either
-      // a registered ext contact or the core destination.
-      const parsedRuri = parseSipUri(req.uri)
-      if (parsedRuri === undefined) {
-        synthesizedReply = { status: 400, reason: "Bad Request" }
-      } else {
-        target = { host: parsedRuri.host, port: parsedRuri.port }
+      // In-dialog (BYE, ACK, re-INVITE, OPTIONS, …): per RFC 3261
+      // §16.12.1, after stripping any topmost Route that pointed at us,
+      // forward to the new topmost Route (if any) when it has `lr`.
+      // Only fall back to the Request-URI when no Route remains. Without
+      // this, an in-dialog ACK with Route: <upstream-proxy>, R-URI =
+      // <unroutable-UAS-Contact> (e.g. K8s pod IP behind an LB) would
+      // be delivered to the unroutable Contact instead of the upstream
+      // loose-route hop.
+      const nextRoute = getHeader(headers, "route")
+      const parsedNextRoute = nextRoute !== undefined ? parseSipUri(nextRoute) : undefined
+      if (parsedNextRoute !== undefined) {
+        const isLooseRoute = /;\s*lr(\s*[;>]|\s*$)/i.test(nextRoute!)
+        if (isLooseRoute) {
+          target = { host: parsedNextRoute.host, port: parsedNextRoute.port }
+        }
+      }
+      if (target === undefined) {
+        const parsedRuri = parseSipUri(req.uri)
+        if (parsedRuri === undefined) {
+          synthesizedReply = { status: 400, reason: "Bad Request" }
+        } else {
+          target = { host: parsedRuri.host, port: parsedRuri.port }
+        }
       }
     }
 
