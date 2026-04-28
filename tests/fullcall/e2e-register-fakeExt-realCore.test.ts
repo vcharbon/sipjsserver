@@ -1,0 +1,70 @@
+/**
+ * E2E test — register + call against the kind-deployed SBC stack
+ * (`sip-front-proxy` in registrar mode + `b2bua-worker` StatefulSet +
+ * Redis + the X-Api-Call-aware mock `call-control` Service).
+ *
+ * Fake in-process alice/bob agents on the host send / receive over real
+ * UDP via the kind hostPort:5060 → NodePort 30060 → proxy. Pod replies
+ * traverse the docker bridge gateway back to the host's UDP socket.
+ *
+ * Gated on `E2E_KIND=1` so the default `npm run test` doesn't depend on
+ * docker / kind. Run with:
+ *
+ *   npm run test:k8s:up                        # idempotent; cluster persists
+ *   npm run test:k8s:images                    # only after src/ or bin/ changes
+ *   tsx tests/k8s/scripts/install-stack.ts     # only on first install
+ *   E2E_KIND=1 vitest run -c vitest.config.live.ts \
+ *     tests/fullcall/e2e-register-fakeExt-realCore.test.ts
+ */
+
+import { describe, it } from "@effect/vitest"
+import { afterAll, beforeAll } from "vitest"
+import { Effect } from "effect"
+import { k8sRegisterSmoke } from "../scenarios/registrar/k8s-register-smoke.js"
+import { k8sRegisterCallBye } from "../scenarios/registrar/k8s-register-call-bye.js"
+import { k8sRegisterCallReroute } from "../scenarios/registrar/k8s-register-call-reroute.js"
+import {
+  createHybridRunner,
+  discoverHostReachableIp,
+  flushHybridIndexReport,
+} from "../support/hybridRunner.js"
+
+const OUTPUT_DIR = "test-results/real-clock/registrarFrontProxy-kind"
+const E2E_KIND_ENABLED = process.env.E2E_KIND === "1"
+
+describe.skipIf(!E2E_KIND_ENABLED)("E2E (real clock) — register fakeExt-realCore", () => {
+  let advertisedIp = ""
+
+  beforeAll(async () => {
+    advertisedIp = await Effect.runPromise(discoverHostReachableIp)
+    console.log(`[hybrid] kind bridge gateway = ${advertisedIp}`)
+  })
+
+  afterAll(() => flushHybridIndexReport(OUTPUT_DIR))
+
+  const buildRunner = () =>
+    createHybridRunner({
+      kindHost: process.env.E2E_KIND_PROXY_HOST ?? "127.0.0.1",
+      kindPort: parseInt(process.env.E2E_KIND_PROXY_PORT ?? "5060", 10),
+      advertisedIp,
+      outputDir: OUTPUT_DIR,
+    })
+
+  it.live(
+    "REGISTER smoke (alice → kind proxy → 200 OK)",
+    () => buildRunner()(k8sRegisterSmoke.toScenario()),
+    { timeout: 30_000 },
+  )
+
+  it.live(
+    "REGISTER + INVITE + BYE (alice ↔ kind core ↔ bob via X-Api-Call)",
+    () => buildRunner()(k8sRegisterCallBye.toScenario()),
+    { timeout: 60_000 },
+  )
+
+  it.live(
+    "REGISTER + INVITE + reroute (bob1 503 → failover → bob2 via on_failure)",
+    () => buildRunner()(k8sRegisterCallReroute.toScenario()),
+    { timeout: 60_000 },
+  )
+})

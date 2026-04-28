@@ -83,6 +83,14 @@ interface InterpreterState {
   readonly trace: TraceEntry[]
   readonly failedRefs: Set<number>
   readonly resolvedMessages: Map<number, SipMessage>
+  /**
+   * Actual UDP source address per received message (keyed by step ref id).
+   * Used by the response-target computation so a UAS can reply via the
+   * NAT-translated source rather than only the topmost Via — needed for
+   * the hybrid kind-cluster harness where the worker's Via carries an
+   * unroutable pod IP.
+   */
+  readonly resolvedSources: Map<number, { ip: string; port: number }>
   readonly b2buaTarget: { host: string; port: number }
   readonly targetFor: (agent: string) => { host: string; port: number }
   /** Sleep that respects the active clock — TestClock under simulated, real under live. */
@@ -205,6 +213,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     trace: [],
     failedRefs: new Set(),
     resolvedMessages: new Map(),
+    resolvedSources: new Map(),
     b2buaTarget,
     targetFor: resolveTarget,
     sleep: sleepMs,
@@ -325,6 +334,8 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
           receivedMs: entry.deliveredMs,
           from,
           to,
+          fromAddr: { ip: entry.src.ip, port: entry.src.port },
+          toAddr: { ip: entry.dst.ip, port: entry.dst.port },
           direction: "send",
           stepIndex: -1,
           status: "pass",
@@ -504,6 +515,16 @@ function executeSend(
       if (step.statusCode === undefined) return baseTgt
       const reqMsg = inResponseToMsg
       if (reqMsg === undefined || reqMsg.type !== "request") return baseTgt
+      // Prefer the actual UDP source of the inbound request when known —
+      // the framework recorded it at receive time. This is the
+      // RFC-3261 §18.2 "received from" address and matches what the
+      // RFC-3581 rport/received params would carry on a NAT-aware peer.
+      // It's the only target that works for the hybrid kind-cluster
+      // harness, where the worker's Via host is an unroutable pod IP.
+      if (resolvedInResponseTo !== undefined) {
+        const src = state.resolvedSources.get(resolvedInResponseTo.id)
+        if (src !== undefined) return { host: src.ip, port: src.port }
+      }
       const top = reqMsg.parsed.via
       if (top === undefined) return baseTgt
       const receivedRaw = top.params?.["received"]
@@ -820,8 +841,11 @@ function executeExpect(
       return
     }
 
-    // Record the matched message
+    // Record the matched message + the actual UDP source for response routing.
     state.resolvedMessages.set(step.ref.id, matched)
+    if (matchedRinfo !== undefined) {
+      state.resolvedSources.set(step.ref.id, matchedRinfo)
+    }
     dialogState.lastMessage = matched
     dialogState.messagesByRef.set(step.ref.id, matched)
 

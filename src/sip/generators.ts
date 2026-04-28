@@ -125,7 +125,9 @@ function buildViaValue(v: ViaSpec): string {
   let out = `SIP/2.0/${v.transport} ${v.localIp}:${v.localPort};branch=${v.branch}`
   if (v.customParams) {
     for (const [k, val] of Object.entries(v.customParams)) {
-      out += `;${k}=${val}`
+      // RFC 3581 §3: a flag parameter (e.g. `rport` on a UAC request) is
+      // serialised without `=value`. Empty-string values map to that shape.
+      out += val.length > 0 ? `;${k}=${val}` : `;${k}`
     }
   }
   return out

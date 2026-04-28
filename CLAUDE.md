@@ -76,3 +76,4 @@ Load these only when the task touches the area:
 | Rule coverage and mutation testing | [docs/rule-coverage-and-killing.md](docs/rule-coverage-and-killing.md) |
 | Tracing / OpenTelemetry rules | [docs/tracing-design.md](docs/tracing-design.md) |
 | Overload protection | [docs/overload-protection.md](docs/overload-protection.md) |
+| Authoring multi-agent SIP scenarios (hybrid kind harness) | [docs/test-api-external.md](docs/test-api-external.md) |

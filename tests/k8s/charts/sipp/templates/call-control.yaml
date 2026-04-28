@@ -8,9 +8,13 @@ data:
   server.mjs: |
     import http from "node:http"
 
-    // Always route every /call/new to the same destination. /call/failure and
-    // /call/refer return safe defaults so the worker never gets stuck on a
-    // missing-endpoint response.
+    // X-Api-Call-aware mock: when sip_headers carries an X-Api-Call JSON
+    // instruction, honor it (action route|reject, destination, on_failure,
+    // call_limiter, update_headers). Otherwise fall back to the legacy
+    // TARGET_HOST/TARGET_PORT default route. Mirrors the canonical
+    // src/decision/adapters/http-reference/MockServer.ts semantics so the
+    // hybrid register-fakeExt-realCore harness can drive routing from
+    // alice's INVITE.
     const TARGET_HOST = process.env.TARGET_HOST || "sipp-uas"
     const TARGET_PORT = parseInt(process.env.TARGET_PORT || "5060", 10)
     const PORT = parseInt(process.env.PORT || "8080", 10)
@@ -30,24 +34,91 @@ data:
       res.end(JSON.stringify(body))
     }
 
+    function buildRouteFromInstruction(body, instr) {
+      const userMatch = /^sip:([^@]+)@/.exec(body.ruri || "")
+      const user = userMatch ? userMatch[1] : ""
+      if (instr.action === "reject") {
+        return {
+          action: "reject",
+          reject_code: instr.reject_code || 403,
+          reject_reason: instr.reject_reason || "Rejected",
+        }
+      }
+      const dest = instr.destination || {}
+      const host = dest.host || TARGET_HOST
+      const port = dest.port || TARGET_PORT
+      const resp = {
+        action: "route",
+        destination: { host, port, transport: "udp" },
+        new_ruri: instr.new_ruri || `sip:${user}@${host}:${port}`,
+      }
+      if (instr.update_headers) resp.update_headers = instr.update_headers
+      if (instr.call_limiter) resp.call_limiter = instr.call_limiter
+      if (instr.on_failure !== undefined) {
+        resp.callback_context = JSON.stringify(instr.on_failure)
+      }
+      if (instr.relay_first_18x_to_180) resp.relay_first_18x_to_180 = true
+      return resp
+    }
+
+    function handleNewCall(body) {
+      const apiCallRaw = body.sip_headers && body.sip_headers["X-Api-Call"]
+      if (apiCallRaw !== undefined && apiCallRaw !== null) {
+        let instr
+        try {
+          instr = JSON.parse(apiCallRaw)
+        } catch {
+          return { error: "Invalid X-Api-Call JSON" }
+        }
+        return buildRouteFromInstruction(body, instr)
+      }
+      // Legacy fallback for tests that don't send X-Api-Call.
+      return {
+        action: "route",
+        destination: { host: TARGET_HOST, port: TARGET_PORT, transport: "udp" },
+        new_ruri: `sip:test@${TARGET_HOST}:${TARGET_PORT}`,
+      }
+    }
+
+    function handleCallFailure(body) {
+      if (body.callback_context !== undefined) {
+        try {
+          const instr = JSON.parse(body.callback_context)
+          if (instr.action === "failover") {
+            if (!instr.destination) return { action: "terminate" }
+            const resp = { action: "failover", destination: instr.destination }
+            if (instr.new_ruri) resp.new_ruri = instr.new_ruri
+            if (instr.call_limiter) resp.call_limiter = instr.call_limiter
+            if (instr.update_headers) resp.update_headers = instr.update_headers
+            resp.callback_context =
+              instr.on_next_failure !== undefined
+                ? JSON.stringify(instr.on_next_failure)
+                : body.callback_context
+            if (instr.relay_first_18x_to_180) resp.relay_first_18x_to_180 = true
+            return resp
+          }
+        } catch {
+          /* fall through to terminate */
+        }
+      }
+      return { action: "terminate" }
+    }
+
     const server = http.createServer(async (req, res) => {
       try {
-        await readBody(req) // drain
+        const raw = await readBody(req)
+        if (req.url === "/healthz") return reply(res, 200, { ok: true })
+        const body = raw.length > 0 ? JSON.parse(raw) : {}
         if (req.url === "/call/new" && req.method === "POST") {
-          return reply(res, 200, {
-            action: "route",
-            destination: { host: TARGET_HOST, port: TARGET_PORT, transport: "udp" },
-            new_ruri: `sip:test@${TARGET_HOST}:${TARGET_PORT}`,
-          })
+          const resp = handleNewCall(body)
+          if (resp.error) return reply(res, 400, resp)
+          return reply(res, 200, resp)
         }
         if (req.url === "/call/failure" && req.method === "POST") {
-          return reply(res, 200, { action: "terminate" })
+          return reply(res, 200, handleCallFailure(body))
         }
         if (req.url === "/call/refer" && req.method === "POST") {
-          return reply(res, 200, { action: "deny", deny_code: 403, deny_reason: "no refer in tests" })
-        }
-        if (req.url === "/healthz") {
-          return reply(res, 200, { ok: true })
+          return reply(res, 200, { action: "reject", reject_code: 603, reject_reason: "Declined" })
         }
         reply(res, 404, { error: "not found" })
       } catch (err) {
@@ -55,7 +126,7 @@ data:
       }
     })
     server.listen(PORT, "0.0.0.0", () => {
-      console.log(`mock call-control listening on :${PORT}, target=${TARGET_HOST}:${TARGET_PORT}`)
+      console.log(`mock call-control listening on :${PORT}, default-target=${TARGET_HOST}:${TARGET_PORT}`)
     })
 ---
 apiVersion: apps/v1

@@ -238,6 +238,15 @@ export interface AgentConfig {
    */
   readonly ip?: string
   /**
+   * Hybrid-runner override: IP to advertise in this agent's Contact / Via /
+   * From URIs without changing the actual bind address. Used by the
+   * register-fakeExt-realCore harness so an agent can bind on the host
+   * (e.g. 0.0.0.0) but advertise a host-reachable IP that pods inside
+   * a kind cluster can route back to (the docker bridge gateway, or
+   * host.docker.internal). Undefined → use the bound IP unchanged.
+   */
+  readonly advertisedIp?: string
+  /**
    * Pre-assigned `Call-ID` for this agent's first outbound dialog. Used
    * by HA scenarios that need to deterministically steer a call to a
    * specific worker via the proxy's HRW Call-ID hash. When omitted the
@@ -389,6 +398,16 @@ export interface TraceEntry {
   readonly receivedMs: number
   readonly from: string
   readonly to: string
+  /**
+   * Optional wire-level addresses corresponding to `from` / `to`. Carried
+   * separately so the rule engine can key on the bare name (`from`) while
+   * the renderer can show `name (ip:port)` to disambiguate look-alike
+   * names (e.g. proxy-ext vs proxy-core both labelled "proxy" by the
+   * transport's `participantLabel`). Undefined when the originator is a
+   * test agent (whose name is already address-disambiguated by port).
+   */
+  readonly fromAddr?: { readonly ip: string; readonly port: number }
+  readonly toAddr?: { readonly ip: string; readonly port: number }
   readonly direction: "send" | "receive"
   readonly stepIndex: number
   readonly status: TraceStatus

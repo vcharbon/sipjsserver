@@ -17,3 +17,6 @@ spec:
       protocol: UDP
       port: {{ .Values.bind.port }}
       targetPort: {{ .Values.bind.port }}
+      {{- if .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}

@@ -68,7 +68,13 @@ function renderTraceEntries(
       entry.status === "unexpected" ? " [UNEXPECTED]"
       : entry.status === "fail" ? " [FAIL]"
       : ""
-    const prefix = `── [${tsBlock}] ${entry.from} → ${entry.to} ── ${label}${statusTag} `
+    const fromLabel = entry.fromAddr
+      ? `${entry.from} (${entry.fromAddr.ip}:${entry.fromAddr.port})`
+      : entry.from
+    const toLabel = entry.toAddr
+      ? `${entry.to} (${entry.toAddr.ip}:${entry.toAddr.port})`
+      : entry.to
+    const prefix = `── [${tsBlock}] ${fromLabel} → ${toLabel} ── ${label}${statusTag} `
     lines.push(prefix.padEnd(SEPARATOR_WIDTH, "─"))
     lines.push("")
     lines.push(serializeMessage(entry.message))

@@ -57,3 +57,15 @@ healthProbe:
 # K8s then decodes back to the raw bytes on the file mount.
 hmacKey: "phaseA-test-hmac-CURRENT-PAD1234"
 previousHmacKey: "phaseA-test-hmac-PREVIOUS-PAD123"
+
+# NodePort 30060 matches tests/k8s/cluster.yaml's extraPortMappings on
+# the load-tier worker (containerPort 30060 → hostPort 5060/UDP). The
+# hybrid register-fakeExt-realCore harness sends UDP from the host
+# loopback and traffic reaches the in-cluster proxy via this NodePort.
+# (The hybrid harness runs its own in-process register-proxy on the
+# host and treats the in-cluster sip-front-proxy + b2bua-worker stack
+# as an opaque "core" peer; REGISTERs are terminated in-process and
+# never reach the cluster, so PROXY_REGISTER_MODE here is irrelevant.)
+service:
+  type: NodePort
+  nodePort: 30060

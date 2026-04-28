@@ -763,7 +763,15 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       decisionTarget = target
 
       // ── §16.6 / §16.6.5 Record-Route ──────────────────────────────────────
-      let nextHeaders: SipHeader[] = [...headers]
+      // First populate `received=` / `rport=` on the topmost incoming
+      // Via per RFC 3261 §18.2.1 + RFC 3581 §4 so the response-routing
+      // path can deliver replies through NAT / non-routable upstream
+      // addresses.
+      let nextHeaders: SipHeader[] = populateReceivedRportOnTopVia(
+        headers,
+        src.address,
+        src.port,
+      )
       // Update Max-Forwards in place (or append).
       nextHeaders = upsertHeader(nextHeaders, "Max-Forwards", String(mfNext))
 
@@ -1138,6 +1146,10 @@ const handleRequestRegistrarMode = (
       counters.recordRouteInserted++
     }
 
+    // RFC 3261 §18.2.1 + RFC 3581 §4 — populate `received=` / `rport=`
+    // on the topmost incoming Via before pushing our own.
+    nextHeaders = populateReceivedRportOnTopVia(nextHeaders, src.address, src.port)
+
     // ── Push our Via on top with `;net=<ingress>` tag ─────────────────────
     // The tag tells `handleResponseImpl` which endpoint to send the
     // response on when this Via gets popped: the response goes back to
@@ -1188,6 +1200,59 @@ const prependHeader = (
   name: string,
   value: string
 ): SipHeader[] => [{ name, value }, ...headers]
+
+/**
+ * RFC 3261 §18.2.1 + RFC 3581 §4: when a stateful proxy / UAS receives a
+ * request, it MUST add `received=<src-ip>` to the topmost Via if the Via
+ * sent-by host differs from the actual packet source address, and SHOULD
+ * populate `rport=<src-port>` if the Via had an `rport` flag without a
+ * value. The mutated Via is then carried in the forwarded request and
+ * later used by the response-routing path (`handleResponseImpl`) to
+ * deliver responses through NAT or non-routable upstream addresses.
+ */
+const populateReceivedRportOnTopVia = (
+  headers: ReadonlyArray<SipHeader>,
+  srcIp: string,
+  srcPort: number,
+): SipHeader[] => {
+  const out: SipHeader[] = []
+  let updated = false
+  for (const h of headers) {
+    if (!updated && h.name.toLowerCase() === "via") {
+      // Parse just enough of `SIP/2.0/UDP host:port;param=val;...` to
+      // (a) compare sent-by host to srcIp and (b) splice `received=` /
+      // populate `rport=` without disturbing the rest.
+      let value = h.value
+      const semi = value.indexOf(";")
+      const head = semi === -1 ? value : value.slice(0, semi)
+      const params = semi === -1 ? "" : value.slice(semi)
+      // head = "SIP/2.0/UDP host:port" — extract host:port.
+      const hp = head.split(" ").pop() ?? ""
+      const colon = hp.lastIndexOf(":")
+      const sentByHost = colon === -1 ? hp : hp.slice(0, colon)
+      const needReceived = sentByHost !== srcIp
+      // Already has received=? then RFC §18.2.1 says "MUST add" — but if
+      // upstream stamped one, leave it. Reasonable.
+      const hasReceived = /;received=/i.test(params)
+      // rport flag (no value) → populate. If already populated or absent
+      // from the original Via, leave alone.
+      const rportFlag = /(^|;)rport(?=;|$)/i.test(params)
+      let nextParams = params
+      if (needReceived && !hasReceived) {
+        nextParams += `;received=${srcIp}`
+      }
+      if (rportFlag) {
+        nextParams = nextParams.replace(/;rport(?=;|$)/i, `;rport=${srcPort}`)
+      }
+      value = head + nextParams
+      out.push({ name: h.name, value })
+      updated = true
+    } else {
+      out.push(h)
+    }
+  }
+  return out
+}
 
 /** Replace first occurrence of `name`, or append if absent. */
 const upsertHeader = (

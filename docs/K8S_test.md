@@ -315,8 +315,18 @@ kubectl -n sip-test rollout status   statefulset b2bua-worker --timeout=120s
 kubectl delete namespace sip-test --wait=true
 npx tsx tests/k8s/scripts/install-stack.ts sip-test
 ```
+--
+
+## VCH commands
+
+```
+bash kubectl delete pod -n sip-test -l app.kubernetes.io/name=b2bua-worker 2>&1 && kubectl rollout status statefulset b2bua-worker -n sip-test --timeout=60s 2>&1 
+```
+
 
 ---
+
+
 
 ## 7. Known limitations + future work
 

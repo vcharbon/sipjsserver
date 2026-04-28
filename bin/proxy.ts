@@ -68,6 +68,7 @@ import {
   ProxyBindConfig,
   ProxyCore,
   PROXY_VERSION,
+  Registrar,
   RegisterStrategy,
   type SocketAddr,
   workerRegistryControlNoopLayer,
@@ -128,16 +129,22 @@ const advertisedHost = process.env["PROXY_ADVERTISED_HOST"] ?? bindHost
 const advertisedPort = parsePort(process.env["PROXY_ADVERTISED_PORT"], bindPort)
 const mode = (process.env["PROXY_REGISTRY_MODE"] ?? "static").toLowerCase()
 
-// Both registrar-mode strategies default to `noop` for the K8s-LB binary.
-// Slice 2 of the REGISTER + double-stack work added them as required deps
-// of `ProxyCore.Default`; the noops mean REGISTER returns 501 and the
-// (never-bound-here) `core` lookup path returns 404. A future binary in
-// registrar mode swaps these for `inMemoryRegistrar` /
-// `registrarLookup` + `RegistrarProxyConfig.layer(...)`.
-const noopRegistrarLayers = Layer.mergeAll(
-  RegisterStrategy.noopLayer,
-  CoreToExtRoutingStrategy.noopLayer,
-)
+// Register-strategy default for both static and kubernetes modes is `noop`
+// (REGISTER → 501). The hybrid register-fakeExt-realCore harness flips
+// `PROXY_REGISTER_MODE=in-memory` via Helm extraEnv so REGISTER is
+// terminated by an in-process AOR store. INVITE routing (LoadBalancer in
+// k8s mode, ForwardAll in static mode) is untouched.
+const registerMode = (process.env["PROXY_REGISTER_MODE"] ?? "noop").toLowerCase()
+const registrarLayers =
+  registerMode === "in-memory"
+    ? Layer.mergeAll(
+        RegisterStrategy.inMemoryRegistrarLayer,
+        CoreToExtRoutingStrategy.noopLayer,
+      ).pipe(Layer.provide(Registrar.inMemoryLayer))
+    : Layer.mergeAll(
+        RegisterStrategy.noopLayer,
+        CoreToExtRoutingStrategy.noopLayer,
+      )
 
 const baseBindLayer = Layer.mergeAll(
   SignalingNetwork.real,
@@ -149,7 +156,7 @@ const baseBindLayer = Layer.mergeAll(
     reusePort: true,
   }),
   CancelBranchLru.Default,
-  noopRegistrarLayers,
+  registrarLayers,
 )
 
 const buildStaticLayer = () => {

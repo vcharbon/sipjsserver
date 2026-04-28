@@ -34,9 +34,38 @@ export function createLiveTransport(opts?: {
   bindIp?: string
   b2buaHost?: string
   b2buaPort?: number
+  /**
+   * Transport-wide advertised IP. Used as the default Contact / Via / From
+   * address for every agent that does not set its own `advertisedIp`. Lets
+   * the hybrid runner bind on 0.0.0.0 (so kind pods can reach the host via
+   * the bridge gateway) while advertising a single host-reachable IP.
+   */
+  advertisedIp?: string
+  /**
+   * When `true`, the transport DOES NOT provide its own `SignalingNetwork.real`
+   * and instead requires one from the surrounding scope. The hybrid harness
+   * uses this so the in-process register-proxy and the alice/bob agents
+   * share a single `SignalingNetwork.real` instance — and therefore a single
+   * trace buffer (drained via `drainNetworkTrace`).
+   */
+  useExternalNetwork?: boolean
+  /**
+   * Optional per-(ip,port) name registry. Returned by `participantLabel`,
+   * combined with the wire address by the trace renderer to produce labels
+   * like `proxy(ext) (172.20.0.1:5060)`. Defaults to no labels (the renderer
+   * falls back to `ip:port`).
+   */
+  participantLabels?: ReadonlyMap<string, string>
+  /** Optional per-(ip,port) network tag override. */
+  participantNetworkOverrides?: ReadonlyMap<string, NetworkTag>
 }): TestTransport {
   const bindIp = opts?.bindIp ?? "127.0.0.1"
+  const transportAdvertisedIp = opts?.advertisedIp
+  const useExternalNetwork = opts?.useExternalNetwork === true
+  const externalLabels = opts?.participantLabels
+  const externalNetworks = opts?.participantNetworkOverrides
   const agents = new Map<string, LiveAgent>()
+  const participantLabels = new Map<string, string>()
 
   // Lazy: the `core` real fabric is built only if any agent declares
   // `network: "core"`. Each `SignalingNetwork.real` Layer creates an
@@ -77,19 +106,32 @@ export function createLiveTransport(opts?: {
           )
 
           const { ip, port } = endpoint.localAddress
+          // Contact / Via / From URIs use `advertisedIp` when set; this lets
+          // the hybrid runner bind on 0.0.0.0 (so kind pods can reach the
+          // host via the bridge gateway) while advertising a routable IP.
+          const advertisedIp = config.advertisedIp ?? transportAdvertisedIp ?? ip
           agents.set(name, { ip, port, endpoint, network: agentNetwork })
           participantNetworks.set(labelKey(ip, port), agentNetwork)
+          // Register the agent under both its bind addr (what shows up
+          // as the SOURCE of its outbound trace records) and its
+          // advertised addr (what other peers address it as), so the
+          // interpreter's "skip hops where either side is an agent"
+          // filter (drainNetworkTrace path) catches all duplicates.
+          participantLabels.set(labelKey(ip, port), name)
+          if (advertisedIp !== ip) {
+            participantLabels.set(labelKey(advertisedIp, port), name)
+          }
           agentInfos[name] = {
-            ip,
+            ip: advertisedIp,
             port,
             uri: config.uri,
-            contact: `<sip:${ip}:${port};transport=udp>`,
+            contact: `<sip:${advertisedIp}:${port};transport=udp>`,
           }
         }
 
         yield* Effect.addFinalizer(() => Effect.sync(() => agents.clear()))
         return agentInfos
-      }).pipe(Effect.provide(SignalingNetwork.real)),
+      }).pipe(useExternalNetwork ? (e) => e : Effect.provide(SignalingNetwork.real)),
 
     send: (agentName, buf, port, address) =>
       Effect.gen(function* () {
@@ -120,6 +162,10 @@ export function createLiveTransport(opts?: {
       }),
 
     participantNetwork: (ip: string, port: number) =>
-      participantNetworks.get(labelKey(ip, port)),
+      externalNetworks?.get(labelKey(ip, port))
+        ?? participantNetworks.get(labelKey(ip, port)),
+    participantLabel: (ip: string, port: number) =>
+      externalLabels?.get(labelKey(ip, port))
+        ?? participantLabels.get(labelKey(ip, port)),
   }
 }

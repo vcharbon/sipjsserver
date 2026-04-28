@@ -18,6 +18,8 @@ export default defineConfig({
     include: [
       "tests/fullcall/e2e-real-clock.test.ts",
       "tests/harness/limiter-rejection.test.ts",
+      // Hybrid kind-cluster suite — no-ops unless `E2E_KIND=1` in env.
+      "tests/fullcall/e2e-register-fakeExt-realCore.test.ts",
     ],
   },
 })

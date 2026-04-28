@@ -91,33 +91,25 @@ No work in slices 2+ until this is green.
 
 ---
 
-## Slice 2 — Mock call-control HTTP service
+## Slice 2 — Mock call-control HTTP service ✅ already wired
 
-`MockServer.ts` exposes pure response builders (`mockNewCallResponse`,
-`mockCallFailureResponse`, `mockCallReferBehavior`). We need them
-running as a real HTTP server inside kind so the b2bua-worker can hit
-them.
+**Discovery during implementation:** the mock call-control endpoints are
+**already exposed by every b2bua-worker pod**. [src/http/StatusServer.ts:413](src/http/StatusServer.ts#L413) calls
+`addCallControlRoutes(router)` unconditionally inside the StatusServer
+layer. `AppConfig.ts:172` defaults `CALL_CONTROL_URL` to
+`http://localhost:3002` — the worker's own status port.
 
-**Files to add/modify:**
-- `bin/mock-call-control.ts` — new entrypoint. Effect `HttpRouter` (already
-  in this codebase via `effect/unstable/http`) exposing:
-  - `POST /call/new` → `mockNewCallResponse(body)`
-  - `POST /call/failure` → `mockCallFailureResponse(body)`
-  - `POST /call/refer` → `mockCallReferBehavior(body)`
-  - `GET /healthz` → 200 (used by k8s readiness)
-  - Reads bind port from env `MOCK_HTTP_PORT` (default 8080).
-- [tsconfig.bin.json](tsconfig.bin.json) — add `bin/mock-call-control.ts` to includes (it already lists `bin/proxy.ts` etc.).
-- [Dockerfile](Dockerfile) — already produces `dist-bin/`; no changes needed beyond making sure the bin compiles into the image.
-- `tests/k8s/charts/mock-call-control/` — new minimal chart:
-  - `Chart.yaml`, `values.yaml`
-  - `templates/deployment.yaml` — single replica, `command: ["node", "dist-bin/bin/mock-call-control.js"]`, port 8080
-  - `templates/service.yaml` — ClusterIP, port 8080
-  - `templates/_helpers.tpl` (mirroring redis chart conventions)
-- [tests/k8s/fixtures/helm.ts](tests/k8s/fixtures/helm.ts) — add `installMockCallControl(ns)` alongside existing `installRedis` / `installSipp` / `installWorker` / `installProxy`.
-- [tests/k8s/scripts/install-stack.ts](tests/k8s/scripts/install-stack.ts) — call `installMockCallControl(ns)` before `installWorker`, and pass `--set callControl.url=http://mock-call-control:8080` (or equivalent helm value) to the worker chart.
-- [deploy/helm/b2bua-worker/values.yaml](deploy/helm/b2bua-worker/values.yaml) + the worker `templates/statefulset.yaml` — confirm `CALL_CONTROL_URL` env var is templated (read via `src/config/AppConfig.ts`'s `callControlUrl`); add it if missing.
+Net effect: a freshly-deployed worker pod self-routes via X-Api-Call out
+of the box. **No new bin entrypoint, no new helm chart, no
+[tests/k8s/scripts/install-stack.ts](tests/k8s/scripts/install-stack.ts) change is required.**
 
-**Acceptance:** `npm run test:k8s:up && tsx tests/k8s/scripts/install-stack.ts` produces a healthy `mock-call-control` Service that responds 200 to `/healthz` and 200 + valid JSON to `POST /call/new` with an X-Api-Call body.
+The only worker-side env wiring slice 3 will add (via helm `extraEnv`)
+is:
+- `B2B_OUTBOUND_PROXY=<proxy ClusterIP>:5060` so b-leg INVITEs egress
+  through the proxy back to alice/bob (required for the proxy's
+  registrar lookup + Record-Route stamping to apply on the b-leg too).
+- `SIP_LOCAL_IP=$(POD_IP)` via downward API so worker-stamped Via /
+  Contact don't claim 127.0.0.1.
 
 ---
 

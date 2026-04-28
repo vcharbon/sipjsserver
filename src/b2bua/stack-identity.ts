@@ -25,11 +25,18 @@ export interface StackIdentityOpts {
 
 const encode = encodeURIComponent
 
-/** Build a ViaSpec with cr/lg/em custom params. */
+/** Build a ViaSpec with cr/lg/em + RFC 3581 `rport` custom params. */
 export function buildCallVia(opts: StackIdentityOpts): ViaSpec {
   const customParams: Record<string, string> = {
     cr: encode(opts.callRef),
     lg: encode(opts.leg),
+    // RFC 3581 §3: include `rport` (no value) so the next hop populates
+    // `received=` / `rport=` on response Vias and we can route responses
+    // through any NAT or non-symmetric routing without relying on
+    // sent-by being externally reachable. Without this, a B2BUA behind
+    // a Service / pod IP cannot receive responses through a stateful
+    // proxy that is not in the same routing domain as the worker pod.
+    rport: "",
   }
   if (opts.isEmergency) customParams.em = "1"
   return {
