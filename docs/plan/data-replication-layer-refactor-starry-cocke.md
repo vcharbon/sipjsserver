@@ -5,7 +5,7 @@
 | Slice | Description                                                    | Status        | Artifacts                                                                                  |
 |-------|----------------------------------------------------------------|---------------|--------------------------------------------------------------------------------------------|
 | 0     | Spec doc: full mechanism + signaling walk-throughs + recovery flows + loss classes | **DONE (v1)** | [docs/replication/call-cache-backup.md](../replication/call-cache-backup.md) — awaiting review |
-| 1     | AtomicWriter + Lua script for call+indexes (no propagate yet); memory-layer mutex parity | not started   |                                                                                            |
+| 1     | AtomicWriter + Lua script for call+indexes (no propagate yet); memory-layer mutex parity | **DONE**      | [src/replication/AtomicWriter.ts](../../src/replication/AtomicWriter.ts), [tests/replication/atomic-writer.test.ts](../../tests/replication/atomic-writer.test.ts), `PartitionedRelayStorage` delegates writes |
 | 2     | PropagateStream + extend Lua to ZADD propagate:{peer} + EpochCounter | not started   |                                                                                            |
 | 3     | `/replog` long-poll HTTP service + ReplLog + Prometheus `/metrics` endpoint | not started   |                                                                                            |
 | 4     | ReplPuller client + steady-state replication (alongside legacy push for one slice) | not started   |                                                                                            |

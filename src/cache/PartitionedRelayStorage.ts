@@ -44,6 +44,10 @@ import {
   Stream,
 } from "effect"
 import { RedisClient, RedisError } from "../redis/RedisClient.js"
+import {
+  AtomicWriter,
+  type AtomicWriterError,
+} from "../replication/AtomicWriter.js"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -186,8 +190,12 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
     PartitionedRelayStorage,
     Effect.gen(function* () {
       const redis = yield* RedisClient
+      const writer = yield* AtomicWriter
 
       const wrapErr = (err: RedisError): StorageError =>
+        new StorageError({ reason: err.reason })
+
+      const wrapWriterErr = (err: AtomicWriterError): StorageError =>
         new StorageError({ reason: err.reason })
 
       const getCall = (
@@ -214,20 +222,9 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
         indexes: ReadonlyArray<string>,
         ttlSec: number
       ): Effect.Effect<void, StorageError> =>
-        Effect.gen(function* () {
-          yield* redis.setex(
-            PartitionedRelayStorage.callKey(role, owner, callRef),
-            ttlSec,
-            json
-          ).pipe(Effect.mapError(wrapErr))
-          for (const idx of indexes) {
-            yield* redis.setex(
-              PartitionedRelayStorage.indexKey(idx),
-              ttlSec,
-              callRef
-            ).pipe(Effect.mapError(wrapErr))
-          }
-        })
+        writer
+          .put(role, owner, callRef, json, indexes, ttlSec)
+          .pipe(Effect.mapError(wrapWriterErr))
 
       const refreshCall = (
         role: PartitionRole,
@@ -236,18 +233,9 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
         indexes: ReadonlyArray<string>,
         ttlSec: number
       ): Effect.Effect<void, StorageError> =>
-        Effect.gen(function* () {
-          yield* redis.expire(
-            PartitionedRelayStorage.callKey(role, owner, callRef),
-            ttlSec
-          ).pipe(Effect.mapError(wrapErr))
-          for (const idx of indexes) {
-            yield* redis.expire(
-              PartitionedRelayStorage.indexKey(idx),
-              ttlSec
-            ).pipe(Effect.mapError(wrapErr))
-          }
-        })
+        writer
+          .refresh(role, owner, callRef, indexes, ttlSec)
+          .pipe(Effect.mapError(wrapWriterErr))
 
       const deleteCall = (
         role: PartitionRole,
@@ -255,15 +243,9 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
         callRef: string,
         indexes: ReadonlyArray<string>
       ): Effect.Effect<void, StorageError> =>
-        Effect.gen(function* () {
-          const keys: Array<string> = [
-            PartitionedRelayStorage.callKey(role, owner, callRef),
-          ]
-          for (const idx of indexes) {
-            keys.push(PartitionedRelayStorage.indexKey(idx))
-          }
-          yield* redis.del(...keys).pipe(Effect.mapError(wrapErr))
-        })
+        writer
+          .delete(role, owner, callRef, indexes)
+          .pipe(Effect.mapError(wrapWriterErr))
 
       const scanCalls = (
         role: PartitionRole,
@@ -326,15 +308,19 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
         scanCalls,
       }
     })
-  )
+  ).pipe(Layer.provide(AtomicWriter.redisLayer))
 
   /**
    * Tests: in-memory MutableHashMap + Effect Clock. TTL is enforced
    * on access (sweep-on-touch), matching `CallStateCache.memoryLayer`.
+   * Writes route through an embedded AtomicWriter that wraps the same
+   * MutableHashMap with a single-permit Semaphore — this gives the
+   * memory layer the same all-or-nothing contract as the Lua-backed
+   * production layer (Slice 1, [docs/replication/call-cache-backup.md §5.7](../../docs/replication/call-cache-backup.md)).
    */
-  static readonly memoryLayer = Layer.effect(
+  static readonly memoryLayer = Layer.sync(
     PartitionedRelayStorage,
-    Effect.sync(() => makeMemoryApi().api)
+    () => makeMemoryApi().api
   )
 
   /**
@@ -373,6 +359,10 @@ export interface MemoryApiHandle {
 
 const makeMemoryApi = (): MemoryApiHandle => {
   const store = MutableHashMap.empty<string, MemoryEntry>()
+  const writer = AtomicWriter.makeMemoryUnsafe(store)
+
+  const wrapWriterErr = (err: AtomicWriterError): StorageError =>
+    new StorageError({ reason: err.reason })
 
   const sweep = (key: string, nowMs: number): Option.Option<MemoryEntry> => {
     const opt = MutableHashMap.get(store, key)
@@ -382,32 +372,6 @@ const makeMemoryApi = (): MemoryApiHandle => {
       return Option.none()
     }
     return opt
-  }
-
-  const put = (
-    key: string,
-    value: string,
-    ttlSec: number,
-    nowMs: number
-  ): void => {
-    MutableHashMap.set(store, key, {
-      value,
-      expiresAtMs: nowMs + ttlSec * 1000,
-    })
-  }
-
-  const expireExisting = (
-    key: string,
-    ttlSec: number,
-    nowMs: number
-  ): void => {
-    const opt = sweep(key, nowMs)
-    if (Option.isSome(opt)) {
-      MutableHashMap.set(store, key, {
-        value: opt.value.value,
-        expiresAtMs: nowMs + ttlSec * 1000,
-      })
-    }
   }
 
   const getCall = (
@@ -445,20 +409,9 @@ const makeMemoryApi = (): MemoryApiHandle => {
     indexes: ReadonlyArray<string>,
     ttlSec: number
   ): Effect.Effect<void, StorageError> =>
-    Effect.gen(function* () {
-      const ms = yield* Clock.currentTimeMillis
-      yield* Effect.sync(() => {
-        put(PartitionedRelayStorage.callKey(role, owner, callRef), json, ttlSec, ms)
-        for (const idx of indexes) {
-          put(
-            PartitionedRelayStorage.indexKey(idx),
-            callRef,
-            ttlSec,
-            ms
-          )
-        }
-      })
-    })
+    writer
+      .put(role, owner, callRef, json, indexes, ttlSec)
+      .pipe(Effect.mapError(wrapWriterErr))
 
   const refreshCall = (
     role: PartitionRole,
@@ -467,23 +420,9 @@ const makeMemoryApi = (): MemoryApiHandle => {
     indexes: ReadonlyArray<string>,
     ttlSec: number
   ): Effect.Effect<void, StorageError> =>
-    Effect.gen(function* () {
-      const ms = yield* Clock.currentTimeMillis
-      yield* Effect.sync(() => {
-        expireExisting(
-          PartitionedRelayStorage.callKey(role, owner, callRef),
-          ttlSec,
-          ms
-        )
-        for (const idx of indexes) {
-          expireExisting(
-            PartitionedRelayStorage.indexKey(idx),
-            ttlSec,
-            ms
-          )
-        }
-      })
-    })
+    writer
+      .refresh(role, owner, callRef, indexes, ttlSec)
+      .pipe(Effect.mapError(wrapWriterErr))
 
   const deleteCall = (
     role: PartitionRole,
@@ -491,18 +430,9 @@ const makeMemoryApi = (): MemoryApiHandle => {
     callRef: string,
     indexes: ReadonlyArray<string>
   ): Effect.Effect<void, StorageError> =>
-    Effect.sync(() => {
-      MutableHashMap.remove(
-        store,
-        PartitionedRelayStorage.callKey(role, owner, callRef)
-      )
-      for (const idx of indexes) {
-        MutableHashMap.remove(
-          store,
-          PartitionedRelayStorage.indexKey(idx)
-        )
-      }
-    })
+    writer
+      .delete(role, owner, callRef, indexes)
+      .pipe(Effect.mapError(wrapWriterErr))
 
   const scanCalls = (
     role: PartitionRole,
