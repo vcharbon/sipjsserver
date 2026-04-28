@@ -42,6 +42,7 @@ import {
   ServiceMap,
 } from "effect"
 import { RedisClient } from "../redis/RedisClient.js"
+import { WriteNotifier, type WriteNotifierApi } from "./WriteNotifier.js"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -283,6 +284,7 @@ return { seq, tonumber(epoch) }
     AtomicWriter,
     Effect.gen(function* () {
       const redis = yield* RedisClient
+      const notifier = yield* WriteNotifier
 
       const buildPeerKeys = (
         role: PartitionRole,
@@ -310,6 +312,20 @@ return { seq, tonumber(epoch) }
         return keys
       }
 
+      // Publish a notification when the Lua returned a non-null
+      // {seq, epoch} (i.e. peer-bearing path). No-op for null results.
+      const announce = (
+        owner: string,
+        peer: string,
+        callRef: string,
+        result: AtomicWriteResult | null
+      ): Effect.Effect<AtomicWriteResult | null> => {
+        if (result === null) return Effect.succeed(null)
+        return notifier
+          .publish({ owner, peer, callRef, seq: result.seq, epoch: result.epoch })
+          .pipe(Effect.as(result))
+      }
+
       const put: AtomicWriterApi["put"] = (
         role,
         owner,
@@ -335,7 +351,11 @@ return { seq, tonumber(epoch) }
             callRef,
             setTtl,
           ])
-          .pipe(Effect.mapError(wrapWriterErr), Effect.map(parseLuaPair))
+          .pipe(
+            Effect.mapError(wrapWriterErr),
+            Effect.map(parseLuaPair),
+            Effect.flatMap((r) => announce(owner, peer, callRef, r))
+          )
       }
 
       const refresh: AtomicWriterApi["refresh"] = (
@@ -361,7 +381,11 @@ return { seq, tonumber(epoch) }
             callRef,
             setTtl,
           ])
-          .pipe(Effect.mapError(wrapWriterErr), Effect.map(parseLuaPair))
+          .pipe(
+            Effect.mapError(wrapWriterErr),
+            Effect.map(parseLuaPair),
+            Effect.flatMap((r) => announce(owner, peer, callRef, r))
+          )
       }
 
       const del: AtomicWriterApi["delete"] = (
@@ -382,7 +406,11 @@ return { seq, tonumber(epoch) }
         const keys = buildPeerKeys(role, owner, callRef, indexes, peer)
         return redis
           .eval(AtomicWriter.DELETE_WITH_PEER_LUA, keys, [callRef, setTtl])
-          .pipe(Effect.mapError(wrapWriterErr), Effect.map(parseLuaPair))
+          .pipe(
+            Effect.mapError(wrapWriterErr),
+            Effect.map(parseLuaPair),
+            Effect.flatMap((r) => announce(owner, peer, callRef, r))
+          )
       }
 
       return { put, refresh, delete: del }
@@ -390,25 +418,36 @@ return { seq, tonumber(epoch) }
   )
 
   /**
-   * Tests / fabric: build an AtomicWriter wired to a shared in-memory store.
-   * The store is the one PartitionedRelayStorage.memoryLayer writes through;
-   * sharing it lets both services see one set of entries with the same
-   * atomicity contract.
+   * Tests / fabric: build an AtomicWriter wired to a shared in-memory
+   * store. Pulls a `WriteNotifier` from the layer scope; tests that
+   * exercise ReplLog should compose `WriteNotifier.layer`, others can
+   * use `WriteNotifier.noopLayer`.
    */
   static readonly memoryLayerFromStore = (
     store: MemoryStore
-  ): Layer.Layer<AtomicWriter> =>
-    Layer.sync(AtomicWriter, () => makeMemoryUnsafe(store))
+  ): Layer.Layer<AtomicWriter, never, WriteNotifier> =>
+    Layer.effect(
+      AtomicWriter,
+      Effect.gen(function* () {
+        const notifier = yield* WriteNotifier
+        return makeMemoryUnsafe(store, notifier)
+      })
+    )
 
   /**
-   * Synchronous factory used by `PartitionedRelayStorage.memoryLayer` and
-   * by `PeerFabric.simulated` to embed an AtomicWriter that shares a
-   * MutableHashMap with another service. Synchronous so callers that build
-   * their state outside of an Effect.gen scope (e.g. PeerFabric's per-peer
-   * state map) do not need an Effect runtime to wire up a peer.
+   * Synchronous factory used by `PartitionedRelayStorage.memoryLayer`
+   * and by `PeerFabric.simulated` to embed an AtomicWriter that shares
+   * a MutableHashMap with another service. Synchronous so callers that
+   * build their state outside of an Effect.gen scope (e.g. PeerFabric's
+   * per-peer state map) do not need an Effect runtime to wire up a
+   * peer. The optional `notifier` is published to on every successful
+   * peer-bearing write; pass undefined for tests that don't observe
+   * notifications (the existing 800+ tests fall into this bucket).
    */
-  static readonly makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi =>
-    makeMemoryUnsafe(store)
+  static readonly makeMemoryUnsafe = (
+    store: MemoryStore,
+    notifier?: WriteNotifierApi
+  ): AtomicWriterApi => makeMemoryUnsafe(store, notifier)
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +609,10 @@ const propagateZAdd = (
   writePropagateSet(store, peer, view, setTtlSec, nowMs)
 }
 
-const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
+const makeMemoryUnsafe = (
+  store: MemoryStore,
+  notifier?: WriteNotifierApi
+): AtomicWriterApi => {
   // Single-permit semaphore = mutex. Without this, two fibers could
   // observe the clock then race into the synchronous write block in
   // an order TestClock cannot predict — atomicity from the observer's
@@ -582,6 +624,26 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
   const exclusive = mutex.withPermits(1)
 
   const nowMs = Clock.currentTimeMillis
+
+  const announce = (
+    owner: string,
+    peer: string,
+    callRef: string,
+    result: AtomicWriteResult | null
+  ): Effect.Effect<AtomicWriteResult | null> => {
+    if (result === null || notifier === undefined) {
+      return Effect.succeed(result)
+    }
+    return notifier
+      .publish({
+        owner,
+        peer,
+        callRef,
+        seq: result.seq,
+        epoch: result.epoch,
+      })
+      .pipe(Effect.as(result))
+  }
 
   const put: AtomicWriterApi["put"] = (
     role,
@@ -598,7 +660,7 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
         const peer = opts?.peer
         const setTtl =
           opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
-        return yield* Effect.sync(() => {
+        const result = yield* Effect.sync(() => {
           const expiresAtMs = ms + ttlSec * 1000
           putEntry(store, AtomicWriter.callKey(role, owner, callRef), {
             value: json,
@@ -616,6 +678,10 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
           propagateZAdd(store, peer, callRef, seq, setTtl, ms)
           return { seq, epoch } satisfies AtomicWriteResult
         })
+        if (peer !== undefined && peer.length > 0) {
+          return yield* announce(owner, peer, callRef, result)
+        }
+        return result
       })
     )
 
@@ -633,7 +699,7 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
         const peer = opts?.peer
         const setTtl =
           opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
-        return yield* Effect.sync(() => {
+        const result = yield* Effect.sync(() => {
           const newExpire = ms + ttlSec * 1000
           extendIfPresent(
             store,
@@ -650,6 +716,10 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
           propagateZAdd(store, peer, callRef, seq, setTtl, ms)
           return { seq, epoch } satisfies AtomicWriteResult
         })
+        if (peer !== undefined && peer.length > 0) {
+          return yield* announce(owner, peer, callRef, result)
+        }
+        return result
       })
     )
 
@@ -666,7 +736,7 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
         const peer = opts?.peer
         const setTtl =
           opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
-        return yield* Effect.sync(() => {
+        const result = yield* Effect.sync(() => {
           removeEntry(store, AtomicWriter.callKey(role, owner, callRef))
           for (const idx of indexes) {
             removeEntry(store, AtomicWriter.indexKey(idx))
@@ -677,6 +747,10 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
           propagateZAdd(store, peer, callRef, seq, setTtl, ms)
           return { seq, epoch } satisfies AtomicWriteResult
         })
+        if (peer !== undefined && peer.length > 0) {
+          return yield* announce(owner, peer, callRef, result)
+        }
+        return result
       })
     )
 

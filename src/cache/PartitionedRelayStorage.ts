@@ -48,6 +48,7 @@ import {
   AtomicWriter,
   type AtomicWriterError,
 } from "../replication/AtomicWriter.js"
+import { WriteNotifier } from "../replication/WriteNotifier.js"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -333,7 +334,15 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
         scanCalls,
       }
     })
-  ).pipe(Layer.provide(AtomicWriter.redisLayer))
+  ).pipe(
+    // Slice 3: AtomicWriter requires a WriteNotifier (it publishes
+    // on every successful peer-bearing write so ReplLog's long-poll
+    // handlers can push entries to subscribers within milliseconds).
+    // We embed the default sliding-PubSub notifier here so the public
+    // `redisLayer` external requirement stays at just `RedisClient`.
+    Layer.provide(AtomicWriter.redisLayer),
+    Layer.provide(WriteNotifier.layer)
+  )
 
   /**
    * Tests: in-memory MutableHashMap + Effect Clock. TTL is enforced

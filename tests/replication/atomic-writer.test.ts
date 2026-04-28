@@ -12,13 +12,14 @@
  */
 
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Fiber, MutableHashMap, Option } from "effect"
+import { Effect, Fiber, Layer, MutableHashMap, Option } from "effect"
 import {
   AtomicWriter,
   type AtomicWriterApi,
   type MemoryStore,
   type MemoryStoreEntry,
 } from "../../src/replication/AtomicWriter.js"
+import { WriteNotifier } from "../../src/replication/WriteNotifier.js"
 
 const callKey = AtomicWriter.callKey
 const indexKey = AtomicWriter.indexKey
@@ -245,6 +246,12 @@ describe("AtomicWriter.memory — service layer", () => {
       )
       expect(has(store, callKey("bak", "worker-Z", "call-Z"))).toBe(true)
       expect(has(store, indexKey("leg:z"))).toBe(true)
-    }).pipe(Effect.provide(AtomicWriter.memoryLayerFromStore(store)))
+    }).pipe(
+      Effect.provide(
+        AtomicWriter.memoryLayerFromStore(store).pipe(
+          Layer.provide(WriteNotifier.noopLayer)
+        )
+      )
+    )
   })
 })
