@@ -365,8 +365,22 @@ export class CallState extends ServiceMap.Service<
         )
         const { role, primary } = partitionOf(callRef)
         const indexes = callIndexKeys(bumped)
+        // Slice 2: when the LB has assigned a backup peer
+        // (`_topology.bak` non-empty and not self), pass it through to
+        // the storage layer so the Lua script also writes the
+        // `propagate:{peer}` ZADD + seq INCR + sliding TTL. Calls
+        // without an LB-assigned backup go through the no-peer path —
+        // call body + indexes only, no replication metadata.
+        const peerOpt =
+          bumped._topology !== undefined &&
+          bumped._topology.bak.length > 0 &&
+          bumped._topology.bak !== selfOrdinal
+            ? bumped._topology.bak
+            : undefined
         yield* storage
-          .putCall(role, primary, callRef, json, indexes, ttl)
+          .putCall(role, primary, callRef, json, indexes, ttl, {
+            peer: peerOpt,
+          })
           .pipe(Effect.mapError(toRedisErr))
 
         // Slice 5: AFTER the local write succeeds, fan out to the
@@ -407,8 +421,19 @@ export class CallState extends ServiceMap.Service<
         const indexes = call !== undefined ? callIndexKeys(call) : []
         // Slice 5: fan delete out to the backup peer too (best-effort).
         yield* fanOutDelete(call, callRef, indexes)
+        // Slice 2: same peer-extraction logic as flushToRedis — the
+        // delete event is announced through `propagate:{peer}` so the
+        // backup observes the termination. No-peer calls hard-delete
+        // without any replication side effect.
+        const peerOpt =
+          call !== undefined &&
+          call._topology !== undefined &&
+          call._topology.bak.length > 0 &&
+          call._topology.bak !== selfOrdinal
+            ? call._topology.bak
+            : undefined
         yield* storage
-          .deleteCall(role, primary, callRef, indexes)
+          .deleteCall(role, primary, callRef, indexes, { peer: peerOpt })
           .pipe(Effect.mapError(toRedisErr))
       })
 

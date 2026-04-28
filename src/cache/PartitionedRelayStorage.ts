@@ -63,6 +63,16 @@ export interface ScanEntry {
 }
 
 /**
+ * Slice 2 — per-write replication options. Pass `peer` only for calls
+ * the LB has assigned a backup to; absent peer = no replication side
+ * effect on this write.
+ */
+export interface PartitionedRelayWriteOptions {
+  readonly peer?: string | undefined
+  readonly propagateSetTtlSec?: number | undefined
+}
+
+/**
  * Fault used internally by `redisLayer` when a SCAN/GET pair would
  * surface a key that disappeared mid-scan. We return the survivors
  * and skip the missing one — ttl reads can return 0/-2 in Redis.
@@ -98,9 +108,12 @@ export interface PartitionedRelayStorageApi {
   ) => Effect.Effect<string | null, StorageError>
 
   /**
-   * Full create/overwrite. Writes the call's state JSON + every
-   * index entry with the supplied TTL. Sequential, not atomic — F10
-   * (mid-flush crash) is an accepted small loss class.
+   * Full create/overwrite. Writes the call's state JSON + every index
+   * entry atomically (Slice 1 — Lua / mutex). When `opts.peer` is
+   * provided, also bumps `propagate_seq:{peer}` and ZADDs the callRef
+   * into `propagate:{peer}` with sliding TTL (Slice 2). Pass
+   * `peer=undefined` (or empty string) for calls without an
+   * LB-assigned backup — those skip the propagate side effect entirely.
    */
   readonly putCall: (
     role: PartitionRole,
@@ -108,28 +121,37 @@ export interface PartitionedRelayStorageApi {
     callRef: string,
     json: string,
     indexes: ReadonlyArray<string>,
-    ttlSec: number
+    ttlSec: number,
+    opts?: PartitionedRelayWriteOptions
   ) => Effect.Effect<void, StorageError>
 
   /**
    * Keepalive — refresh TTL on the call key + every named index. No
    * value rewrite. No-op for missing keys (matches Redis EXPIRE
-   * semantics + the memory layer's `expire*` ops).
+   * semantics + the memory layer's `expire*` ops). When `opts.peer` is
+   * provided the refresh is also a propagate event (so the backup
+   * keeps its TTL parity).
    */
   readonly refreshCall: (
     role: PartitionRole,
     owner: string,
     callRef: string,
     indexes: ReadonlyArray<string>,
-    ttlSec: number
+    ttlSec: number,
+    opts?: PartitionedRelayWriteOptions
   ) => Effect.Effect<void, StorageError>
 
-  /** Termination — delete the call key + every named index. */
+  /**
+   * Termination — delete the call key + every named index. When
+   * `opts.peer` is provided, also bumps the propagate set so the
+   * backup observes the deletion.
+   */
   readonly deleteCall: (
     role: PartitionRole,
     owner: string,
     callRef: string,
-    indexes: ReadonlyArray<string>
+    indexes: ReadonlyArray<string>,
+    opts?: PartitionedRelayWriteOptions
   ) => Effect.Effect<void, StorageError>
 
   /**
@@ -220,32 +242,35 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
         callRef: string,
         json: string,
         indexes: ReadonlyArray<string>,
-        ttlSec: number
+        ttlSec: number,
+        opts?: PartitionedRelayWriteOptions
       ): Effect.Effect<void, StorageError> =>
         writer
-          .put(role, owner, callRef, json, indexes, ttlSec)
-          .pipe(Effect.mapError(wrapWriterErr))
+          .put(role, owner, callRef, json, indexes, ttlSec, opts)
+          .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
 
       const refreshCall = (
         role: PartitionRole,
         owner: string,
         callRef: string,
         indexes: ReadonlyArray<string>,
-        ttlSec: number
+        ttlSec: number,
+        opts?: PartitionedRelayWriteOptions
       ): Effect.Effect<void, StorageError> =>
         writer
-          .refresh(role, owner, callRef, indexes, ttlSec)
-          .pipe(Effect.mapError(wrapWriterErr))
+          .refresh(role, owner, callRef, indexes, ttlSec, opts)
+          .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
 
       const deleteCall = (
         role: PartitionRole,
         owner: string,
         callRef: string,
-        indexes: ReadonlyArray<string>
+        indexes: ReadonlyArray<string>,
+        opts?: PartitionedRelayWriteOptions
       ): Effect.Effect<void, StorageError> =>
         writer
-          .delete(role, owner, callRef, indexes)
-          .pipe(Effect.mapError(wrapWriterErr))
+          .delete(role, owner, callRef, indexes, opts)
+          .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
 
       const scanCalls = (
         role: PartitionRole,
@@ -407,32 +432,35 @@ const makeMemoryApi = (): MemoryApiHandle => {
     callRef: string,
     json: string,
     indexes: ReadonlyArray<string>,
-    ttlSec: number
+    ttlSec: number,
+    opts?: PartitionedRelayWriteOptions
   ): Effect.Effect<void, StorageError> =>
     writer
-      .put(role, owner, callRef, json, indexes, ttlSec)
-      .pipe(Effect.mapError(wrapWriterErr))
+      .put(role, owner, callRef, json, indexes, ttlSec, opts)
+      .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
 
   const refreshCall = (
     role: PartitionRole,
     owner: string,
     callRef: string,
     indexes: ReadonlyArray<string>,
-    ttlSec: number
+    ttlSec: number,
+    opts?: PartitionedRelayWriteOptions
   ): Effect.Effect<void, StorageError> =>
     writer
-      .refresh(role, owner, callRef, indexes, ttlSec)
-      .pipe(Effect.mapError(wrapWriterErr))
+      .refresh(role, owner, callRef, indexes, ttlSec, opts)
+      .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
 
   const deleteCall = (
     role: PartitionRole,
     owner: string,
     callRef: string,
-    indexes: ReadonlyArray<string>
+    indexes: ReadonlyArray<string>,
+    opts?: PartitionedRelayWriteOptions
   ): Effect.Effect<void, StorageError> =>
     writer
-      .delete(role, owner, callRef, indexes)
-      .pipe(Effect.mapError(wrapWriterErr))
+      .delete(role, owner, callRef, indexes, opts)
+      .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
 
   const scanCalls = (
     role: PartitionRole,

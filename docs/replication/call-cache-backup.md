@@ -107,6 +107,14 @@ Index lookups happen on inbound SIP requests where the worker has only a Call-ID
 
 ### 4.2 The propagate sorted set
 
+**Backup is optional.** The load balancer assigns `w_bak` per call at INVITE time
+based on its own policy; for a call that the LB did not assign a backup to,
+`_topology.bak` is undefined and the call is **single-copy** (only `pri:N:call:{ref}`
+exists; nothing is replicated). Single-copy calls accept "if N dies the call dies"
+as the loss class — the LB chose this on purpose (e.g. low-priority calls,
+short-lived OPTIONS, capacity bias). Replication state machinery below applies
+*only* when a peer is assigned.
+
 `propagate:{peer}` uses `ZADD` with `score=seq, member=callRef`. ZADD on an existing member **updates the score in place**, not appending — this gives us automatic compaction. 50 writes to the same callRef result in *one* member with the latest seq. Memory grows with active calls, not with write rate.
 
 The whole set has a sliding TTL bumped on every write (`EXPIRE propagate:{peer} long_ttl`). When the worker has had no calls in either direction with `peer` for the configured idle window, the whole set drops. This bounds the index of "peers I have any business with" without explicit cleanup.
@@ -135,6 +143,22 @@ The `DELETE_RETENTION_SEC` is not chosen to cover hours-long downtime — it is 
 ## 5. Atomic write path
 
 Every state-changing operation on a call goes through one Lua script: `atomic_call_write.lua`. The script is the only place we touch `pri:`/`bak:` + `idx:` + `propagate:*` together. Sequential `SETEX` loops in `PartitionedRelayStorage.putCall` are removed by Slice 1.
+
+### 5.0 Two script variants for the optional-backup case
+
+Each mode (put / refresh / delete) has **two variants**:
+
+- **`*_no_peer`** — call body + indexes only, no propagate side effects. Used when
+  the call has no LB-assigned backup (`_topology.bak === undefined`). This is
+  Slice 1's script unchanged.
+- **`*_with_peer`** — call body + indexes + `INCR propagate_seq:{peer}` +
+  `ZADD propagate:{peer} seq callRef` + `EXPIRE propagate:{peer} long_ttl`. Used
+  when the call has a backup assignment.
+
+The AtomicWriter API takes `peer?: string`. When absent, the no-peer script
+runs; when present, the with-peer script runs. The seq/epoch return value is
+also peer-conditional: undefined when there is no peer (no replication
+sequence to advance).
 
 ### 5.1 Inputs
 
@@ -250,18 +274,21 @@ T=300   The call is updated 50 more times by re-INVITE/refresh-timer. Each time,
 
 T=600   BYE arrives, AtomicWriter("delete", peer=B, ...):
           INCR propagate_seq:B            -> seq = 998
-          DEL pri:N:call:X
+          SETEX pri:N:call:X DELETE_RETENTION_SEC=300 '{"_deleted":true,"indexes":[...]}'
           DEL idx:...
-          ZADD propagate:B 998 X           (still announces; value X but call gone)
-        Local view: { (X, 998) }, but call:X is now nil.
+          ZADD propagate:B 998 X           (announces deletion)
+          EXPIRE propagate:B long_ttl
+        Local view: { (X, 998) }; pri:N:call:X is now a tombstone with 300 s TTL.
 
-T=601   B picks up seq 998, dereferences -> GET fails -> DEL bak:N:call:X locally.
-        B can also remove X from its own propagate:N if it had bumped one (it
-        won't have, since N owned it; B never wrote bak side independently).
+T=601   B picks up seq 998, dereferences -> GET pri:N:call:X returns the tombstone
+        JSON. B's puller sees `_deleted:true`, runs AtomicWriter("delete", peer=N, ...)
+        on its own sidecar to remove bak:N:call:X plus the indexes listed in the
+        tombstone payload.
 
-T=??    Stale propagate:B entry (X, 998) where call is gone is GC'd by a
-        periodic sweep that removes members below the lowest delivered_seq across
-        active consumers when call:{callRef} returns nil.
+T=900   Tombstone expires (T=600 + 300 s). pri:N:call:X is now genuinely nil.
+        Periodic sweep: walks propagate:B, finds (X, 998), GETs pri:N:call:X → nil,
+        confirms 998 is below the lowest delivered_seq across active consumers,
+        ZREMs the member.
 ```
 
 ASCII state machine for one entry in `propagate:{peer}`:
@@ -272,18 +299,32 @@ ASCII state machine for one entry in `propagate:{peer}`:
                                 │
                                 ▼
    ┌────────────────────────────────────────────────────┐
-   │  alive: member X with latest score; call:X exists │
+   │  alive: member X with latest score;                │
+   │  pri:…:call:X holds live JSON                      │
    └────────────────────────────────────────────────────┘
                 │                                │
        BYE / delete                       sliding-set TTL elapses
-                │                          (no peer activity for hours)
+       (Lua SETEX tombstone +              (no peer activity for hours)
+        ZADD propagate)                            │
                 ▼                                │
    ┌────────────────────────────────────────────┐│
-   │  zombie: member X exists, call:X is nil   ││
+   │  tombstoned: member X exists, call:X     ││
+   │  is JSON `{_deleted:true,…}` with         ││
+   │  DELETE_RETENTION_SEC TTL (~300 s)        ││
+   └────────────────────────────────────────────┘│
+                │                                │
+       backup pulls within retention             │
+        ▶ applies delete locally                 │
+                │                                │
+       OR retention elapses, tombstone TTLs out  │
+                │                                │
+                ▼                                │
+   ┌────────────────────────────────────────────┐│
+   │  orphaned: member X exists, call:X nil    ││
    └────────────────────────────────────────────┘│
                 │                                │
       periodic sweep                             │
-      (member-callRef gone +                     │
+      (call:X is nil + seq                       │
        below low-water of consumer ack)          │
                 │                                │
                 ▼                                ▼
@@ -457,15 +498,17 @@ The puller on B receives the bumped seq, applies a refresh on `bak:N:call:{callR
 ```
 BYE arrives → rules drive Call.state = "terminating" → eventually "terminated".
 The terminal flush calls AtomicWriter.write(mode="delete", peer=B, ...):
-  - DEL pri:N:call:{callRef}, all idx keys
+  - SETEX pri:N:call:{callRef} DELETE_RETENTION_SEC '{"_deleted":true,"indexes":[…]}'
+  - DEL every idx:{key}
   - INCR propagate_seq:B → seq
   - ZADD propagate:B seq callRef
   - EXPIRE propagate:B long_ttl
-B's puller receives the entry, GETs callRef on N's storage view → null (deleted),
-applies a corresponding delete on bak:N:call:{callRef} + indexes.
+B's puller receives the entry, GETs callRef on N's storage view → tombstone JSON,
+applies a corresponding delete on bak:N:call:{callRef} + indexes (using the
+indexes list embedded in the tombstone).
 ```
 
-If B is unreachable when the BYE happens, the propagate entry (seq, callRef) sits in N's sorted set. B's `bak:N:call:{callRef}` will TTL-expire on its own (no more refreshes). When B comes back up, the propagate entry is still there (call body is null) — B picks it up, sees null, and removes its (already TTL-expired or not) backup copy. Cleanup either way.
+If B is unreachable when the BYE happens but reconnects within `DELETE_RETENTION_SEC` (~5 min), B picks up the tombstone on its first pull and converges normally. If B's downtime exceeds the retention, the tombstone has expired by the time B returns — but in that case B has restarted with a fresh sidecar (assumption: no Redis persistence means a multi-minute outage almost always means a sidecar restart), epoch mismatches, and the puller does a full resync against N's *current* state which simply doesn't include the deleted call. Either way the backup converges; nothing relies on the tombstone being available indefinitely.
 
 ### 9.5 ACK on 2xx / CANCEL
 
@@ -596,14 +639,20 @@ The crucial property: even with a wiped sidecar, the *active* calls survive beca
 Before: N has 1000 active calls. Goes down (rolling upgrade, infra event, etc.).
 N is down for 2 hours.
 During downtime:
-  - 800 of N's calls receive BYE (TTL expires anyway since no refreshes).
-    Their pri:N:call:* entries TTL out from N's sidecar.
-    Peers' bak:N:call:* entries TTL out symmetrically (no refreshes from N's puller —
-    actually N's puller is dead, but the peers' own write loop for their bak side
-    is what keeps it fresh; with N's primary writes paused and no takeover, the
-    backup copy on a peer drifts then dies via TTL).
-  - 200 calls are taken over by peer R. R writes to bak:N:call:* on R's side; those
-    are alive on R but not on N (N is down).
+  - N is gone, so peers cannot pull from N. N's own pri:N:call:* and propagate:*
+    sets continue to TTL-decay if the sidecar survives, or are absent entirely
+    if the sidecar was wiped on pod restart.
+  - 800 of N's calls receive BYE during the 2 hours. The other workers
+    that took those calls over write tombstones into their own
+    bak:N:call:* (which they own as backup). Those tombstones TTL out
+    well before N returns — only ~300 s of retention each.
+    Peer-side propagate:N entries for those 800 calls were live for the
+    tombstone window then GC'd by sweep. 2 hours later, none of these
+    calls leave any artifact anywhere.
+  - 200 calls are taken over by peer R. R writes the latest takeover state to
+    bak:N:call:* on R's side and ZADDs propagate:N on R's side (so N can
+    pick the takeover state up). Those entries are alive throughout the
+    downtime because R's writes keep refreshing them.
   ↓
 N comes back. Sidecar may or may not be wiped; same path either way.
 ReadyGate runs. Drains propagate:N from each Pi.
@@ -660,7 +709,7 @@ This is the single accepted loss class in the new design, identical to the prior
 | ID  | Scenario                                                 | Loss bound                                                                              | Mitigation                          |
 |-----|----------------------------------------------------------|-----------------------------------------------------------------------------------------|-------------------------------------|
 | L1  | Primary process crash mid-INVITE before flush            | The current INVITE state. UAC's Timer A retransmits; if the recovered/replacement worker has nothing, 481. | Fast restart + replication latency. |
-| L2  | Primary process crash between BYE and propagate          | BYE may not be observable to backup; backup TTL-expires within one TTL window.          | TTL alignment.                      |
+| L2  | Primary process crash before AtomicWriter("delete") is called | Backup never sees the tombstone announcement. Backup's `bak:` copy refreshes stop, expires within one call-TTL. (Crash *during* the Lua call cannot leave a half-state — Redis script atomicity.) | TTL alignment fall-back.            |
 | L3  | Both primary and backup down for a single call's TTL window | Call lost. F4/F11 accepted.                                                            | None. AZ-level concern.             |
 | L4  | Long-poll TCP drop, immediate reconnect                  | None — re-entrant resume from `lastSeq`.                                                | Built-in.                           |
 | L5  | Long-poll TCP drop, reconnect delayed by N seconds       | Backup sees state up to N seconds stale.                                                | Heartbeat + reconnect monitoring.   |

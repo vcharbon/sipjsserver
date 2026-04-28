@@ -2,36 +2,33 @@
  * AtomicWriter — sole entry point for state-changing writes against a
  * worker's local Redis sidecar (or its in-memory test fake).
  *
- * Slice 1 deliverable. The contract is documented in
- * [docs/replication/call-cache-backup.md §5](../../docs/replication/call-cache-backup.md).
+ * Slice 2 widens the Slice 1 surface: when a backup peer is assigned to
+ * a call, every put/refresh/delete also bumps `propagate_seq:{peer}`,
+ * compacts the callRef into `propagate:{peer}`, and slides the set's
+ * TTL. Calls without an LB-assigned backup go through the lighter
+ * "no-peer" path — call body + indexes only, no replication side
+ * effects. Spec: [docs/replication/call-cache-backup.md §5](../../docs/replication/call-cache-backup.md).
  *
- * What atomicity buys us
- * ----------------------
- * The previous `PartitionedRelayStorage.putCall` flushed the call body
- * and N index entries with a sequential SETEX loop. If the worker
- * crashed mid-flush, observers (peers pulling, the local recovery scan)
- * could see the call body without all of its indexes — accepted-loss
- * class F10 in the old design. Slice 1 closes F10 by funnelling every
- * write through one Lua script that runs to completion atomically on
- * the Redis instance (Redis runs scripts to completion before serving
- * any other command, RFC-equivalent for our purposes).
+ * Backup is OPTIONAL (per LB policy). Callers pass `peer=undefined`
+ * when the call's `_topology.bak` is empty/absent, which selects the
+ * Slice 1 atomic path. The Slice 2 path adds:
  *
- * Slice 1 scope
- * -------------
- * - call body + indexes only (NO `propagate:{peer}` set yet — Slice 2 widens the script).
- * - PUT, REFRESH and DELETE modes.
- * - In-memory layer mirrors the all-or-nothing contract via a single-permit
- *   Semaphore around the same MutableHashMap mutations the existing memory
- *   layer already uses.
+ *   INCR  propagate_seq:{peer}            -- per-peer monotonic seq
+ *   GET   epoch:{owner}                   -- bumped at boot by EpochCounter
+ *   ZADD  propagate:{peer} seq callRef    -- compacts on existing member
+ *   EXPIRE propagate:{peer} setTtl        -- sliding TTL on the whole set
+ *   EXPIRE propagate_seq:{peer} setTtl    -- counter survives as long as the set
+ *
+ * Atomicity is unchanged: a single Lua EVAL runs to completion before
+ * any other Redis command on the local sidecar. The memory layer mirrors
+ * the contract via a single-permit Semaphore.
  *
  * Layer composition
  * -----------------
- * `AtomicWriter` is a separate service. The in-memory implementation needs
- * to share its store with `PartitionedRelayStorage.memoryLayer` so both
- * services see the same state. We expose `AtomicWriter.makeMemory(store)`
- * as a non-Layer factory consumed internally by
- * `PartitionedRelayStorage.memoryLayer`. Tests that want AtomicWriter
- * exposed as a service can use `AtomicWriter.memoryLayerFromStore(store)`.
+ * `AtomicWriter` is a separate service. The in-memory implementation
+ * shares its store with `PartitionedRelayStorage.memoryLayer`. Tests
+ * that want AtomicWriter exposed as a service can use
+ * `AtomicWriter.memoryLayerFromStore(store)`.
  */
 
 import {
@@ -52,11 +49,30 @@ import { RedisClient } from "../redis/RedisClient.js"
 
 export type PartitionRole = "pri" | "bak"
 
+/** Default sliding TTL on `propagate:{peer}` and `propagate_seq:{peer}`. */
+export const DEFAULT_PROPAGATE_SET_TTL_SEC = 3600
+
+/** Result of a peer-bearing write — undefined when no peer was assigned. */
+export interface AtomicWriteResult {
+  readonly seq: number
+  readonly epoch: number
+}
+
 export class AtomicWriterError extends Data.TaggedError(
   "AtomicWriterError"
 )<{
   readonly reason: string
 }> {}
+
+/**
+ * Options shared by every write API. `peer` is undefined for calls
+ * without an LB-assigned backup; `propagateSetTtlSec` defaults to
+ * `DEFAULT_PROPAGATE_SET_TTL_SEC` when omitted.
+ */
+export interface PeerWriteOptions {
+  readonly peer?: string | undefined
+  readonly propagateSetTtlSec?: number | undefined
+}
 
 export interface AtomicWriterApi {
   readonly put: (
@@ -65,23 +81,26 @@ export interface AtomicWriterApi {
     callRef: string,
     json: string,
     indexes: ReadonlyArray<string>,
-    ttlSec: number
-  ) => Effect.Effect<void, AtomicWriterError>
+    ttlSec: number,
+    opts?: PeerWriteOptions
+  ) => Effect.Effect<AtomicWriteResult | null, AtomicWriterError>
 
   readonly refresh: (
     role: PartitionRole,
     owner: string,
     callRef: string,
     indexes: ReadonlyArray<string>,
-    ttlSec: number
-  ) => Effect.Effect<void, AtomicWriterError>
+    ttlSec: number,
+    opts?: PeerWriteOptions
+  ) => Effect.Effect<AtomicWriteResult | null, AtomicWriterError>
 
   readonly delete: (
     role: PartitionRole,
     owner: string,
     callRef: string,
-    indexes: ReadonlyArray<string>
-  ) => Effect.Effect<void, AtomicWriterError>
+    indexes: ReadonlyArray<string>,
+    opts?: PeerWriteOptions
+  ) => Effect.Effect<AtomicWriteResult | null, AtomicWriterError>
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +112,16 @@ export interface AtomicWriterApi {
  * `MemoryEntry` but re-declared here to keep AtomicWriter independent of
  * cache/PartitionedRelayStorage at the type level. Both services touch
  * the same MutableHashMap instance at runtime.
+ *
+ * The single store keeps:
+ *   - `pri:|bak:{owner}:call:{ref}` — call body, scalar
+ *   - `idx:{indexKey}`              — flat index → callRef
+ *   - `propagate:{peer}`            — composite entry whose `value` is a
+ *     JSON map `{callRef → seq}` (Slice 2 representation of the
+ *     Redis sorted set in memory).
+ *   - `propagate_seq:{peer}`        — counter
+ *   - `epoch:{owner}`               — counter (no TTL; effectively
+ *     persistent inside the simulated sidecar)
  */
 export interface MemoryStoreEntry {
   readonly value: string
@@ -119,7 +148,20 @@ export class AtomicWriter extends ServiceMap.Service<
   /** Build a flat index storage key (must match PartitionedRelayStorage.indexKey). */
   static readonly indexKey = (indexKey: string): string => `idx:${indexKey}`
 
-  /** Lua script for PUT mode. KEYS = [callKey, idx1, idx2, ...] ARGV = [ttlSec, json, callRef]. */
+  /** `propagate:{peer}` sorted set / composite key. */
+  static readonly propagateSetKey = (peer: string): string =>
+    `propagate:${peer}`
+
+  /** `propagate_seq:{peer}` per-peer monotonic seq counter. */
+  static readonly propagateSeqKey = (peer: string): string =>
+    `propagate_seq:${peer}`
+
+  /** `epoch:{owner}` worker incarnation counter. */
+  static readonly epochKey = (owner: string): string => `epoch:${owner}`
+
+  // ---------------- No-peer Lua scripts (Slice 1 unchanged) ----------------
+
+  /** PUT (no peer). KEYS = [callKey, idx1, idx2, ...] ARGV = [ttlSec, json, callRef]. */
   static readonly PUT_LUA = `
 local ttl = tonumber(ARGV[1])
 redis.call("SETEX", KEYS[1], ttl, ARGV[2])
@@ -129,7 +171,7 @@ end
 return 1
 `
 
-  /** Lua script for REFRESH mode. KEYS = [callKey, idx1, ...] ARGV = [ttlSec]. */
+  /** REFRESH (no peer). KEYS = [callKey, idx1, ...] ARGV = [ttlSec]. */
   static readonly REFRESH_LUA = `
 local ttl = tonumber(ARGV[1])
 for i = 1, #KEYS do
@@ -138,7 +180,7 @@ end
 return 1
 `
 
-  /** Lua script for DELETE mode. KEYS = [callKey, idx1, ...] ARGV = []. */
+  /** DELETE (no peer). KEYS = [callKey, idx1, ...] ARGV = []. */
   static readonly DELETE_LUA = `
 for i = 1, #KEYS do
   redis.call("DEL", KEYS[i])
@@ -146,54 +188,201 @@ end
 return 1
 `
 
+  // ---------------- Peer-bearing Lua scripts (Slice 2 new) -----------------
+
+  /**
+   * PUT (with peer). KEYS = [callKey, idx1..idxK, propSet, propSeq, epochKey]
+   * ARGV = [ttlSec, json, callRef, propagateSetTtlSec]. Returns [seq, epoch].
+   */
+  static readonly PUT_WITH_PEER_LUA = `
+local ttl = tonumber(ARGV[1])
+local prop_ttl = tonumber(ARGV[4])
+local idx_end = #KEYS - 3
+local prop_set = KEYS[#KEYS - 2]
+local prop_seq = KEYS[#KEYS - 1]
+local epoch_k  = KEYS[#KEYS]
+
+redis.call("SETEX", KEYS[1], ttl, ARGV[2])
+for i = 2, idx_end do
+  redis.call("SETEX", KEYS[i], ttl, ARGV[3])
+end
+
+local seq = redis.call("INCR", prop_seq)
+redis.call("EXPIRE", prop_seq, prop_ttl)
+local epoch = redis.call("GET", epoch_k)
+if not epoch then
+  redis.call("SET", epoch_k, "1")
+  epoch = "1"
+end
+redis.call("ZADD", prop_set, seq, ARGV[3])
+redis.call("EXPIRE", prop_set, prop_ttl)
+return { seq, tonumber(epoch) }
+`
+
+  /**
+   * REFRESH (with peer). KEYS = [callKey, idx1..idxK, propSet, propSeq, epochKey]
+   * ARGV = [ttlSec, callRef, propagateSetTtlSec]. Returns [seq, epoch].
+   */
+  static readonly REFRESH_WITH_PEER_LUA = `
+local ttl = tonumber(ARGV[1])
+local prop_ttl = tonumber(ARGV[3])
+local idx_end = #KEYS - 3
+local prop_set = KEYS[#KEYS - 2]
+local prop_seq = KEYS[#KEYS - 1]
+local epoch_k  = KEYS[#KEYS]
+
+for i = 1, idx_end do
+  redis.call("EXPIRE", KEYS[i], ttl)
+end
+
+local seq = redis.call("INCR", prop_seq)
+redis.call("EXPIRE", prop_seq, prop_ttl)
+local epoch = redis.call("GET", epoch_k)
+if not epoch then
+  redis.call("SET", epoch_k, "1")
+  epoch = "1"
+end
+redis.call("ZADD", prop_set, seq, ARGV[2])
+redis.call("EXPIRE", prop_set, prop_ttl)
+return { seq, tonumber(epoch) }
+`
+
+  /**
+   * DELETE (with peer). KEYS = [callKey, idx1..idxK, propSet, propSeq, epochKey]
+   * ARGV = [callRef, propagateSetTtlSec]. Returns [seq, epoch].
+   *
+   * Slice 2 implementation hard-deletes the call key (matching pre-Slice-1
+   * semantics). Slice 5 will switch to the tombstone retention path
+   * documented in spec §4.3.
+   */
+  static readonly DELETE_WITH_PEER_LUA = `
+local prop_ttl = tonumber(ARGV[2])
+local idx_end = #KEYS - 3
+local prop_set = KEYS[#KEYS - 2]
+local prop_seq = KEYS[#KEYS - 1]
+local epoch_k  = KEYS[#KEYS]
+
+for i = 1, idx_end do
+  redis.call("DEL", KEYS[i])
+end
+
+local seq = redis.call("INCR", prop_seq)
+redis.call("EXPIRE", prop_seq, prop_ttl)
+local epoch = redis.call("GET", epoch_k)
+if not epoch then
+  redis.call("SET", epoch_k, "1")
+  epoch = "1"
+end
+redis.call("ZADD", prop_set, seq, ARGV[1])
+redis.call("EXPIRE", prop_set, prop_ttl)
+return { seq, tonumber(epoch) }
+`
+
   /** Production: backed by RedisClient and the Lua scripts above. */
   static readonly redisLayer = Layer.effect(
     AtomicWriter,
     Effect.gen(function* () {
       const redis = yield* RedisClient
-      const wrapErr = (err: { reason: string }) =>
-        new AtomicWriterError({ reason: err.reason })
 
-      const put = (
-        role: PartitionRole,
-        owner: string,
-        callRef: string,
-        json: string,
-        indexes: ReadonlyArray<string>,
-        ttlSec: number
-      ): Effect.Effect<void, AtomicWriterError> => {
-        const keys: Array<string> = [AtomicWriter.callKey(role, owner, callRef)]
-        for (const idx of indexes) keys.push(AtomicWriter.indexKey(idx))
-        return redis
-          .eval(AtomicWriter.PUT_LUA, keys, [ttlSec, json, callRef])
-          .pipe(Effect.mapError(wrapErr), Effect.asVoid)
-      }
-
-      const refresh = (
+      const buildPeerKeys = (
         role: PartitionRole,
         owner: string,
         callRef: string,
         indexes: ReadonlyArray<string>,
-        ttlSec: number
-      ): Effect.Effect<void, AtomicWriterError> => {
+        peer: string
+      ): Array<string> => {
         const keys: Array<string> = [AtomicWriter.callKey(role, owner, callRef)]
         for (const idx of indexes) keys.push(AtomicWriter.indexKey(idx))
-        return redis
-          .eval(AtomicWriter.REFRESH_LUA, keys, [ttlSec])
-          .pipe(Effect.mapError(wrapErr), Effect.asVoid)
+        keys.push(AtomicWriter.propagateSetKey(peer))
+        keys.push(AtomicWriter.propagateSeqKey(peer))
+        keys.push(AtomicWriter.epochKey(owner))
+        return keys
       }
 
-      const del = (
+      const buildBareKeys = (
         role: PartitionRole,
         owner: string,
         callRef: string,
         indexes: ReadonlyArray<string>
-      ): Effect.Effect<void, AtomicWriterError> => {
+      ): Array<string> => {
         const keys: Array<string> = [AtomicWriter.callKey(role, owner, callRef)]
         for (const idx of indexes) keys.push(AtomicWriter.indexKey(idx))
+        return keys
+      }
+
+      const put: AtomicWriterApi["put"] = (
+        role,
+        owner,
+        callRef,
+        json,
+        indexes,
+        ttlSec,
+        opts
+      ) => {
+        const peer = opts?.peer
+        const setTtl = opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        if (peer === undefined || peer.length === 0) {
+          const keys = buildBareKeys(role, owner, callRef, indexes)
+          return redis
+            .eval(AtomicWriter.PUT_LUA, keys, [ttlSec, json, callRef])
+            .pipe(Effect.mapError(wrapWriterErr), Effect.as(null))
+        }
+        const keys = buildPeerKeys(role, owner, callRef, indexes, peer)
         return redis
-          .eval(AtomicWriter.DELETE_LUA, keys, [])
-          .pipe(Effect.mapError(wrapErr), Effect.asVoid)
+          .eval(AtomicWriter.PUT_WITH_PEER_LUA, keys, [
+            ttlSec,
+            json,
+            callRef,
+            setTtl,
+          ])
+          .pipe(Effect.mapError(wrapWriterErr), Effect.map(parseLuaPair))
+      }
+
+      const refresh: AtomicWriterApi["refresh"] = (
+        role,
+        owner,
+        callRef,
+        indexes,
+        ttlSec,
+        opts
+      ) => {
+        const peer = opts?.peer
+        const setTtl = opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        if (peer === undefined || peer.length === 0) {
+          const keys = buildBareKeys(role, owner, callRef, indexes)
+          return redis
+            .eval(AtomicWriter.REFRESH_LUA, keys, [ttlSec])
+            .pipe(Effect.mapError(wrapWriterErr), Effect.as(null))
+        }
+        const keys = buildPeerKeys(role, owner, callRef, indexes, peer)
+        return redis
+          .eval(AtomicWriter.REFRESH_WITH_PEER_LUA, keys, [
+            ttlSec,
+            callRef,
+            setTtl,
+          ])
+          .pipe(Effect.mapError(wrapWriterErr), Effect.map(parseLuaPair))
+      }
+
+      const del: AtomicWriterApi["delete"] = (
+        role,
+        owner,
+        callRef,
+        indexes,
+        opts
+      ) => {
+        const peer = opts?.peer
+        const setTtl = opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        if (peer === undefined || peer.length === 0) {
+          const keys = buildBareKeys(role, owner, callRef, indexes)
+          return redis
+            .eval(AtomicWriter.DELETE_LUA, keys, [])
+            .pipe(Effect.mapError(wrapWriterErr), Effect.as(null))
+        }
+        const keys = buildPeerKeys(role, owner, callRef, indexes, peer)
+        return redis
+          .eval(AtomicWriter.DELETE_WITH_PEER_LUA, keys, [callRef, setTtl])
+          .pipe(Effect.mapError(wrapWriterErr), Effect.map(parseLuaPair))
       }
 
       return { put, refresh, delete: del }
@@ -220,6 +409,28 @@ return 1
    */
   static readonly makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi =>
     makeMemoryUnsafe(store)
+}
+
+// ---------------------------------------------------------------------------
+// Redis-side helpers
+// ---------------------------------------------------------------------------
+
+const wrapWriterErr = (err: { reason: string }): AtomicWriterError =>
+  new AtomicWriterError({ reason: err.reason })
+
+const parseLuaPair = (raw: unknown): AtomicWriteResult | null => {
+  if (Array.isArray(raw) && raw.length === 2) {
+    const [seq, epoch] = raw
+    if (typeof seq === "number" && typeof epoch === "number") {
+      return { seq, epoch }
+    }
+    const seqN = Number(seq)
+    const epochN = Number(epoch)
+    if (Number.isFinite(seqN) && Number.isFinite(epochN)) {
+      return { seq: seqN, epoch: epochN }
+    }
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +467,109 @@ const removeEntry = (store: MemoryStore, key: string): void => {
   MutableHashMap.remove(store, key)
 }
 
+/** Sweep-on-touch: returns the live entry or removes it if expired. */
+const liveEntry = (
+  store: MemoryStore,
+  key: string,
+  nowMs: number
+): MemoryStoreEntry | null => {
+  const opt = MutableHashMap.get(store, key)
+  if (Option.isNone(opt)) return null
+  if (opt.value.expiresAtMs <= nowMs) {
+    MutableHashMap.remove(store, key)
+    return null
+  }
+  return opt.value
+}
+
+/**
+ * Ensure `epoch:{owner}` exists; if not, initialize to 1 (matching the
+ * Lua `if not epoch then SET ... "1"` branch). Returns the value seen.
+ */
+const ensureEpoch = (store: MemoryStore, owner: string): number => {
+  const opt = MutableHashMap.get(store, AtomicWriter.epochKey(owner))
+  if (Option.isSome(opt)) {
+    const n = Number(opt.value.value)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  MutableHashMap.set(store, AtomicWriter.epochKey(owner), {
+    value: "1",
+    expiresAtMs: Number.MAX_SAFE_INTEGER,
+  })
+  return 1
+}
+
+/**
+ * Read+update `propagate_seq:{peer}` (INCR with sliding TTL). Re-creates
+ * the counter if it had expired (matches Redis behaviour: an expired
+ * counter is gone, and INCR on a missing key creates it at 1).
+ */
+const incrSeq = (
+  store: MemoryStore,
+  peer: string,
+  setTtlSec: number,
+  nowMs: number
+): number => {
+  const key = AtomicWriter.propagateSeqKey(peer)
+  const live = liveEntry(store, key, nowMs)
+  const next = live === null ? 1 : Number(live.value) + 1
+  MutableHashMap.set(store, key, {
+    value: String(next),
+    expiresAtMs: nowMs + setTtlSec * 1000,
+  })
+  return next
+}
+
+interface PropagateSetView {
+  readonly entries: Record<string, number>
+}
+
+const readPropagateSet = (
+  store: MemoryStore,
+  peer: string,
+  nowMs: number
+): PropagateSetView => {
+  const key = AtomicWriter.propagateSetKey(peer)
+  const live = liveEntry(store, key, nowMs)
+  if (live === null) return { entries: {} }
+  try {
+    const parsed = JSON.parse(live.value) as { entries?: Record<string, number> }
+    if (parsed && typeof parsed === "object" && parsed.entries) {
+      return { entries: parsed.entries }
+    }
+  } catch {
+    // Corrupted entry — treat as empty.
+  }
+  return { entries: {} }
+}
+
+const writePropagateSet = (
+  store: MemoryStore,
+  peer: string,
+  view: PropagateSetView,
+  setTtlSec: number,
+  nowMs: number
+): void => {
+  MutableHashMap.set(store, AtomicWriter.propagateSetKey(peer), {
+    value: JSON.stringify({ entries: view.entries }),
+    expiresAtMs: nowMs + setTtlSec * 1000,
+  })
+}
+
+/** Compact (ZADD-replaces-score): same callRef updates seq in place. */
+const propagateZAdd = (
+  store: MemoryStore,
+  peer: string,
+  callRef: string,
+  seq: number,
+  setTtlSec: number,
+  nowMs: number
+): void => {
+  const view = readPropagateSet(store, peer, nowMs)
+  view.entries[callRef] = seq
+  writePropagateSet(store, peer, view, setTtlSec, nowMs)
+}
+
 const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
   // Single-permit semaphore = mutex. Without this, two fibers could
   // observe the clock then race into the synchronous write block in
@@ -269,18 +583,22 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
 
   const nowMs = Clock.currentTimeMillis
 
-  const put = (
-    role: PartitionRole,
-    owner: string,
-    callRef: string,
-    json: string,
-    indexes: ReadonlyArray<string>,
-    ttlSec: number
-  ): Effect.Effect<void, AtomicWriterError> =>
+  const put: AtomicWriterApi["put"] = (
+    role,
+    owner,
+    callRef,
+    json,
+    indexes,
+    ttlSec,
+    opts
+  ) =>
     exclusive(
       Effect.gen(function* () {
         const ms = yield* nowMs
-        yield* Effect.sync(() => {
+        const peer = opts?.peer
+        const setTtl =
+          opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        return yield* Effect.sync(() => {
           const expiresAtMs = ms + ttlSec * 1000
           putEntry(store, AtomicWriter.callKey(role, owner, callRef), {
             value: json,
@@ -292,21 +610,30 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
               expiresAtMs,
             })
           }
+          if (peer === undefined || peer.length === 0) return null
+          const epoch = ensureEpoch(store, owner)
+          const seq = incrSeq(store, peer, setTtl, ms)
+          propagateZAdd(store, peer, callRef, seq, setTtl, ms)
+          return { seq, epoch } satisfies AtomicWriteResult
         })
       })
     )
 
-  const refresh = (
-    role: PartitionRole,
-    owner: string,
-    callRef: string,
-    indexes: ReadonlyArray<string>,
-    ttlSec: number
-  ): Effect.Effect<void, AtomicWriterError> =>
+  const refresh: AtomicWriterApi["refresh"] = (
+    role,
+    owner,
+    callRef,
+    indexes,
+    ttlSec,
+    opts
+  ) =>
     exclusive(
       Effect.gen(function* () {
         const ms = yield* nowMs
-        yield* Effect.sync(() => {
+        const peer = opts?.peer
+        const setTtl =
+          opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        return yield* Effect.sync(() => {
           const newExpire = ms + ttlSec * 1000
           extendIfPresent(
             store,
@@ -317,22 +644,39 @@ const makeMemoryUnsafe = (store: MemoryStore): AtomicWriterApi => {
           for (const idx of indexes) {
             extendIfPresent(store, AtomicWriter.indexKey(idx), newExpire, ms)
           }
+          if (peer === undefined || peer.length === 0) return null
+          const epoch = ensureEpoch(store, owner)
+          const seq = incrSeq(store, peer, setTtl, ms)
+          propagateZAdd(store, peer, callRef, seq, setTtl, ms)
+          return { seq, epoch } satisfies AtomicWriteResult
         })
       })
     )
 
-  const del = (
-    role: PartitionRole,
-    owner: string,
-    callRef: string,
-    indexes: ReadonlyArray<string>
-  ): Effect.Effect<void, AtomicWriterError> =>
+  const del: AtomicWriterApi["delete"] = (
+    role,
+    owner,
+    callRef,
+    indexes,
+    opts
+  ) =>
     exclusive(
-      Effect.sync(() => {
-        removeEntry(store, AtomicWriter.callKey(role, owner, callRef))
-        for (const idx of indexes) {
-          removeEntry(store, AtomicWriter.indexKey(idx))
-        }
+      Effect.gen(function* () {
+        const ms = yield* nowMs
+        const peer = opts?.peer
+        const setTtl =
+          opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        return yield* Effect.sync(() => {
+          removeEntry(store, AtomicWriter.callKey(role, owner, callRef))
+          for (const idx of indexes) {
+            removeEntry(store, AtomicWriter.indexKey(idx))
+          }
+          if (peer === undefined || peer.length === 0) return null
+          const epoch = ensureEpoch(store, owner)
+          const seq = incrSeq(store, peer, setTtl, ms)
+          propagateZAdd(store, peer, callRef, seq, setTtl, ms)
+          return { seq, epoch } satisfies AtomicWriteResult
+        })
       })
     )
 
