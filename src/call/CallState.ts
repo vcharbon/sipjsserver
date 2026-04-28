@@ -26,11 +26,6 @@ import {
   type PartitionRole,
   type StorageError,
 } from "../cache/PartitionedRelayStorage.js"
-import {
-  PeerCachePort,
-  WorkerOrdinal,
-  type PeerWriteError,
-} from "../cache/PeerCachePort.js"
 import { AppConfig } from "../config/AppConfig.js"
 import { RedisError } from "../redis/RedisClient.js"
 import type { Call } from "./CallModel.js"
@@ -89,12 +84,6 @@ export class CallState extends ServiceMap.Service<
       const storage = yield* PartitionedRelayStorage
       const config = yield* AppConfig
       const ttl = config.callContextTtlSec
-      // Slice 5: optional cross-pod cache port. When present, every
-      // local flush also fires-and-forgets a remote write to the
-      // call's `_topology.bak` peer (D3: failures must NEVER block
-      // the local write). When absent (single-worker tests / dev),
-      // the dual-write path is a no-op.
-      const peerCachePort = yield* Effect.serviceOption(PeerCachePort)
       // Slice 4/5: this worker's ordinal, used to compute
       // `(role, primary)` from a callRef. Prefers the explicit
       // `workerOrdinalLabel` (production K8s pod hostname; matches the
@@ -140,92 +129,12 @@ export class CallState extends ServiceMap.Service<
         }
       }
 
-      // Slice 5: decide whether to fan a write/delete out to the
-      // backup peer named in `_topology.bak`. Returns `Option.none()`
-      // when the call has no topology, or when bak equals self
-      // (degenerate single-worker case from cookie encode time), or
-      // when the peer port is not provided.
-      const backupTarget = (
-        call: Call
-      ): Option.Option<{
-        readonly peer: WorkerOrdinal
-        readonly role: PartitionRole
-        readonly owner: WorkerOrdinal
-      }> => {
-        if (Option.isNone(peerCachePort)) return Option.none()
-        const topo = call._topology
-        if (topo === undefined) return Option.none()
-        if (topo.bak.length === 0) return Option.none()
-        if (topo.bak === selfOrdinal) return Option.none()
-        // The backup peer always stores under `bak:{cookie.w_pri}:`
-        // — D16 (recovery write-back invariant). The "owner" is the
-        // cookie's natural primary, not `self`.
-        return Option.some({
-          peer: WorkerOrdinal(topo.bak),
-          role: "bak" as const,
-          owner: WorkerOrdinal(topo.pri),
-        })
-      }
-
-      // Slice 5: fire-and-forget remote write. D3: failures must NEVER
-      // block the local write or fail the call event. We log + swallow.
-      const fanOutPut = (
-        call: Call,
-        callRef: string,
-        json: string,
-        indexes: ReadonlyArray<string>
-      ): Effect.Effect<void> => {
-        const tgt = backupTarget(call)
-        if (Option.isNone(tgt)) return Effect.void
-        if (Option.isNone(peerCachePort)) return Effect.void
-        const port = peerCachePort.value
-        const remote = port
-          .putCall({
-            peer: tgt.value.peer,
-            role: tgt.value.role,
-            owner: tgt.value.owner,
-            callRef,
-            state: json,
-            indexes,
-            ttlSec: ttl,
-          })
-          .pipe(
-            Effect.catchTag("PeerWriteError", (e: PeerWriteError) =>
-              Effect.logWarning(
-                `Backup peer-write failed for ${callRef} (peer=${e.peer} reason=${e.reason})`
-              )
-            )
-          )
-        return Effect.forkChild(remote).pipe(Effect.asVoid)
-      }
-
-      const fanOutDelete = (
-        call: Call | undefined,
-        callRef: string,
-        indexes: ReadonlyArray<string>
-      ): Effect.Effect<void> => {
-        if (call === undefined) return Effect.void
-        const tgt = backupTarget(call)
-        if (Option.isNone(tgt)) return Effect.void
-        if (Option.isNone(peerCachePort)) return Effect.void
-        const port = peerCachePort.value
-        const remote = port
-          .deleteCall({
-            peer: tgt.value.peer,
-            role: tgt.value.role,
-            owner: tgt.value.owner,
-            callRef,
-            indexes,
-          })
-          .pipe(
-            Effect.catchTag("PeerWriteError", (e: PeerWriteError) =>
-              Effect.logWarning(
-                `Backup peer-delete failed for ${callRef} (peer=${e.peer} reason=${e.reason})`
-              )
-            )
-          )
-        return Effect.forkChild(remote).pipe(Effect.asVoid)
-      }
+      // Slice 6: dual-write fan-out is gone. Replication is now driven
+      // by the propagate stream + ReplPuller (slices 2-4): every write
+      // through `storage.putCall` (with a peer attached) atomically
+      // bumps `propagate:{peer}` inside the same Lua, and the peer's
+      // ReplPuller picks it up over the long-poll. CallState no longer
+      // forks an HTTP push.
 
       // Slice 4: index-key computation collapses what used to be
       // `writeCacheIndexes` / `refreshIndexTtl` into an array passed
@@ -383,10 +292,10 @@ export class CallState extends ServiceMap.Service<
           })
           .pipe(Effect.mapError(toRedisErr))
 
-        // Slice 5: AFTER the local write succeeds, fan out to the
-        // backup peer. Best-effort — never blocks or fails the local
-        // write event (D3).
-        yield* fanOutPut(bumped, callRef, json, indexes)
+        // Slice 6: replication is implicit in the Lua write above —
+        // when `peerOpt` is set, the storage layer's atomic script
+        // ZADDs `propagate:{peer}` and the peer's ReplPuller observes
+        // it via its open long-poll. No HTTP fan-out from CallState.
 
         yield* Effect.logDebug(`Flushed call ${callRef} to cache`)
       })
@@ -419,11 +328,10 @@ export class CallState extends ServiceMap.Service<
         // sweep, so true retransmissions get cached responses replayed there.
         const { role, primary } = partitionOf(callRef)
         const indexes = call !== undefined ? callIndexKeys(call) : []
-        // Slice 5: fan delete out to the backup peer too (best-effort).
-        yield* fanOutDelete(call, callRef, indexes)
-        // Slice 2: same peer-extraction logic as flushToRedis — the
-        // delete event is announced through `propagate:{peer}` so the
-        // backup observes the termination. No-peer calls hard-delete
+        // Slice 2/6: same peer-extraction logic as flushToRedis. The
+        // delete event is announced through `propagate:{peer}` inside
+        // the Lua atomic write so the backup's ReplPuller observes
+        // termination on its open long-poll. No-peer calls hard-delete
         // without any replication side effect.
         const peerOpt =
           call !== undefined &&
@@ -531,12 +439,19 @@ export class CallState extends ServiceMap.Service<
           const json = yield* Schema.encodeEffect(JsonCallSchema)(bumped).pipe(Effect.orDie)
           const { role, primary } = partitionOf(callRef)
           const indexes = callIndexKeys(bumped)
+          // Slice 6: same peer extraction as flushToRedis. Replication
+          // is implicit in the Lua write — no separate fan-out.
+          const peerOpt =
+            bumped._topology !== undefined &&
+            bumped._topology.bak.length > 0 &&
+            bumped._topology.bak !== selfOrdinal
+              ? bumped._topology.bak
+              : undefined
           yield* storage
-            .putCall(role, primary, callRef, json, indexes, ttl)
+            .putCall(role, primary, callRef, json, indexes, ttl, {
+              peer: peerOpt,
+            })
             .pipe(Effect.mapError(toRedisErr))
-          // Slice 5: fan out best-effort. flushAllCalls is the drain
-          // path (D5) — we want every backup to have the latest gen.
-          yield* fanOutPut(bumped, callRef, json, indexes)
           flushed++
         }
         yield* Effect.logInfo(`Flushed ${flushed} calls to cache`)
