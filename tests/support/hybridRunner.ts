@@ -284,12 +284,12 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
 
       // Wrap the live transport so its drainNetworkTrace pulls from
       // the shared SignalingNetwork's per-instance buffer. Same-host
-      // sender+receiver pairs record the same packet twice (send-side
-      // + recv-side); collapse to one entry per `raw` for display.
-      // The interpreter's agent filter (using `participantLabel`)
-      // handles dropping agent traffic that's already in the step-
-      // level trace.
+      // sender+receiver pairs record the same packet twice; dedupe on
+      // `raw` and drop any entry that has no known participant on
+      // either side (those are recv-side records using kernel-reported
+      // ephemeral peer addresses that aren't in our label registry).
       const network = yield* SignalingNetwork
+      const labelKeyOf = (ip: string, port: number) => `${ip}:${port}`
       const transport: TestTransport = {
         ...transportBase,
         drainNetworkTrace: () =>
@@ -300,7 +300,9 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
                 const k = e.raw.toString("binary")
                 if (seen.has(k)) return false
                 seen.add(k)
-                return true
+                const srcKnown = labels.has(labelKeyOf(e.src.ip, e.src.port))
+                const dstKnown = labels.has(labelKeyOf(e.dst.ip, e.dst.port))
+                return srcKnown || dstKnown
               }) as ReadonlyArray<NetworkTraceEntry>
             }),
           ),

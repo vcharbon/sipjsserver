@@ -33,14 +33,18 @@ worker:
   statefulSetName: b2bua-worker
   podPort: 5060
 
-# Advertise the Service name in Record-Route so in-dialog ACK/BYE land
-# on a proxy via the Service ClusterIP. Without this the proxy stamps
-# its bind address (0.0.0.0:5060) into Record-Route and SIPp's [routes]
-# expansion produces an un-routable URI.
+# Advertise an address that resolves from BOTH inside the cluster
+# (Service DNS name) AND from the host running the hybrid harness
+# (kind hostPort 5060). For the hybrid harness specifically we
+# advertise the kind hostPort `127.0.0.1:5060` so in-dialog ACK/BYE
+# Route URIs stamped in Record-Route by this proxy are resolvable on
+# the host. The in-cluster sipp-uas etc. use the Service's ClusterIP
+# directly via X-Api-Call, never through the in-cluster DNS name, so
+# this override is safe for our test scenarios.
 bind:
   host: "0.0.0.0"
   port: 5060
-  advertisedHost: "sip-front-proxy"
+  advertisedHost: "127.0.0.1"
   advertisedPort: 5060
 
 # Keepalive cadence — keep the production defaults so we exercise the

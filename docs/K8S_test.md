@@ -322,6 +322,20 @@ npx tsx tests/k8s/scripts/install-stack.ts sip-test
 ```
 bash kubectl delete pod -n sip-test -l app.kubernetes.io/name=b2bua-worker 2>&1 && kubectl rollout status statefulset b2bua-worker -n sip-test --timeout=60s 2>&1 
 ```
+# One-time setup (or after src/ changes)
+npm run test:k8s:up                     # creates the kind cluster (skips if up)
+npm run test:k8s:images                 # builds + loads sipjsserver:dev
+tsx tests/k8s/scripts/install-stack.ts  # installs proxy + worker + redis + call-control
+
+# After src/ changes that affect cluster pods
+kubectl delete pod -n sip-test -l app.kubernetes.io/name=b2bua-worker
+kubectl rollout restart deployment sip-front-proxy -n sip-test
+
+# The actual test run
+E2E_KIND=1 npx vitest run -c vitest.config.live.ts \
+  tests/fullcall/e2e-register-fakeExt-realCore.test.ts
+Open test-results/real-clock/registrarFrontProxy-kind/index.html to see the report.
+
 
 
 ---
