@@ -36,13 +36,19 @@ affinity:
 # Production stays at 200s for RFC 3261 Timer C math (180s + 20s safety).
 terminationGracePeriodSeconds: 30
 
-# Connect to the test Redis pod installed via tests/k8s/charts/redis/.
-# Single Redis (no dual-write) — Phase B will swap this for the dual
-# Redis StatefulSet topology. Short DNS name resolves via the pod's
-# in-namespace search domain.
+# Per-pod Redis sidecar topology. Each worker pod ships its own
+# Redis container at `localhost:6379`; peer workers fetch state via
+# `/replog` over the headless StatefulSet DNS. See
+# docs/replication/call-cache-backup.md §2-§4 for the full design.
+redis:
+  enabled: true
+
+# Connect to the colocated sidecar over loopback. The shared
+# `redis` Service / Deployment that used to live in
+# tests/k8s/charts/redis/ is gone with the per-pod sidecar topology.
 extraEnv:
   - name: REDIS_URL
-    value: "redis://redis:6379"
+    value: "redis://localhost:6379"
   # Worker uses sipLocalIp for both bind AND Contact/Via header
   # construction. Bind to (and advertise) the pod IP so responses are
   # routable. POD_IP is set by the chart from the downward API; K8s

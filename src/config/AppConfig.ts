@@ -153,8 +153,28 @@ function parseB2bOutboundProxy(): AppConfigData["b2bOutboundProxy"] {
   return { host, port }
 }
 
+/**
+ * Resolve the worker's stable identifier — matches the `WorkerId` the
+ * proxy stamps into stickiness cookies. Order of precedence:
+ *   1. `WORKER_ORDINAL_LABEL` (explicit override; tests / non-K8s).
+ *   2. `POD_NAME`             (K8s downward API: StatefulSet pod hostname).
+ *   3. `HOSTNAME`             (every Linux container has this).
+ * Returns `undefined` (no override) when none of the above are set —
+ * downstream consumers fall back to `String(workerIndex)` then `"self"`.
+ */
+function resolveWorkerOrdinalLabel(): string | undefined {
+  const explicit = process.env["WORKER_ORDINAL_LABEL"]
+  if (explicit !== undefined && explicit.length > 0) return explicit
+  const podName = process.env["POD_NAME"]
+  if (podName !== undefined && podName.length > 0) return podName
+  const hostname = process.env["HOSTNAME"]
+  if (hostname !== undefined && hostname.length > 0) return hostname
+  return undefined
+}
+
 function readConfigFromEnv(): AppConfigData {
   const outbound = parseB2bOutboundProxy()
+  const ordinal = resolveWorkerOrdinalLabel()
   return {
     sipLocalIp: envOrDefault("SIP_LOCAL_IP", "127.0.0.1"),
     sipLocalPort: parseInt(envOrDefault("SIP_LOCAL_PORT", "5060"), 10),
@@ -207,6 +227,7 @@ function readConfigFromEnv(): AppConfigData {
     otelMaxAttributeValueLength: parseInt(envOrDefault("OTEL_MAX_ATTRIBUTE_VALUE_LENGTH", "32768"), 10),
     traceTombstoneEnabled: envOrDefault("TRACE_TOMBSTONE_ENABLED", "true") === "true",
     ...(outbound !== undefined ? { b2bOutboundProxy: outbound } : {}),
+    ...(ordinal !== undefined ? { workerOrdinalLabel: ordinal } : {}),
   }
 }
 

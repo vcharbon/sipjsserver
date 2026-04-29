@@ -19,6 +19,10 @@ sipPort: 5060
 # liveness / readiness TCP socket probes since K8s doesn't natively
 # support UDP probes (Phase 2 may replace with a real HTTP health
 # endpoint backed by `DrainingState.mode`).
+#
+# The worker's StatusServer also serves the `/replog` long-poll
+# replication endpoint on this same port — peer workers reach it via
+# the headless StatefulSet DNS (`<pod>.<svc>.<ns>:adminPort/replog`).
 adminPort: 3002
 
 # RFC 3261 Timer C (180s) + 20s safety. The worker's
@@ -75,3 +79,44 @@ podAnnotations: {}
 podManagementPolicy: OrderedReady
 updateStrategy:
   type: RollingUpdate
+
+# Per-pod Redis sidecar — colocated with each worker, in-memory only,
+# unshared. Each worker writes only to its own sidecar at
+# `localhost:6379` (set REDIS_URL accordingly via extraEnv); peer
+# workers fetch state via the worker's `/replog` long-poll endpoint
+# (served on adminPort by the same Node process). See
+# docs/replication/call-cache-backup.md §2-§4.
+#
+# Disabled by default so the production chart remains backward
+# compatible with deployments that supply their own (potentially
+# shared, potentially clustered) Redis. Tests / dual-write deployments
+# enable it.
+redis:
+  enabled: false
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  # Lightweight per spec: in-memory only, no AOF, no RDB. The sidecar
+  # holds at most one worker's call set; tens of MiB peak.
+  resources:
+    requests:
+      memory: 50Mi
+      cpu: 25m
+    limits:
+      memory: 256Mi
+  # Backing storage is emptyDir so the sidecar restarts with a clean
+  # state when the pod is replaced — matches the design assumption in
+  # call-cache-backup.md §11.2 (sidecar-wiped recovery path).
+  emptyDir:
+    sizeLimit: 256Mi
+  # Disable persistence and snapshotting explicitly. Sidecars are
+  # ephemeral by design; redis-server defaults to RDB snapshots on
+  # SIGTERM, which we don't want.
+  args:
+    - "--save"
+    - ""
+    - "--appendonly"
+    - "no"
+    - "--maxmemory-policy"
+    - "noeviction"

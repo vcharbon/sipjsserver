@@ -44,6 +44,11 @@ spec:
             - name: sip-udp
               containerPort: {{ .Values.sipPort }}
               protocol: UDP
+            # `admin` exposes the StatusServer port — `/metrics`,
+            # `/call-control`, and `/replog` are all routes on this
+            # same HTTP server. Peer workers reach the replog stream
+            # via the headless StatefulSet DNS
+            # (`<pod>.<svc>.<ns>.svc.cluster.local:<adminPort>/replog`).
             - name: admin
               containerPort: {{ .Values.adminPort }}
               protocol: TCP
@@ -88,6 +93,45 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+        {{- if .Values.redis.enabled }}
+        # Per-pod Redis sidecar for the data-replication layer
+        # (docs/replication/call-cache-backup.md §2-§4). The worker
+        # writes call/idx/propagate data here on `localhost:6379`;
+        # peer workers reach this sidecar's contents via the worker's
+        # `/replog` long-poll endpoint, never via direct Redis TCP.
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+          args:
+            {{- toYaml .Values.redis.args | nindent 12 }}
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          # Bind to the loopback so only the worker container in the
+          # same pod can reach it. Backed by emptyDir — see §11.2.
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+        {{- end }}
+      {{- if .Values.redis.enabled }}
+      volumes:
+        - name: redis-data
+          emptyDir:
+            sizeLimit: {{ .Values.redis.emptyDir.sizeLimit }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

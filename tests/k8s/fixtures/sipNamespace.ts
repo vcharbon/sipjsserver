@@ -2,20 +2,22 @@ import { Effect } from "effect"
 import { exec } from "./exec.js"
 import {
   installProxy,
-  installRedis,
   installSipp,
   installWorker,
 } from "./helm.js"
 
 /**
- * Install the full Phase A stack (redis + sipp + worker + proxy) into a
- * namespace. Helm `--wait` blocks per chart until pods are Ready, so
- * this resolves only when the cluster is ready to accept SIPp traffic.
+ * Install the full test stack (sipp + worker + proxy) into a namespace.
+ * Helm `--wait` blocks per chart until pods are Ready, so this resolves
+ * only when the cluster is ready to accept SIPp traffic.
+ *
+ * Per-pod Redis sidecars come up alongside each b2bua-worker pod
+ * (chart `redis.enabled=true`); there is no standalone Redis chart.
+ * See docs/replication/call-cache-backup.md §2.
  */
 export const installStack = (namespace: string) =>
   Effect.gen(function* () {
     yield* Effect.logInfo(`installing stack into namespace=${namespace}`)
-    yield* installRedis(namespace)
     yield* installSipp(namespace)
     yield* installWorker(namespace)
     yield* installProxy(namespace)
