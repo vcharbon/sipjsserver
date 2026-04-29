@@ -16,7 +16,20 @@ npm run test:fake       # Fake stack only (no real-clock scenarios)
 npm run dev             # Start the server in development mode
 ```
 
-After every code change, run `npm run typecheck` and verify zero errors and zero warnings. Warnings and Effect TS messages must be fixed, not ignored. Only suppress a warning with a lint-disable comment as a last resort, always with an explanation.
+After every code change, run `npm run typecheck` and verify zero errors and zero warnings.
+
+## Never ignore a warning
+
+Two independent gates run during typecheck and BOTH must be clean:
+
+- **`tsc`** — the standard TypeScript compiler. Catches type errors and ordinary lint-style issues.
+- **The Effect TS language-service plugin** — runs *inside* `tsc` and is the only thing that flags v4-specific footguns: deprecated v3 APIs that still type-check, `preferSchemaOverJson` on opaque payloads, `Global 'Error' loses type safety`, catch-all error handling, missing `yield*` on Effects.
+
+A `tsc`-clean build with the Effect plugin silenced is **not** a clean build. Fix every warning. `eslint-disable` comments do not silence the Effect plugin (it's not eslint) — if the plugin fires inside `Effect.gen`, the workaround is usually to refactor (e.g. extract a pure JSON helper out of the generator), not to suppress.
+
+The single most common silent mis-fix when migrating from v3: replacing `Effect.catchAll` with `Effect.catchCause`. v4 removed `catchAll` *on purpose* — catch-all is an anti-pattern that erases the typed error channel and swallows defects. The right replacement is `catchTag`/`catchTags`. Use `catchCause` only when you genuinely need to handle defects+interrupts together, and document why at the call site. See [docs/typescript-effect.md](docs/typescript-effect.md) for the full v4 migration cheat-sheet.
+
+Only suppress a warning with a lint-disable comment as a last resort, always with an explanation.
 
 
 ## Agent Strategy
