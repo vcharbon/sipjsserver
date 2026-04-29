@@ -12,6 +12,8 @@ import { CallState } from "../call/CallState.js"
 import { AppConfig } from "../config/AppConfig.js"
 import { addCallControlRoutes } from "../decision/adapters/http-reference/MockServer.js"
 import { MetricsRegistry, type MetricsRegistryState } from "../observability/MetricsRegistry.js"
+import { addReplLogRoutes, ReplLog } from "../replication/ReplLog.js"
+import { ReplMetrics, type ReplMetricsSnapshot } from "../replication/ReplMetrics.js"
 
 
 /** Start a V8 CPU profile in the current process, write to dir after durationMs. */
@@ -96,7 +98,10 @@ function buildStatusBlocks(registry: MetricsRegistryState) {
   return { overload, workers }
 }
 
-function renderPrometheus(reg: MetricsRegistryState): string {
+function renderPrometheus(
+  reg: MetricsRegistryState,
+  repl: ReplMetricsSnapshot | null
+): string {
   const lines: string[] = []
 
   /** Emit a single metric line with optional labels. */
@@ -270,14 +275,39 @@ function renderPrometheus(reg: MetricsRegistryState): string {
     }
   }
 
+  // ── Replication metrics ────────────────────────────────────────────
+  // Server-side signals only (writer epoch, peer-bearing publish
+  // counters). Boot-side pull/drain metrics (replpos lag, ReadyGate
+  // unreconciled count, frames-applied total) are deferred until
+  // ReplPuller/ReadyGate are wired in production — see
+  // docs/todos/DATA-REPLICATION-LAYER-REFACTOR-SURPRISES.md P1.
+  if (repl !== null) {
+    header("b2bua_repl_writer_epoch", "gauge", "Local writer epoch this worker boot landed on (incarnation counter).")
+    m("b2bua_repl_writer_epoch", repl.writerEpoch, { owner: repl.owner })
+
+    if (repl.perPeer.length > 0) {
+      header("b2bua_repl_writes_total", "counter", "Peer-bearing writes published locally since process start, by destination peer.")
+      header("b2bua_repl_writes_seq_max", "gauge", "Highest local propagate seq observed for this peer.")
+      for (const [peer, state] of repl.perPeer) {
+        m("b2bua_repl_writes_total", state.writesTotal, { peer })
+        m("b2bua_repl_writes_seq_max", state.seqMax, { peer })
+      }
+    }
+  }
+
   return lines.join("\n") + "\n"
 }
 
-export const StatusServerLayer: Layer.Layer<never, never, CallState | AppConfig | MetricsRegistry> = Layer.unwrap(
+export const StatusServerLayer: Layer.Layer<
+  never,
+  never,
+  CallState | AppConfig | MetricsRegistry | ReplLog | ReplMetrics
+> = Layer.unwrap(
   Effect.gen(function* () {
     const callState = yield* CallState
     const config = yield* AppConfig
     const registry = yield* MetricsRegistry
+    const replMetrics = yield* ReplMetrics
     const startedAt = yield* Clock.currentTimeMillis
 
     const routes = HttpRouter.use(
@@ -304,7 +334,8 @@ export const StatusServerLayer: Layer.Layer<never, never, CallState | AppConfig 
           "GET",
           "/metrics",
           Effect.gen(function* () {
-            return HttpServerResponse.text(renderPrometheus(registry), {
+            const replSnap = yield* replMetrics.snapshot
+            return HttpServerResponse.text(renderPrometheus(registry, replSnap), {
               headers: { "content-type": "text/plain; version=0.0.4" },
             })
           })
@@ -411,6 +442,7 @@ export const StatusServerLayer: Layer.Layer<never, never, CallState | AppConfig 
         )
 
         yield* addCallControlRoutes(router)
+        yield* addReplLogRoutes(router)
       })
     )
 

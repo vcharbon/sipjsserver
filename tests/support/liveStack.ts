@@ -26,6 +26,7 @@ import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { HttpReferenceAdapterLayer } from "../../src/decision/adapters/http-reference/HttpReferenceAdapter.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
+import { WriteNotifier } from "../../src/replication/WriteNotifier.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 import { OverloadController } from "../../src/b2bua/OverloadController.js"
@@ -52,7 +53,18 @@ export function liveStackLayer(opts: {
 
   const RedisLayer = RedisClient.layer.pipe(Layer.provide(AppConfigLayer))
 
-  const CallStateCacheLayer = PartitionedRelayStorage.redisLayer.pipe(Layer.provide(RedisLayer))
+  // WriteNotifier hoisted as a top-level shared layer: ReplLog (when
+  // mounted by the live HTTP stack) must subscribe to the very same
+  // hub instance the AtomicWriter publishes to. The live stack itself
+  // doesn't currently wire ReplLog, but providing the layer here keeps
+  // the composition shape identical to main.ts and prevents future
+  // miswiring (see DATA-REPLICATION-LAYER-REFACTOR-SURPRISES.md P1#1).
+  const WriteNotifierLayer = WriteNotifier.layer
+
+  const CallStateCacheLayer = PartitionedRelayStorage.redisLayer.pipe(
+    Layer.provide(RedisLayer),
+    Layer.provide(WriteNotifierLayer)
+  )
   const CallLimiterLayer = CallLimiter.redisLayer.pipe(
     Layer.provide(AppConfigLayer),
     Layer.provide(RedisLayer)

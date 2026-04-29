@@ -77,3 +77,4 @@ Load these only when the task touches the area:
 | Tracing / OpenTelemetry rules | [docs/tracing-design.md](docs/tracing-design.md) |
 | Overload protection | [docs/overload-protection.md](docs/overload-protection.md) |
 | Authoring multi-agent SIP scenarios (hybrid kind harness) | [docs/test-api-external.md](docs/test-api-external.md) |
+| Replication / call cache backup mechanism |        [docs/replication/call-cache-backup.md](../replication/call-cache-backup.md) |

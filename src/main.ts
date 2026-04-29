@@ -22,6 +22,11 @@ import { AppConfig } from "./config/AppConfig.js"
 import { CallState } from "./call/CallState.js"
 import { PartitionedRelayStorage } from "./cache/PartitionedRelayStorage.js"
 import { CallLimiter } from "./call/CallLimiter.js"
+import { EpochCounter } from "./replication/EpochCounter.js"
+import { PropagateStream } from "./replication/PropagateStream.js"
+import { ReplLog } from "./replication/ReplLog.js"
+import { ReplMetrics } from "./replication/ReplMetrics.js"
+import { WriteNotifier } from "./replication/WriteNotifier.js"
 import { CdrWriter } from "./cdr/CdrWriter.js"
 import { RedisClient } from "./redis/RedisClient.js"
 import { UdpTransport } from "./sip/UdpTransport.js"
@@ -51,8 +56,15 @@ const CallLimiterLayer = CallLimiter.redisLayer.pipe(
   Layer.provide(RedisLayer)
 )
 
+// Hoisted at the top of the layer graph so a single memoized hub is
+// shared by AtomicWriter (publisher, transitively via
+// PartitionedRelayStorage.redisLayer) and ReplLog (subscriber). See
+// DATA-REPLICATION-LAYER-REFACTOR-SURPRISES.md P1#1.
+const WriteNotifierLayer = WriteNotifier.layer
+
 const CallStateCacheLayer = PartitionedRelayStorage.redisLayer.pipe(
-  Layer.provide(RedisLayer)
+  Layer.provide(RedisLayer),
+  Layer.provide(WriteNotifierLayer)
 )
 
 const CdrLayer = CdrWriter.layer.pipe(
@@ -121,10 +133,50 @@ const CallStateLayer = CallState.layer.pipe(
   Layer.provide(CallStateCacheLayer)
 )
 
+// Replication services for the server side of `/replog`. EpochCounter
+// runs the boot-time `INCR epoch:{owner}` for this worker; ReplLog
+// composes the long-poll stream from PropagateStream + storage +
+// WriteNotifier + EpochCounter. The route handler itself is registered
+// inside StatusServerLayer (alongside `/metrics` and call-control).
+const EpochCounterLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* AppConfig
+    const ordinal =
+      config.workerOrdinalLabel !== undefined
+        ? config.workerOrdinalLabel
+        : config.workerIndex >= 0
+          ? String(config.workerIndex)
+          : "self"
+    return EpochCounter.redisLayer(ordinal)
+  })
+).pipe(
+  Layer.provide(AppConfigLayer),
+  Layer.provide(RedisLayer),
+  Layer.orDie
+)
+
+const PropagateStreamLayer = PropagateStream.redisLayer.pipe(
+  Layer.provide(RedisLayer)
+)
+
+const ReplLogLayer = ReplLog.layer.pipe(
+  Layer.provide(PropagateStreamLayer),
+  Layer.provide(CallStateCacheLayer),
+  Layer.provide(WriteNotifierLayer),
+  Layer.provide(EpochCounterLayer)
+)
+
+const ReplMetricsLayer = ReplMetrics.layer.pipe(
+  Layer.provide(EpochCounterLayer),
+  Layer.provide(WriteNotifierLayer)
+)
+
 const HttpLayer = StatusServerLayer.pipe(
   Layer.provide(CallStateLayer),
   Layer.provide(AppConfigLayer),
-  Layer.provide(MetricsRegistryLayer)
+  Layer.provide(MetricsRegistryLayer),
+  Layer.provide(ReplLogLayer),
+  Layer.provide(ReplMetricsLayer)
 )
 
 // ---------------------------------------------------------------------------

@@ -48,7 +48,6 @@ import {
   AtomicWriter,
   type AtomicWriterError,
 } from "../replication/AtomicWriter.js"
-import { WriteNotifier } from "../replication/WriteNotifier.js"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -335,13 +334,17 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
       }
     })
   ).pipe(
-    // Slice 3: AtomicWriter requires a WriteNotifier (it publishes
-    // on every successful peer-bearing write so ReplLog's long-poll
-    // handlers can push entries to subscribers within milliseconds).
-    // We embed the default sliding-PubSub notifier here so the public
-    // `redisLayer` external requirement stays at just `RedisClient`.
-    Layer.provide(AtomicWriter.redisLayer),
-    Layer.provide(WriteNotifier.layer)
+    // AtomicWriter requires a WriteNotifier (it publishes on every
+    // successful peer-bearing write so ReplLog's long-poll handlers
+    // can push entries to subscribers within milliseconds). We
+    // intentionally do NOT embed `WriteNotifier.layer` here: ReplLog
+    // must subscribe to the same hub instance the writer publishes
+    // to, and the only reliable way to achieve that is to hoist
+    // `WriteNotifier.layer` to the outermost composition so a single
+    // memoized instance is shared by both. Therefore
+    // `redisLayer`'s external requirement now includes
+    // `WriteNotifier`.
+    Layer.provide(AtomicWriter.redisLayer)
   )
 
   /**
