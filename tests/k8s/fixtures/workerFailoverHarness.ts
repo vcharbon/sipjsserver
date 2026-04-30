@@ -4,6 +4,7 @@ import * as path from "node:path"
 import { deleteSippJob, runSippJob, type SippRunResult } from "./sippJob.js"
 import {
   fetchRoutingDecisions,
+  waitForInvites,
   workerIpToName,
   type RoutingDecision,
 } from "./proxyLogs.js"
@@ -143,16 +144,21 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
         }),
       )
 
-      // (2) Wait for the ramp window so both workers see traffic.
+      // (2) Wait for the ramp window. Sleep first so steady-state is
+      //     reached, then poll up to a hard cap for INVITEs to appear
+      //     — important after a prior test killed pods and Service
+      //     endpoints / kube-proxy conntrack are still settling.
       yield* Effect.sleep(`${opts.rampSec} seconds`)
-
-      // (3) Pick the worker handling the most INVITEs.
-      const earlyDecisions = yield* fetchRoutingDecisions(opts.namespace, {
+      const minInvites = Math.max(Math.floor((opts.cps * opts.rampSec) / 4), 5)
+      const waitDeadlineMs = Date.now() + 30_000
+      const wait = yield* waitForInvites(opts.namespace, {
+        cidPrefix,
+        minCount: minInvites,
         since: `${opts.rampSec + 30}s`,
+        deadlineMs: waitDeadlineMs,
       })
-      const earlyInvites = earlyDecisions.filter(
-        (d) => d.callId.startsWith(cidPrefix) && d.method === "INVITE",
-      )
+      const earlyDecisions = wait.decisions
+      const earlyInvites = wait.invites
       const counts = new Map<string, number>()
       for (const d of earlyInvites) {
         counts.set(d.workerIp, (counts.get(d.workerIp) ?? 0) + 1)

@@ -154,3 +154,58 @@ export const workerIpToName = (namespace: string) =>
     const pods = yield* listPods(namespace, "app.kubernetes.io/name=b2bua-worker")
     return new Map(pods.map((p) => [p.ip, p.name]))
   })
+
+export interface WaitForInvitesOpts {
+  /** Test-run unique cidPrefix; only INVITEs whose Call-ID starts with this are counted. */
+  readonly cidPrefix: string
+  /** Minimum number of matching INVITEs that must be visible before the wait succeeds. */
+  readonly minCount: number
+  /** `since` window passed to fetchRoutingDecisions; relative duration. */
+  readonly since: string
+  /** Wall-clock deadline (ms). Returns early on first satisfaction; fails after deadline. */
+  readonly deadlineMs: number
+  /** Poll cadence in seconds. Default 2s. */
+  readonly pollSec?: number
+}
+
+export interface WaitForInvitesResult {
+  readonly decisions: ReadonlyArray<RoutingDecision>
+  readonly invites: ReadonlyArray<RoutingDecision>
+  readonly satisfied: boolean
+}
+
+/**
+ * Poll the proxy routing log until at least `minCount` INVITEs whose
+ * Call-ID starts with `cidPrefix` are visible, OR `deadlineMs` is hit.
+ *
+ * Used by failover harnesses to wait for sipp Job pods to actually
+ * start sending INVITEs. A static `Effect.sleep(rampSec)` is unreliable
+ * after a prior test killed pods because the new sipp Job's first
+ * INVITE may not land for several seconds (pod scheduling, image
+ * cache, Service endpoints reconciling, kube-proxy conntrack
+ * settling).
+ */
+export const waitForInvites = (
+  namespace: string,
+  opts: WaitForInvitesOpts,
+): Effect.Effect<WaitForInvitesResult> =>
+  Effect.gen(function* () {
+    const pollSec = opts.pollSec ?? 2
+    while (Date.now() < opts.deadlineMs) {
+      const decisions = yield* fetchRoutingDecisions(namespace, { since: opts.since })
+      const invites = decisions.filter(
+        (d) => d.callId.startsWith(opts.cidPrefix) && d.method === "INVITE",
+      )
+      if (invites.length >= opts.minCount) {
+        return { decisions, invites, satisfied: true }
+      }
+      yield* Effect.sleep(`${pollSec} seconds`)
+    }
+    // Final read after the deadline so the caller has the freshest
+    // (still-empty) snapshot for the diagnostic.
+    const decisions = yield* fetchRoutingDecisions(namespace, { since: opts.since })
+    const invites = decisions.filter(
+      (d) => d.callId.startsWith(opts.cidPrefix) && d.method === "INVITE",
+    )
+    return { decisions, invites, satisfied: false }
+  })

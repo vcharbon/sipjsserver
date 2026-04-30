@@ -53,14 +53,14 @@ describe("k8s/proxy-failover-lb-killdash9 — Phase 2b: LB pod kill via in-pod k
           postKillSec: POSTKILL_S,
         })
 
+        // See comment in proxy-failover-lb-delete.test.ts: kube-proxy
+        // UDP conntrack pins all sipp traffic to one proxy pod, so a
+        // ≥2-pods assertion would be a false negative. We just check
+        // the targeted pod actually saw real traffic.
         expect(result.killedProxyPod).not.toBe("")
         expect(
-          result.preKillCounts?.length ?? 0,
-          "expected proxy log lines to carry --prefix pod identifiers for ≥2 pods",
-        ).toBeGreaterThanOrEqual(2)
-        expect(
           result.preKillCounts?.[0]?.[1] ?? 0,
-          "expected the busiest proxy pod to have routed at least RAMP*CPS/2 INVITEs",
+          "expected the targeted proxy pod to have routed at least RAMP*CPS/2 INVITEs",
         ).toBeGreaterThanOrEqual(Math.floor(CPS * RAMP_S * 0.5))
 
         const failed = unaffectedFailures(result.classifications)

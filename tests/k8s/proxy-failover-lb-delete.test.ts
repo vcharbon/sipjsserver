@@ -54,14 +54,18 @@ describe("k8s/proxy-failover-lb-delete — Phase 2a: LB pod kill via delete --gr
 
         // Sanity: the kill picked a real pod and we routed enough
         // INVITEs to that pod to make the kill meaningful.
+        //
+        // Note: kube-proxy UDP conntrack pins flows from a single
+        // sipp src-port to ONE Service endpoint, so all 300 INVITEs
+        // typically end up on a single proxy pod. We therefore do
+        // NOT assert `>= 2 pods saw traffic` — that would be a
+        // common false negative. The kill picks "the busiest" which
+        // is "the one with all the traffic", which is the
+        // interesting case anyway.
         expect(result.killedProxyPod).not.toBe("")
         expect(
-          result.preKillCounts?.length ?? 0,
-          "expected proxy log lines to carry --prefix pod identifiers for ≥2 pods",
-        ).toBeGreaterThanOrEqual(2)
-        expect(
           result.preKillCounts?.[0]?.[1] ?? 0,
-          "expected the busiest proxy pod to have routed at least RAMP*CPS/2 INVITEs",
+          "expected the targeted proxy pod to have routed at least RAMP*CPS/2 INVITEs",
         ).toBeGreaterThanOrEqual(Math.floor(CPS * RAMP_S * 0.5))
 
         // Hard gate: unaffected calls must not fail.

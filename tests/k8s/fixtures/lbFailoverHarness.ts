@@ -2,7 +2,7 @@ import { Effect, Fiber } from "effect"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { deleteSippJob, runSippJob, type SippRunResult } from "./sippJob.js"
-import { fetchRoutingDecisions } from "./proxyLogs.js"
+import { fetchRoutingDecisions, waitForInvites } from "./proxyLogs.js"
 import { podLogs, waitForDeploymentSteady } from "./kubectl.js"
 import { killPod, type KillMode } from "./podKill.js"
 import { parseSippMessageTrace, type CallOutcome } from "./sippOutcomes.js"
@@ -102,16 +102,22 @@ export const runLbFailoverScenario = (opts: LbFailoverHarnessOpts) =>
         }),
       )
 
-      // (2) Wait for the ramp window so all proxy pods see traffic.
+      // (2) Wait for the ramp window. Sleep first so steady-state is
+      //     reached, then poll up to a hard cap for INVITEs to appear
+      //     in the routing log — important after a prior test killed
+      //     pods and Service endpoints / kube-proxy conntrack are
+      //     still settling.
       yield* Effect.sleep(`${opts.rampSec} seconds`)
-
-      // (3) Pick the proxy pod handling the most INVITEs.
-      const earlyDecisions = yield* fetchRoutingDecisions(opts.namespace, {
+      const minInvites = Math.max(Math.floor((opts.cps * opts.rampSec) / 4), 5)
+      const waitDeadlineMs = Date.now() + 30_000
+      const wait = yield* waitForInvites(opts.namespace, {
+        cidPrefix,
+        minCount: minInvites,
         since: `${opts.rampSec + 30}s`,
+        deadlineMs: waitDeadlineMs,
       })
-      const earlyInvites = earlyDecisions.filter(
-        (d) => d.callId.startsWith(cidPrefix) && d.method === "INVITE",
-      )
+      const earlyDecisions = wait.decisions
+      const earlyInvites = wait.invites
       const counts = new Map<string, number>()
       for (const d of earlyInvites) {
         const proxy = d.proxyPod ?? "unknown"
