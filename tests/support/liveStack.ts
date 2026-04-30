@@ -36,6 +36,7 @@ import { TracingService } from "../../src/tracing/TracingService.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { B2buaCoreLayer } from "../../src/b2bua/B2buaCore.js"
 import { DrainingState } from "../../src/b2bua/DrainingState.js"
+import { WorkerReadiness } from "../../src/cache/WorkerReadiness.js"
 
 /**
  * Build the full live stack for a given `AppConfigData`. Every backing
@@ -105,5 +106,9 @@ export function liveStackLayer(opts: {
     // Live stack runs against real sockets but tests still drive
     // markDraining explicitly — skip the SIGTERM hook.
     Layer.provideMerge(DrainingState.test),
+    // Live tests don't run ReadyGate; default to ready=true so the
+    // OPTIONS keepalive path answers 200. See networkLeaves.ts for
+    // the same rationale on the fake stack.
+    Layer.provideMerge(WorkerReadiness.test(true)),
   )
 }

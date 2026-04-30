@@ -53,6 +53,11 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
           // (1) Start the long Job in the background. uac-hold.xml
           //     pauses 3s between ACK and BYE (just under the proxy's
           //     5s drainGraceMs default).
+          // uac-hold-failover.xml has a 15s ACK→BYE pause; with sipp's
+          // 11-attempt BYE retrans (T1=500ms, capped at T2=4s ≈ 32s
+          // worst case), each call needs ~50s end-to-end. timeoutSec /
+          // waitTimeoutSec are sized to that worst case so a single
+          // slow BYE doesn't prematurely fail the Job.
           const holdFiber = yield* Effect.forkChild(
             runSippJob({
               namespace: NAMESPACE,
@@ -62,8 +67,8 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
               service: "test",
               calls: N_HOLD,
               callsPerSecond: 20,
-              timeoutSec: 30,
-              waitTimeoutSec: 60,
+              timeoutSec: 90,
+              waitTimeoutSec: 120,
               captureTraces: true,
               archiveDir: `/tmp/proxy-drain-${stamp}`,
               extraArgs: ["-cid_str", holdCidStr],
@@ -107,6 +112,50 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
           const ipMap = yield* workerIpToName(NAMESPACE)
           const drainPod = ipMap.get(drainTargetIp)
           expect(drainPod, `IP ${drainTargetIp} not mapped to a pod`).toBeTruthy()
+
+          // (2.5) Wait for replication to settle on the survivor BEFORE
+          //       killing the primary. Without this gate the test races
+          //       the steady-state ReplPuller: if we kill before the
+          //       backup's `sipas:bak:<drainPod>:call:*` partition has
+          //       caught up, the migrated BYE arrives at a backup that
+          //       can't resolve the dialog and 481s. Empirically the
+          //       puller converges in <2s on a hot cluster, but takes
+          //       longer right after a pod roll. Poll up to 15s.
+          const drainedInviteCount = earlyInvites.filter(
+            (d) => d.workerIp === drainTargetIp,
+          ).length
+          const survivorPod = Array.from(ipMap.entries())
+            .find(([, pod]) => pod !== drainPod)?.[1]
+          if (survivorPod !== undefined) {
+            // Scope to THIS run's callRefs via the holdCidPrefix stamp.
+            // Without the prefix, stale keys from prior failed runs in
+            // the same namespace inflate the count and the gate
+            // releases before the current run's state has replicated.
+            const replPattern = `sipas:bak:${drainPod}:call:*${holdCidPrefix}*`
+            const replDeadlineMs = Date.now() + 15_000
+            let bakCount = 0
+            while (Date.now() < replDeadlineMs) {
+              const scan = yield* execInPod(
+                NAMESPACE,
+                survivorPod,
+                "redis",
+                ["redis-cli", "--scan", "--pattern", replPattern],
+              ).pipe(
+                Effect.catchTag("ExecError", () =>
+                  Effect.succeed({ stdout: "", stderr: "" }),
+                ),
+              )
+              bakCount = scan.stdout
+                .split("\n")
+                .filter((s) => s.trim().length > 0).length
+              if (bakCount >= drainedInviteCount) break
+              yield* Effect.sleep("500 millis")
+            }
+            yield* Effect.logInfo(
+              `replication settle: bak:${drainPod} count=${bakCount}/${drainedInviteCount}` +
+                ` on ${survivorPod} (waited ${Date.now() - (replDeadlineMs - 15_000)}ms)`,
+            )
+          }
 
           // (3) SIGTERM with 30s grace (matches `terminationGracePeriodSeconds`
           //     in tests/k8s/values/b2bua-worker.yaml).
@@ -319,6 +368,6 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
           yield* deleteSippJob(NAMESPACE, freshJobName).pipe(Effect.ignore)
         }
       }),
-    { timeout: 240_000 },
+    { timeout: 360_000 },
   )
 })

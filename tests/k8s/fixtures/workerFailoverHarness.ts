@@ -71,6 +71,15 @@ export interface WorkerHarnessResult {
   tKill?: Date
   /** Per-Call-ID outcome map produced by the sipp trace parser. */
   outcomes: ReadonlyMap<string, CallOutcome>
+  /**
+   * Worker IP → pod-name map read AFTER the StatefulSet recovered.
+   * For `delete-grace0` the killed StatefulSet ordinal returns with a
+   * fresh IP, so the only way to identify "this packet was routed to
+   * the returned primary pod" is to look the IP up in this map and
+   * compare the pod name to `killedWorkerPod`. Empty when recovery
+   * timed out.
+   */
+  postRecoveryIpMap: ReadonlyMap<string, string>
 }
 
 /**
@@ -123,6 +132,7 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
       establishedOnDyingCount: 0,
       decisions: [],
       outcomes: new Map(),
+      postRecoveryIpMap: new Map(),
     }
 
     try {
@@ -237,6 +247,16 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
         `worker-failover[${opts.killMode}]: StatefulSet back to ${WORKER_REPLICAS}` +
           ` replicas in ${tAfterRecover - tBeforeRecover}ms`,
       )
+      // Capture the post-recovery IP→pod-name map. After
+      // `delete-grace0` the killed StatefulSet ordinal comes back with
+      // a different IP, so post-kill routing decisions need this map
+      // (not the pre-kill `killedWorkerIp`) to identify packets that
+      // landed on the *returned* primary pod. See
+      // `postKillReinviteServedByReturnedPrimary` below.
+      // workerIpToName returns Effect<…, never> — listPods absorbs
+      // kubectl errors internally and returns an empty list, so a bare
+      // `yield*` is safe (no catchAll needed; v4 forbids the pattern).
+      result.postRecoveryIpMap = yield* workerIpToName(opts.namespace)
 
       // (7) Post-kill smoke INVITE — proves end-to-end routability.
       const smokeResult = yield* runSippJob({
@@ -438,6 +458,55 @@ export const postKillReinviteSuccesses = (
     if (thirdInvite < tKillMs) continue
     const outcome = result.outcomes.get(callId)?.outcome
     if (outcome === "clean" || outcome === "retransmitted") count++
+  }
+  return count
+}
+
+/**
+ * Slice C of `docs/plan/bye-takeover-replicated-indexes-fix.md`:
+ * how many calls had their 3rd INVITE (re-INVITE 2 in `uac-pingpong.xml`)
+ * decided post-kill AND routed back to the *returned* primary pod
+ * (same StatefulSet ordinal as the killed one — proves the rehydration
+ * path was exercised, not just the in-flight backup hand-off).
+ *
+ * "Returned primary" is detected by resolving the decision's worker IP
+ * through `result.postRecoveryIpMap` (captured AFTER the StatefulSet
+ * recovered) and matching the pod name to `result.killedWorkerPod`.
+ * Under `delete-grace0` the IP changes; under `exec-kill-9` the IP
+ * stays the same. Either way, the pod *name* is preserved by the
+ * StatefulSet, so name-based comparison is the right pivot.
+ *
+ * Calls whose final outcome is not `clean`/`retransmitted` are
+ * excluded — a 3rd-INVITE decision alone doesn't prove rehydration
+ * worked end-to-end; the BYE must also have completed.
+ */
+export const postKillReinviteServedByReturnedPrimary = (
+  result: WorkerHarnessResult,
+): number => {
+  if (result.tKill === undefined) return 0
+  if (result.killedWorkerPod === "") return 0
+  const tKillMs = result.tKill.getTime()
+  const invitesByCallId = new Map<
+    string,
+    Array<{ readonly tMs: number; readonly workerIp: string }>
+  >()
+  for (const d of result.decisions) {
+    if (d.method !== "INVITE" || d.tDecided === undefined) continue
+    const arr = invitesByCallId.get(d.callId)
+    const entry = { tMs: d.tDecided.getTime(), workerIp: d.workerIp }
+    if (arr) arr.push(entry)
+    else invitesByCallId.set(d.callId, [entry])
+  }
+  let count = 0
+  for (const [callId, invites] of invitesByCallId) {
+    if (invites.length < 3) continue
+    invites.sort((a, b) => a.tMs - b.tMs)
+    const third = invites[2]!
+    if (third.tMs < tKillMs) continue
+    const outcome = result.outcomes.get(callId)?.outcome
+    if (outcome !== "clean" && outcome !== "retransmitted") continue
+    const podName = result.postRecoveryIpMap.get(third.workerIp)
+    if (podName === result.killedWorkerPod) count++
   }
   return count
 }

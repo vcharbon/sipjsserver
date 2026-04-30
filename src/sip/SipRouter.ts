@@ -32,6 +32,7 @@ import { TimerService } from "../call/TimerService.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
 import { TracingService } from "../tracing/TracingService.js"
 import { DrainingState } from "../b2bua/DrainingState.js"
+import { WorkerReadiness } from "../cache/WorkerReadiness.js"
 import {
   type Call,
   type CallTopology,
@@ -231,6 +232,7 @@ export class SipRouter extends ServiceMap.Service<
       const cdr = yield* CdrWriter
       const tracing = yield* TracingService
       const draining = yield* DrainingState
+      const readiness = yield* WorkerReadiness
 
       // ── Timer handler that feeds back into withCall ──────────────────
 
@@ -428,14 +430,25 @@ export class SipRouter extends ServiceMap.Service<
           // These are infrastructure pings, not call-bound — short-circuit
           // BEFORE call resolution so they never touch CallStateCache.
           //
-          // Behavior depends on `DrainingState`:
-          //   - serving  → 200 OK (per §11; minimal response, no Allow body
-          //                — operators use Prometheus / SIP probes for
-          //                feature discovery in this codebase).
-          //   - draining → 503 Service Unavailable + `Retry-After: 0`
-          //                (RFC 3261 §21.5.4 + §20.33). `Retry-After: 0`
-          //                is the canonical "drained" signal proxies use
-          //                to demote the worker to `health=draining`.
+          // Reply must agree with the K8s `/ready` HTTP probe so the
+          // proxy's two readiness signals (Endpoints membership +
+          // SIP HealthProbe) cannot disagree:
+          //   - serving   AND  ready   → 200 OK (RFC 3261 §11; minimal
+          //                              response, no Allow body — operators
+          //                              use Prometheus / SIP probes for
+          //                              feature discovery in this codebase).
+          //   - serving   AND  !ready  → 503 + `Retry-After: 0` (boot-time
+          //                              ReadyGate still draining peers'
+          //                              `propagate:N` queues — pod is also
+          //                              out of K8s Endpoints, so few SIP
+          //                              probes reach here, but if any do
+          //                              we must mirror the HTTP gate).
+          //   - draining               → 503 + `Retry-After: 0`
+          //                              (RFC 3261 §21.5.4 + §20.33).
+          //                              `Retry-After: 0` is the canonical
+          //                              "drained" signal proxies use to
+          //                              demote the worker to
+          //                              `health=draining`.
           //
           // In-dialog OPTIONS (To-tag present) falls through to the rule
           // chain so existing transparent-relay rules handle it.
@@ -446,21 +459,24 @@ export class SipRouter extends ServiceMap.Service<
             !event.message.parsed?.to?.tag
           ) {
             const mode = yield* draining.mode
+            const ready = yield* readiness.currentReady
             const req = event.message
             const respDest = { host: event.rinfo.address, port: event.rinfo.port }
-            if (mode === "serving") {
+            if (mode === "serving" && ready) {
               const ok = generateResponse(req, 200, "OK", { toTag: newTag() })
               yield* Effect.logDebug(
-                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 200 (serving)`
+                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 200 (serving, ready)`
               )
               yield* txnLayer.send(ok, respDest, "response")
             } else {
+              const reason =
+                mode === "draining" ? "draining" : "not-ready (boot drain)"
               const unavailable = generateResponse(req, 503, "Service Unavailable", {
                 toTag: newTag(),
                 extraHeaders: [{ name: "Retry-After", value: "0" }],
               })
               yield* Effect.logDebug(
-                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 503 (draining)`
+                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 503 (${reason})`
               )
               yield* txnLayer.send(unavailable, respDest, "response")
             }

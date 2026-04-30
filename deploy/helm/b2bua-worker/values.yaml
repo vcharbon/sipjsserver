@@ -33,6 +33,13 @@ adminPort: 3002
 # entire grace window before K8s SIGKILLs.
 terminationGracePeriodSeconds: 200
 
+# Optional preStop sleep — keeps the pod in `Terminating` state for
+# this many seconds before the kubelet SIGTERMs the worker. Set > 0
+# only in test values where a controlled drain window is needed; in
+# production the worker's own SIGTERM-driven draining is sufficient
+# and a preStop sleep would only delay rolling deploys.
+preStopSleepSec: 0
+
 resources: {}
 
 # Liveness/readiness: K8s does not support UDP probes. We use a TCP

@@ -9,6 +9,8 @@ import { createServer } from "node:http"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { writeHeapSnapshot } from "node:v8"
 import { CallState } from "../call/CallState.js"
+import { WorkerReadiness } from "../cache/WorkerReadiness.js"
+import { DrainingState } from "../b2bua/DrainingState.js"
 import { AppConfig } from "../config/AppConfig.js"
 import { addCallControlRoutes } from "../decision/adapters/http-reference/MockServer.js"
 import { MetricsRegistry, type MetricsRegistryState } from "../observability/MetricsRegistry.js"
@@ -301,13 +303,15 @@ function renderPrometheus(
 export const StatusServerLayer: Layer.Layer<
   never,
   never,
-  CallState | AppConfig | MetricsRegistry | ReplLog | ReplMetrics
+  CallState | AppConfig | MetricsRegistry | ReplLog | ReplMetrics | WorkerReadiness | DrainingState
 > = Layer.unwrap(
   Effect.gen(function* () {
     const callState = yield* CallState
     const config = yield* AppConfig
     const registry = yield* MetricsRegistry
     const replMetrics = yield* ReplMetrics
+    const readiness = yield* WorkerReadiness
+    const draining = yield* DrainingState
     const startedAt = yield* Clock.currentTimeMillis
 
     const routes = HttpRouter.use(
@@ -338,6 +342,29 @@ export const StatusServerLayer: Layer.Layer<
             return HttpServerResponse.text(renderPrometheus(registry, replSnap), {
               headers: { "content-type": "text/plain; version=0.0.4" },
             })
+          })
+        )
+
+        // Slice D9 — Kubernetes readiness gate.
+        //
+        // Returns 200 only when the worker is past its boot-time
+        // ReadyGate handshake (so its `pri:` partition has been
+        // hydrated from peer `bak:` snapshots) AND not currently
+        // draining (SIGTERM received). Either signal alone keeps
+        // the pod out of the K8s Service Endpoints, which transitively
+        // keeps the proxy's `decode_forward` from sending in-dialog
+        // traffic to a worker that isn't ready to absorb it.
+        yield* router.add(
+          "GET",
+          "/ready",
+          Effect.gen(function* () {
+            const ready = yield* readiness.currentReady
+            const mode = yield* draining.mode
+            const ok = ready && mode === "serving"
+            return yield* HttpServerResponse.json(
+              { ready: ok, replicationReady: ready, draining: mode === "draining" },
+              { status: ok ? 200 : 503 }
+            )
           })
         )
 

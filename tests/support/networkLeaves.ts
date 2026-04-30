@@ -35,6 +35,7 @@ import { TracingService } from "../../src/tracing/TracingService.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { B2buaCoreLayer } from "../../src/b2bua/B2buaCore.js"
 import { DrainingState } from "../../src/b2bua/DrainingState.js"
+import { WorkerReadiness } from "../../src/cache/WorkerReadiness.js"
 import { MockCallControlLayer } from "../fullcall/framework/MockCallControlLayer.js"
 import {
   CancelBranchLru,
@@ -136,9 +137,15 @@ export function b2buaWorkerStackLayer(opts: {
     CallLimiter.memoryLayer,
   ).pipe(Layer.provideMerge(Leaves))
 
+  // Tests don't run `ReadyGate`, so default to `ready=true` — otherwise
+  // SipRouter's OPTIONS keepalive would 503 and any rule path that
+  // consults readiness would block. Production wires
+  // `WorkerReadiness.Default` (initial=false) and lets ReadyGate flip
+  // it; the test variant skips that handshake.
   return B2buaCoreLayer.pipe(
     Layer.provideMerge(MidServices),
     Layer.provideMerge(DrainingState.test),
+    Layer.provideMerge(WorkerReadiness.test(true)),
   )
 }
 

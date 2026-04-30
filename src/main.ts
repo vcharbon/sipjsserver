@@ -54,6 +54,16 @@ import { MetricsRegistry } from "./observability/MetricsRegistry.js"
 const AppConfigLayer = AppConfig.layer
 const MetricsRegistryLayer = MetricsRegistry.layer
 
+// Hoisted so the SAME MutableRef instance backs both:
+//   - the K8s `/ready` HTTP handler (StatusServer / HttpLayer)
+//   - the boot-time ReadyGate that flips it true after replication drain
+//   - the SIGTERM-driven mode flip on DrainingState
+// Memoization is by Layer identity, so a single Layer reference lifted
+// here and shared across SipLayer / HttpLayer / ReplicationLayer
+// guarantees one instance per process.
+const WorkerReadinessLayer = WorkerReadiness.Default
+const DrainingStateLayer = DrainingState.Default
+
 const RedisLayer = RedisClient.layer.pipe(
   Layer.provide(AppConfigLayer)
 )
@@ -132,6 +142,9 @@ const UdpLayer = UdpTransport.layer.pipe(
 // Composed B2BUA layer (core + environment deps)
 // ---------------------------------------------------------------------------
 
+// DrainingState is NOT provided inline here — it is hoisted to the
+// outer `standaloneMain` composition so HttpLayer can also see the
+// same instance for the `/ready` route gating.
 const SipLayer = B2buaCoreLayer.pipe(
   Layer.provide(AppConfigLayer),
   Layer.provide(UdpLayer),
@@ -141,7 +154,6 @@ const SipLayer = B2buaCoreLayer.pipe(
   Layer.provide(CallControlLayer),
   Layer.provide(TracingLayer),
   Layer.provide(CdrLayer),
-  Layer.provide(DrainingState.Default),
 )
 
 // ---------------------------------------------------------------------------
@@ -192,6 +204,11 @@ const ReplMetricsLayer = ReplMetrics.layer.pipe(
   Layer.provide(WriteNotifierLayer)
 )
 
+// WorkerReadiness + DrainingState are kept as requirements (not
+// provided here) so HttpLayer's `/ready` handler reads from the
+// SAME refs as ReadyGate (which flips ready after boot drain) and
+// the SIGTERM accelerant (which flips draining on shutdown). Both
+// layers are satisfied by the outer `standaloneMain` composition.
 const HttpLayer = StatusServerLayer.pipe(
   Layer.provide(CallStateLayer),
   Layer.provide(AppConfigLayer),
@@ -286,11 +303,13 @@ const runReplicationConsumer = (
   )
   // Bundle the leaves so they're memoized as one composite layer —
   // services exported by ALL of them are visible to consumers.
+  // WorkerReadiness is NOT provided here: it's hoisted to the outer
+  // `standaloneMain` composition so HttpLayer's `/ready` handler and
+  // ReadyGate's `markReady` flip share the same MutableRef.
   const PullSideLeaves = Layer.mergeAll(
     PeerEnumeratorLayer,
     ReplPullerLayer,
     ReplogClientLayer,
-    WorkerReadiness.Default
   )
   // ReadyGate sits on top, satisfied by the leaves; the merge ensures
   // BOTH ReadyGate AND the leaves are exported from ReplicationLayer.
@@ -443,6 +462,13 @@ const standaloneMain = Effect.gen(function* () {
     yield* Effect.logInfo(
       "replication: K8S_NAMESPACE unset — skipping ReadyGate / ReplPuller boot (single-node mode)"
     )
+    // Without a ReadyGate to flip readiness, the K8s `/ready` route
+    // would stay 503 forever. In single-node / dev / non-K8s mode
+    // there's nothing to drain, so mark ready immediately. The
+    // `/ready` route still gates correctly on `DrainingState` for
+    // graceful shutdown.
+    const readiness = yield* WorkerReadiness
+    yield* readiness.markReady(true)
   }
 
   // Run SipRouter — blocks forever consuming TransactionEvent stream
@@ -450,6 +476,16 @@ const standaloneMain = Effect.gen(function* () {
 }).pipe(
   Effect.provide(
     Layer.mergeAll(SipLayer, AppConfigLayer).pipe(
+      // Hoisted shared singletons consumed by SipLayer (DrainingState),
+      // HttpLayer (both, for `/ready`) and the replication consumer
+      // fiber (WorkerReadiness, for ReadyGate.markReady). `provideMerge`
+      // both satisfies SipLayer's DrainingState requirement AND keeps
+      // the singletons exported so HttpLayer / runReplicationConsumer
+      // see the SAME instances. `Layer.mergeAll` would not satisfy
+      // intra-list deps.
+      Layer.provideMerge(
+        Layer.mergeAll(WorkerReadinessLayer, DrainingStateLayer)
+      ),
       Layer.provideMerge(OtelLayer)
     )
   )

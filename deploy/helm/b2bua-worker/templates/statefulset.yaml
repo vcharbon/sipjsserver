@@ -80,6 +80,22 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- with .Values.preStopSleepSec }}
+          # preStop sleep keeps the container in `Terminating` for the
+          # configured window before the kubelet SIGTERMs the worker
+          # process. Critical for the failover-suite tests: SIPs's BYE
+          # only flows ~15s after the kill (per uac-hold-failover.xml's
+          # ACK→BYE pause), and without this sleep the worker process
+          # exits on SIGTERM in <2s, the StatefulSet replaces the pod
+          # with a fresh primary, and BYEs that should `tryBackup` end
+          # up `decode_forward`'d to the empty replacement → 481.
+          # Set to 0 in production values.yaml; the failover values
+          # override sets it to span the full BYE window.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ . | quote }}]
+          {{- end }}
           {{- if .Values.livenessProbe.enabled }}
           # K8s does not support UDP probes — TCP socket on the admin
           # port is the standard dodge. This only catches hard-crash;
@@ -94,8 +110,20 @@ spec:
             failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
           {{- end }}
           {{- if .Values.readinessProbe.enabled }}
+          # Slice D9 — replication-aware readiness gate.
+          #
+          # `/ready` returns 200 only when the worker is past its
+          # boot-time ReadyGate handshake (data-replication drain
+          # complete) AND not currently draining (SIGTERM received).
+          # Either signal alone keeps the pod out of K8s Service
+          # Endpoints, which transitively keeps the proxy from
+          # routing in-dialog traffic to a worker that hasn't
+          # rehydrated its `pri:` partition from peers' `bak:`
+          # snapshots — see docs/replication/call-cache-backup.md
+          # §8 (ReadyGate spec).
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /ready
               port: admin
             initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.readinessProbe.periodSeconds }}

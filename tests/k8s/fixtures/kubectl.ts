@@ -61,7 +61,20 @@ export const deletePod = (
   opts: { gracePeriodSec?: number } = {},
 ) =>
   Effect.gen(function* () {
-    const args = ["-n", namespace, "delete", "pod", name, "--ignore-not-found"]
+    // `--wait=false` returns as soon as the API has accepted the
+    // deletion request, regardless of how long the pod takes to fully
+    // terminate. Without this, kubectl blocks for up to
+    // `gracePeriodSec`, which can exceed our exec timeout when the
+    // chart sets a long preStop sleep.
+    const args = [
+      "-n",
+      namespace,
+      "delete",
+      "pod",
+      name,
+      "--ignore-not-found",
+      "--wait=false",
+    ]
     if (opts.gracePeriodSec !== undefined) {
       args.push(`--grace-period=${opts.gracePeriodSec}`)
       if (opts.gracePeriodSec === 0) args.push("--force")
