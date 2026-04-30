@@ -2,7 +2,11 @@ import { Effect, Fiber } from "effect"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { deleteSippJob, runSippJob, type SippRunResult } from "./sippJob.js"
-import { fetchRoutingDecisions, workerIpToName } from "./proxyLogs.js"
+import {
+  fetchRoutingDecisions,
+  workerIpToName,
+  type RoutingDecision,
+} from "./proxyLogs.js"
 import {
   listPods,
   podLogs,
@@ -60,6 +64,12 @@ export interface WorkerHarnessResult {
   preKillCounts?: ReadonlyArray<readonly [string, number]>
   /** Number of calls that were `established-on-dying` per the matrix. */
   establishedOnDyingCount: number
+  /** Routing decisions for the load-Job calls, post-test, in chronological order. */
+  decisions: ReadonlyArray<RoutingDecision>
+  /** Wall-clock instant the kill was issued. */
+  tKill?: Date
+  /** Per-Call-ID outcome map produced by the sipp trace parser. */
+  outcomes: ReadonlyMap<string, CallOutcome>
 }
 
 /**
@@ -110,6 +120,8 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
       loadJobStatus: "failed",
       loadStats: { successful: 0, failed: 0, created: 0 },
       establishedOnDyingCount: 0,
+      decisions: [],
+      outcomes: new Map(),
     }
 
     try {
@@ -167,6 +179,7 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
 
       // (4) Issue the kill.
       const tKill = yield* killPod(opts.namespace, killedWorkerPod, opts.killMode)
+      result.tKill = tKill
 
       // (5) Wait for the load Job to drain.
       const loadResult = yield* Fiber.join(loadFiber).pipe(
@@ -243,6 +256,8 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
       result.establishedOnDyingCount = classifications.filter(
         (c) => c.state === "established-on-dying",
       ).length
+      result.decisions = loadDecisions
+      result.outcomes = outcomes
 
       // Archive routing decisions and pod logs.
       yield* Effect.tryPromise(() =>
@@ -360,3 +375,42 @@ export const unaffectedFailures = (
         c.outcome === "bye-timeout" ||
         c.outcome === "mid-dialog-error"),
   )
+
+/**
+ * Count Call-IDs whose THIRD INVITE in the proxy routing log was
+ * decided AFTER `tKill` AND whose final sipp outcome is `clean` or
+ * `retransmitted`. This is the Phase 3 §C sanity check: it proves at
+ * least one ping-pong call exercised the failover path between
+ * re-INVITE(1) (pre-kill) and re-INVITE(2) (post-kill) and still
+ * succeeded end-to-end.
+ *
+ * In the uac-pingpong.xml scenario each call has 3 INVITE messages:
+ * the initial INVITE (CSeq 1), re-INVITE(1) (CSeq 2), and re-INVITE(2)
+ * (CSeq 3). We rely on temporal ordering of the proxy routing log
+ * lines rather than parsing CSeq, because the log line format does
+ * not expose CSeq directly.
+ */
+export const postKillReinviteSuccesses = (
+  result: WorkerHarnessResult,
+): number => {
+  if (result.tKill === undefined) return 0
+  const tKillMs = result.tKill.getTime()
+  const inviteTimesByCallId = new Map<string, Array<number>>()
+  for (const d of result.decisions) {
+    if (d.method !== "INVITE" || d.tDecided === undefined) continue
+    const arr = inviteTimesByCallId.get(d.callId)
+    const t = d.tDecided.getTime()
+    if (arr) arr.push(t)
+    else inviteTimesByCallId.set(d.callId, [t])
+  }
+  let count = 0
+  for (const [callId, times] of inviteTimesByCallId) {
+    if (times.length < 3) continue
+    times.sort((a, b) => a - b)
+    const thirdInvite = times[2]!
+    if (thirdInvite < tKillMs) continue
+    const outcome = result.outcomes.get(callId)?.outcome
+    if (outcome === "clean" || outcome === "retransmitted") count++
+  }
+  return count
+}
