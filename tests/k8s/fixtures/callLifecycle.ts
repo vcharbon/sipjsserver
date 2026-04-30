@@ -23,14 +23,21 @@ export interface ClassifiedCall {
 export interface ClassifyCallsInput {
   readonly decisions: ReadonlyArray<RoutingDecision>
   readonly outcomes: ReadonlyMap<string, CallOutcome>
-  /** IP of the worker pod that was killed. */
-  readonly killedWorkerIp: string
+  /**
+   * Identifies the killed entity. Worker-failover tests pass
+   * `killedWorkerIp` (matched against `RoutingDecision.workerIp`); LB-
+   * failover tests pass `killedProxyPod` (matched against
+   * `RoutingDecision.proxyPod`). Exactly one must be set.
+   */
+  readonly killedWorkerIp?: string
+  readonly killedProxyPod?: string
   /** Wall-clock instant the kill was issued. */
   readonly tKill: Date
 }
 
 interface InvitePoint {
   readonly workerIp: string
+  readonly proxyPod: string | undefined
   /**
    * Best estimate of when the proxy routed the INVITE. Prefer the
    * proxy log timestamp (`d.tDecided`); fall back to the sipp INVITE
@@ -64,7 +71,7 @@ const firstInvite = (
     }
   }
   if (!chosen) return undefined
-  return { workerIp: chosen.workerIp, t: chosenT }
+  return { workerIp: chosen.workerIp, proxyPod: chosen.proxyPod, t: chosenT }
 }
 
 /**
@@ -92,7 +99,12 @@ const firstInvite = (
  * happens if the sipp message log was truncated).
  */
 export const classifyCalls = (input: ClassifyCallsInput): Array<ClassifiedCall> => {
-  const { decisions, outcomes, killedWorkerIp, tKill } = input
+  const { decisions, outcomes, killedWorkerIp, killedProxyPod, tKill } = input
+  if ((killedWorkerIp === undefined) === (killedProxyPod === undefined)) {
+    throw new Error(
+      "classifyCalls: exactly one of killedWorkerIp or killedProxyPod must be set",
+    )
+  }
   const tKillMs = tKill.getTime()
   const out: Array<ClassifiedCall> = []
 
@@ -106,8 +118,14 @@ export const classifyCalls = (input: ClassifyCallsInput): Array<ClassifiedCall> 
     const retransmits = outcome?.retransmits ?? 0
     const invite = firstInvite(decisions, callId, outcome?.tFirstInvite)
 
+    const onKilledTarget =
+      invite !== undefined &&
+      (killedWorkerIp !== undefined
+        ? invite.workerIp === killedWorkerIp
+        : invite.proxyPod === killedProxyPod)
+
     let state: LifecycleState
-    if (invite === undefined || invite.workerIp !== killedWorkerIp) {
+    if (invite === undefined || !onKilledTarget) {
       state = "unaffected"
     } else if (outcome?.tAck !== undefined && outcome.tAck.getTime() < tKillMs) {
       state = "established-on-dying"
@@ -117,7 +135,7 @@ export const classifyCalls = (input: ClassifyCallsInput): Array<ClassifiedCall> 
       state = "pre-routed-on-dying"
     } else {
       // No usable timestamp on either side; conservatively treat as
-      // pre-routed (the proxy was still routing to the dying worker
+      // pre-routed (the proxy was still routing to the dying target
       // somewhere in the test window).
       state = "pre-routed-on-dying"
     }

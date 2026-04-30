@@ -142,6 +142,64 @@ export const execInPod = (
   )
 
 /**
+ * Wait until a Deployment has `replicas` ready replicas AND its
+ * generation has been observed by the controller (i.e. no rollout in
+ * progress). Used by LB-failover tests to confirm the killed proxy pod
+ * was recreated.
+ */
+export const waitForDeploymentSteady = (
+  namespace: string,
+  name: string,
+  replicas: number,
+  timeoutSec: number,
+): Effect.Effect<void, KubectlWaitError> =>
+  Effect.gen(function* () {
+    const deadline = Date.now() + timeoutSec * 1000
+    let lastSeen = ""
+    while (Date.now() < deadline) {
+      const result = yield* exec(
+        "kubectl",
+        [
+          "-n",
+          namespace,
+          "get",
+          "deployment",
+          name,
+          "-o",
+          "jsonpath={.status.readyReplicas}|{.status.observedGeneration}|{.metadata.generation}",
+        ],
+        { timeoutMs: 10_000 },
+      ).pipe(
+        Effect.matchEffect({
+          onSuccess: (r) => Effect.succeed(r.stdout.trim()),
+          onFailure: () => Effect.succeed(""),
+        }),
+      )
+      lastSeen = result
+      const [readyRaw, observedRaw, generationRaw] = result.split("|")
+      const ready = readyRaw ? parseInt(readyRaw, 10) : NaN
+      const observed = observedRaw ? parseInt(observedRaw, 10) : NaN
+      const generation = generationRaw ? parseInt(generationRaw, 10) : NaN
+      if (
+        Number.isFinite(ready) &&
+        ready === replicas &&
+        Number.isFinite(observed) &&
+        Number.isFinite(generation) &&
+        observed >= generation
+      ) {
+        return
+      }
+      yield* Effect.sleep("1 second")
+    }
+    return yield* new KubectlWaitError({
+      resource: `deployment ${namespace}/${name}`,
+      reason:
+        `not steady within ${timeoutSec}s ` +
+        `(want readyReplicas=${replicas}, last status="${lastSeen}")`,
+    })
+  })
+
+/**
  * Wait until a StatefulSet has `replicas` ready replicas AND its
  * `currentRevision` matches `updateRevision` (i.e. no rolling update in
  * progress). Throws on timeout. Used by failover tests in `afterEach`
