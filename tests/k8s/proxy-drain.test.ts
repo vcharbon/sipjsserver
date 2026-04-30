@@ -12,22 +12,24 @@ import { deletePod } from "./fixtures/kubectl.js"
 const NAMESPACE = process.env.K8S_TEST_NAMESPACE ?? "sip-test"
 
 /**
- * INV-3 — Drain handoff (Phase A scope).
+ * INV-3 — Drain handoff (Phase B scope, with dual-write deployed).
  *
- * Asserts the proxy-side drain contract for the load-balancer
- * mechanism shipped in PR4–PR6:
+ * Asserts the full proxy-side drain contract:
  *
+ *   (a) Established calls survive the drain end-to-end. Either (i) the
+ *       BYE lands on the still-alive draining worker during its grace
+ *       window, or (ii) it migrates to the backup worker, whose
+ *       replicated dialog state (per-call dual-write across per-pod
+ *       Redis sidecars — see docs/replication/call-cache-backup.md)
+ *       lets it serve the in-dialog request without 481.
  *   (b) New INVITEs are routed *only* to non-draining workers.
  *   (c) The draining worker terminates within
  *       `terminationGracePeriodSeconds`.
  *
- * The full INV-3(a) "ACK/BYE/CANCEL for existing dialogs continue to
- * reach the original worker" claim is Phase B territory: without Redis
- * dual-write, when the StatefulSet replacement pod (same name, new IP)
- * comes up before all in-flight BYEs arrive, the proxy correctly
- * resolves the cookie's worker ID to the NEW pod IP — but the new pod
- * has no dialog state. This is the core problem dual-write solves.
- * Phase A logs the (a) signal but does not fail on it.
+ * Promoted from informational logging to a hard assertion in Phase 1
+ * of docs/plan/proper-end-to-end-cheerful-lobster.md, after Phases 0a
+ * (per-pod Redis sidecar topology) and 0b (production wiring of
+ * ReplPuller + ReadyGate + HTTP ReplogClient) shipped.
  */
 describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
   it.live(
@@ -158,10 +160,10 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
           )
           const perCall = aggregatePerCall(holdAll)
 
-          // (a) Phase A signal — log how many of the calls originally
-          //     owned by the drained worker had their BYE reach the
-          //     drained IP vs. somewhere else. Without dual-write,
-          //     migration is expected for some fraction.
+          // (a) Count established-on-drained calls and where their BYE
+          //     was routed. With dual-write deployed, every such call
+          //     must succeed end-to-end whether the BYE stuck to the
+          //     drained worker or migrated to the backup.
           let drainedByeStuck = 0
           let drainedByeMigrated = 0
           const migrations: Array<{ callId: string; byeIps: ReadonlyArray<string> }> = []
@@ -179,7 +181,7 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
             }
           }
           yield* Effect.logInfo(
-            `INV-3(a) signal: drainTargetIp=${drainTargetIp} pod=${drainPod}` +
+            `INV-3(a) [Phase B]: drainTargetIp=${drainTargetIp} pod=${drainPod}` +
               ` workerIPs=[${Array.from(ipMap.entries())
                 .map(([ip, n]) => `${n}=${ip}`)
                 .join(", ")}]` +
@@ -188,14 +190,14 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
               ` sample-migrations=${JSON.stringify(migrations)}`,
           )
 
-          // (a) is INFORMATIONAL only in Phase A. The
-          // drained-worker BYE-handoff window depends on the proxy's
-          // drainingSince clock (set when the K8s watch sees
-          // deletionTimestamp OR when OPTIONS returns 503), the OPTIONS
-          // probe interval, and the 5s drainGraceMs. It also interacts
-          // with the StatefulSet replacement timing. A meaningful
-          // assertion needs Phase B (Redis dual-write + dialog
-          // hydration) to be a useful regression net.
+          // (a) Sanity: the drain MUST have actually hit some calls.
+          //     A value of 0 means the test's pacing is wrong — the
+          //     drainTargetIp had no in-flight dialogs when we
+          //     deleted it.
+          expect(
+            drainedByeStuck + drainedByeMigrated,
+            "expected at least one BYE seen for the drained worker — drain did not hit any in-flight calls",
+          ).toBeGreaterThan(0)
 
           // (c) Drained worker pod should be gone within ~grace window.
           // We don't poll the pod; we check the wall-clock budget.
@@ -205,13 +207,20 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
             "drain budget overrun — pod should be terminated by now",
           ).toBeLessThan(60_000) // 30s grace + slack
 
-          // Status of the hold Job is informational. The expected
-          // outcome is that calls on the drained worker SUCCEED if the
-          // BYE lands before SIGKILL, FAIL if the worker is gone first.
-          // We log it for visibility but don't assert on it.
-          yield* Effect.logInfo(
-            `inv3 hold job status=${holdResult.jobStatus} successful=${holdResult.stats.successful}/${N_HOLD}`,
-          )
+          // (a) Phase B hard assertion: with dual-write deployed,
+          //     every established call must end with a 2xx to BYE
+          //     (either via the still-alive drained worker during
+          //     the grace window, or via the backup worker after
+          //     hand-off). Allow ≤2 calls in the inherent-loss window
+          //     where the BYE arrives in the SIGTERM/grace boundary
+          //     and the worker process is gone before serving it.
+          expect(
+            holdResult.stats.successful,
+            `inv3 hold job survival: only ${holdResult.stats.successful}/${N_HOLD} calls succeeded` +
+              ` (status=${holdResult.jobStatus},` +
+              ` BYEs-to-drained=${drainedByeStuck},` +
+              ` BYEs-migrated=${drainedByeMigrated})`,
+          ).toBeGreaterThanOrEqual(N_HOLD - 2)
         } finally {
           yield* deleteSippJob(NAMESPACE, holdJobName).pipe(Effect.ignore)
           yield* deleteSippJob(NAMESPACE, freshJobName).pipe(Effect.ignore)
