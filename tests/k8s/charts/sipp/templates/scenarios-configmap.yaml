@@ -9,5 +9,7 @@ data:
 {{ .Files.Get "scenarios/uac-basic.xml" | indent 4 }}
   uac-hold.xml: |-
 {{ .Files.Get "scenarios/uac-hold.xml" | indent 4 }}
+  uac-hold-failover.xml: |-
+{{ .Files.Get "scenarios/uac-hold-failover.xml" | indent 4 }}
   uas-basic.xml: |-
 {{ .Files.Get "scenarios/uas-basic.xml" | indent 4 }}

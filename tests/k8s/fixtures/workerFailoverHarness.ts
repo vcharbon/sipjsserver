@@ -1,0 +1,362 @@
+import { Effect, Fiber } from "effect"
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
+import { deleteSippJob, runSippJob, type SippRunResult } from "./sippJob.js"
+import { fetchRoutingDecisions, workerIpToName } from "./proxyLogs.js"
+import {
+  listPods,
+  podLogs,
+  waitForStatefulSetSteady,
+} from "./kubectl.js"
+import { killPod, type KillMode } from "./podKill.js"
+import { parseSippMessageTrace, type CallOutcome } from "./sippOutcomes.js"
+import { classifyCalls, type ClassifiedCall } from "./callLifecycle.js"
+import { summarize, writeFailoverReport } from "./failoverReport.js"
+
+const PROXY_LABEL = "app.kubernetes.io/name=sip-front-proxy"
+const WORKER_LABEL = "app.kubernetes.io/name=b2bua-worker"
+const WORKER_STATEFULSET = "b2bua-worker"
+const WORKER_REPLICAS = 2
+
+export interface WorkerFailoverHarnessOpts {
+  /** Kubernetes namespace where the stack is installed. */
+  readonly namespace: string
+  /** Kill strategy. Drives the failure mode under test. */
+  readonly killMode: KillMode
+  /**
+   * Stable prefix for the runId / sipp Job names. Used to disambiguate
+   * archive directories across the 3a-B / 3b-B / 3a-C / 3b-C variants.
+   * Recommended: `"worker-delete-hold"`, `"worker-killdash9-pingpong"`, etc.
+   */
+  readonly runIdPrefix: string
+  /** Sustained CPS during the load window. */
+  readonly cps: number
+  /** Seconds before the kill — sipp ramps to steady state. */
+  readonly rampSec: number
+  /** Seconds after the kill — sipp keeps sending so post-kill state is observable. */
+  readonly postKillSec: number
+  /** Scenario file name on the sipp ConfigMap (e.g. "uac-hold-failover.xml"). */
+  readonly scenario: string
+  /** Human-readable scenario name written to summary.txt. */
+  readonly scenarioName: string
+  /** Hard timeout for the sipp Job (seconds). */
+  readonly sippTimeoutSec?: number
+  /** Wait timeout for the sipp Job (seconds). */
+  readonly sippWaitTimeoutSec?: number
+}
+
+export interface WorkerHarnessResult {
+  readonly archiveDir: string
+  readonly runId: string
+  classifications: ReadonlyArray<ClassifiedCall>
+  counters: { reEmissions: number; establishFailures: number; badlyTreated: number }
+  workerRecoveredMs: number
+  smokeJobStatus: "succeeded" | "failed"
+  smokeStats: { successful: number; failed: number; created: number }
+  killedWorkerPod: string
+  killedWorkerIp: string
+  loadJobStatus: "succeeded" | "failed"
+  loadStats: { successful: number; failed: number; created: number }
+  preKillCounts?: ReadonlyArray<readonly [string, number]>
+  /** Number of calls that were `established-on-dying` per the matrix. */
+  establishedOnDyingCount: number
+}
+
+/**
+ * Drive a single worker-failover scenario end-to-end. Mirrors
+ * `lbFailoverHarness.runLbFailoverScenario` but kills a b2bua-worker
+ * StatefulSet pod rather than a sip-front-proxy Deployment pod.
+ *
+ * Steps:
+ *  1. Fork a sustained-load sipp Job through the proxy.
+ *  2. After `rampSec`, pick the worker pod handling the most INVITEs
+ *     (by routing decision worker IP), resolve to the pod name, kill it.
+ *  3. Join the load Fiber, wait for the StatefulSet to come back to
+ *     `WORKER_REPLICAS` ready replicas, run a small post-kill smoke INVITE.
+ *  4. Build the per-call lifecycle classification using `killedWorkerIp`,
+ *     write the 5x4 matrix + supporting artefacts.
+ *
+ * The `unaffected.failed == 0` hard gate is enforced by the test
+ * wrapper, not here. Survival of established / in-flight / pre-routed
+ * populations on the dying worker is reported in the matrix only.
+ */
+export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
+  Effect.gen(function* () {
+    const tTestStart = new Date()
+    const totalCalls = opts.cps * (opts.rampSec + opts.postKillSec)
+    const runId = `${opts.runIdPrefix}-${tTestStart.getTime().toString(36)}`
+    const archiveDir = path.resolve("test-results", "k8s-failover", runId)
+    yield* Effect.tryPromise(() => fs.mkdir(archiveDir, { recursive: true })).pipe(
+      Effect.orDie,
+    )
+    const proxyLogsDir = path.join(archiveDir, "proxy-logs")
+    const workerLogsDir = path.join(archiveDir, "worker-logs")
+
+    const loadJobName = `${opts.runIdPrefix}-${tTestStart.getTime().toString(36)}`
+    const smokeJobName = `${opts.runIdPrefix}-smoke-${tTestStart.getTime().toString(36)}`
+    const cidStr = `${loadJobName}-%u@det`
+    const cidPrefix = `${loadJobName}-`
+
+    const result: WorkerHarnessResult = {
+      archiveDir,
+      runId,
+      classifications: [],
+      counters: { reEmissions: 0, establishFailures: 0, badlyTreated: 0 },
+      workerRecoveredMs: -1,
+      smokeJobStatus: "failed",
+      smokeStats: { successful: 0, failed: 0, created: 0 },
+      killedWorkerPod: "",
+      killedWorkerIp: "",
+      loadJobStatus: "failed",
+      loadStats: { successful: 0, failed: 0, created: 0 },
+      establishedOnDyingCount: 0,
+    }
+
+    try {
+      // (1) Fork the sustained load Job.
+      const loadFiber = yield* Effect.forkChild(
+        runSippJob({
+          namespace: opts.namespace,
+          name: loadJobName,
+          scenario: opts.scenario,
+          target: "sip-front-proxy:5060",
+          service: "test",
+          calls: totalCalls,
+          callsPerSecond: opts.cps,
+          timeoutSec: opts.sippTimeoutSec ?? 120,
+          waitTimeoutSec: opts.sippWaitTimeoutSec ?? 180,
+          captureTraces: true,
+          archiveDir,
+          extraArgs: ["-cid_str", cidStr],
+        }),
+      )
+
+      // (2) Wait for the ramp window so both workers see traffic.
+      yield* Effect.sleep(`${opts.rampSec} seconds`)
+
+      // (3) Pick the worker handling the most INVITEs.
+      const earlyDecisions = yield* fetchRoutingDecisions(opts.namespace, {
+        since: `${opts.rampSec + 30}s`,
+      })
+      const earlyInvites = earlyDecisions.filter(
+        (d) => d.callId.startsWith(cidPrefix) && d.method === "INVITE",
+      )
+      const counts = new Map<string, number>()
+      for (const d of earlyInvites) {
+        counts.set(d.workerIp, (counts.get(d.workerIp) ?? 0) + 1)
+      }
+      const sorted = Array.from(counts.entries())
+        .filter(([ip]) => ip !== "")
+        .sort((a, b) => b[1] - a[1])
+      const killedWorkerIp = sorted[0]?.[0] ?? ""
+      result.killedWorkerIp = killedWorkerIp
+      result.preKillCounts = sorted
+
+      const ipMap = yield* workerIpToName(opts.namespace)
+      const killedWorkerPod = ipMap.get(killedWorkerIp) ?? ""
+      result.killedWorkerPod = killedWorkerPod
+
+      yield* Effect.logInfo(
+        `worker-failover[${opts.killMode}]: killing busiest worker ${killedWorkerPod}` +
+          ` (ip=${killedWorkerIp}, ${sorted[0]?.[1]} INVITEs);` +
+          ` other workers: ${sorted
+            .slice(1)
+            .map(([ip, n]) => `${ipMap.get(ip) ?? ip}=${n}`)
+            .join(", ")}`,
+      )
+
+      // (4) Issue the kill.
+      const tKill = yield* killPod(opts.namespace, killedWorkerPod, opts.killMode)
+
+      // (5) Wait for the load Job to drain.
+      const loadResult = yield* Fiber.join(loadFiber).pipe(
+        Effect.catchTag("SippJobError", (e) =>
+          Effect.succeed({
+            jobStatus: "failed" as const,
+            stats: { successful: 0, failed: 0, created: 0 },
+            logs: e.message,
+          } satisfies SippRunResult),
+        ),
+      )
+      result.loadJobStatus = loadResult.jobStatus
+      result.loadStats = loadResult.stats
+
+      // (6) Wait for the StatefulSet to recover. For `delete-grace0` the
+      //     killed pod's name is reused with a fresh IP; for `exec-kill-9`
+      //     the same pod's container restarts in place (same IP).
+      const tBeforeRecover = Date.now()
+      yield* waitForStatefulSetSteady(
+        opts.namespace,
+        WORKER_STATEFULSET,
+        WORKER_REPLICAS,
+        60,
+      )
+      const tAfterRecover = Date.now()
+      result.workerRecoveredMs = tAfterRecover - tBeforeRecover
+      yield* Effect.logInfo(
+        `worker-failover[${opts.killMode}]: StatefulSet back to ${WORKER_REPLICAS}` +
+          ` replicas in ${tAfterRecover - tBeforeRecover}ms`,
+      )
+
+      // (7) Post-kill smoke INVITE — proves end-to-end routability.
+      const smokeResult = yield* runSippJob({
+        namespace: opts.namespace,
+        name: smokeJobName,
+        scenario: "uac-basic.xml",
+        target: "sip-front-proxy:5060",
+        service: "test",
+        calls: 5,
+        callsPerSecond: 5,
+        timeoutSec: 20,
+        waitTimeoutSec: 40,
+      })
+      result.smokeJobStatus = smokeResult.jobStatus
+      result.smokeStats = smokeResult.stats
+
+      // (8) Per-call classification + report.
+      const elapsedSec = Math.ceil((Date.now() - tTestStart.getTime()) / 1000) + 30
+      const decisionsFinal = yield* fetchRoutingDecisions(opts.namespace, {
+        since: `${elapsedSec}s`,
+      })
+      const loadDecisions = decisionsFinal.filter((d) => d.callId.startsWith(cidPrefix))
+      const tFirstInvite = loadDecisions.find((d) => d.method === "INVITE")?.tDecided
+      const tLastInvite = [...loadDecisions]
+        .reverse()
+        .find((d) => d.method === "INVITE")?.tDecided
+
+      let outcomes = new Map<string, CallOutcome>()
+      if (loadResult.tracePaths?.msgLog !== undefined) {
+        const msg = yield* Effect.tryPromise(() =>
+          fs.readFile(loadResult.tracePaths!.msgLog!, "utf8"),
+        ).pipe(Effect.orDie)
+        outcomes = parseSippMessageTrace(msg)
+      }
+
+      const classifications = classifyCalls({
+        decisions: loadDecisions,
+        outcomes,
+        killedWorkerIp,
+        tKill,
+      })
+      result.classifications = classifications
+      result.counters = summarize(classifications)
+      result.establishedOnDyingCount = classifications.filter(
+        (c) => c.state === "established-on-dying",
+      ).length
+
+      // Archive routing decisions and pod logs.
+      yield* Effect.tryPromise(() =>
+        fs.writeFile(
+          path.join(archiveDir, "routing-decisions.ndjson"),
+          loadDecisions.map((d) => JSON.stringify(d)).join("\n"),
+          "utf8",
+        ),
+      ).pipe(Effect.orDie)
+      yield* Effect.tryPromise(() => fs.mkdir(proxyLogsDir, { recursive: true })).pipe(
+        Effect.orDie,
+      )
+      yield* Effect.tryPromise(() => fs.mkdir(workerLogsDir, { recursive: true })).pipe(
+        Effect.orDie,
+      )
+      const proxyLogText = yield* podLogs(
+        opts.namespace,
+        { labelSelector: PROXY_LABEL },
+        { since: `${elapsedSec}s` },
+      ).pipe(Effect.catchAll(() => Effect.succeed("")))
+      yield* Effect.tryPromise(() =>
+        fs.writeFile(path.join(proxyLogsDir, "all.log"), proxyLogText, "utf8"),
+      ).pipe(Effect.orDie)
+      const workerLogText = yield* podLogs(
+        opts.namespace,
+        { labelSelector: WORKER_LABEL },
+        { since: `${elapsedSec}s` },
+      ).pipe(Effect.catchAll(() => Effect.succeed("")))
+      yield* Effect.tryPromise(() =>
+        fs.writeFile(path.join(workerLogsDir, "all.log"), workerLogText, "utf8"),
+      ).pipe(Effect.orDie)
+
+      // Best-effort: capture --previous logs for the killed pod
+      // (delete-grace0 → previous pod is gone; kill-9 → same name, will work).
+      if (opts.killMode === "exec-kill-9") {
+        const prev = yield* podLogs(
+          opts.namespace,
+          { pod: killedWorkerPod },
+          { previous: true },
+        ).pipe(Effect.catchAll(() => Effect.succeed("")))
+        if (prev.length > 0) {
+          yield* Effect.tryPromise(() =>
+            fs.writeFile(
+              path.join(workerLogsDir, `${killedWorkerPod}.previous.log`),
+              prev,
+              "utf8",
+            ),
+          ).pipe(Effect.orDie)
+        }
+      }
+
+      yield* writeFailoverReport({
+        archiveDir,
+        classifications,
+        scenarioName: opts.scenarioName,
+        killTimeline: {
+          tInviteFirst: tFirstInvite?.toISOString(),
+          tKillIssued: tKill.toISOString(),
+          tInviteLast: tLastInvite?.toISOString(),
+          killedWorkerPod,
+          killedWorkerIp,
+          killMode: opts.killMode,
+          workerRecoveredMs: result.workerRecoveredMs,
+          loadJobStatus: result.loadJobStatus,
+          loadStats: result.loadStats,
+          smokeJobStatus: result.smokeJobStatus,
+          smokeStats: result.smokeStats,
+          counters: result.counters,
+          establishedOnDyingCount: result.establishedOnDyingCount,
+        },
+      })
+
+      yield* Effect.logInfo(
+        `worker-failover[${opts.killMode}] counters:` +
+          ` re-emissions=${result.counters.reEmissions},` +
+          ` establish-failures=${result.counters.establishFailures},` +
+          ` badly-treated=${result.counters.badlyTreated},` +
+          ` established-on-dying=${result.establishedOnDyingCount},` +
+          ` total-classified=${classifications.length}`,
+      )
+
+      // Best-effort: peek at how many backup keys ended up on the
+      // surviving worker's sidecar — useful diagnostic in archives,
+      // not asserted (the keys are TTL'd, may have expired by now).
+      const survivors = (yield* listPods(opts.namespace, WORKER_LABEL)).filter(
+        (p) => p.name !== killedWorkerPod,
+      )
+      if (survivors.length > 0) {
+        const survivor = survivors[0]!
+        yield* Effect.logInfo(
+          `worker-failover[${opts.killMode}]: surviving worker ${survivor.name}` +
+            ` (ip=${survivor.ip}) is ready=${survivor.ready}; bak: keys count` +
+            ` deferred to manual inspection`,
+        )
+      }
+
+      return result
+    } finally {
+      yield* deleteSippJob(opts.namespace, loadJobName).pipe(Effect.ignore)
+      yield* deleteSippJob(opts.namespace, smokeJobName).pipe(Effect.ignore)
+    }
+  })
+
+/**
+ * Count `unaffected` calls whose outcome is one of the failure
+ * sippOutcomes. The Phase 3 hard gate: this MUST be zero.
+ */
+export const unaffectedFailures = (
+  classifications: ReadonlyArray<ClassifiedCall>,
+): ReadonlyArray<ClassifiedCall> =>
+  classifications.filter(
+    (c) =>
+      c.state === "unaffected" &&
+      (c.outcome === "establish-failed" ||
+        c.outcome === "bye-timeout" ||
+        c.outcome === "mid-dialog-error"),
+  )
