@@ -95,8 +95,10 @@ kind load docker-image sipp:dev --name sip-e2e
 
 ## 4. Install / reinstall the SUT into a namespace
 
-The harness installs four charts into a single namespace (`sip-test` by
-default). Charts: `redis` + `sipp` + `b2bua-worker` + `sip-front-proxy`.
+The harness installs three charts into a single namespace (`sip-test` by
+default): `sipp` + `b2bua-worker` + `sip-front-proxy`. Each
+`b2bua-worker` pod runs its own Redis sidecar (no shared Redis chart;
+see `docs/replication/call-cache-backup.md`).
 
 ### One-shot install
 
@@ -120,9 +122,6 @@ helm upgrade sip-front-proxy deploy/helm/sip-front-proxy \
 
 # SIPp (UAS + mock-call-control + scenarios ConfigMap)
 helm upgrade sipp tests/k8s/charts/sipp -n sip-test --wait --timeout 60s
-
-# Redis
-helm upgrade redis tests/k8s/charts/redis -n sip-test --wait --timeout 60s
 ```
 
 ### Tear down everything in a namespace
@@ -254,11 +253,21 @@ kubectl -n sip-test exec deploy/sip-front-proxy -- ls /etc/sip-proxy/hmac
 ### Worker behavior
 
 ```bash
-# Worker connects to Redis + binds UDP on pod IP (not 0.0.0.0).
-kubectl -n sip-test logs b2bua-worker-0 | head -10
+# Worker connects to its sidecar Redis + binds UDP on pod IP (not 0.0.0.0).
+kubectl -n sip-test logs b2bua-worker-0 -c worker | head -10
 # Expected lines:
-#   "Redis connected to redis://redis:6379"
+#   "Redis connected to redis://localhost:6379"
 #   "UDP socket listening on <POD_IP>:5060 (queueMax=100, ...)"
+
+# Sidecar Redis on the same pod (separate container).
+kubectl -n sip-test exec b2bua-worker-0 -c redis -- redis-cli ping
+# Expected: PONG
+
+# Per-pod partitioning: pri:<pod>:* on the pod's own sidecar,
+# bak:<peer>:* on the peer's sidecar. No cross-pollination.
+kubectl -n sip-test exec b2bua-worker-0 -c redis -- redis-cli keys 'sipas:pri:b2bua-worker-0:*'
+kubectl -n sip-test exec b2bua-worker-1 -c redis -- redis-cli keys 'sipas:bak:b2bua-worker-0:*'
+# (Empty until a call lands; populated as the proxy stamps w_pri/w_bak.)
 
 # Per-call activity (timeout warnings indicate stuck transactions —
 # normal during a chaotic test, alarming if persistent).
@@ -315,7 +324,158 @@ kubectl -n sip-test rollout status   statefulset b2bua-worker --timeout=120s
 kubectl delete namespace sip-test --wait=true
 npx tsx tests/k8s/scripts/install-stack.ts sip-test
 ```
---
+
+---
+
+## 7. Failover test suite
+
+The failover suite (plan:
+[docs/plan/proper-end-to-end-cheerful-lobster.md](plan/proper-end-to-end-cheerful-lobster.md))
+runs sustained sipp load through the proxy and kills a pod mid-call,
+then measures end-to-end survival across the matrix of `(state-at-kill
+× outcome)`. It is **not** part of `npm run test:k8s` — the inner-loop
+K8s suite stays fast; failover is opt-in or nightly.
+
+The 7 tests covering 1 promoted scenario + 6 new failover scenarios:
+
+| File | Phase | Kill mode | Lifecycle |
+|------|-------|-----------|-----------|
+| `proxy-drain.test.ts` | regression | graceful drain | `uac-hold.xml` (3 s pause) |
+| `proxy-failover-lb-delete.test.ts` | 2a | `delete --grace=0 --force` (proxy) | `uac-basic.xml` |
+| `proxy-failover-lb-killdash9.test.ts` | 2b | `kill -9 1` in proxy container | `uac-basic.xml` |
+| `proxy-failover-worker-delete-hold.test.ts` | 3a-B | `delete --grace=0 --force` (worker) | `uac-hold-failover.xml` (10 s pause) |
+| `proxy-failover-worker-killdash9-hold.test.ts` | 3b-B | `kill -9 1` in worker container | `uac-hold-failover.xml` |
+| `proxy-failover-worker-delete-pingpong.test.ts` | 3a-C | `delete --grace=0 --force` (worker) | `uac-pingpong.xml` |
+| `proxy-failover-worker-killdash9-pingpong.test.ts` | 3b-C | `kill -9 1` in worker container | `uac-pingpong.xml` |
+
+### 7.1 Run the whole failover suite
+
+```bash
+# Bring kind up (idempotent), then run all 7 tests sequentially.
+npm run test:k8s:failover
+```
+
+Wall-clock for one full pass: ~5 min (3 short + 4 long). Tests are
+sequential by design (the suite mutates pod state; concurrent runs
+collide). The suite is also chained into `npm run test:nightly`.
+
+### 7.2 Run a single scenario
+
+```bash
+# Just the LB delete-grace0 case.
+npx vitest run -c vitest.config.k8s.ts tests/k8s/proxy-failover-lb-delete.test.ts
+
+# Just the headline pingpong + worker kill-9 case.
+npx vitest run -c vitest.config.k8s.ts tests/k8s/proxy-failover-worker-killdash9-pingpong.test.ts
+```
+
+### 7.3 Tune the sizing
+
+All 4 knobs are env-var overridable. Defaults match the plan; lower
+them for quick local sanity, raise for stress.
+
+| Variable | Default (3a-B / 2a/2b) | Default (3a-C / 3b-C "pingpong") |
+|---------|-----------------------|----------------------------------|
+| `K8S_FAILOVER_CPS`      | 20  | (uses `K8S_FAILOVER_CPS_C`, default 10) |
+| `K8S_FAILOVER_RAMP_S`   | 5   | (uses `K8S_FAILOVER_RAMP_S_C`, default 15) |
+| `K8S_FAILOVER_POSTKILL_S` | 10 | (uses `K8S_FAILOVER_POSTKILL_S_C`, default 30) |
+
+```bash
+# Quick local sanity: 5 cps, 3s ramp, 5s post-kill (≈8s of load).
+K8S_FAILOVER_CPS=5 K8S_FAILOVER_RAMP_S=3 K8S_FAILOVER_POSTKILL_S=5 \
+  npx vitest run -c vitest.config.k8s.ts tests/k8s/proxy-failover-lb-delete.test.ts
+```
+
+### 7.4 Verify a single run's results
+
+Every run writes an archive under `test-results/k8s-failover/<runId>/`.
+The first thing to look at is `summary.txt`:
+
+```bash
+# Most recent archive (any scenario).
+ls -1t test-results/k8s-failover/ | head -1
+cat test-results/k8s-failover/<runId>/summary.txt
+```
+
+Expected layout:
+
+```
+scenario: phase-3a-B-worker-delete-hold
+total calls: 300
+
+state x outcome (counts):
+state \ outcome      clean  retransmitted  establish-failed  bye-timeout  mid-dialog-error
+unaffected           148    0              0                 0            0
+established-on-dying  47    2              0                 1            0
+in-flight-on-dying     0    0              8                 0            0
+pre-routed-on-dying    3    1              0                 0            0
+
+rollup counters:
+  re-emissions:        12
+  establish-failures:  8
+  badly-treated:       1
+```
+
+The hard gate is `unaffected.failed == 0` — the entire `unaffected`
+row's `establish-failed`, `bye-timeout`, and `mid-dialog-error` cells
+must all be zero. Survival in the other rows is logged but not
+asserted (until per-population thresholds are added; see
+[docs/todos/K8S_FAILOVER_FOLLOWUPS.md](todos/K8S_FAILOVER_FOLLOWUPS.md) #2).
+
+Other artefacts in the same directory:
+
+| File / dir | Use |
+|-----------|-----|
+| `categories.json` | Per-Call-ID `{state, outcome, retransmits}` — joinable to other artefacts by `callId`. |
+| `routing-decisions.ndjson` | Every routing line the proxy emitted in the test window, parsed. |
+| `kill-timeline.json` | `tInviteFirst`, `tKillIssued`, `tInviteLast`, recovery time, killed pod, scenario stats, rollup counters. |
+| `proxy-logs/all.log` | Both proxy pods' logs scoped to the test window. |
+| `worker-logs/all.log` | All worker logs scoped to the test window. For `kill-9` the killed pod's `--previous.log` is also captured. |
+| `sipp-traces/msg.log` | Sipp's `-trace_msg` per-message log (the source of truth for outcomes). |
+| `sipp-traces/stat.csv` | Sipp's cumulative `-stf` stats. |
+| `sipp-traces/screen.log` | Sipp's terminal output. |
+
+### 7.5 Cross-run trends
+
+```bash
+# Chronological table across all archived runs.
+npx tsx tests/k8s/scripts/failover-summary.ts
+
+# Filter to one phase.
+npx tsx tests/k8s/scripts/failover-summary.ts --filter phase-3
+```
+
+Useful when looking for slow drift in `re-emissions` /
+`establish-failures` / `badly-treated` after a code change that the
+hard-gate assertion didn't catch.
+
+### 7.6 Clean up archives
+
+Archives are NOT auto-pruned (per plan — they're the "investigation"
+artefact). Manual:
+
+```bash
+# List what's there + size; nothing deleted.
+bash tests/k8s/scripts/failover-cleanup.sh
+
+# Keep only the 10 most recent runs (prompts before deleting).
+bash tests/k8s/scripts/failover-cleanup.sh --keep 10
+
+# Same, but skip the prompt.
+bash tests/k8s/scripts/failover-cleanup.sh --keep 10 --yes
+```
+
+### 7.7 Known issues / follow-ups
+
+See [docs/todos/K8S_FAILOVER_FOLLOWUPS.md](todos/K8S_FAILOVER_FOLLOWUPS.md):
+- Rolling-restart (both worker pods) leaves one ReplPuller fiber hung
+  until that pod is restarted individually. Single-pod kill (the test
+  path) works correctly.
+- LB / worker harnesses are 90 % duplicated; merge candidate.
+- Survival-rate thresholds deferred until 3+ baseline runs exist on
+  `main`.
+
+---
 
 ## VCH commands
 
