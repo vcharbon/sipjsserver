@@ -17,7 +17,12 @@ export default defineConfig({
     exclude: [
       "tests/fullcall/e2e-real-clock.test.ts",
       "tests/harness/limiter-rejection.test.ts",
-      "tests/k8s/**",
+      // Exclude the live K8s suites — they need a kind cluster and run
+      // under `vitest.config.k8s.ts`. The pure parser tests under
+      // `tests/k8s/fixtures/` (e.g. sippOutcomes.test.ts) only read
+      // checked-in samples and are part of the inner loop.
+      "tests/k8s/*.test.ts",
+      "tests/k8s/scripts/**",
       "node_modules/**",
       "dist/**",
     ],

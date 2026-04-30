@@ -1,0 +1,565 @@
+----------------------------------------------- 2026-04-30 03:57:34.400880
+UDP message sent (510 bytes):
+
+INVITE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-1-0
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag001
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 1-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Subject: K8s tier UAC
+Content-Type: application/sdp
+Content-Length:   135
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.130
+s=-
+c=IN IP4 10.244.3.130
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:34.403287
+UDP message received [372] bytes :
+
+SIP/2.0 100 Trying
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-1-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-0;w_bak=b2bua-worker-1;v=2;kid=3c7c534b0e585180;sig=OYZqRU5n_LdH1o_dNqWebA;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag001
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 1-11@10.244.3.130
+CSeq: 1 INVITE
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:34.410521
+UDP message received [491] bytes :
+
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-1-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-0;w_bak=b2bua-worker-1;v=2;kid=3c7c534b0e585180;sig=OYZqRU5n_LdH1o_dNqWebA;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag001
+To: sut <sip:uas@10.96.222.192:5060>;tag=ww6w4sq9
+Call-ID: 1-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.2.30:5060;callRef=b2bua-worker-0%7C1-11%4010.244.3.130%7C11SIPpTag001;leg=a>
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:34.411729
+UDP message received [652] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-1-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-0;w_bak=b2bua-worker-1;v=2;kid=3c7c534b0e585180;sig=OYZqRU5n_LdH1o_dNqWebA;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag001
+To: sut <sip:uas@10.96.222.192:5060>;tag=ww6w4sq9
+Call-ID: 1-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.2.30:5060;callRef=b2bua-worker-0%7C1-11%4010.244.3.130%7C11SIPpTag001;leg=a>
+Content-Type: application/sdp
+Content-Length: 133
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.40
+s=-
+c=IN IP4 10.244.3.40
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:34.411825
+UDP message sent (324 bytes):
+
+ACK sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-1-4
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag001
+To: sut <sip:uas@10.96.222.192:5060>;tag=ww6w4sq9
+Call-ID: 1-11@10.244.3.130
+CSeq: 1 ACK
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:34.896837
+UDP message sent (510 bytes):
+
+INVITE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-2-0
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag002
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 2-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Subject: K8s tier UAC
+Content-Type: application/sdp
+Content-Length:   135
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.130
+s=-
+c=IN IP4 10.244.3.130
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:34.899180
+UDP message received [372] bytes :
+
+SIP/2.0 100 Trying
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-2-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-0;w_bak=b2bua-worker-1;v=2;kid=3c7c534b0e585180;sig=oq5RBdJ-zzP1L1IeitM1wA;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag002
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 2-11@10.244.3.130
+CSeq: 1 INVITE
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:34.906378
+UDP message received [491] bytes :
+
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-2-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-0;w_bak=b2bua-worker-1;v=2;kid=3c7c534b0e585180;sig=oq5RBdJ-zzP1L1IeitM1wA;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag002
+To: sut <sip:uas@10.96.222.192:5060>;tag=tyhrx0qz
+Call-ID: 2-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.2.30:5060;callRef=b2bua-worker-0%7C2-11%4010.244.3.130%7C11SIPpTag002;leg=a>
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:34.907140
+UDP message received [652] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-2-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-0;w_bak=b2bua-worker-1;v=2;kid=3c7c534b0e585180;sig=oq5RBdJ-zzP1L1IeitM1wA;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag002
+To: sut <sip:uas@10.96.222.192:5060>;tag=tyhrx0qz
+Call-ID: 2-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.2.30:5060;callRef=b2bua-worker-0%7C2-11%4010.244.3.130%7C11SIPpTag002;leg=a>
+Content-Type: application/sdp
+Content-Length: 133
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.40
+s=-
+c=IN IP4 10.244.3.40
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:34.907221
+UDP message sent (324 bytes):
+
+ACK sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-2-4
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag002
+To: sut <sip:uas@10.96.222.192:5060>;tag=tyhrx0qz
+Call-ID: 2-11@10.244.3.130
+CSeq: 1 ACK
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:34.913001
+UDP message sent (324 bytes):
+
+BYE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-1-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag001
+To: sut <sip:uas@10.96.222.192:5060>;tag=ww6w4sq9
+Call-ID: 1-11@10.244.3.130
+CSeq: 2 BYE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:34.914173
+UDP message received [350] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-1-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag001
+To: sut <sip:uas@10.96.222.192:5060>;tag=ww6w4sq9
+Call-ID: 1-11@10.244.3.130
+CSeq: 2 BYE
+Contact: <sip:b2bua@10.244.2.30:5060;callRef=b2bua-worker-0%7C1-11%4010.244.3.130%7C11SIPpTag001;leg=a>
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.400741
+UDP message sent (510 bytes):
+
+INVITE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-3-0
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag003
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 3-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Subject: K8s tier UAC
+Content-Type: application/sdp
+Content-Length:   135
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.130
+s=-
+c=IN IP4 10.244.3.130
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:35.403109
+UDP message received [372] bytes :
+
+SIP/2.0 100 Trying
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-3-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-1;w_bak=b2bua-worker-0;v=2;kid=3c7c534b0e585180;sig=ac7lrRnra9ZaewlvSvVxdA;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag003
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 3-11@10.244.3.130
+CSeq: 1 INVITE
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.411097
+UDP message received [491] bytes :
+
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-3-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-1;w_bak=b2bua-worker-0;v=2;kid=3c7c534b0e585180;sig=ac7lrRnra9ZaewlvSvVxdA;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag003
+To: sut <sip:uas@10.96.222.192:5060>;tag=2ycxgmlx
+Call-ID: 3-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.1.35:5060;callRef=b2bua-worker-1%7C3-11%4010.244.3.130%7C11SIPpTag003;leg=a>
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.412026
+UDP message received [652] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-3-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-1;w_bak=b2bua-worker-0;v=2;kid=3c7c534b0e585180;sig=ac7lrRnra9ZaewlvSvVxdA;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag003
+To: sut <sip:uas@10.96.222.192:5060>;tag=2ycxgmlx
+Call-ID: 3-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.1.35:5060;callRef=b2bua-worker-1%7C3-11%4010.244.3.130%7C11SIPpTag003;leg=a>
+Content-Type: application/sdp
+Content-Length: 133
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.40
+s=-
+c=IN IP4 10.244.3.40
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:35.412105
+UDP message sent (324 bytes):
+
+BYE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-2-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag002
+To: sut <sip:uas@10.96.222.192:5060>;tag=tyhrx0qz
+Call-ID: 2-11@10.244.3.130
+CSeq: 2 BYE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.412137
+UDP message sent (324 bytes):
+
+ACK sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-3-4
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag003
+To: sut <sip:uas@10.96.222.192:5060>;tag=2ycxgmlx
+Call-ID: 3-11@10.244.3.130
+CSeq: 1 ACK
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.413966
+UDP message received [350] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-2-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag002
+To: sut <sip:uas@10.96.222.192:5060>;tag=tyhrx0qz
+Call-ID: 2-11@10.244.3.130
+CSeq: 2 BYE
+Contact: <sip:b2bua@10.244.2.30:5060;callRef=b2bua-worker-0%7C2-11%4010.244.3.130%7C11SIPpTag002;leg=a>
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.895354
+UDP message sent (510 bytes):
+
+INVITE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-4-0
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag004
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 4-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Subject: K8s tier UAC
+Content-Type: application/sdp
+Content-Length:   135
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.130
+s=-
+c=IN IP4 10.244.3.130
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:35.897452
+UDP message received [372] bytes :
+
+SIP/2.0 100 Trying
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-4-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-1;w_bak=b2bua-worker-0;v=2;kid=3c7c534b0e585180;sig=l2_3gb3Ohkk9s1KDF4WeOw;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag004
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 4-11@10.244.3.130
+CSeq: 1 INVITE
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.905021
+UDP message received [491] bytes :
+
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-4-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-1;w_bak=b2bua-worker-0;v=2;kid=3c7c534b0e585180;sig=l2_3gb3Ohkk9s1KDF4WeOw;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag004
+To: sut <sip:uas@10.96.222.192:5060>;tag=b8nj4hpl
+Call-ID: 4-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.1.35:5060;callRef=b2bua-worker-1%7C4-11%4010.244.3.130%7C11SIPpTag004;leg=a>
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.905881
+UDP message received [652] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-4-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-1;w_bak=b2bua-worker-0;v=2;kid=3c7c534b0e585180;sig=l2_3gb3Ohkk9s1KDF4WeOw;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag004
+To: sut <sip:uas@10.96.222.192:5060>;tag=b8nj4hpl
+Call-ID: 4-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.1.35:5060;callRef=b2bua-worker-1%7C4-11%4010.244.3.130%7C11SIPpTag004;leg=a>
+Content-Type: application/sdp
+Content-Length: 133
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.40
+s=-
+c=IN IP4 10.244.3.40
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:35.905971
+UDP message sent (324 bytes):
+
+ACK sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-4-4
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag004
+To: sut <sip:uas@10.96.222.192:5060>;tag=b8nj4hpl
+Call-ID: 4-11@10.244.3.130
+CSeq: 1 ACK
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.916248
+UDP message sent (324 bytes):
+
+BYE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-3-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag003
+To: sut <sip:uas@10.96.222.192:5060>;tag=2ycxgmlx
+Call-ID: 3-11@10.244.3.130
+CSeq: 2 BYE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:35.919467
+UDP message received [350] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-3-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag003
+To: sut <sip:uas@10.96.222.192:5060>;tag=2ycxgmlx
+Call-ID: 3-11@10.244.3.130
+CSeq: 2 BYE
+Contact: <sip:b2bua@10.244.1.35:5060;callRef=b2bua-worker-1%7C3-11%4010.244.3.130%7C11SIPpTag003;leg=a>
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:36.396697
+UDP message sent (510 bytes):
+
+INVITE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-5-0
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag005
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 5-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Subject: K8s tier UAC
+Content-Type: application/sdp
+Content-Length:   135
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.130
+s=-
+c=IN IP4 10.244.3.130
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:36.398653
+UDP message received [372] bytes :
+
+SIP/2.0 100 Trying
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-5-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-0;w_bak=b2bua-worker-1;v=2;kid=3c7c534b0e585180;sig=YePgy-Jztj1BmGtTE98ICQ;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag005
+To: sut <sip:uas@10.96.222.192:5060>
+Call-ID: 5-11@10.244.3.130
+CSeq: 1 INVITE
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:36.404104
+UDP message received [491] bytes :
+
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-5-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-0;w_bak=b2bua-worker-1;v=2;kid=3c7c534b0e585180;sig=YePgy-Jztj1BmGtTE98ICQ;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag005
+To: sut <sip:uas@10.96.222.192:5060>;tag=pg0b8vhq
+Call-ID: 5-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.2.30:5060;callRef=b2bua-worker-0%7C5-11%4010.244.3.130%7C11SIPpTag005;leg=a>
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:36.405243
+UDP message received [652] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-5-0
+Record-Route: <sip:127.0.0.1:5060;w_pri=b2bua-worker-0;w_bak=b2bua-worker-1;v=2;kid=3c7c534b0e585180;sig=YePgy-Jztj1BmGtTE98ICQ;lr>
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag005
+To: sut <sip:uas@10.96.222.192:5060>;tag=pg0b8vhq
+Call-ID: 5-11@10.244.3.130
+CSeq: 1 INVITE
+Contact: <sip:b2bua@10.244.2.30:5060;callRef=b2bua-worker-0%7C5-11%4010.244.3.130%7C11SIPpTag005;leg=a>
+Content-Type: application/sdp
+Content-Length: 133
+
+v=0
+o=user1 53655765 2353687637 IN IP4 10.244.3.40
+s=-
+c=IN IP4 10.244.3.40
+t=0 0
+m=audio 6000 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+
+----------------------------------------------- 2026-04-30 03:57:36.405339
+UDP message sent (324 bytes):
+
+ACK sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-5-4
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag005
+To: sut <sip:uas@10.96.222.192:5060>;tag=pg0b8vhq
+Call-ID: 5-11@10.244.3.130
+CSeq: 1 ACK
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:36.408862
+UDP message sent (324 bytes):
+
+BYE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-4-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag004
+To: sut <sip:uas@10.96.222.192:5060>;tag=b8nj4hpl
+Call-ID: 4-11@10.244.3.130
+CSeq: 2 BYE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:36.410216
+UDP message received [350] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-4-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag004
+To: sut <sip:uas@10.96.222.192:5060>;tag=b8nj4hpl
+Call-ID: 4-11@10.244.3.130
+CSeq: 2 BYE
+Contact: <sip:b2bua@10.244.1.35:5060;callRef=b2bua-worker-1%7C4-11%4010.244.3.130%7C11SIPpTag004;leg=a>
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:36.907847
+UDP message sent (324 bytes):
+
+BYE sip:uas@10.96.222.192:5060 SIP/2.0
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-5-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag005
+To: sut <sip:uas@10.96.222.192:5060>;tag=pg0b8vhq
+Call-ID: 5-11@10.244.3.130
+CSeq: 2 BYE
+Contact: sip:sipp@10.244.3.130:5060
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2026-04-30 03:57:36.909698
+UDP message received [350] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 10.244.3.130:5060;branch=z9hG4bK-11-5-6
+From: sipp <sip:sipp@10.244.3.130:5060>;tag=11SIPpTag005
+To: sut <sip:uas@10.96.222.192:5060>;tag=pg0b8vhq
+Call-ID: 5-11@10.244.3.130
+CSeq: 2 BYE
+Contact: <sip:b2bua@10.244.2.30:5060;callRef=b2bua-worker-0%7C5-11%4010.244.3.130%7C11SIPpTag005;leg=a>
+Content-Length: 0
+
+

@@ -1,5 +1,14 @@
-import { Effect } from "effect"
+import { Data, Effect } from "effect"
 import { exec } from "./exec.js"
+
+export class KubectlWaitError extends Data.TaggedError("KubectlWaitError")<{
+  readonly resource: string
+  readonly reason: string
+}> {
+  override get message(): string {
+    return `kubectl wait failed for ${this.resource}: ${this.reason}`
+  }
+}
 
 export interface PodInfo {
   readonly name: string
@@ -111,6 +120,101 @@ export const podExec = (
       { timeoutMs: 30_000 },
     )
     return stdout
+  })
+
+/**
+ * Run a command inside a specific container of a pod. Returns both
+ * stdout and stderr because callers (e.g. `podKill.ts`) may want the
+ * stderr stream when the exec exits non-zero (kill -9 makes the kubectl
+ * exec channel close abruptly, which is normal).
+ */
+export const execInPod = (
+  namespace: string,
+  podName: string,
+  container: string,
+  command: ReadonlyArray<string>,
+  opts: { timeoutMs?: number } = {},
+) =>
+  exec(
+    "kubectl",
+    ["-n", namespace, "exec", podName, "-c", container, "--", ...command],
+    { timeoutMs: opts.timeoutMs ?? 30_000 },
+  )
+
+/**
+ * Wait until a StatefulSet has `replicas` ready replicas AND its
+ * `currentRevision` matches `updateRevision` (i.e. no rolling update in
+ * progress). Throws on timeout. Used by failover tests in `afterEach`
+ * before yielding to the next test.
+ */
+export const waitForStatefulSetSteady = (
+  namespace: string,
+  name: string,
+  replicas: number,
+  timeoutSec: number,
+): Effect.Effect<void, KubectlWaitError> =>
+  Effect.gen(function* () {
+    const deadline = Date.now() + timeoutSec * 1000
+    let lastSeen = ""
+    while (Date.now() < deadline) {
+      const result = yield* exec(
+        "kubectl",
+        [
+          "-n",
+          namespace,
+          "get",
+          "statefulset",
+          name,
+          "-o",
+          "jsonpath={.status.readyReplicas}|{.status.currentRevision}|{.status.updateRevision}",
+        ],
+        { timeoutMs: 10_000 },
+      ).pipe(
+        Effect.matchEffect({
+          onSuccess: (r) => Effect.succeed(r.stdout.trim()),
+          onFailure: () => Effect.succeed(""),
+        }),
+      )
+      lastSeen = result
+      const [readyRaw, currentRev, updateRev] = result.split("|")
+      const ready = readyRaw ? parseInt(readyRaw, 10) : NaN
+      if (
+        Number.isFinite(ready) &&
+        ready === replicas &&
+        currentRev !== "" &&
+        currentRev === updateRev
+      ) {
+        return
+      }
+      yield* Effect.sleep("1 second")
+    }
+    return yield* new KubectlWaitError({
+      resource: `statefulset ${namespace}/${name}`,
+      reason:
+        `not steady within ${timeoutSec}s ` +
+        `(want readyReplicas=${replicas}, last status="${lastSeen}")`,
+    })
+  })
+
+/**
+ * Wrap `kubectl cp <ns>/<pod>:<srcInPod> <dstOnHost>`. The pod must
+ * still be in `Running` phase — copying out of a `Succeeded` or
+ * `Failed` pod fails with "cannot exec into a container in a completed
+ * pod". Callers (e.g. `sippJob.ts`) hold the pod alive with a tail
+ * `sleep` after the workload exits to make this work.
+ */
+export const kubectlCp = (
+  namespace: string,
+  podName: string,
+  srcInPod: string,
+  dstOnHost: string,
+  opts: { container?: string; timeoutMs?: number } = {},
+) =>
+  Effect.gen(function* () {
+    const args = ["-n", namespace, "cp"]
+    if (opts.container) args.push("-c", opts.container)
+    args.push(`${podName}:${srcInPod}`, dstOnHost)
+    yield* exec("kubectl", args, { timeoutMs: opts.timeoutMs ?? 60_000 })
   })
 
 /**

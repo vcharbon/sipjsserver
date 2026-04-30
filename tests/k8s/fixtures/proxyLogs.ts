@@ -10,6 +10,19 @@ export interface RoutingDecision {
   readonly result: string
   /** Pod name of the proxy that made the decision (when readable). */
   readonly proxyPod?: string
+  /**
+   * Wall-clock timestamp the proxy logged for this decision, parsed
+   * from the bracketed `[HH:MM:SS.fff]` prefix on the log line. The
+   * date component is taken from `referenceDate` passed to
+   * `parseRoutingDecisions` (defaults to `new Date()`); the parser
+   * cannot infer the date from the log line itself. `undefined` when
+   * the bracket is missing or unparseable.
+   *
+   * Used by `callLifecycle.classifyCalls` to bucket calls relative to
+   * `T_kill`. Existing tests that don't need timing leave this field
+   * unread — adding it is purely additive.
+   */
+  readonly tDecided?: Date
 }
 
 /**
@@ -22,21 +35,55 @@ export interface RoutingDecision {
  * With `--prefix`, the line is prefixed by `[pod/<name>/<container>] `.
  */
 const ROUTED_RE =
-  /^(?:\[pod\/([^/\]]+)(?:\/[^\]]+)?\]\s*)?\[[^\]]+\]\s+\w+\s+\(#\d+\):\s+routed\s+(\S+)\s+(\S+)\s+→\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d+)\s+\(decision=([^,]+),\s+result=([^)]+)\)/
+  /^(?:\[pod\/([^/\]]+)(?:\/[^\]]+)?\]\s*)?\[([^\]]+)\]\s+\w+\s+\(#\d+\):\s+routed\s+(\S+)\s+(\S+)\s+→\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d+)\s+\(decision=([^,]+),\s+result=([^)]+)\)/
 
-export const parseRoutingDecisions = (logs: string): ReadonlyArray<RoutingDecision> => {
+const TIME_RE = /^(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?$/
+
+const parseTimestamp = (raw: string, ref: Date): Date | undefined => {
+  const m = TIME_RE.exec(raw.trim())
+  if (!m) return undefined
+  const hh = parseInt(m[1] ?? "", 10)
+  const mm = parseInt(m[2] ?? "", 10)
+  const ss = parseInt(m[3] ?? "", 10)
+  const fracRaw = m[4] ?? ""
+  // Pad/truncate to milliseconds.
+  const ms =
+    fracRaw === ""
+      ? 0
+      : parseInt((fracRaw + "000").slice(0, 3), 10)
+  if (![hh, mm, ss, ms].every(Number.isFinite)) return undefined
+  return new Date(
+    Date.UTC(
+      ref.getUTCFullYear(),
+      ref.getUTCMonth(),
+      ref.getUTCDate(),
+      hh,
+      mm,
+      ss,
+      ms,
+    ),
+  )
+}
+
+export const parseRoutingDecisions = (
+  logs: string,
+  opts: { referenceDate?: Date } = {},
+): ReadonlyArray<RoutingDecision> => {
+  const ref = opts.referenceDate ?? new Date()
   const out: Array<RoutingDecision> = []
   for (const line of logs.split("\n")) {
     const m = ROUTED_RE.exec(line)
     if (!m) continue
+    const tDecided = m[2] ? parseTimestamp(m[2], ref) : undefined
     out.push({
       proxyPod: m[1] || undefined,
-      method: m[2] ?? "",
-      callId: m[3] ?? "",
-      workerIp: m[4] ?? "",
-      workerPort: parseInt(m[5] ?? "0", 10),
-      decision: m[6] ?? "",
-      result: m[7] ?? "",
+      method: m[3] ?? "",
+      callId: m[4] ?? "",
+      workerIp: m[5] ?? "",
+      workerPort: parseInt(m[6] ?? "0", 10),
+      decision: m[7] ?? "",
+      result: m[8] ?? "",
+      tDecided,
     })
   }
   return out
@@ -45,6 +92,13 @@ export const parseRoutingDecisions = (logs: string): ReadonlyArray<RoutingDecisi
 export interface RoutingDecisionsOpts {
   /** Time window relative to now (e.g. "60s", "5m"). */
   readonly since?: string
+  /**
+   * Reference date used to expand the bracketed `[HH:MM:SS.fff]`
+   * timestamp on each log line into a full `Date`. Defaults to "now"
+   * inside `parseRoutingDecisions`. Failover tests that need accurate
+   * `tDecided` should pass the test-start `Date` here.
+   */
+  readonly referenceDate?: Date
 }
 
 /**
@@ -60,7 +114,7 @@ export const fetchRoutingDecisions = (
       { labelSelector: "app.kubernetes.io/name=sip-front-proxy" },
       { since: opts.since },
     )
-    return parseRoutingDecisions(logs)
+    return parseRoutingDecisions(logs, { referenceDate: opts.referenceDate })
   })
 
 /**
