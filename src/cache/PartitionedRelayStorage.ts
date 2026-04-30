@@ -333,19 +333,23 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
         scanCalls,
       }
     })
-  ).pipe(
-    // AtomicWriter requires a WriteNotifier (it publishes on every
-    // successful peer-bearing write so ReplLog's long-poll handlers
-    // can push entries to subscribers within milliseconds). We
-    // intentionally do NOT embed `WriteNotifier.layer` here: ReplLog
-    // must subscribe to the same hub instance the writer publishes
-    // to, and the only reliable way to achieve that is to hoist
-    // `WriteNotifier.layer` to the outermost composition so a single
-    // memoized instance is shared by both. Therefore
-    // `redisLayer`'s external requirement now includes
-    // `WriteNotifier`.
-    Layer.provide(AtomicWriter.redisLayer)
   )
+  // AtomicWriter requires a WriteNotifier (it publishes on every
+  // successful peer-bearing write so ReplLog's long-poll handlers can
+  // push entries to subscribers within milliseconds). We intentionally
+  // do NOT embed `WriteNotifier.layer` here: ReplLog must subscribe to
+  // the same hub instance the writer publishes to, and the only
+  // reliable way to achieve that is to hoist `WriteNotifier.layer` to
+  // the outermost composition so a single memoized instance is shared.
+  //
+  // Phase 0b additionally hoists `AtomicWriter.redisLayer` itself: the
+  // production `ReplPuller.redisLayer` (consumer of /replog from peers)
+  // also needs AtomicWriter to apply backup writes. Keeping a single
+  // shared AtomicWriter is functionally fine (each is a thin wrapper
+  // over the same RedisClient + WriteNotifier), but composing it once
+  // at the top avoids two redundant service instances.
+  // Therefore `redisLayer`'s external requirement is now:
+  // `RedisClient | AtomicWriter | WriteNotifier`.
 
   /**
    * Tests: in-memory MutableHashMap + Effect Clock. TTL is enforced

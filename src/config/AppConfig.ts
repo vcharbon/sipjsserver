@@ -45,6 +45,26 @@ export const AppConfigData = Schema.Struct({
    * Slice 5 of the HA-resilience plan (D7 / D15).
    */
   workerOrdinalLabel: Schema.optional(Schema.String),
+  /**
+   * K8s namespace this worker pod runs in — required for the
+   * headless-StatefulSet peer discovery used by the data-replication
+   * layer (`PeerEnumerator.headlessStatefulSet`,
+   * `PeerEndpointResolver.headlessStatefulSet`). Sourced from the
+   * downward API (`fieldRef: metadata.namespace`).
+   *
+   * When unset (single-node / dev / non-K8s deployments), the worker
+   * skips boot-time peer discovery entirely — `ReadyGate` is bypassed
+   * and no `ReplPuller` fibers are forked. The B2BUA still starts and
+   * serves SIP locally; just without cross-pod replication.
+   */
+  k8sNamespace: Schema.optional(Schema.String),
+  /**
+   * Headless-StatefulSet service name peer workers resolve through
+   * (`<pod>.<workerServiceName>.<k8sNamespace>.svc.cluster.local`).
+   * Defaults to `b2bua-worker` — matches the chart's `fullname`
+   * template result in the typical deployment.
+   */
+  workerServiceName: Schema.String,
   /** TTL for Redis call context keys (seconds). Derived as keepaliveIntervalSec * 2. */
   callContextTtlSec: Schema.Int,
   /** Delay before deleting Redis keys after call termination (seconds). Covers SIP retransmissions. */
@@ -175,6 +195,7 @@ function resolveWorkerOrdinalLabel(): string | undefined {
 function readConfigFromEnv(): AppConfigData {
   const outbound = parseB2bOutboundProxy()
   const ordinal = resolveWorkerOrdinalLabel()
+  const namespace = process.env["K8S_NAMESPACE"]
   return {
     sipLocalIp: envOrDefault("SIP_LOCAL_IP", "127.0.0.1"),
     sipLocalPort: parseInt(envOrDefault("SIP_LOCAL_PORT", "5060"), 10),
@@ -228,6 +249,10 @@ function readConfigFromEnv(): AppConfigData {
     traceTombstoneEnabled: envOrDefault("TRACE_TOMBSTONE_ENABLED", "true") === "true",
     ...(outbound !== undefined ? { b2bOutboundProxy: outbound } : {}),
     ...(ordinal !== undefined ? { workerOrdinalLabel: ordinal } : {}),
+    ...(namespace !== undefined && namespace.length > 0
+      ? { k8sNamespace: namespace }
+      : {}),
+    workerServiceName: envOrDefault("WORKER_SERVICE_NAME", "b2bua-worker"),
   }
 }
 

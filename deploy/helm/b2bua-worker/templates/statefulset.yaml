@@ -61,6 +61,22 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # Namespace from the downward API. Required by the
+            # data-replication consumer wiring (ReadyGate +
+            # ReplPuller per-peer fibers — Phase 0b). When absent
+            # (single-node / non-K8s deployments) the worker skips
+            # the boot handshake gracefully and only serves the
+            # `/replog` producer side.
+            - name: K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Headless StatefulSet service name peer workers resolve
+            # through. Defaults to `b2bua-worker` to match the chart's
+            # fullname template; override via values.yaml if the
+            # release name differs.
+            - name: WORKER_SERVICE_NAME
+              value: {{ include "b2bua-worker.fullname" . | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -295,6 +295,11 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
  *                         epoch-mismatch detection on the consumer side.
  *   since={number}      — optional; default 0. Server emits all entries
  *                         in `propagate:{caller}` with seq > since.
+ *   drainOnly={1|true}  — optional; when set, server emits hello + backlog
+ *                         + caught_up and ends the stream (no long-poll,
+ *                         no heartbeats). Used by the ReadyGate boot
+ *                         handshake (spec §8) — the gate just needs to
+ *                         drain up to head_at_open and move on.
  */
 export const addReplLogRoutes = (
   router: HttpRouter.HttpRouter,
@@ -324,7 +329,17 @@ export const addReplLogRoutes = (
             { status: 400 }
           )
         }
-        const body = replLog.stream(caller, sinceSeq, config)
+        const drainOnlyParam = url.searchParams.get("drainOnly")
+        const drainOnly =
+          drainOnlyParam !== null &&
+          (drainOnlyParam === "1" ||
+            drainOnlyParam.toLowerCase() === "true")
+        // Per-request drainOnly flag overlays onto layer-level config.
+        const perRequestConfig: ReplLogConfig = {
+          ...(config ?? {}),
+          ...(drainOnly ? { drainOnly: true } : {}),
+        }
+        const body = replLog.stream(caller, sinceSeq, perRequestConfig)
         return HttpServerResponse.stream(body, {
           contentType: "application/x-ndjson",
           headers: { "cache-control": "no-store" },

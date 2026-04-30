@@ -27,6 +27,7 @@ import {
   Option,
   ServiceMap,
 } from "effect"
+import { AppConfig } from "../config/AppConfig.js"
 import { RedisClient } from "../redis/RedisClient.js"
 import {
   AtomicWriter,
@@ -82,6 +83,14 @@ export class PropagateStream extends ServiceMap.Service<
     PropagateStream,
     Effect.gen(function* () {
       const redis = yield* RedisClient
+      const config = yield* AppConfig
+      // RedisClient applies its prefix manually via `pk()` (see
+      // `src/redis/RedisClient.ts`), it does NOT pass `keyPrefix` to
+      // ioredis. So `redis.raw.options.keyPrefix` is undefined and we
+      // have to compose the same prefix ourselves when calling raw
+      // commands like ZRANGEBYSCORE / ZREVRANGE that aren't on the
+      // wrapped RedisClient surface.
+      const keyPrefix = `${config.redisKeyPrefix}:`
 
       const wrapErr = (err: { reason: string }): PropagateStreamError =>
         new PropagateStreamError({ reason: err.reason })
@@ -103,12 +112,7 @@ export class PropagateStream extends ServiceMap.Service<
             if (limit !== undefined && limit > 0) {
               args.push("LIMIT", 0, limit)
             }
-            // Use raw ioredis here so we can batch the prefix correctly;
-            // the underlying call-shape is identical to redis.eval which
-            // already prefixes via `pk()`. We mirror the prefix lookup
-            // through a small SCAN-style helper.
-            const prefix = redis.raw.options?.keyPrefix ?? ""
-            const fullKey = `${prefix}${key}`
+            const fullKey = `${keyPrefix}${key}`
             const flat = await (redis.raw as unknown as {
               zrangebyscore: (
                 k: string,
@@ -133,8 +137,7 @@ export class PropagateStream extends ServiceMap.Service<
         Effect.tryPromise({
           try: async () => {
             const key = AtomicWriter.propagateSetKey(peer)
-            const prefix = redis.raw.options?.keyPrefix ?? ""
-            const fullKey = `${prefix}${key}`
+            const fullKey = `${keyPrefix}${key}`
             const result = await (redis.raw as unknown as {
               zrevrange: (
                 k: string,

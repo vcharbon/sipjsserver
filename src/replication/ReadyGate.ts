@@ -26,9 +26,18 @@ import {
   Duration,
   Effect,
   Layer,
+  Result,
   ServiceMap,
   Stream,
 } from "effect"
+import {
+  HttpClient,
+  HttpClientRequest,
+} from "effect/unstable/http"
+import {
+  PeerEndpointResolver,
+} from "../cache/PeerEndpointResolver.js"
+import { WorkerOrdinal } from "../cache/PeerCachePort.js"
 import { PeerEnumerator } from "../cache/PeerEnumerator.js"
 import { WorkerReadiness } from "../cache/WorkerReadiness.js"
 import { ReplPuller } from "./ReplPuller.js"
@@ -59,7 +68,104 @@ export interface ReplogClientApi {
 export class ReplogClient extends ServiceMap.Service<
   ReplogClient,
   ReplogClientApi
->()("@sipjsserver/replication/ReplogClient") {}
+>()("@sipjsserver/replication/ReplogClient") {
+  /**
+   * Production: HTTP-backed transport. Resolves the peer to a base URL
+   * via `PeerEndpointResolver`, opens
+   * `GET <peerBase>/replog?caller=<self>&since=<lastSeq>[&drainOnly=1]`
+   * through the ambient `HttpClient` (typically `FetchHttpClient.layer`),
+   * and exposes the response body as a `Stream<Uint8Array>`.
+   *
+   * Transport / DNS / status errors are absorbed: the stream ends
+   * gracefully (caller observes "no more frames" rather than a typed
+   * error). Production wires a forked-fiber retry loop above this layer
+   * so a closed stream simply triggers reconnect with backoff.
+   *
+   * `self` is the local worker's ordinal — the `caller` query param the
+   * peer's `/replog` endpoint records as the calling worker's identity.
+   */
+  static readonly fetchHttpLayer = (cfg: {
+    readonly self: string
+  }): Layer.Layer<ReplogClient, never, HttpClient.HttpClient | PeerEndpointResolver> =>
+    Layer.effect(
+      ReplogClient,
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient
+        const resolver = yield* PeerEndpointResolver
+
+        const buildUrl = (
+          peer: string,
+          sinceSeq: number,
+          drainOnly: boolean
+        ): Effect.Effect<string, never> =>
+          Effect.gen(function* () {
+            const resolved = yield* Effect.result(
+              resolver.resolve(WorkerOrdinal(peer))
+            )
+            if (Result.isFailure(resolved)) {
+              yield* Effect.logWarning(
+                `ReplogClient: resolve(${peer}) failed (${resolved.failure.reason}) — yielding empty stream`
+              )
+              return ""
+            }
+            const base = resolved.success
+            const drainQs = drainOnly ? "&drainOnly=1" : ""
+            return `${base}/replog?caller=${encodeURIComponent(
+              cfg.self
+            )}&since=${sinceSeq}${drainQs}`
+          })
+
+        const streamFromPeer = (
+          peer: string,
+          sinceSeq: number,
+          opts?: { readonly drainOnly?: boolean }
+        ): Stream.Stream<Uint8Array, never> => {
+          const drainOnly = opts?.drainOnly === true
+          // The whole pipeline is wrapped in an Effect that resolves
+          // the URL, builds the request, and unwraps a Stream from
+          // the streamed response body. Any HTTP error converts to an
+          // empty stream + warning log so the consumer (ReplPuller)
+          // observes a clean end-of-stream and the steady-state retry
+          // loop reconnects after backoff.
+          return Stream.unwrap(
+            Effect.gen(function* () {
+              const url = yield* buildUrl(peer, sinceSeq, drainOnly)
+              if (url.length === 0) return Stream.empty
+              const req = HttpClientRequest.get(url)
+              const respResult = yield* Effect.result(client.execute(req))
+              if (Result.isFailure(respResult)) {
+                yield* Effect.logWarning(
+                  `ReplogClient: execute(${peer}) failed — ${respResult.failure.message}`
+                )
+                return Stream.empty
+              }
+              const resp = respResult.success
+              if (resp.status < 200 || resp.status >= 300) {
+                yield* Effect.logWarning(
+                  `ReplogClient: peer ${peer} returned status=${resp.status}`
+                )
+                return Stream.empty
+              }
+              // resp.stream returns Stream<Uint8Array, HttpClientError>
+              // — collapse the error channel so the public surface is
+              // `Stream<Uint8Array, never>` (ReplPuller's contract).
+              return resp.stream.pipe(
+                Stream.catchCause((cause) =>
+                  Stream.unwrap(
+                    Effect.logWarning(
+                      `ReplogClient: stream from ${peer} aborted — ${cause}`
+                    ).pipe(Effect.as(Stream.empty))
+                  )
+                )
+              )
+            })
+          )
+        }
+
+        return { streamFromPeer }
+      })
+    )
+}
 
 // ---------------------------------------------------------------------------
 // ReadyGate types

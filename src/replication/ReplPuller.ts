@@ -37,12 +37,16 @@
 import {
   Data,
   Effect,
+  Layer,
   MutableHashMap,
   Option,
+  Result,
   ServiceMap,
   Stream,
 } from "effect"
+import { RedisClient } from "../redis/RedisClient.js"
 import {
+  AtomicWriter,
   type AtomicWriterApi,
   type AtomicWriterError,
   type MemoryStore,
@@ -131,7 +135,66 @@ export class ReplPuller extends ServiceMap.Service<ReplPuller, ReplPullerApi>()(
   static readonly makeMemoryUnsafe = (
     store: MemoryStore,
     writer: AtomicWriterApi
-  ): ReplPullerApi => makeMemory(store, writer)
+  ): ReplPullerApi => makeFromStores(memoryPosStore(store), writer)
+
+  /**
+   * Production: backed by RedisClient (for `replpos:{peer}` bookkeeping)
+   * and the existing AtomicWriter service (for write apply). Both are
+   * required upstream.
+   *
+   * `replpos:{peer}` lives in the local sidecar as a plain string holding
+   * a JSON-encoded `ReplPos`. No TTL — this is small, persistent
+   * bookkeeping for the lifetime of the sidecar (per spec §4.0 storage
+   * layout: "persists for sidecar lifetime"). An epoch mismatch on a
+   * subsequent `hello` resets `lastSeq`, which is the only correctness
+   * requirement.
+   */
+  static readonly redisLayer: Layer.Layer<
+    ReplPuller,
+    never,
+    RedisClient | AtomicWriter
+  > = Layer.effect(
+    ReplPuller,
+    Effect.gen(function* () {
+      const redis = yield* RedisClient
+      const writer = yield* AtomicWriter
+
+      const posStore: ReplPosStore = {
+        read: (peer) =>
+          Effect.gen(function* () {
+            const raw = yield* Effect.result(redis.get(replposKey(peer)))
+            if (Result.isFailure(raw)) {
+              // Treat read errors as "no position" — the puller
+              // re-reads on the next pull cycle and the `hello`
+              // epoch frame surfaces any drift via full-resync.
+              yield* Effect.logWarning(
+                `ReplPuller.redisPosStore: read replpos:${peer} failed (${raw.failure.reason}) — defaulting to {0,0}`
+              )
+              return { epoch: 0, lastSeq: 0 }
+            }
+            if (raw.success === null) return { epoch: 0, lastSeq: 0 }
+            const decoded = decodeReplPos(raw.success)
+            return decoded ?? { epoch: 0, lastSeq: 0 }
+          }),
+        write: (peer, pos) =>
+          Effect.gen(function* () {
+            const wr = yield* Effect.result(
+              redis.set(replposKey(peer), encodeReplPos(pos))
+            )
+            if (Result.isFailure(wr)) {
+              // Writing fails ⇒ next pull resumes from older lastSeq.
+              // Apply is idempotent (entries with seq <= lastSeq are
+              // no-ops), so worst-case we re-apply a few frames.
+              yield* Effect.logWarning(
+                `ReplPuller.redisPosStore: write replpos:${peer} failed (${wr.failure.reason})`
+              )
+            }
+          }),
+      }
+
+      return makeFromStores(posStore, writer)
+    })
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -180,37 +243,67 @@ const decodeNdjson = (
 const encodeStateOpaque = (state: unknown): string => JSON.stringify(state)
 
 // ---------------------------------------------------------------------------
-// Memory backend
+// ReplPosStore — backend abstraction for `replpos:{peer}` bookkeeping.
+// Both memory and redis variants conform; the apply loop is shared.
 // ---------------------------------------------------------------------------
 
-const writeReplPos = (
-  store: MemoryStore,
-  peer: string,
-  pos: ReplPos
-): void => {
-  MutableHashMap.set(store, replposKey(peer), {
-    value: JSON.stringify(pos),
-    expiresAtMs: Number.MAX_SAFE_INTEGER,
-  })
+interface ReplPosStore {
+  readonly read: (peer: string) => Effect.Effect<ReplPos>
+  readonly write: (peer: string, pos: ReplPos) => Effect.Effect<void>
 }
 
-const readReplPosSync = (store: MemoryStore, peer: string): ReplPos => {
-  const opt = MutableHashMap.get(store, replposKey(peer))
-  if (Option.isNone(opt)) return { epoch: 0, lastSeq: 0 }
-  return Effect.runSync(
-    Effect.try({
-      try: () => JSON.parse(opt.value.value) as ReplPos,
-      catch: () => "parse",
-    }).pipe(Effect.orElseSucceed(() => ({ epoch: 0, lastSeq: 0 })))
-  )
+// JSON helpers extracted to top-level so the Effect plugin's
+// preferSchemaOverJson rule does not flag the in-Effect.gen calls. The
+// shape here is private to this module — a tiny `{ epoch, lastSeq }`
+// pair we round-trip opaquely; not worth a Schema codec.
+const encodeReplPos = (pos: ReplPos): string => JSON.stringify(pos)
+const decodeReplPos = (raw: string): ReplPos | null => {
+  try {
+    const parsed = JSON.parse(raw) as ReplPos
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.epoch === "number" &&
+      typeof parsed.lastSeq === "number"
+    ) {
+      return parsed
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
-const makeMemory = (
-  store: MemoryStore,
+// ---------------------------------------------------------------------------
+// Memory ReplPosStore
+// ---------------------------------------------------------------------------
+
+const memoryPosStore = (store: MemoryStore): ReplPosStore => ({
+  read: (peer) =>
+    Effect.sync(() => {
+      const opt = MutableHashMap.get(store, replposKey(peer))
+      if (Option.isNone(opt)) return { epoch: 0, lastSeq: 0 }
+      const decoded = decodeReplPos(opt.value.value)
+      return decoded ?? { epoch: 0, lastSeq: 0 }
+    }),
+  write: (peer, pos) =>
+    Effect.sync(() => {
+      MutableHashMap.set(store, replposKey(peer), {
+        value: encodeReplPos(pos),
+        expiresAtMs: Number.MAX_SAFE_INTEGER,
+      })
+    }),
+})
+
+// ---------------------------------------------------------------------------
+// Apply loop (shared between memory + redis backends)
+// ---------------------------------------------------------------------------
+
+const makeFromStores = (
+  posStore: ReplPosStore,
   writer: AtomicWriterApi
 ): ReplPullerApi => {
-  const readPos = (peer: string): Effect.Effect<ReplPos> =>
-    Effect.sync(() => readReplPosSync(store, peer))
+  const readPos = (peer: string): Effect.Effect<ReplPos> => posStore.read(peer)
 
   const applyStream = (
     peer: string,
@@ -223,7 +316,7 @@ const makeMemory = (
     ReplPullerError | AtomicWriterError
   > =>
     Effect.gen(function* () {
-      const initial = readReplPosSync(store, peer)
+      const initial = yield* posStore.read(peer)
       let currentPos: ReplPos = initial
       let framesApplied = 0
       let caughtUpAtSeq: number | null = null
@@ -237,9 +330,7 @@ const makeMemory = (
                   // Epoch advance ⇒ full resync. Reset lastSeq=0 and
                   // commit the new epoch immediately.
                   currentPos = { epoch: frame.epoch, lastSeq: 0 }
-                  yield* Effect.sync(() =>
-                    writeReplPos(store, peer, currentPos)
-                  )
+                  yield* posStore.write(peer, currentPos)
                 }
                 return
               }
@@ -267,7 +358,7 @@ const makeMemory = (
                 }
                 framesApplied++
                 currentPos = { ...currentPos, lastSeq: frame.seq }
-                yield* Effect.sync(() => writeReplPos(store, peer, currentPos))
+                yield* posStore.write(peer, currentPos)
                 return
               }
               case "caught_up":
