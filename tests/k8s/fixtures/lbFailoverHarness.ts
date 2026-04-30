@@ -109,11 +109,12 @@ export const runLbFailoverScenario = (opts: LbFailoverHarnessOpts) =>
       //     still settling.
       yield* Effect.sleep(`${opts.rampSec} seconds`)
       const minInvites = Math.max(Math.floor((opts.cps * opts.rampSec) / 4), 5)
-      const waitDeadlineMs = Date.now() + 30_000
+      // Same 60s cap as workerFailoverHarness — see comment there.
+      const waitDeadlineMs = Date.now() + 60_000
       const wait = yield* waitForInvites(opts.namespace, {
         cidPrefix,
         minCount: minInvites,
-        since: `${opts.rampSec + 30}s`,
+        since: `${opts.rampSec + 60}s`,
         deadlineMs: waitDeadlineMs,
       })
       const earlyDecisions = wait.decisions

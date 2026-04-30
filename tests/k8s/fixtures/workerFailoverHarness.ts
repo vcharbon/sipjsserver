@@ -150,11 +150,17 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
       //     endpoints / kube-proxy conntrack are still settling.
       yield* Effect.sleep(`${opts.rampSec} seconds`)
       const minInvites = Math.max(Math.floor((opts.cps * opts.rampSec) / 4), 5)
-      const waitDeadlineMs = Date.now() + 30_000
+      // 60s polling cap absorbs sipp Job cold-start latency (image
+      // pull + pod scheduling + Service endpoints reconcile) after the
+      // earlier LB-failover suite has churned proxy pods. The previous
+      // 30s cap fits when sipp images are hot from `npm run build`
+      // (LB suite case) but is regularly under-budgeted for the
+      // worker-failover tests that run later in the file order.
+      const waitDeadlineMs = Date.now() + 60_000
       const wait = yield* waitForInvites(opts.namespace, {
         cidPrefix,
         minCount: minInvites,
-        since: `${opts.rampSec + 30}s`,
+        since: `${opts.rampSec + 60}s`,
         deadlineMs: waitDeadlineMs,
       })
       const earlyDecisions = wait.decisions

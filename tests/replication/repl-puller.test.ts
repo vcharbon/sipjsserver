@@ -167,6 +167,141 @@ describe("ReplPuller — apply backlog from a peer's /replog stream", () => {
   })
 })
 
+describe("ReplPuller — bak-side index reconstruction", () => {
+  it.effect("idx:leg:{callId}|{tag} keys are stamped on the consumer when a Call body is streamed", () => {
+    const producer = setupProducer("worker-A")
+    const consumer = consumerStore()
+    const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+
+    // Minimal Call-shaped JSON exercising every index-key branch
+    // `callIndexKeys` produces: a-leg leg, b-leg leg+tag, b-leg
+    // call-id, b-leg dialog remoteTag, callbackContext.
+    const callRef = "worker-A|cid-A|tag-A"
+    const callBody = {
+      callRef,
+      aLeg: { callId: "cid-A", fromTag: "tag-A" },
+      bLegs: [
+        {
+          callId: "cid-B",
+          fromTag: "tag-B",
+          dialogs: [{ sip: { remoteTag: "rtag-B" } }],
+        },
+      ],
+      callbackContext: "ctx-Z",
+    }
+
+    return Effect.gen(function* () {
+      const writer = yield* AtomicWriter
+      yield* writer.put(
+        "pri",
+        "worker-A",
+        callRef,
+        JSON.stringify(callBody),
+        // primary's own index keys — the producer's idx:* set is
+        // irrelevant to this test; we only check what arrives on the
+        // consumer via the puller.
+        ["leg:cid-A|tag-A"],
+        60,
+        { peer: "worker-B" }
+      )
+
+      const replLog = yield* ReplLog
+      const result = yield* puller.applyStream(
+        "worker-A",
+        replLog.stream("worker-B", 0, { drainOnly: true })
+      )
+      expect(result.framesApplied).toBe(1)
+
+      // Consumer's bak: partition has the call body...
+      const bakBody = MutableHashMap.get(
+        consumer,
+        AtomicWriter.callKey("bak", "worker-A", callRef)
+      )
+      expect(Option.isSome(bakBody)).toBe(true)
+
+      // ...AND every flat idx:* entry callIndexKeysFromUnknown derives
+      // from the body, each pointing at the callRef. This is the
+      // property `resolveFromSipKey` relies on for in-dialog routing
+      // on a backup worker (see docs/plan/bye-takeover-replicated-
+      // indexes-fix.md Slice A).
+      for (const idxKey of [
+        "leg:cid-A|tag-A",
+        "leg:cid-B|tag-B",
+        "leg:cid-B",
+        "leg:cid-B|rtag-B",
+        "ctx:ctx-Z",
+      ]) {
+        const idx = MutableHashMap.get(consumer, AtomicWriter.indexKey(idxKey))
+        expect(Option.isSome(idx)).toBe(true)
+        if (Option.isSome(idx)) expect(idx.value.value).toBe(callRef)
+      }
+    }).pipe(Effect.provide(producer.layer))
+  })
+
+  it.effect("delete frames remove the bak: idx:* entries written by the prior put", () => {
+    const producer = setupProducer("worker-A")
+    const consumer = consumerStore()
+    const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+
+    const callRef = "worker-A|cid-A|tag-A"
+    const callBody = {
+      callRef,
+      aLeg: { callId: "cid-A", fromTag: "tag-A" },
+      bLegs: [],
+    }
+
+    return Effect.gen(function* () {
+      const writer = yield* AtomicWriter
+      const replLog = yield* ReplLog
+
+      // Round 1 — put. After this, bak:worker-A:call:{callRef} +
+      // idx:leg:cid-A|tag-A are on the consumer.
+      yield* writer.put(
+        "pri",
+        "worker-A",
+        callRef,
+        JSON.stringify(callBody),
+        [],
+        60,
+        { peer: "worker-B" }
+      )
+      yield* puller.applyStream(
+        "worker-A",
+        replLog.stream("worker-B", 0, { drainOnly: true })
+      )
+      expect(
+        Option.isSome(
+          MutableHashMap.get(consumer, AtomicWriter.indexKey("leg:cid-A|tag-A"))
+        )
+      ).toBe(true)
+
+      // Round 2 — delete. The puller should DEL the idx:* entry it
+      // previously stamped, not just the call body.
+      yield* writer.delete("pri", "worker-A", callRef, [], {
+        peer: "worker-B",
+      })
+      const pos = yield* puller.readPos("worker-A")
+      yield* puller.applyStream(
+        "worker-A",
+        replLog.stream("worker-B", pos.lastSeq, { drainOnly: true })
+      )
+
+      expect(
+        Option.isSome(
+          MutableHashMap.get(consumer, AtomicWriter.callKey("bak", "worker-A", callRef))
+        )
+      ).toBe(false)
+      expect(
+        Option.isSome(
+          MutableHashMap.get(consumer, AtomicWriter.indexKey("leg:cid-A|tag-A"))
+        )
+      ).toBe(false)
+    }).pipe(Effect.provide(producer.layer))
+  })
+})
+
 describe("ReplPuller — epoch mismatch resync", () => {
   it.effect("a hello with a different epoch resets lastSeq to 0", () => {
     const producer = setupProducer("worker-A")

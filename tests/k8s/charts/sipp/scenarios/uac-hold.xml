@@ -30,7 +30,10 @@
   </send>
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
-  <recv response="200" rtd="true"/>
+  <!-- rrs="true" captures the proxy's Record-Route into the dialog
+       route set so the [routes] macro on ACK/BYE expands to a Route
+       header carrying the stickiness cookie back through the proxy. -->
+  <recv response="200" rtd="true" rrs="true"/>
   <send>
     <![CDATA[
       ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0

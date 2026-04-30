@@ -1,13 +1,16 @@
 import { describe, expect } from "vitest"
 import { it } from "@effect/vitest"
 import { Effect, Fiber } from "effect"
+import * as fs from "node:fs/promises"
+import * as path from "node:path"
 import { deleteSippJob, runSippJob } from "./fixtures/sippJob.js"
 import {
   aggregatePerCall,
   fetchRoutingDecisions,
+  waitForInvites,
   workerIpToName,
 } from "./fixtures/proxyLogs.js"
-import { deletePod } from "./fixtures/kubectl.js"
+import { deletePod, execInPod } from "./fixtures/kubectl.js"
 
 const NAMESPACE = process.env.K8S_TEST_NAMESPACE ?? "sip-test"
 
@@ -54,33 +57,39 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
             runSippJob({
               namespace: NAMESPACE,
               name: holdJobName,
-              scenario: "uac-hold.xml",
+              scenario: "uac-hold-failover.xml",
               target: "sip-front-proxy:5060",
               service: "test",
               calls: N_HOLD,
               callsPerSecond: 20,
               timeoutSec: 30,
               waitTimeoutSec: 60,
+              captureTraces: true,
+              archiveDir: `/tmp/proxy-drain-${stamp}`,
               extraArgs: ["-cid_str", holdCidStr],
             }),
           )
 
-          // (2) Wait briefly for INVITEs to settle (≈1s for 20 calls @
-          //     20cps + handling lag), then drain. The pace must keep
-          //     BYEs inside the 5s grace window after delete.
-          yield* Effect.sleep("2 seconds")
-
-          // Snapshot to find the busiest worker.
-          const decisionsEarly = yield* fetchRoutingDecisions(NAMESPACE, {
+          // (2) Poll for INVITEs to settle (≈1s for 20 calls @ 20cps
+          //     + handling lag in the hot-cluster case, or up to ~60s
+          //     after a fresh kind boot when the sipp Job pod is still
+          //     pulling its image). A static `Effect.sleep` is brittle:
+          //     when this test runs in isolation against a cold cluster
+          //     it fires before any INVITE is on the wire. We must keep
+          //     the BYE wave inside the proxy's 5s drainGraceMs after
+          //     `delete`, but that budget starts at the kill below, not
+          //     here — the ramp can take as long as it needs.
+          const earlyWait = yield* waitForInvites(NAMESPACE, {
+            cidPrefix: holdCidPrefix,
+            minCount: N_HOLD,
             since: "120s",
+            deadlineMs: Date.now() + 60_000,
           })
-          const earlyInvites = decisionsEarly.filter(
-            (d) => d.callId.startsWith(holdCidPrefix) && d.method === "INVITE",
-          )
           expect(
-            earlyInvites.length,
+            earlyWait.invites.length,
             "expected proxy to have routed INVITEs before drain",
           ).toBeGreaterThanOrEqual(N_HOLD)
+          const earlyInvites = earlyWait.invites
 
           const counts = new Map<string, number>()
           for (const d of earlyInvites) {
@@ -206,6 +215,90 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
             drainElapsedMs,
             "drain budget overrun — pod should be terminated by now",
           ).toBeLessThan(60_000) // 30s grace + slack
+
+          // (a) Diagnostic: dump every surviving worker's Redis sidecar
+          //     so we can tell which side of the dual-write contract is
+          //     broken when the survival assertion fails. Three useful
+          //     buckets: (i) no `bak:*` keys at all → write side is
+          //     broken; (ii) keys present but BYE still 481 → backup
+          //     read path doesn't consult the partition; (iii) keys
+          //     present and BYE returns 200 → response routing bug.
+          //     Cheap (<1s per pod). Always-on so a passing run still
+          //     archives ground truth.
+          const archiveDir = `/tmp/proxy-drain-${stamp}`
+          yield* Effect.tryPromise(() =>
+            fs.mkdir(archiveDir, { recursive: true }),
+          ).pipe(Effect.orDie)
+          const survivors = Array.from(ipMap.entries())
+            .filter(([, pod]) => pod !== drainPod)
+            .map(([ip, pod]) => ({ ip, pod }))
+          for (const survivor of survivors) {
+            const lines: Array<string> = []
+            lines.push(`# host=${survivor.pod} ip=${survivor.ip}`)
+            // idx:* and propagate:* are added to the dump to cover the
+            // contract Slices A and B of
+            // `docs/plan/bye-takeover-replicated-indexes-fix.md` enforce:
+            //  - idx:leg:* on the survivor confirms the puller stamped
+            //    the bak-side index on Slice A.
+            //  - propagate:b2bua-worker-0 on the survivor confirms
+            //    Slice B's takeover writes announced back to the
+            //    original primary (membership = migrated callRefs).
+            // Production keyspace prefix — see PartitionedRelayStorage.
+            // Without this prefix, --scan returns nothing because the
+            // actual keys live under `sipas:bak:…`, not `bak:…`.
+            const KS = "sipas:"
+            for (const prefix of ["bak", "pri", "idx", "propagate"]) {
+              const scan = yield* execInPod(
+                NAMESPACE,
+                survivor.pod,
+                "redis",
+                ["redis-cli", "--scan", "--pattern", `${KS}${prefix}:*`],
+              ).pipe(
+                Effect.catchTag("ExecError", () =>
+                  Effect.succeed({ stdout: "(scan failed)\n", stderr: "" }),
+                ),
+              )
+              const keys = scan.stdout
+                .split("\n")
+                .map((s) => s.trim())
+                .filter((s) => s.length > 0)
+              lines.push(`# ${prefix}:* count=${keys.length}`)
+              for (const key of keys.slice(0, 50)) {
+                // propagate:* is a sorted set; GET on a non-string type
+                // errors. Use ZRANGE WITHSCORES instead so the dump
+                // shows callRef→seq pairs for the takeover stream.
+                const args = key.startsWith(`${KS}propagate:`) &&
+                  !key.startsWith(`${KS}propagate_seq:`)
+                  ? ["redis-cli", "ZRANGE", key, "0", "-1", "WITHSCORES"]
+                  : ["redis-cli", "GET", key]
+                const get = yield* execInPod(
+                  NAMESPACE,
+                  survivor.pod,
+                  "redis",
+                  args,
+                ).pipe(
+                  Effect.catchTag("ExecError", () =>
+                    Effect.succeed({ stdout: "(get failed)", stderr: "" }),
+                  ),
+                )
+                lines.push(`${key} → ${get.stdout.trim().slice(0, 200)}`)
+              }
+            }
+            const dump = lines.join("\n") + "\n"
+            yield* Effect.tryPromise(() =>
+              fs.writeFile(
+                path.join(archiveDir, `redis-${survivor.pod}.txt`),
+                dump,
+                "utf8",
+              ),
+            ).pipe(Effect.orDie)
+            yield* Effect.logInfo(
+              `redis-dump[${survivor.pod}]: ` +
+                lines
+                  .filter((l) => l.startsWith("# "))
+                  .join(" | "),
+            )
+          }
 
           // (a) Phase B hard assertion: with dual-write deployed,
           //     every established call must end with a 2xx to BYE

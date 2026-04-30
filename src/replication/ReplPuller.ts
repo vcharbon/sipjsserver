@@ -44,6 +44,7 @@ import {
   ServiceMap,
   Stream,
 } from "effect"
+import { callIndexKeysFromUnknown } from "../call/CallModel.js"
 import { RedisClient } from "../redis/RedisClient.js"
 import {
   AtomicWriter,
@@ -305,6 +306,21 @@ const makeFromStores = (
 ): ReplPullerApi => {
   const readPos = (peer: string): Effect.Effect<ReplPos> => posStore.read(peer)
 
+  // Per-puller cache of the index-key set most recently stamped for each
+  // (peer, callRef). Populated on every successful `put` apply; consumed
+  // on `delete` apply so the bak-side `idx:*` keys are removed alongside
+  // the call body. Without this map a delete frame would leave orphaned
+  // `idx:*` entries pointing at a now-absent callRef until TTL.
+  //
+  // The current AtomicWriter delete path is hard-delete (Slice 2 §5.5
+  // notes Slice 5 will switch to a tombstone JSON carrying the index
+  // list). Until that lands, the puller has no on-wire signal carrying
+  // the indexes for a delete event, so we remember them locally instead.
+  // Bounded by the number of currently-replicated callRefs.
+  const indexCache = MutableHashMap.empty<string, ReadonlyArray<string>>()
+  const indexCacheKey = (peer: string, callRef: string): string =>
+    `${peer} ${callRef}`
+
   const applyStream = (
     peer: string,
     upstream: Stream.Stream<Uint8Array, never>
@@ -338,22 +354,39 @@ const makeFromStores = (
                 // Idempotent: skip already-applied entries.
                 if (frame.seq <= currentPos.lastSeq) return
                 if (frame.state === null) {
-                  yield* writer.delete("bak", peer, frame.callRef, [])
+                  // Recover the index set from the cache populated by
+                  // the prior put apply. If absent (long downtime,
+                  // out-of-order receipt without prior put) we fall
+                  // back to no-index DEL — the bak: call body is
+                  // removed and orphaned idx:* keys TTL out within one
+                  // call-TTL window.
+                  const cacheKey = indexCacheKey(peer, frame.callRef)
+                  const cached = MutableHashMap.get(indexCache, cacheKey)
+                  const indexes = Option.isSome(cached) ? cached.value : []
+                  yield* writer.delete("bak", peer, frame.callRef, indexes)
+                  if (Option.isSome(cached)) {
+                    MutableHashMap.remove(indexCache, cacheKey)
+                  }
                 } else {
                   const json = encodeStateOpaque(frame.state)
-                  // Slice 4 doesn't yet pull index keys (the spec
-                  // pull contract carries only the call body).
-                  // Indexes are reconstructed from the call body's
-                  // canonical fields when ReplPuller fully wires
-                  // CallModel.callIndexKeys into the apply path —
-                  // tracked as Slice 5 polish.
+                  // Recompute the index keys from the streamed body
+                  // (spec §4.1: `idx:*` is flat and a deterministic
+                  // function of the Call shape). This is the
+                  // "Option A1 — recompute on receive" path from
+                  // `docs/plan/bye-takeover-replicated-indexes-fix.md`.
+                  const indexes = callIndexKeysFromUnknown(frame.state)
                   yield* writer.put(
                     "bak",
                     peer,
                     frame.callRef,
                     json,
-                    [],
+                    indexes,
                     /* ttlSec */ 600
+                  )
+                  MutableHashMap.set(
+                    indexCache,
+                    indexCacheKey(peer, frame.callRef),
+                    indexes
                   )
                 }
                 framesApplied++

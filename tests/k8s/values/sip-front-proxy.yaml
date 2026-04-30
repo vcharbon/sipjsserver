@@ -33,18 +33,26 @@ worker:
   statefulSetName: b2bua-worker
   podPort: 5060
 
-# Advertise an address that resolves from BOTH inside the cluster
-# (Service DNS name) AND from the host running the hybrid harness
-# (kind hostPort 5060). For the hybrid harness specifically we
-# advertise the kind hostPort `127.0.0.1:5060` so in-dialog ACK/BYE
-# Route URIs stamped in Record-Route by this proxy are resolvable on
-# the host. The in-cluster sipp-uas etc. use the Service's ClusterIP
-# directly via X-Api-Call, never through the in-cluster DNS name, so
-# this override is safe for our test scenarios.
+# Advertised address stamped onto Record-Route URIs. The in-cluster
+# sipp UAC (Job pods) populates its dialog route set from this URI and
+# uses it for ALL in-dialog requests (ACK, BYE, re-INVITE, UPDATE,
+# INFO, …). It must therefore resolve from inside the cluster.
+#
+# Using the headless Service DNS name `sip-front-proxy` (UDP/5060) lets
+# kube-proxy load-balance the in-dialog request to either proxy pod;
+# both pods share the HMAC keys so any pod can decode the stickiness
+# cookie and forward to the call's primary or backup worker.
+#
+# NOTE: the host-side hybrid harness (tests/support/registrarFront-
+# ProxyHybridStack.ts) historically relied on advertisedHost being
+# `127.0.0.1` so its host-resident UAC could send in-dialog requests
+# back through the kind hostPort. That harness now needs its own
+# install with a values override; the in-cluster failover/drain suite
+# is the primary user of this chart.
 bind:
   host: "0.0.0.0"
   port: 5060
-  advertisedHost: "127.0.0.1"
+  advertisedHost: "sip-front-proxy"
   advertisedPort: 5060
 
 # Keepalive cadence — keep the production defaults so we exercise the

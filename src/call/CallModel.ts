@@ -728,6 +728,72 @@ export function callIndexKeys(call: Call): Array<string> {
   return keys
 }
 
+/**
+ * Best-effort structural extraction of `callIndexKeys` from an opaque
+ * JSON-decoded call body. Used by the replication puller to reconstruct
+ * the `idx:*` set from a streamed `bak:` body without coupling the
+ * puller to the full `Call` schema decode (the puller is intentionally
+ * schema-tolerant — see `ReplPuller`).
+ *
+ * Walks exactly the same field path as `callIndexKeys` above. Missing
+ * or wrong-typed fields are skipped silently; the worst case is an
+ * empty key list, which leaves the bak-side `idx:` partition unstamped
+ * for that entry — same as the pre-fix behaviour. A correctly-shaped
+ * `Call` JSON always produces the identical key set as `callIndexKeys`,
+ * which is the property `docs/replication/call-cache-backup.md` §4.1
+ * relies on for cross-partition lookup.
+ */
+export function callIndexKeysFromUnknown(state: unknown): Array<string> {
+  if (state === null || typeof state !== "object") return []
+  const c = state as Record<string, unknown>
+  const keys: Array<string> = []
+
+  const aLeg = c["aLeg"]
+  if (aLeg !== null && typeof aLeg === "object") {
+    const aL = aLeg as Record<string, unknown>
+    const callId = aL["callId"]
+    const fromTag = aL["fromTag"]
+    if (typeof callId === "string" && typeof fromTag === "string") {
+      keys.push(`leg:${callId}|${fromTag}`)
+    }
+  }
+
+  const bLegs = c["bLegs"]
+  if (Array.isArray(bLegs)) {
+    for (const b of bLegs) {
+      if (b === null || typeof b !== "object") continue
+      const bL = b as Record<string, unknown>
+      const bCallId = bL["callId"]
+      const bFromTag = bL["fromTag"]
+      if (typeof bCallId === "string" && typeof bFromTag === "string") {
+        keys.push(`leg:${bCallId}|${bFromTag}`)
+      }
+      if (typeof bCallId === "string") {
+        keys.push(`leg:${bCallId}`)
+      }
+      const dialogs = bL["dialogs"]
+      if (Array.isArray(dialogs) && typeof bCallId === "string") {
+        for (const d of dialogs) {
+          if (d === null || typeof d !== "object") continue
+          const sip = (d as Record<string, unknown>)["sip"]
+          if (sip !== null && typeof sip === "object") {
+            const remoteTag = (sip as Record<string, unknown>)["remoteTag"]
+            if (typeof remoteTag === "string" && remoteTag.length > 0) {
+              keys.push(`leg:${bCallId}|${remoteTag}`)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const callbackContext = c["callbackContext"]
+  if (typeof callbackContext === "string") {
+    keys.push(`ctx:${callbackContext}`)
+  }
+  return keys
+}
+
 /** Parameters the dialog constructors need from the enclosing leg. */
 export interface MakeDialogLegCtx {
   readonly callId: string

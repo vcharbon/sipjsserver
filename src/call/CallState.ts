@@ -129,6 +129,45 @@ export class CallState extends ServiceMap.Service<
         }
       }
 
+      /**
+       * Choose the propagate peer for a write, depending on which role
+       * this worker holds for the call:
+       *
+       * - role==="pri" (we are the call's natural primary): propagate to
+       *   the LB-assigned backup `_topology.bak`. Skip if absent or
+       *   equal to self (degenerate cookie / single-copy call).
+       * - role==="bak" (we are taking over for the original primary
+       *   `primary`): propagate to `primary` itself so that when the
+       *   original primary returns from its outage its ReadyGate drains
+       *   `propagate:{primary}` from us and merges the takeover state
+       *   into its own `pri:{primary}:` partition (spec §10.3, §11.2).
+       *   Without this branch, takeover writes were silently lost
+       *   because the previous code only propagated to `_topology.bak`
+       *   — which equals self in the takeover case — so `peer===self`
+       *   was filtered out and nothing announced.
+       */
+      const propagatePeerFor = (
+        role: PartitionRole,
+        primary: string,
+        topology: { readonly pri: string; readonly bak: string; readonly gen: number } | undefined
+      ): string | undefined => {
+        if (role === "pri") {
+          if (
+            topology !== undefined &&
+            topology.bak.length > 0 &&
+            topology.bak !== selfOrdinal
+          ) {
+            return topology.bak
+          }
+          return undefined
+        }
+        // role === "bak" — we are writing into the original primary's
+        // partition. Always announce to that primary so it can pick up
+        // takeover edits on its return. `primary` is, by partitionOf
+        // construction, !== selfOrdinal whenever role is "bak".
+        return primary.length > 0 ? primary : undefined
+      }
+
       // Slice 6: dual-write fan-out is gone. Replication is now driven
       // by the propagate stream + ReplPuller (slices 2-4): every write
       // through `storage.putCall` (with a peer attached) atomically
@@ -274,18 +313,11 @@ export class CallState extends ServiceMap.Service<
         )
         const { role, primary } = partitionOf(callRef)
         const indexes = callIndexKeys(bumped)
-        // Slice 2: when the LB has assigned a backup peer
-        // (`_topology.bak` non-empty and not self), pass it through to
-        // the storage layer so the Lua script also writes the
-        // `propagate:{peer}` ZADD + seq INCR + sliding TTL. Calls
-        // without an LB-assigned backup go through the no-peer path —
-        // call body + indexes only, no replication metadata.
-        const peerOpt =
-          bumped._topology !== undefined &&
-          bumped._topology.bak.length > 0 &&
-          bumped._topology.bak !== selfOrdinal
-            ? bumped._topology.bak
-            : undefined
+        // Slice 2: when role==="pri" and the LB has assigned a backup,
+        // propagate to that backup. Slice B (bye-takeover-replicated-
+        // indexes-fix): when role==="bak" we are taking over for the
+        // original primary, so propagate to `primary` itself.
+        const peerOpt = propagatePeerFor(role, primary, bumped._topology)
         yield* storage
           .putCall(role, primary, callRef, json, indexes, ttl, {
             peer: peerOpt,
@@ -328,18 +360,17 @@ export class CallState extends ServiceMap.Service<
         // sweep, so true retransmissions get cached responses replayed there.
         const { role, primary } = partitionOf(callRef)
         const indexes = call !== undefined ? callIndexKeys(call) : []
-        // Slice 2/6: same peer-extraction logic as flushToRedis. The
-        // delete event is announced through `propagate:{peer}` inside
-        // the Lua atomic write so the backup's ReplPuller observes
-        // termination on its open long-poll. No-peer calls hard-delete
-        // without any replication side effect.
-        const peerOpt =
-          call !== undefined &&
-          call._topology !== undefined &&
-          call._topology.bak.length > 0 &&
-          call._topology.bak !== selfOrdinal
-            ? call._topology.bak
-            : undefined
+        // Slice 2/6 + Slice B: same peer-selection rule as flushToRedis.
+        // The delete event is announced through `propagate:{peer}` so
+        // the backup's ReplPuller observes termination on its open
+        // long-poll. Takeover deletes (role==="bak") propagate to the
+        // original primary so its ReadyGate sees the tombstone on
+        // return.
+        const peerOpt = propagatePeerFor(
+          role,
+          primary,
+          call !== undefined ? call._topology : undefined
+        )
         yield* storage
           .deleteCall(role, primary, callRef, indexes, { peer: peerOpt })
           .pipe(Effect.mapError(toRedisErr))
@@ -439,14 +470,10 @@ export class CallState extends ServiceMap.Service<
           const json = yield* Schema.encodeEffect(JsonCallSchema)(bumped).pipe(Effect.orDie)
           const { role, primary } = partitionOf(callRef)
           const indexes = callIndexKeys(bumped)
-          // Slice 6: same peer extraction as flushToRedis. Replication
-          // is implicit in the Lua write — no separate fan-out.
-          const peerOpt =
-            bumped._topology !== undefined &&
-            bumped._topology.bak.length > 0 &&
-            bumped._topology.bak !== selfOrdinal
-              ? bumped._topology.bak
-              : undefined
+          // Slice 6 + Slice B: same peer-selection rule as flushToRedis;
+          // replication is implicit in the Lua write — no separate
+          // fan-out.
+          const peerOpt = propagatePeerFor(role, primary, bumped._topology)
           yield* storage
             .putCall(role, primary, callRef, json, indexes, ttl, {
               peer: peerOpt,
