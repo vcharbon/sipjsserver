@@ -277,7 +277,7 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
         opts.namespace,
         { labelSelector: PROXY_LABEL },
         { since: `${elapsedSec}s` },
-      ).pipe(Effect.catchAll(() => Effect.succeed("")))
+      ).pipe(Effect.catchTag("ExecError", () => Effect.succeed("")))
       yield* Effect.tryPromise(() =>
         fs.writeFile(path.join(proxyLogsDir, "all.log"), proxyLogText, "utf8"),
       ).pipe(Effect.orDie)
@@ -285,7 +285,7 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
         opts.namespace,
         { labelSelector: WORKER_LABEL },
         { since: `${elapsedSec}s` },
-      ).pipe(Effect.catchAll(() => Effect.succeed("")))
+      ).pipe(Effect.catchTag("ExecError", () => Effect.succeed("")))
       yield* Effect.tryPromise(() =>
         fs.writeFile(path.join(workerLogsDir, "all.log"), workerLogText, "utf8"),
       ).pipe(Effect.orDie)
@@ -297,7 +297,7 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
           opts.namespace,
           { pod: killedWorkerPod },
           { previous: true },
-        ).pipe(Effect.catchAll(() => Effect.succeed("")))
+        ).pipe(Effect.catchTag("ExecError", () => Effect.succeed("")))
         if (prev.length > 0) {
           yield* Effect.tryPromise(() =>
             fs.writeFile(
