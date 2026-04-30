@@ -162,6 +162,21 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
         .sort((a, b) => b[1] - a[1])
       const killedWorkerIp = sorted[0]?.[0] ?? ""
       result.killedWorkerIp = killedWorkerIp
+
+      // Fail-fast: empty routing log means sipp didn't ramp in time
+      // or the namespace is being polluted by concurrent traffic.
+      // Surface the cause here rather than letting kubectl reject
+      // `delete pod ""`.
+      if (killedWorkerIp === "" || sorted.length === 0) {
+        return yield* Effect.die(
+          new Error(
+            `worker-failover[${opts.killMode}]: no INVITEs visible for cidPrefix=${cidPrefix}` +
+              ` after ${opts.rampSec}s ramp. earlyDecisions=${earlyDecisions.length},` +
+              ` earlyInvites=${earlyInvites.length}. Sipp Job may not have started in time` +
+              ` (pod scheduling + image pull). Bump rampSec or pre-warm the cluster.`,
+          ),
+        )
+      }
       result.preKillCounts = sorted
 
       const ipMap = yield* workerIpToName(opts.namespace)

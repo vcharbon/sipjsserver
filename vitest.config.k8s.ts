@@ -8,19 +8,23 @@ import { defineConfig } from "vitest/config"
  * installs the production Helm charts into a freshly-created namespace,
  * drives a SIPp Pod, and asserts on Loki/Prometheus.
  *
- * Single fork: install/teardown of namespaces + chaos CRDs is not
- * isolated across files. Tests within a single file may run in parallel
- * if they namespace-scope explicitly.
+ * Sequential execution: install/teardown of namespaces, chaos CRDs,
+ * pod-kill state, and routing-log buffers are not isolated across
+ * files. Two settings are needed:
  *
- * Bring the cluster up before running with `npm run test:k8s:up`, or use
- * `npm run test:k8s` which runs `up` then `test`. `npm run test:k8s:fresh`
- * tears down + recreates from scratch.
+ *   - `pool: "forks"` + `singleFork: true` — one worker PROCESS so
+ *     setup/teardown happens once.
+ *   - `fileParallelism: false` — files execute one-after-another in
+ *     that fork. Without this the failover suite would have 7 tests
+ *     all kicking off sipp jobs and pod-kills at the same wall-clock
+ *     second; routing decisions would be polluted across tests.
  */
 export default defineConfig({
   test: {
     include: ["tests/k8s/**/*.test.ts"],
     pool: "forks",
     forks: { singleFork: true },
+    fileParallelism: false,
     testTimeout: 5 * 60 * 1000,
     hookTimeout: 10 * 60 * 1000,
   },

@@ -124,6 +124,21 @@ export const runLbFailoverScenario = (opts: LbFailoverHarnessOpts) =>
       result.killedProxyPod = killedProxyPod
       result.preKillCounts = sorted
 
+      // Fail-fast: empty routing log means sipp didn't ramp in time
+      // (pod scheduling overhead, image pull, etc.) or the namespace
+      // is being polluted by concurrent traffic. Surface the cause
+      // here rather than letting kubectl reject `delete pod ""`.
+      if (killedProxyPod === "" || sorted.length === 0) {
+        return yield* Effect.die(
+          new Error(
+            `LB-failover[${opts.killMode}]: no INVITEs visible for cidPrefix=${cidPrefix}` +
+              ` after ${opts.rampSec}s ramp. earlyDecisions=${earlyDecisions.length},` +
+              ` earlyInvites=${earlyInvites.length}. Sipp Job may not have started in time` +
+              ` (pod scheduling + image pull). Bump rampSec or pre-warm the cluster.`,
+          ),
+        )
+      }
+
       yield* Effect.logInfo(
         `LB-failover[${opts.killMode}]: killing busiest proxy pod ${killedProxyPod}` +
           ` (${sorted[0]?.[1]} INVITEs);` +
