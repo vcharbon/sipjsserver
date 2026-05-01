@@ -45,9 +45,20 @@ import {
   EXT_INGRESS as REGISTRAR_EXT_INGRESS,
   registrarFrontProxyFakeStackLayer,
 } from "../../support/registrarFrontProxyFakeStack.js"
+import {
+  K8S_PROXY_ADDR,
+  k8sFakeStackLayer,
+  k8sWorkerAddr,
+  k8sWorkerId,
+} from "../../support/k8sFakeStack.js"
 import { ProxyCore } from "../../../src/sip-front-proxy/index.js"
 
-export type Sut = "b2bonly" | "proxy+b2b" | "sipproxyHA" | "registrarFrontProxy"
+export type Sut =
+  | "b2bonly"
+  | "proxy+b2b"
+  | "sipproxyHA"
+  | "registrarFrontProxy"
+  | "k8sFailover"
 
 // ---------------------------------------------------------------------------
 // Test rule registry: disable-on-env + handle-firing tracker
@@ -167,11 +178,13 @@ export function createSimulatedTransport(opts?: {
   const StackLayer =
     sut === "sipproxyHA"
       ? sipproxyHAFakeStackLayer({ config, handlers: buildTestHandlers() })
-      : sut === "proxy+b2b"
-        ? proxyB2bFakeStackLayer({ config })
-        : sut === "registrarFrontProxy"
-          ? registrarFrontProxyFakeStackLayer({ config })
-          : fakeStackLayer({ config })
+      : sut === "k8sFailover"
+        ? k8sFakeStackLayer({ config, handlers: buildTestHandlers() })
+        : sut === "proxy+b2b"
+          ? proxyB2bFakeStackLayer({ config })
+          : sut === "registrarFrontProxy"
+            ? registrarFrontProxyFakeStackLayer({ config })
+            : fakeStackLayer({ config })
 
   const mockState: MockTransportState = {
     agents: new Map(),
@@ -223,6 +236,20 @@ export function createSimulatedTransport(opts?: {
     participantLabels.set(w2Key, "b2b-2")
     participantNetworks.set(w1Key, "ext")
     participantNetworks.set(w2Key, "ext")
+  } else if (sut === "k8sFailover") {
+    // Same subnet conventions as sipproxyHA — proxy on 10.10, workers
+    // on 10.20.0.{ordinal}. Hard-coded for the default `workerCount=2`
+    // the failover-harness layer pre-allocates; if a future scenario
+    // bumps the count, extend the seed here.
+    const proxyKey = labelKey(K8S_PROXY_ADDR.host, K8S_PROXY_ADDR.port)
+    participantLabels.set(proxyKey, "proxy")
+    participantNetworks.set(proxyKey, "ext")
+    for (let n = 1; n <= 2; n++) {
+      const addr = k8sWorkerAddr(n)
+      const key = labelKey(addr.host, addr.port)
+      participantLabels.set(key, k8sWorkerId(n) as unknown as string)
+      participantNetworks.set(key, "ext")
+    }
   } else {
     const k = labelKey("127.0.0.1", sipPort)
     participantLabels.set(k, "B2BUA")
@@ -261,15 +288,14 @@ export function createSimulatedTransport(opts?: {
         // `SignalingNetwork`; that's out of scope until a deployment
         // actually needs it.
 
-        if (sut === "sipproxyHA") {
-          // The sipproxyHA SUT layer auto-starts both worker
-          // SipRouters and the HealthProbe internally — nothing to
-          // do here beyond force-materialising ProxyCore. The
-          // `CallState` / `TimerService` / `SipRouter` services are
-          // not exposed outward (each worker keeps its own scoped
-          // instances inside the SUT layer), so we don't yield them
-          // for verifyCleanState — sipproxyHA scenarios use
-          // `skipFinalSweep` for that reason.
+        if (sut === "sipproxyHA" || sut === "k8sFailover") {
+          // Both HA SUT layers auto-start their worker SipRouters
+          // and HealthProbe internally. Force-materialise ProxyCore
+          // so its forked ingress fiber starts. Per-worker
+          // CallState / TimerService instances live inside the SUT
+          // layer's scope and aren't exposed outward, so HA-style
+          // scenarios opt into `skipFinalSweep` to skip the
+          // verifyCleanState pass that targets the missing handles.
           yield* ProxyCore
         } else if (sut === "registrarFrontProxy") {
           // Registrar mode: ProxyCore-only. No B2BUA, no SipRouter,

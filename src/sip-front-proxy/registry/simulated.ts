@@ -107,6 +107,19 @@ export interface SimulatedLayerOpts {
    * would let a runaway test fill memory; 256 is plenty.
    */
   readonly eventBufferCapacity?: number
+  /**
+   * Slice 3 of the k8s-reliability rework: when true, the simulated
+   * registry stamps `firstSeenAtMs` on every newly-added worker (using
+   * `Clock.currentTimeMillis`) unless the caller already supplied one.
+   * Off by default so existing tests stay byte-identical (the LB
+   * fresh-pod guard then stays inert as before — see comments in
+   * `WorkerEntry.firstSeenAtMs` and `LoadBalancer.freshPodGuardMs`).
+   *
+   * The `SimulatedK8sCluster` facade enables this so its `addWorker` /
+   * `respawn` paths exercise the LB's fresh-pod-guard window
+   * deterministically under TestClock.
+   */
+  readonly autoStampFirstSeenAtMs?: boolean
 }
 
 /**
@@ -119,15 +132,29 @@ export const simulatedLayer = (
 ): Layer.Layer<WorkerRegistry | WorkerRegistrySimulatedControl> => {
   const initial = opts.initial ?? []
   const eventBufferCapacity = opts.eventBufferCapacity ?? 256
+  const autoStamp = opts.autoStampFirstSeenAtMs === true
 
   return Layer.effectServices(
     Effect.gen(function* () {
-      // The simulated registry does NOT auto-stamp `firstSeenAtMs` —
-      // tests that want to exercise the Slice E3 fresh-pod guard pass
-      // it explicitly on the WorkerEntry. Existing load-balancer tests
-      // don't, so the guard stays inert for them.
+      // The simulated registry does NOT auto-stamp `firstSeenAtMs` by
+      // default — tests that want to exercise the Slice E3 fresh-pod
+      // guard pass it explicitly on the WorkerEntry. Existing load-
+      // balancer tests don't, so the guard stays inert for them.
+      // Slice 3 of the k8s-reliability rework opts in via
+      // `autoStampFirstSeenAtMs: true` so the SimulatedK8sCluster's
+      // addWorker / respawn paths reproduce the K8s informer race
+      // window deterministically.
+      const initialStamped: ReadonlyArray<WorkerEntry> = autoStamp
+        ? yield* Effect.gen(function* () {
+            const t = yield* Clock.currentTimeMillis
+            return initial.map((e) =>
+              e.firstSeenAtMs === undefined ? { ...e, firstSeenAtMs: t } : e
+            )
+          })
+        : initial
+
       const stateRef = yield* Ref.make(
-        HashMap.fromIterable(initial.map((e) => [e.id, e] as const))
+        HashMap.fromIterable(initialStamped.map((e) => [e.id, e] as const))
       )
       const events = yield* PubSub.bounded<RegistryEvent>(eventBufferCapacity)
 
@@ -161,8 +188,12 @@ export const simulatedLayer = (
           Effect.gen(function* () {
             const map = yield* Ref.get(stateRef)
             if (HashMap.has(map, entry.id)) return
-            yield* Ref.set(stateRef, HashMap.set(map, entry.id, entry))
-            yield* PubSub.publish(events, { _tag: "added", entry })
+            const stamped: WorkerEntry =
+              autoStamp && entry.firstSeenAtMs === undefined
+                ? { ...entry, firstSeenAtMs: yield* Clock.currentTimeMillis }
+                : entry
+            yield* Ref.set(stateRef, HashMap.set(map, entry.id, stamped))
+            yield* PubSub.publish(events, { _tag: "added", entry: stamped })
           }),
         remove: (id) =>
           Effect.gen(function* () {

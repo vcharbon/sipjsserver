@@ -415,5 +415,10 @@ function renameStepAgent(step: Step, mapping: Record<string, string>): Step {
       return step
     case "infra":
       return { ...step, target: mapping[step.target] ?? step.target }
+    case "k8s":
+      // Worker IDs are not agent names — k8s steps are addressed by
+      // their cluster-side worker id (`b2b-1`, etc.) rather than the
+      // logical agent identifier the rename mapping operates on.
+      return step
   }
 }

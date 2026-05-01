@@ -158,6 +158,14 @@ export interface ProxyStackLayerOpts {
   readonly cancelLruSweepIntervalMs?: number
   readonly proxyQueueMax?: number
   readonly loadBalancer?: LoadBalancerConfigData
+  /**
+   * Slice 3 of the k8s-reliability rework: pass through to the
+   * simulated registry's `autoStampFirstSeenAtMs` opt-in. When true,
+   * any worker added (initial set or dynamic `add`) gets a
+   * `firstSeenAtMs` stamped from the current Clock unless one was
+   * supplied. Off by default so existing fixtures stay byte-identical.
+   */
+  readonly autoStampFirstSeenAtMs?: boolean
 }
 
 /**
@@ -179,7 +187,10 @@ export function proxyStackLayer(opts: ProxyStackLayerOpts) {
     queueMax: opts.proxyQueueMax ?? 1024,
   }
   const BindCfgLayer = ProxyBindConfig.layer(bindCfg)
-  const RegistryLayer = workerRegistrySimulatedLayer({ initial: initialWorkers })
+  const RegistryLayer = workerRegistrySimulatedLayer({
+    initial: initialWorkers,
+    autoStampFirstSeenAtMs: opts.autoStampFirstSeenAtMs === true,
+  })
   const HmacLayer = hmacKeyProviderStaticLayer({
     current: opts.hmacKey ?? DEFAULT_HMAC_KEY,
     ...(opts.hmacPreviousKey !== undefined ? { previous: opts.hmacPreviousKey } : {}),

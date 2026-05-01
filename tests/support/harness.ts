@@ -25,6 +25,7 @@ import { formatReport } from "../fullcall/framework/report.js"
 import { writeScenarioReport, writeIndexReport } from "../fullcall/framework/html-report.js"
 import { writeTextReports } from "../fullcall/framework/text-report.js"
 import { HA_PROXY_ADDR } from "./proxyB2bFakeStack.js"
+import { K8S_PROXY_ADDR } from "./k8sFakeStack.js"
 import {
   CORE_INGRESS as REGISTRAR_CORE_INGRESS,
   EXT_INGRESS as REGISTRAR_EXT_INGRESS,
@@ -136,9 +137,11 @@ export function createSimulatedRunner(opts?: {
   const target =
     sut === "sipproxyHA"
       ? { host: HA_PROXY_ADDR.host, port: HA_PROXY_ADDR.port }
-      : sut === "registrarFrontProxy"
-        ? { host: REGISTRAR_EXT_INGRESS.host, port: REGISTRAR_EXT_INGRESS.port }
-        : { host: "127.0.0.1", port: sipPort }
+      : sut === "k8sFailover"
+        ? { host: K8S_PROXY_ADDR.host, port: K8S_PROXY_ADDR.port }
+        : sut === "registrarFrontProxy"
+          ? { host: REGISTRAR_EXT_INGRESS.host, port: REGISTRAR_EXT_INGRESS.port }
+          : { host: "127.0.0.1", port: sipPort }
 
   return (scenario: Scenario): Effect.Effect<void> => {
     // Provide the simulated stack at the *outer* runScoped scope — NOT
