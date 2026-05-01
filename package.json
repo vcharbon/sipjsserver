@@ -22,6 +22,8 @@
     "test:k8s:down": "tsx tests/k8s/scripts/down.ts",
     "test:k8s:fresh": "tsx tests/k8s/scripts/down.ts && tsx tests/k8s/scripts/up.ts && vitest run -c vitest.config.k8s.ts",
     "test:k8s:images": "tsx tests/k8s/scripts/images.ts",
+    "test:k8s:proxy-host-mode": "helm upgrade --install sip-front-proxy deploy/helm/sip-front-proxy -n sip-test --create-namespace -f tests/k8s/values/sip-front-proxy.yaml -f tests/k8s/values/sip-front-proxy.host.yaml --wait --timeout 120s",
+    "test:k8s:proxy-cluster-mode": "helm upgrade --install sip-front-proxy deploy/helm/sip-front-proxy -n sip-test --create-namespace -f tests/k8s/values/sip-front-proxy.yaml --wait --timeout 120s",
     "test:k8s:failover": "tsx tests/k8s/scripts/up-if-needed.ts && vitest run -c vitest.config.k8s.ts tests/k8s/proxy-drain.test.ts tests/k8s/proxy-failover-*.test.ts",
     "test:rule-kill": "echo 'test:rule-kill is disabled — too slow pending fake-clock speedup. Run `tsx scripts/rule-kill.ts` manually if needed.' && exit 0",
     "dev:profile": "NODE_OPTIONS='--max-old-space-size=600 --expose-gc' B2BUA_EXPOSE_GC=1 CHOKIDAR_USEPOLLING=true tsx --env-file=.env --watch src/main.ts",

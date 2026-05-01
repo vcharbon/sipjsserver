@@ -2,9 +2,21 @@ import { Effect } from "effect"
 import { exec } from "./exec.js"
 import {
   installProxy,
+  installProxyHostMode,
   installSipp,
   installWorker,
 } from "./helm.js"
+
+export interface InstallStackOpts {
+  /**
+   * When true, install the proxy with the host-mode overlay
+   * (advertisedHost=127.0.0.1) so a host-resident SIPp UAC can reach
+   * it via the kind hostPort at 127.0.0.1:5060. Defaults to in-cluster
+   * mode (advertisedHost=sip-front-proxy) which the failover/drain
+   * test files require.
+   */
+  readonly proxyHostMode?: boolean
+}
 
 /**
  * Install the full test stack (sipp + worker + proxy) into a namespace.
@@ -15,12 +27,18 @@ import {
  * (chart `redis.enabled=true`); there is no standalone Redis chart.
  * See docs/replication/call-cache-backup.md §2.
  */
-export const installStack = (namespace: string) =>
+export const installStack = (
+  namespace: string,
+  opts: InstallStackOpts = {},
+) =>
   Effect.gen(function* () {
-    yield* Effect.logInfo(`installing stack into namespace=${namespace}`)
+    yield* Effect.logInfo(
+      `installing stack into namespace=${namespace}` +
+        (opts.proxyHostMode ? " [proxy=host-mode]" : ""),
+    )
     yield* installSipp(namespace)
     yield* installWorker(namespace)
-    yield* installProxy(namespace)
+    yield* opts.proxyHostMode ? installProxyHostMode(namespace) : installProxy(namespace)
   })
 
 export const deleteNamespace = (namespace: string) =>

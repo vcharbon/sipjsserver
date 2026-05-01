@@ -11,6 +11,10 @@ export const WORKER_CHART = resolve(REPO_ROOT, "deploy/helm/b2bua-worker")
 export const SIPP_CHART = resolve(REPO_ROOT, "tests/k8s/charts/sipp")
 
 export const PROXY_VALUES = resolve(REPO_ROOT, "tests/k8s/values/sip-front-proxy.yaml")
+export const PROXY_HOST_VALUES = resolve(
+  REPO_ROOT,
+  "tests/k8s/values/sip-front-proxy.host.yaml",
+)
 export const WORKER_VALUES = resolve(REPO_ROOT, "tests/k8s/values/b2bua-worker.yaml")
 
 export interface HelmInstallOpts {
@@ -82,6 +86,22 @@ export const installProxy = (namespace: string) =>
     chart: PROXY_CHART,
     namespace,
     valuesFiles: [PROXY_VALUES],
+    waitTimeoutSec: 120,
+  })
+
+/**
+ * Install the proxy chart with the host-mode overlay applied on top of
+ * the standard test values. Use when a host-resident SIPp UAC needs to
+ * reach the proxy via 127.0.0.1:5060 (kind hostPort) — Record-Route is
+ * stamped with 127.0.0.1 so the dialog's route set keeps working from
+ * outside the cluster. See tests/k8s/values/sip-front-proxy.host.yaml.
+ */
+export const installProxyHostMode = (namespace: string) =>
+  helmInstall({
+    release: "sip-front-proxy",
+    chart: PROXY_CHART,
+    namespace,
+    valuesFiles: [PROXY_VALUES, PROXY_HOST_VALUES],
     waitTimeoutSec: 120,
   })
 

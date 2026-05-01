@@ -497,6 +497,13 @@ E2E_KIND=1 npx vitest run -c vitest.config.live.ts \
 Open test-results/real-clock/registrarFrontProxy-kind/index.html to see the report.
 
 
+## external SIPP with K8S
+
+### Manual host-mode for ad-hoc sipp from WSL:
+npm run test:k8s:proxy-host-mode
+
+### Switch back:
+npm run test:k8s:proxy-cluster-mode
 
 ---
 

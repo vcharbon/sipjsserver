@@ -1,0 +1,52 @@
+# Host-mode overlay for ad-hoc SIPp runs from WSL / the host machine.
+#
+# Apply ON TOP of tests/k8s/values/sip-front-proxy.yaml:
+#
+#   npm run test:k8s:proxy-host-mode
+#   # or, to drive the whole vitest suite in host mode:
+#   K8S_PROXY_HOST_MODE=1 npx vitest run -c vitest.config.k8s.ts <file>
+#
+# Switch back to in-cluster mode with `npm run test:k8s:proxy-cluster-mode`
+# (or just re-run vitest without K8S_PROXY_HOST_MODE — globalSetup
+# reinstalls the cluster-mode values automatically).
+#
+# REQUIREMENTS for the host-side SIPp UAC scenario (otherwise responses
+# never make it back through docker-proxy):
+#   - Via header MUST include `;rport`. Without it the proxy responds to
+#     the port LITERALLY embedded in Via (e.g. 25060), but docker-proxy's
+#     UDP relay socket lives on an EPHEMERAL port. With `rport`, the
+#     proxy responds to the actual UDP source port docker-proxy used,
+#     which it IS holding a relay socket on. RFC 3581.
+#   - Bind to `127.0.0.1` (sipp `-i 127.0.0.1`) — matches the kind
+#     hostPort and the Record-Route URI advertisedHost stamps.
+#
+# WHY EACH OVERRIDE BELOW:
+#   - bind.advertisedHost=127.0.0.1: Record-Route stamps a host-routable
+#     URI so in-dialog ACK/BYE/re-INVITE traverse the hostPort.
+#   - replicaCount=1 + nodeSelector tier=load: cluster.yaml only maps
+#     host UDP/5060 → containerPort 30060 on `sip-e2e-worker5`. Both
+#     the proxy pod AND the NodePort entry must live on that node so
+#     externalTrafficPolicy: Local has somewhere to land.
+#   - service.externalTrafficPolicy=Local: kube-proxy preserves source
+#     IP and keeps the response path on the SAME node. With Cluster
+#     (the default), the response leaves through the proxy pod's node
+#     instead of retracing the NodePort, breaking docker-proxy's UDP
+#     conntrack.
+
+bind:
+  advertisedHost: "127.0.0.1"
+
+# Pin the single proxy replica to the load-tier kind worker — the only
+# node where cluster.yaml maps host UDP/5060. With externalTrafficPolicy:
+# Local, kube-proxy preserves the source address AND keeps the response
+# path on the same node, so docker-proxy's hostPort UDP conntrack reverses
+# correctly. Without these (default Cluster + edge-tier scheduling),
+# responses leave through a different node than the request entered, the
+# host UAC never sees them, and the call retransmits forever.
+replicaCount: 1
+nodeSelector:
+  tier: load
+affinity: {}
+
+service:
+  externalTrafficPolicy: Local
