@@ -82,6 +82,17 @@ export interface LoadBalancerConfigData {
    * stable across PRs. Default: 5_000 ms (D5).
    */
   readonly drainGracePolicyMs?: number
+  /**
+   * Slice E3 fresh-pod guard window (ms). When the primary is `alive` but
+   * the entry's `firstSeenAtMs` is younger than this many ms, promote
+   * `decode_forward → decode_forward_backup` anyway: a freshly-recreated
+   * pod's K8s `Ready=True` may race ahead of the worker's first OPTIONS
+   * round-trip, and decoding to a still-empty sidecar Redis would 481.
+   *
+   * Defaults to `2 × probePeriod + initialDelay` for K8s defaults
+   * (probePeriod=10s, initialDelay=0): `2 × 10_000 + 0 = 20_000` ms.
+   */
+  readonly freshPodGuardMs?: number
 }
 
 export class LoadBalancerConfig extends ServiceMap.Service<
@@ -97,6 +108,12 @@ export class LoadBalancerConfig extends ServiceMap.Service<
 const COOKIE_PRIMARY_NAME = "w_pri"
 const COOKIE_BACKUP_NAME = "w_bak"
 const DEFAULT_DRAIN_GRACE_MS = 5_000
+/**
+ * 2 × default kubelet probePeriod (10 s) + default initialDelay (0). Tuned
+ * to the K8s defaults so the guard window covers at least one missed
+ * `httpGet /ready` round-trip without operator configuration.
+ */
+const DEFAULT_FRESH_POD_GUARD_MS = 20_000
 const COOKIE_VERSION = "2"
 /** First 16 bytes (128 bits) of HMAC-SHA256 — see header comment. */
 const TRUNCATED_MAC_BYTES = 16
@@ -197,6 +214,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
     }).pipe(Effect.provide(ProxyMetrics.Default)))
 
     const drainGraceMs = cfg.drainGracePolicyMs ?? DEFAULT_DRAIN_GRACE_MS
+    const freshPodGuardMs = cfg.freshPodGuardMs ?? DEFAULT_FRESH_POD_GUARD_MS
 
     // ---- selectForNewDialog -----------------------------------------------
     const selectForNewDialog = (
@@ -288,8 +306,10 @@ export const LoadBalancerStrategyLive: Layer.Layer<
      *     in-flight re-INVITE / UPDATE / INFO completes (D5).
      *   - Primary `draining` past grace OR `dead`: D8 — try the cookie's
      *     `w_bak`. If the backup resolves to an alive entry, return
-     *     `forwardBackup(backup)`; the recovery worker reads its sidecar
-     *     Redis (which has been receiving dual-write) and takes over.
+     *     `forwardBackup(backup)`; the backup worker reads the call from
+     *     its `bak:{w_pri}:` partition (kept fresh by replication) and
+     *     serves the request on the primary's behalf — it does NOT promote
+     *     to primary (see docs/replication/call-cache-backup.md §0).
      *     Otherwise return `unknown` so the core falls back to fresh
      *     `selectForNewDialog` — the picked worker hydrates from Redis
      *     and 481s on miss, the documented post-grace failure mode.
@@ -392,11 +412,48 @@ export const LoadBalancerStrategyLive: Layer.Layer<
         const primary = primaryOpt.value
 
         // ── Routing matrix ──────────────────────────────────────────────
-        if (primary.health === "alive") {
+        // ACK / CANCEL exemption: always reach the original primary.
+        // The downstream worker is the only entity that can complete the
+        // INVITE transaction (RFC 3261 §13.2.2.4 / §9.1, §16.10) — even
+        // a not-ready respawn primary still owns its in-flight UAS state
+        // and would otherwise see a 481-storm if we re-routed. Checked
+        // BEFORE the alive shortcut so an ACK/CANCEL on a respawned
+        // primary doesn't silently re-route through a fresh-pod guard
+        // promotion either.
+        if (isAckOrCancel(msg)) {
           return DecodeResult.forward(primary.address)
         }
-        // ACK / CANCEL exemption: always reach the original primary.
-        if (isAckOrCancel(msg)) {
+        if (primary.health === "alive") {
+          // Slice E3: even an "alive" primary may be a respawned pod
+          // whose K8s Ready=True races ahead of the worker's first
+          // OPTIONS round-trip. If `firstSeenAtMs` is recent enough,
+          // forward to the cookie's backup instead — the backup still holds
+          // the call in its `bak:{w_pri}:` partition and can serve the
+          // request on the primary's behalf (see
+          // docs/replication/call-cache-backup.md §0; the backup does not
+          // become primary).
+          const firstSeenAtMs = primary.firstSeenAtMs
+          if (firstSeenAtMs !== undefined) {
+            const nowMs = yield* Clock.currentTimeMillis
+            if (nowMs - firstSeenAtMs < freshPodGuardMs) {
+              const promoted = yield* tryBackup(wBakRaw)
+              if (promoted._tag === "forwardBackup") {
+                yield* metrics.recordDecodeForwardPromoted(
+                  "unobserved-fresh-pod"
+                )
+                yield* Effect.logInfo(
+                  `[LoadBalancer] decode_forward → decode_forward_backup` +
+                    ` (from=unobserved-fresh-pod primary=${primary.id}` +
+                    ` age=${nowMs - firstSeenAtMs}ms guard=${freshPodGuardMs}ms` +
+                    ` callId=${callId})`
+                )
+                return promoted
+              }
+              // No usable backup — fall through to the normal alive
+              // forward; better to try the (likely) empty primary than
+              // to drop the request.
+            }
+          }
           return DecodeResult.forward(primary.address)
         }
         if (primary.health === "draining") {
@@ -412,9 +469,34 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           // Post-grace: fall through to the backup.
           return yield* tryBackup(wBakRaw)
         }
-        // primary.health === "dead" or "unknown": fall through to the
-        // backup.
-        return yield* tryBackup(wBakRaw)
+        // Slice E1: `not-ready` is the respawned-pod-mid-ReadyGate state.
+        // The worker process is alive but its sidecar Redis is empty / still
+        // hydrating, so any in-dialog request would `resolveFromSipKey`-miss
+        // and 481. Forward to the backup just like dead/unknown — the backup
+        // holds the call in `bak:{w_pri}:` and serves the request on the
+        // primary's behalf (see docs/replication/call-cache-backup.md §0).
+        // primary.health ∈ { "dead", "unknown", "not-ready" }: backup.
+        const promoted = yield* tryBackup(wBakRaw)
+        if (
+          primary.health === "not-ready" &&
+          promoted._tag === "forwardBackup"
+        ) {
+          // Slice E2: surface the not-ready promotion. Here "promotion"
+          // refers to the routing decision (decode_forward upgraded to
+          // decode_forward_backup) — NOT to the worker's role. The backup
+          // worker remains backup; the primary's cookie is unchanged. See
+          // docs/replication/call-cache-backup.md §0. Operators correlating
+          // 481 spikes with respawn events otherwise see nothing — cookie is
+          // valid, ordinal exists, pod is Running. The counter + log give
+          // dashboards a proper signal.
+          yield* metrics.recordDecodeForwardPromoted("not-ready")
+          yield* Effect.logInfo(
+            `[LoadBalancer] decode_forward → decode_forward_backup` +
+              ` (from=not-ready primary=${primary.id} backup=${wBakRaw}` +
+              ` callId=${callId})`
+          )
+        }
+        return promoted
       })
 
     return {

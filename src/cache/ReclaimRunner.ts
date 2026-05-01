@@ -1,19 +1,37 @@
 /**
- * ReclaimRunner — startup-time recovery of "calls I was primary for"
- * from cluster peers' backup partitions.
+ * ReclaimRunner — startup-time recovery of *the worker's own primary
+ * calls* from cluster peers' backup partitions.
  *
- * Slice 6 of the HA-resilience plan. When a worker pod boots (cold
- * start or post-crash restart), it scans every alive peer's
- * `bak:{self}:call:*` partition via `PeerCachePort.scan`, decodes
- * each entry, and copies it back into local `pri:{self}:call:*` so
- * subsequent in-dialog requests can be served from local storage
- * (per `CallState.checkout`).
+ * This implements the reverse-direction recovery described in
+ * docs/replication/call-cache-backup.md §0: while this worker N was
+ * down, peers may have served in-dialog requests for calls N is the
+ * primary of. Per the §0 single-owner invariant, those peers wrote
+ * the updated state into their own `bak:N:call:*` partition (NOT into
+ * their `pri:`); ReclaimRunner pulls those updates back into N's
+ * `pri:N:call:*` so N can resume serving its own primary calls with
+ * the latest state.
+ *
+ * Slice 6 of the HA-resilience plan. On worker boot (cold start or
+ * post-crash restart) it scans every alive peer's `bak:{self}:call:*`
+ * partition via `PeerCachePort.scan`, decodes each entry, and copies
+ * it into local `pri:{self}:call:*` so subsequent in-dialog requests
+ * can be served from local storage (per `CallState.checkout`). No
+ * peer is "promoted" or demoted — every call retains the same primary
+ * ordinal it was assigned at INVITE time (§0).
  *
  * Two reclaim flows in the plan; only Flow 1 ("my primary calls") is
  * implemented here. Flow 2 ("my backup duties") is deliberately
- * skipped — when the original primaries resume their dual-write fan-
- * out, the backup partition repopulates naturally (D14 / accepted
+ * skipped — when the original primaries resume their dual-write
+ * fan-out, the backup partition repopulates naturally (D14 / accepted
  * small TTL-window loss class).
+ *
+ * NOTE (k8s-reliability rework, slice 2.5): a stream-based reverse-
+ * propagate drain is being added to ReadyGate to complement this
+ * scan-based path. The two coexist: the stream gives sub-second
+ * recovery for entries actively present in peers' `propagate:{self}`
+ * sets at boot time, while this scan-based runner is the safety net
+ * that catches anything outside that window. Both honour §0 — neither
+ * touches another worker's `pri:` partition.
  *
  * Lifecycle gates around the work:
  *

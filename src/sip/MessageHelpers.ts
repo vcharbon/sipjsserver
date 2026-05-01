@@ -7,10 +7,17 @@
  * transparent-parse side: it reads and rewrites existing headers rather than
  * constructing new ones.
  *
- * No Effect dependencies — these are deterministic transformations.
+ * Identifier generators (newTag, newBranch, newCallId) read from the
+ * current fiber's Effect `Random` reference via `Fiber.getCurrent`, so
+ * tests pinning a seed with `Random.withSeed(...)` get a deterministic
+ * stream while production keeps the default Math.random-backed RNG.
+ * Outside an Effect fiber (top-level sync, vitest setup) the helpers
+ * fall back to `Math.random` directly. The remaining exports are pure —
+ * header parsing, byte-level classification, etc.
  */
 
-import { randomUUID } from "node:crypto"
+import { Random } from "effect"
+import * as Fiber from "effect/Fiber"
 import type { SipHeader, SipRequest } from "./types.js"
 import {
   parseNameAddr,
@@ -167,16 +174,68 @@ export function parseViaParams(viaValue: string): { cr: string | undefined; lg: 
 // Identifier generators
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve the current RNG: prefer the active fiber's `Random` reference
+ * (so `Random.withSeed(...)` propagates), fall back to `Math.random`
+ * when called outside any Effect fiber.
+ *
+ * Exported so that other modules with the same RFC-3261 nondeterminism
+ * profile (e.g. `CallModel.randomInitialCSeq`) can reuse the same source
+ * without depending on the Effect `Random` import directly.
+ */
+export function currentRng(): {
+  nextDoubleUnsafe(): number
+  nextIntUnsafe(): number
+} {
+  const fiber = Fiber.getCurrent()
+  if (fiber !== undefined) return fiber.getRef(Random.Random)
+  return {
+    nextDoubleUnsafe: () => Math.random(),
+    nextIntUnsafe: () =>
+      Math.floor(
+        Math.random() *
+          (Number.MAX_SAFE_INTEGER - Number.MIN_SAFE_INTEGER + 1),
+      ) + Number.MIN_SAFE_INTEGER,
+  }
+}
+
+/** Generate a 16-byte sequence as 32 hex chars from the current fiber's RNG. */
+function rngHex(rng: { nextIntUnsafe(): number }, byteCount: number): string {
+  let hex = ""
+  for (let i = 0; i < byteCount; i++) {
+    hex += ((rng.nextIntUnsafe() >>> 0) & 0xff).toString(16).padStart(2, "0")
+  }
+  return hex
+}
+
+/** Build a v4 UUID string from the current fiber's RNG. */
+function rngUuidV4(rng: { nextIntUnsafe(): number }): string {
+  const bytes: number[] = []
+  for (let i = 0; i < 16; i++) {
+    bytes.push((rng.nextIntUnsafe() >>> 0) & 0xff)
+  }
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80
+  const hex = (n: number): string => n.toString(16).padStart(2, "0")
+  return [
+    bytes.slice(0, 4).map(hex).join(""),
+    bytes.slice(4, 6).map(hex).join(""),
+    bytes.slice(6, 8).map(hex).join(""),
+    bytes.slice(8, 10).map(hex).join(""),
+    bytes.slice(10, 16).map(hex).join(""),
+  ].join("-")
+}
+
 export function newCallId(localHost: string): string {
-  return `${randomUUID()}@${localHost}`
+  return `${rngUuidV4(currentRng())}@${localHost}`
 }
 
 export function newTag(): string {
-  return Math.random().toString(36).slice(2, 10)
+  return currentRng().nextDoubleUnsafe().toString(36).slice(2, 10)
 }
 
 export function newBranch(): string {
-  return `z9hG4bK${randomUUID().replace(/-/g, "").slice(0, 16)}`
+  return `z9hG4bK${rngHex(currentRng(), 8)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +357,11 @@ export function buildStatelessReject503Buffer(
 
 /**
  * Compute a jittered Retry-After value (seconds).
+ *
+ * Stays synchronous (uses `Math.random`) because the only caller is the
+ * UDP Tier-1 overload pre-ingress hook, which runs in a non-Effect
+ * context. Overload-protection nondeterminism is explicitly out of
+ * scope for the failover-test seeded-Random plumbing.
  */
 export function jitteredRetryAfter(baseSec: number, jitterSec: number): number {
   if (jitterSec <= 0) return baseSec

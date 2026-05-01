@@ -122,6 +122,10 @@ export const simulatedLayer = (
 
   return Layer.effectServices(
     Effect.gen(function* () {
+      // The simulated registry does NOT auto-stamp `firstSeenAtMs` —
+      // tests that want to exercise the Slice E3 fresh-pod guard pass
+      // it explicitly on the WorkerEntry. Existing load-balancer tests
+      // don't, so the guard stays inert for them.
       const stateRef = yield* Ref.make(
         HashMap.fromIterable(initial.map((e) => [e.id, e] as const))
       )

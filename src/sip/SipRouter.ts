@@ -469,11 +469,23 @@ export class SipRouter extends ServiceMap.Service<
               )
               yield* txnLayer.send(ok, respDest, "response")
             } else {
+              // Encode the worker-side cause in a `Reason:` header
+              // (RFC 3326) so the proxy's HealthProbe can distinguish a
+              // SIGTERM-driven `draining` reply from a boot-time
+              // `not-ready` reply. Both are 503 + Retry-After: 0 so an
+              // RFC-compliant probe still demotes the worker; the
+              // `Reason` text adds the proxy-internal qualifier we need
+              // for the decode_forward → decode_forward_backup
+              // promotion in Slice E1 of the respawn fix.
               const reason =
                 mode === "draining" ? "draining" : "not-ready (boot drain)"
+              const reasonHeader = `SIP;cause=503;text="${reason}"`
               const unavailable = generateResponse(req, 503, "Service Unavailable", {
                 toTag: newTag(),
-                extraHeaders: [{ name: "Retry-After", value: "0" }],
+                extraHeaders: [
+                  { name: "Retry-After", value: "0" },
+                  { name: "Reason", value: reasonHeader },
+                ],
               })
               yield* Effect.logDebug(
                 `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 503 (${reason})`

@@ -167,17 +167,20 @@ const DEFAULT_EVENT_BUFFER = 256
 const RANK: Record<WorkerHealth, number> = {
   alive: 0,
   unknown: 1,
-  draining: 2,
-  dead: 3,
+  "not-ready": 2,
+  draining: 3,
+  dead: 4,
 }
 
 /**
- * `dead > draining > unknown > alive`. Returns the more-restrictive of
- * the two. `unknown` ranks above `alive` so `(k8s=alive, probe=unknown)`
- * composes to `unknown` — a worker the K8s pod-watch admits as Ready
- * but whose OPTIONS round-trip we haven't yet observed is not routable.
- * `draining`/`dead` rank above `unknown` because both signals are
- * authoritative regardless of probe state.
+ * `dead > draining > not-ready > unknown > alive`. Returns the
+ * more-restrictive of the two. `unknown` ranks above `alive` so
+ * `(k8s=alive, probe=unknown)` composes to `unknown` — a worker the K8s
+ * pod-watch admits as Ready but whose OPTIONS round-trip we haven't yet
+ * observed is not routable. `not-ready` ranks above `unknown` because we
+ * have a positive observation that the worker is currently mid-ReadyGate
+ * (Slice E1 of the respawn fix), and above neither `draining` nor `dead`
+ * because those are stronger / more authoritative signals.
  */
 export const mostRestrictiveHealth = (
   a: WorkerHealth,
@@ -198,9 +201,9 @@ const resolvePair = (pair: HealthPair): WorkerHealth =>
 
 /**
  * Translate a `V1Pod` into a K8s-side health value plus its (optional)
- * derived address. Returns `null` for pods we can't represent yet
- * (no name, no IP) — those are skipped until a later MODIFIED event
- * fills in the missing fields.
+ * derived address and pod creation timestamp. Returns `null` for pods we
+ * can't represent yet (no name, no IP) — those are skipped until a later
+ * MODIFIED event fills in the missing fields.
  */
 const interpretPod = (
   pod: V1Pod,
@@ -210,6 +213,13 @@ const interpretPod = (
   readonly id: WorkerId
   readonly address: SocketAddr | undefined
   readonly k8sHealth: WorkerHealth
+  /**
+   * Slice E3: pod's `metadata.creationTimestamp` as epoch milliseconds.
+   * Carried verbatim onto `WorkerEntry.firstSeenAtMs` so the
+   * LoadBalancer's fresh-pod guard can demote a still-booting pod's
+   * `decode_forward` to `decode_forward_backup`.
+   */
+  readonly creationTimestampMs: number | undefined
 } | null => {
   const name = pod.metadata?.name
   if (typeof name !== "string" || name.length === 0) return null
@@ -220,14 +230,21 @@ const interpretPod = (
       ? { host: podIP, port: podPort }
       : undefined
 
+  // The typed K8s client narrows `creationTimestamp` to `Date | undefined`.
+  // Slice E3: turn it into epoch ms so the LoadBalancer's fresh-pod guard
+  // has something to compare against `Clock.currentTimeMillis`.
+  const creation = pod.metadata?.creationTimestamp
+  const creationTimestampMs =
+    creation instanceof Date ? creation.getTime() : undefined
+
   // Deletion-timestamp accelerant beats every other read — D5.
   if (pod.metadata?.deletionTimestamp != null) {
-    return { id, address, k8sHealth: "draining" }
+    return { id, address, k8sHealth: "draining", creationTimestampMs }
   }
 
   const ready = pod.status?.conditions?.find((c) => c.type === "Ready")
   if (ready?.status === "True") {
-    return { id, address, k8sHealth: "alive" }
+    return { id, address, k8sHealth: "alive", creationTimestampMs }
   }
 
   // Not ready (and not draining). If we'd previously seen this pod alive
@@ -235,8 +252,14 @@ const interpretPod = (
   // serving" semantics. Otherwise keep the previous value so a
   // freshly-scheduled pod that's still booting doesn't flap to dead the
   // moment we observe it.
-  if (prevK8sHealth === "alive") return { id, address, k8sHealth: "dead" }
-  return { id, address, k8sHealth: prevK8sHealth ?? "dead" }
+  if (prevK8sHealth === "alive")
+    return { id, address, k8sHealth: "dead", creationTimestampMs }
+  return {
+    id,
+    address,
+    k8sHealth: prevK8sHealth ?? "dead",
+    creationTimestampMs,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +310,7 @@ export const kubernetesStatefulSetLayer = (
             prevPair._tag === "Some" ? prevPair.value.k8s : undefined
           )
           if (interp === null) return
-          const { id, address, k8sHealth } = interp
+          const { id, address, k8sHealth, creationTimestampMs } = interp
 
           const prevEntry = HashMap.get(map, id)
           if (prevEntry._tag === "None") {
@@ -301,10 +324,16 @@ export const kubernetesStatefulSetLayer = (
             const resolved = resolvePair(newPair)
             const drainingSince =
               resolved === "draining" ? yield* Clock.currentTimeMillis : undefined
+            // Slice E3: stamp `firstSeenAtMs` from the pod's
+            // `creationTimestamp`. Falls back to wall clock when the API
+            // server hasn't filled it in yet (theoretical — the field is
+            // mandatory) so the guard still applies.
+            const firstSeenAtMs =
+              creationTimestampMs ?? (yield* Clock.currentTimeMillis)
             const entry: WorkerEntry =
               drainingSince === undefined
-                ? { id, address, health: resolved }
-                : { id, address, health: resolved, drainingSince }
+                ? { id, address, health: resolved, firstSeenAtMs }
+                : { id, address, health: resolved, drainingSince, firstSeenAtMs }
             yield* Ref.set(pairsRef, HashMap.set(pairs, id, newPair))
             yield* Ref.set(stateRef, HashMap.set(map, id, entry))
             yield* PubSub.publish(events, { _tag: "added", entry })
@@ -321,11 +350,25 @@ export const kubernetesStatefulSetLayer = (
           const oldPair: HealthPair = prevPair._tag === "Some"
             ? prevPair.value
             : { k8s: "alive", probe: "unknown" }
-          const newPair: HealthPair = { k8s: k8sHealth, probe: oldPair.probe }
+          // Slice E3 re-creation detection: a new `creationTimestamp`
+          // for an existing id means the StatefulSet recreated the pod
+          // (same name, fresh pod). We RESET the probe side to
+          // `unknown` so a stale `alive` from the previous incarnation
+          // doesn't compose with the new pod's k8s=alive into a
+          // routable entry before our SIP probe re-confirms it.
+          const isRecreated =
+            creationTimestampMs !== undefined &&
+            oldEntry.firstSeenAtMs !== undefined &&
+            creationTimestampMs > oldEntry.firstSeenAtMs
+          const probeSide: WorkerHealth = isRecreated ? "unknown" : oldPair.probe
+          const newPair: HealthPair = { k8s: k8sHealth, probe: probeSide }
           const resolvedOld = oldEntry.health
           const resolvedNew = resolvePair(newPair)
 
           let nextEntry: WorkerEntry = oldEntry
+          if (isRecreated && creationTimestampMs !== undefined) {
+            nextEntry = { ...nextEntry, firstSeenAtMs: creationTimestampMs }
+          }
 
           // Address rotation (D8). Only meaningful when we have one.
           if (
@@ -345,6 +388,7 @@ export const kubernetesStatefulSetLayer = (
           // Health change.
           if (resolvedNew !== resolvedOld) {
             const nowMs = yield* Clock.currentTimeMillis
+            const carriedFirstSeen = nextEntry.firstSeenAtMs
             if (resolvedNew === "draining") {
               nextEntry = {
                 id: nextEntry.id,
@@ -352,12 +396,18 @@ export const kubernetesStatefulSetLayer = (
                 health: "draining",
                 drainingSince:
                   oldEntry.drainingSince ?? nowMs,
+                ...(carriedFirstSeen !== undefined
+                  ? { firstSeenAtMs: carriedFirstSeen }
+                  : {}),
               }
             } else {
               nextEntry = {
                 id: nextEntry.id,
                 address: nextEntry.address,
                 health: resolvedNew,
+                ...(carriedFirstSeen !== undefined
+                  ? { firstSeenAtMs: carriedFirstSeen }
+                  : {}),
               }
             }
             yield* PubSub.publish(events, {
@@ -545,6 +595,7 @@ export const kubernetesStatefulSetLayer = (
           const resolvedNew = resolvePair(newPair)
           if (resolvedNew === resolvedOld) return
           const nowMs = yield* Clock.currentTimeMillis
+          const carriedFirstSeen = oldEntry.firstSeenAtMs
           const nextEntry: WorkerEntry =
             resolvedNew === "draining"
               ? {
@@ -552,11 +603,17 @@ export const kubernetesStatefulSetLayer = (
                   address: oldEntry.address,
                   health: "draining",
                   drainingSince: oldEntry.drainingSince ?? nowMs,
+                  ...(carriedFirstSeen !== undefined
+                    ? { firstSeenAtMs: carriedFirstSeen }
+                    : {}),
                 }
               : {
                   id: oldEntry.id,
                   address: oldEntry.address,
                   health: resolvedNew,
+                  ...(carriedFirstSeen !== undefined
+                    ? { firstSeenAtMs: carriedFirstSeen }
+                    : {}),
                 }
           yield* Ref.set(stateRef, HashMap.set(map, id, nextEntry))
           yield* PubSub.publish(events, {

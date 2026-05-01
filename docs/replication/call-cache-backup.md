@@ -17,6 +17,30 @@ the metrics.
 
 ---
 
+## 0. Single-owner invariant (load-bearing — read first)
+
+Every other section depends on this rule. Repeated bugs in the data layer have come from forgetting it; the failure mode is invariably "two workers think they own the same call."
+
+> **A call's primary owner is fixed at INVITE time and never changes for the call's lifetime.**
+
+The proxy stamps the cookie at INVITE time as `v=2|w_pri=<id>|w_bak=<id>|c=<callId>` and HMAC-signs it ([LoadBalancer.ts:108-133](../../src/sip-front-proxy/strategies/LoadBalancer.ts#L108-L133)). On every in-dialog SIP message the proxy decodes the cookie to find the route, but **does not** modify `w_pri` or `w_bak` — modifying either would break the MAC. Promotion to the backup destination (`decode_forward_backup`, [LoadBalancer.ts:440-487](../../src/sip-front-proxy/strategies/LoadBalancer.ts#L440-L487)) changes where the message is sent, **not** the cookie. The two ordinals therefore travel with the call from INVITE through BYE regardless of which worker physically processes any individual message.
+
+Five corollaries that every component must respect:
+
+1. **Backup never promotes.** When the proxy `decode_forward_backup`s a request to worker B because primary A is unreachable, B serves the request *as backup*. There is no "B becomes the new primary." Logs and metrics distinguish the role for observability; behaviour does not branch on it. (D16 in [TODO_doubleWrite.md](../todos/TODO_doubleWrite.md).)
+
+2. **`pri:{P}:call:{ref}` is written only by P, ever.** No other worker writes into another worker's primary partition. Even when B is serving traffic for a call whose `w_pri=A` and A is dead, B writes the updated state into B's own `bak:{A}:call:{ref}` partition — never into B's `pri:{B}:`.
+
+3. **Backup-served updates flow back to the primary via reverse-propagate.** B's write to `bak:{A}:call:{ref}` enqueues a propagate entry on B's `propagate:{A}` (same atomic Lua write as a primary-side put). When A reboots, A's ReadyGate drains B's `propagate:{A}` and ingests the entry; A reconstructs `pri:{A}:call:{ref}` from the latest state B wrote during the outage.
+
+4. **Cookie ordinals are the source of truth for partition routing.** When SipRouter receives an in-dialog request, the routing layer extracts `w_pri` and `w_bak` from the cookie. The cache layer reads from `pri:{self}:` if `w_pri==self`, otherwise from `bak:{w_pri}:`. Writes go to the same partition the read came from. No internal bookkeeping is needed — the SIP message itself carries the routing every time. For non-SIP events (timer, timeout, internal-event) the persisted Call object carries `wPri`/`wBak` so the same routing can be reconstructed.
+
+5. **There is never a moment of dual ownership.** Because primary-rights never move, two workers cannot simultaneously think they own the same call. On primary's restart the primary's `pri:{P}:` is the merge of (its own pre-crash state, if any) and (the reverse-propagate stream from peers); since reverse-propagate writes happened strictly *after* the crash, the `(epoch, seq)` pair on those writes is strictly newer than anything pre-crash. No conflict resolution beyond gen comparison is needed.
+
+The colloquial term "takeover" appears in older sections of this doc and in code comments. Read it as **"the backup served the request from `bak:{w_pri}:`"** — never as "the backup became primary." If you find a comment or doc paragraph that implies promotion to primary, treat it as a bug to fix in the same PR that touches the surrounding code.
+
+---
+
 ## 1. What problem this layer solves
 
 A B2BUA worker pod can die at any time (K8s eviction, node drain, OOM, crash). When it does, the calls that worker was handling must be **recoverable** by another worker so that:
@@ -92,7 +116,7 @@ Every worker N's sidecar holds the following key families. **Only N writes to N'
 | Key pattern                  | Type        | Lifetime                         | Purpose                                                                           |
 |------------------------------|-------------|----------------------------------|-----------------------------------------------------------------------------------|
 | `pri:N:call:{callRef}`       | string (JSON)| call-ttl while live; **`DELETE_RETENTION_SEC` (≈300 s) as tombstone after delete** | Authoritative copy for calls N is the cookie's primary on. **Source of truth.** |
-| `bak:P:call:{callRef}`       | string (JSON)| call-ttl while live; tombstone retention on delete | N's backup-role copy of calls primary P owns. Used on takeover.                  |
+| `bak:P:call:{callRef}`       | string (JSON)| call-ttl while live; tombstone retention on delete | N's backup-role copy of calls primary P owns. Read and written by N when N serves a request as backup (§10); never moved to N's `pri:`. |
 | `idx:{indexKey}`             | string (callRef)| call-ttl; **DEL'd at delete-time** (NO tombstone — indexes are recoverable from the tombstone JSON if needed) | Index → callRef. Index keys come from `callIndexKeys()` in CallModel.ts. |
 | `propagate:{peer}`           | sorted set  | sliding TTL on whole set         | "Hey peer, these callRefs of mine changed; come pull them." Member=callRef, score=seq. |
 | `propagate_seq:{peer}`       | counter (INT)| sliding TTL                      | INCR'd inside the Lua script; produces the score for `propagate:{peer}`.         |
@@ -426,7 +450,7 @@ If `epoch:N` doesn't exist (first sidecar boot ever), it is initialised to 1 by 
 
 ### 8.5 Bidirectional gate
 
-The gate does not require N to push anything outbound. It is purely "drain peers' propagate:N streams." The reason: peers that were holding *backup* copies of N's primary calls during N's downtime have written their takeover state into *their own* `propagate:N` (under takeover semantics, see §10). When N drains those, it picks up the back-edits. There is no asymmetry between "calls I owned" and "calls I held as backup" — both flow over the same propagate streams.
+The gate does not require N to push anything outbound. It is purely "drain peers' propagate:N streams." The reason: peers that were serving requests for N's primary calls during N's downtime wrote into their own `bak:N:` partitions and announced those writes on their own `propagate:N` (reverse-propagate, see §0 and §10.3). When N drains those, it picks up the back-edits. There is no asymmetry between "calls I owned" and "calls I held as backup" — both flow over the same propagate streams.
 
 ---
 
@@ -540,19 +564,21 @@ If found: R has a backup copy.  Decode → Call object with _topology.{pri:P, ba
 If not found: 481 Call/Transaction Does Not Exist (RFC 3261 §12.2.2) — hydration miss.
 ```
 
-### 10.2 Takeover decision
+### 10.2 Whether to serve
 
-R then has to decide whether to *take over* — i.e. process the SIP request authoritatively, write back, and act as the primary going forward — or refuse.
+R has to decide whether to *serve the request as backup* (read the call from `bak:P:`, run rule processing, write the updated state back to `bak:P:`) or refuse with `481`.
 
 The rule is straightforward:
-- If R's view of the cluster says P (the call's original primary, per `_topology.pri`) is **not K8s-Ready** (not in DNS enumeration), R takes over.
+- If R's view of the cluster says P (the call's original primary, per `_topology.pri`) is **not K8s-Ready** (not in DNS enumeration), R serves the request from `bak:P:`.
 - If P is K8s-Ready, R refuses (`481`). The proxy should not have routed here; the assumption is transient (cookie lost / DNS races) and the UAC retry will land on P.
 
 This decision is encapsulated in the `RouterPolicy` layer and is unchanged from the previous design — the cache mechanism doesn't influence it.
 
-### 10.3 Takeover write
+**§0 reminder:** R does not become the new primary. P remains the call's primary by cookie; R is processing on P's behalf while P is unreachable.
 
-When R takes over, the rule processing runs as normal; the resulting Call must be flushed back. R's flush uses the same AtomicWriter, but with crucial role/peer differences:
+### 10.3 Backup-served write
+
+When R serves the request from `bak:P:`, rule processing runs as normal; the resulting Call must be flushed back. R's flush uses the same AtomicWriter, but with crucial role/peer differences:
 
 ```
 AtomicWriter.write({
@@ -568,8 +594,8 @@ AtomicWriter.write({
 
 Two invariants this preserves:
 
-- **D16 (existing)**: The primary partition `pri:P:call:{callRef}` is NEVER written by anyone but P. R writes to `bak:P:call:{callRef}` even when R is now de-facto driving the call. The cookie's `w_pri` permanently names "where this call's primary copy lives" if it's anywhere; there is no race for primary rights.
-- **Bidirectional propagate**: R announces the takeover write into `propagate:P`. When P comes back, P's ReadyGate drains `propagate:P` from R, picks up the takeover-state, and merges it into P's own `pri:P:call:{callRef}` via gen comparison (`_repl.writerEpoch / writerSeq`).
+- **D16 (load-bearing — see §0)**: The primary partition `pri:P:call:{callRef}` is NEVER written by anyone but P. R writes to `bak:P:call:{callRef}` even when R is the worker physically processing the SIP request. The cookie's `w_pri` permanently names "where this call's primary copy lives" if it's anywhere; there is no race for primary rights.
+- **Reverse-propagate**: R announces the write into its own `propagate:P` set. When P comes back, P's ReadyGate drains `propagate:P` from R, picks up the entries written while P was down, and merges them into P's own `pri:P:call:{callRef}` via gen comparison (`_repl.writerEpoch / writerSeq`).
 
 ### 10.4 What if R never takes over?
 
@@ -602,8 +628,8 @@ Steady state resumes. SIP traffic flows.
 
 Key points:
 - N's own `pri:N:call:*` data is preserved in the sidecar across the worker process crash. N does not need to re-hydrate its own primary calls from peers; they were already on disk, still valid TTL-wise.
-- N **does** need to drain peers because while N was down, peers' takeover writes (if any) accumulated in their `propagate:N` streams. Those takeover writes contain the *latest* state for calls N owned where another worker had to step in.
-- Conflict resolution: if both N's local `pri:N:call:X` (pre-crash) and a takeover copy from peer R exist, the one with higher `(epoch, seq)` wins. Since the takeover happened *after* N's crash, R's epoch/seq pair is strictly newer than N's pre-crash pair.
+- N **does** need to drain peers because while N was down, peers' backup-served writes (if any) accumulated in their `propagate:N` streams. Those entries contain the *latest* state for calls N owned where another worker served the request on N's behalf.
+- Conflict resolution: if both N's local `pri:N:call:X` (pre-crash) and a backup-served entry from peer R exist, the one with higher `(epoch, seq)` wins. Since R's write happened *after* N's crash, R's epoch/seq pair is strictly newer than N's pre-crash pair. (No ownership conflict — see §0; R never claimed primary.)
 
 ### 11.2 Worker pod restart with Redis sidecar wiped
 
@@ -624,8 +650,8 @@ Process boot:
       Pi's hello: epoch=Pi's_epoch, head_at_open=...
         (Note: from Pi's perspective, N is asking for ALL state. This is correct.)
       Drain ALL members of Pi's propagate:N (this includes any of N's pre-crash
-        primary calls Pi was holding as bak:N:, plus any takeover writes Pi made
-        while N was down).
+        primary calls Pi was holding as bak:N:, plus any backup-served writes Pi
+        made on N's behalf while N was down).
     all synced or 30 s → ready=true.
   ↓
 N's pri:N:call:* is repopulated from peers' bak: copies.
@@ -643,30 +669,31 @@ During downtime:
     sets continue to TTL-decay if the sidecar survives, or are absent entirely
     if the sidecar was wiped on pod restart.
   - 800 of N's calls receive BYE during the 2 hours. The other workers
-    that took those calls over write tombstones into their own
-    bak:N:call:* (which they own as backup). Those tombstones TTL out
-    well before N returns — only ~300 s of retention each.
+    that served those BYEs as backup write tombstones into their own
+    bak:N:call:* (which they hold on N's behalf, see §0). Those tombstones
+    TTL out well before N returns — only ~300 s of retention each.
     Peer-side propagate:N entries for those 800 calls were live for the
     tombstone window then GC'd by sweep. 2 hours later, none of these
     calls leave any artifact anywhere.
-  - 200 calls are taken over by peer R. R writes the latest takeover state to
-    bak:N:call:* on R's side and ZADDs propagate:N on R's side (so N can
-    pick the takeover state up). Those entries are alive throughout the
-    downtime because R's writes keep refreshing them.
+  - 200 calls are served as backup by peer R. R writes the latest state to
+    bak:N:call:* on R's side and ZADDs propagate:N on R's side so N can
+    recover the state on its eventual restart. Those entries are alive
+    throughout the downtime because R's writes keep refreshing them.
   ↓
 N comes back. Sidecar may or may not be wiped; same path either way.
 ReadyGate runs. Drains propagate:N from each Pi.
   Most propagate:N entries from when N was up have TTL'd out (sliding TTL on
   the whole sorted set; if Pi had no calls in either direction with N for hours,
   Pi's propagate:N may be gone entirely).
-  Active entries: the 200 calls R took over. Those are propagated back to N.
+  Active entries: the 200 calls R served as backup. Those are propagated back to N.
   ↓
-After ready: N has 200 calls in pri:N:call:* (the ones R took over and R wrote
-back into propagate:N). The 800 BYE'd calls are gone everywhere — exactly as
-desired.
+After ready: N has 200 calls in pri:N:call:* (rebuilt from the entries R wrote
+into propagate:N while N was down — see §0 reverse-propagate). The 800 BYE'd
+calls are gone everywhere — exactly as desired.
   ↓
-Steady state: N continues primary duty for the 200 surviving calls, with R
-holding them as backup again per cookie.
+Steady state: N continues primary duty for the 200 surviving calls (which it
+always owned, per cookie), with R holding them as backup again per the same
+cookie.
 ```
 
 The design's cardinal property — *the propagate stream is bounded by active calls, not by event history* — is what makes 2-hour downtimes tolerable. There is no replay log to grow during the outage.
@@ -716,7 +743,7 @@ This is the single accepted loss class in the new design, identical to the prior
 | L6  | Backup's sidecar wiped while primary up                  | Backup re-fetches from primary on next pull (epoch advance triggers full resync).        | Built-in.                           |
 | L7  | Primary's sidecar wiped while primary up                 | Epoch advances; backups detect and re-replicate primary's state from THEIR backup copy. ReadyGate handles it. | Built-in.                           |
 | L8  | Network partition between primary and backup             | Both sides advance independently. On heal, propagate streams converge. Conflict resolution by `(epoch, seq)`. | Gen-based reconciliation.           |
-| L9  | Concurrent takeover by two peers                         | Should not happen — `_topology.bak` is per-call and unique. If it does (cookie tampering, bug), `(epoch, seq)` resolves. | Unique cookie + asserted in tests.  |
+| L9  | Two peers concurrently serving a request as backup       | Should not happen — `_topology.bak` is per-call and unique, and the proxy only routes to one backup. If it does (cookie tampering, bug), `(epoch, seq)` resolves. Neither becomes primary; both write to `bak:{w_pri}:`. | Unique cookie + asserted in tests.  |
 | L10 | Lua script runtime error                                 | Write fails; CallState.flushToRedis surfaces the error; rule processing fails the request. | Tests + metric `repl_lua_eval_total{outcome=err}`. |
 | L11 | Periodic GC removes a propagate entry mid-pull           | The pull might miss a member that was just deleted. Acceptable: that means the call is gone; the puller would have applied a delete anyway. | GC only removes when call:{ref} is null AND below all consumer ack low-water. |
 

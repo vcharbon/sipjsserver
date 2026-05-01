@@ -1,9 +1,35 @@
 /**
  * ReadyGate — boot-time handshake that drains every reachable peer's
  * `propagate:{self}` stream up to its `head_at_open` watermark, then
- * flips `WorkerReadiness.markReady(true)`. Replaces ReclaimRunner.
+ * flips `WorkerReadiness.markReady(true)`.
  *
- * Slice 5 deliverable. Spec §8.
+ * Slice 5 deliverable. Spec §8 of
+ * docs/replication/call-cache-backup.md.
+ *
+ * Single-owner invariant (spec §0): when a peer was holding `bak:{self}:`
+ * copies of this worker's primary calls and serving requests against
+ * them while this worker was down, those updates flow back through
+ * the *same* `propagate:{self}` stream as a reverse-direction entry.
+ * The drain therefore picks up both directions:
+ *
+ *   - Forward direction (peer is primary, this worker holds the
+ *     backup) — entry applied to `bak:{peer}:call:{ref}` locally.
+ *     Existing behaviour.
+ *   - Reverse direction (this worker is the primary, the peer was
+ *     serving a request as backup while this worker was down) —
+ *     entry applied to `pri:{self}:call:{ref}` locally so this
+ *     worker resumes serving its own primary calls with the latest
+ *     state the peer wrote. The k8s-reliability rework (slice 2.5)
+ *     adds the direction tag to the wire format and the
+ *     direction-aware apply path; the existing `ReclaimRunner` flow
+ *     (src/cache/ReclaimRunner.ts) covers the same recovery via
+ *     scan as a safety net for entries that fell out of the
+ *     propagate window.
+ *
+ * The drain never writes into a peer's `pri:` — that would violate
+ * the §0 single-owner invariant. Forward entries land in this
+ * worker's `bak:{peer}:`; reverse entries land in this worker's own
+ * `pri:{self}:`. Neither modifies any other worker's state.
  *
  * Lifecycle (per spec §8.1):
  *   1. Bump epoch (handled by EpochCounter at its own layer creation).

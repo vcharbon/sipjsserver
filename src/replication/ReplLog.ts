@@ -145,13 +145,16 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
       // The call-body lookup uses the *primary* role — when the local
       // worker emits an entry to a backup peer, the call is owned
       // locally as "pri:{owner}:call:{ref}". We derive owner = our
-      // EpochCounter's owner. (In the rare cross-takeover case where
-      // we store the call as "bak:{primary}:" and need to push it
-      // over /replog to the original primary, the same role/owner
-      // pair applies — we always emit from the role/owner that holds
-      // the canonical body, derived at write time. For Slice 3 we
-      // assume primary-side emission only; takeover propagation is a
-      // Slice 5 concern.)
+      // EpochCounter's owner. (Reverse-propagate case — the local
+      // worker is serving a request as backup and updates
+      // "bak:{w_pri}:call:{ref}" so the original primary recovers it
+      // on reboot — uses the same emit path with role/owner derived at
+      // write time and a `direction: "reverse"` tag on the entry.
+      // See docs/replication/call-cache-backup.md §0 for the invariant
+      // this preserves; the backup never moves the call into its own
+      // pri:. Slice 2.4 of the k8s-reliability rework adds the
+      // direction field to the wire format; Slice 3 assumes
+      // primary-side emission only.)
       const ownerOrdinal = counter.owner
 
       const stream = (

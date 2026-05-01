@@ -6,6 +6,12 @@
  * `WorkerHealth` annotation on the registry:
  *
  *   200 OK              → `alive`
+ *   503 Service Unavailable + `Reason: SIP;cause=503;text="not-ready (boot drain)"`
+ *                       → `not-ready`  (Slice E1 of decode-forward-respawn fix:
+ *                                       worker process is alive but boot-time
+ *                                       replication drain isn't done — its
+ *                                       sidecar Redis is empty, so in-dialog
+ *                                       traffic to it would 481.)
  *   503 Service Unavailable (`Retry-After: 0` is the canonical drained
  *                            signal — RFC 3261 §21.5.4 + §20.33)
  *                       → `draining`
@@ -53,7 +59,7 @@ import {
   Stream,
 } from "effect"
 import { generateOutOfDialogRequest } from "../../sip/generators.js"
-import { newBranch, newTag } from "../../sip/MessageHelpers.js"
+import { getHeader, newBranch, newTag } from "../../sip/MessageHelpers.js"
 import { ProxyMetrics, type ProxyMetricsApi } from "../observability/Metrics.js"
 import { customParser } from "../../sip/parsers/custom/index.js"
 import { serialize } from "../../sip/Serializer.js"
@@ -290,17 +296,19 @@ export const optionsKeepaliveLayer = (
             MutableHashMap.remove(pendingByCallId, callId)
 
             // Reset miss counter on any response, then translate the
-            // status into a health value. 200 → alive; 503 → draining;
-            // every other status (4xx other than 503, 5xx other than
-            // 503, 6xx) is treated as alive — the worker answered, so
-            // it's not dead, and we don't know it's draining.
+            // status into a health value. 200 → alive; 503 → draining
+            // OR not-ready, distinguished by the worker's `Reason`
+            // header (RFC 3326). Every other status is treated as
+            // alive — the worker answered, so it's not dead, and we
+            // don't know it's draining.
             const ent = MutableHashMap.get(perWorker, id)
             if (Option.isSome(ent)) {
               ent.value.consecutiveMisses = 0
             }
             let next: WorkerHealth
             if (msg.status === 200) next = "alive"
-            else if (msg.status === 503) next = "draining"
+            else if (msg.status === 503)
+              next = classify503(getHeader(msg.headers, "reason"))
             else next = "alive"
             yield* control
               .setHealth(id, next)
@@ -383,6 +391,23 @@ export const manualLayer: Layer.Layer<
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Translate a worker's 503 OPTIONS reply into a `WorkerHealth` value.
+ *
+ * Inspects the `Reason` header (RFC 3326) — the worker stamps
+ * `SIP;cause=503;text="not-ready (boot drain)"` while ReadyGate is still
+ * draining peers, vs `SIP;cause=503;text="draining"` after SIGTERM. A 503
+ * with no `Reason` header (older workers / non-B2BUA UAS) defaults to
+ * `draining` to preserve the legacy behaviour: any 503 demotes the worker
+ * out of the new-dialog candidate set.
+ */
+const classify503 = (reasonHeader: string | undefined): WorkerHealth => {
+  if (typeof reasonHeader !== "string") return "draining"
+  return reasonHeader.toLowerCase().includes("not-ready")
+    ? "not-ready"
+    : "draining"
+}
 
 /**
  * Decorate a `setHealth` function to additionally tick the

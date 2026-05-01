@@ -7,6 +7,7 @@
 
 import { Schema } from "effect"
 import { FeatureActivations } from "../decision/schemas/features.js"
+import { currentRng } from "../sip/MessageHelpers.js"
 
 // ── INVITE client transaction handle (in-memory; opaque to JSON) ──────────
 //
@@ -37,9 +38,12 @@ export type InviteTxnHandle = typeof InviteTxnHandleSchema.Type
  * Generate a random initial CSeq as a multiple of 1000 (1000–2_000_000).
  * RFC 3261 §8.1.1.5 recommends a random initial value.
  * Using multiples of 1000 makes it obvious in traces when a CSeq is wrong.
+ *
+ * Reads from the current fiber's Effect `Random` reference via
+ * `currentRng()`, so seeded test runs reproduce the CSeq sequence.
  */
 export function randomInitialCSeq(): number {
-  return (Math.floor(Math.random() * 2000) + 1) * 1000
+  return (Math.floor(currentRng().nextDoubleUnsafe() * 2000) + 1) * 1000
 }
 
 // ── Remote address ──────────────────────────────────────────────────────────

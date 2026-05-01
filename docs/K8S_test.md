@@ -393,11 +393,11 @@ The first thing to look at is `summary.txt`:
 
 ```bash
 # Most recent archive (any scenario).
-ls -1t test-results/k8s-failover/ | head -1
+ls -1t test-results/k8s-failover/ 
 cat test-results/k8s-failover/<runId>/summary.txt
 ```
 
-Expected layout:
+Expected layout
 
 ```
 scenario: phase-3a-B-worker-delete-hold

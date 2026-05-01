@@ -44,7 +44,21 @@ import {
   ServiceMap,
   Stream,
 } from "effect"
+import * as Fiber from "effect/Fiber"
+import { ConnectivityGate, type ConnectivityGateApi } from "./ConnectivityGate.js"
 import type { RemoteInfo } from "./types.js"
+
+/**
+ * Read the active fiber's `ConnectivityGate` reference. Falls back to
+ * the always-allow default when invoked from bare sync code (tests that
+ * mount the simulated layer outside an Effect — none today, but this
+ * keeps the helper symmetric with `currentRng()` in MessageHelpers).
+ */
+function currentConnectivityGate(): ConnectivityGateApi {
+  const fiber = Fiber.getCurrent()
+  if (fiber !== undefined) return fiber.getRef(ConnectivityGate)
+  return ConnectivityGate.defaultValue()
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -468,6 +482,25 @@ export class SignalingNetwork extends ServiceMap.Service<
               sentMs: number,
             ): Effect.Effect<void> =>
               Effect.gen(function* () {
+                // Connectivity-gate check (slice 1.3): if the test layer
+                // has disconnected/partitioned this src→dst pair, drop
+                // the packet without enqueueing or recording an
+                // undeliverable. Distinct from "no endpoint bound" —
+                // the endpoint exists, the network just refuses to
+                // carry the packet right now.
+                const gate = currentConnectivityGate()
+                if (
+                  !gate.canDeliver(
+                    { ip: src.address, port: src.port },
+                    { ip: dst.address, port: dst.port },
+                  )
+                ) {
+                  yield* Effect.logDebug(
+                    `[SignalingNetwork.simulated] gated drop ${src.address}:${src.port} → ${dst.address}:${dst.port} (connectivity)`
+                  )
+                  return
+                }
+
                 const target = Option.getOrUndefined(
                   MutableHashMap.get(routingTable, keyOf(dst.address, dst.port))
                 )

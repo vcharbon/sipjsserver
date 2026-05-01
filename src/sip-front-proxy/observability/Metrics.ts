@@ -113,6 +113,23 @@ const baseWorkerHealth = Metric.gauge("sip_worker_health", {
     "Per-worker health, 1 for the current state and 0 for the others (worker_id, health labels).",
 })
 
+/**
+ * Slice E2: counts cookies whose `decode_forward` was promoted to
+ * `decode_forward_backup` because the named primary was not-routable —
+ * either `not-ready` (worker still draining boot replication) or absent
+ * via the Slice E3 stale-pod guard (`unobserved-fresh-pod`). Without
+ * this counter the promotion is invisible to operators (the cookie is
+ * valid, the ordinal exists, the pod is Running — nothing else fires).
+ */
+const baseDecodeForwardPromoted = Metric.counter(
+  "sipfp_decode_forward_promoted_total",
+  {
+    description:
+      "Stickiness decisions promoted from decode_forward to decode_forward_backup because the cookie's primary was not-routable (from=not-ready / unobserved-fresh-pod).",
+    incremental: true,
+  }
+)
+
 const baseCancelLookup = Metric.counter("sip_cancel_lookup_total", {
   description:
     "CancelBranchLru outcomes: hit / miss / expired_sweep. The first two come from lookups, the last from the sweep fiber.",
@@ -144,9 +161,29 @@ export type RoutingDecisionKind =
 
 export type HmacFailureReason = "missing" | "decode" | "mismatch" | "unknown_kid"
 
-export type WorkerHealthLabel = "unknown" | "alive" | "draining" | "dead"
+export type WorkerHealthLabel =
+  | "unknown"
+  | "alive"
+  | "not-ready"
+  | "draining"
+  | "dead"
 
 export type CancelLookupOutcome = "hit" | "miss" | "expired_sweep"
+
+/**
+ * Reason that drove the proxy to promote a `decode_forward` to
+ * `decode_forward_backup`. Kept as a closed union so a future reason can't
+ * silently appear in dashboards.
+ *
+ *   - `not-ready`              — primary's OPTIONS reply was
+ *                                `503 + Reason: not-ready (boot drain)`.
+ *   - `unobserved-fresh-pod`   — Slice E3: primary is in the registry but
+ *                                we haven't yet observed any positive
+ *                                Ready signal from it (informer race).
+ */
+export type DecodeForwardPromotionReason =
+  | "not-ready"
+  | "unobserved-fresh-pod"
 
 // ---------------------------------------------------------------------------
 // Service surface
@@ -202,6 +239,14 @@ export interface ProxyMetricsApi {
     outcome: CancelLookupOutcome
   ) => Effect.Effect<void>
 
+  /**
+   * Slice E2: increment `sipfp_decode_forward_promoted_total{from=…}` when
+   * a cookie's primary forced a promotion to `decode_forward_backup`.
+   */
+  readonly recordDecodeForwardPromoted: (
+    from: DecodeForwardPromotionReason
+  ) => Effect.Effect<void>
+
   /** Update the active-dialogs estimate. */
   readonly setActiveDialogsEstimate: (count: number) => Effect.Effect<void>
 }
@@ -222,7 +267,13 @@ export class ProxyMetrics extends ServiceMap.Service<ProxyMetrics, ProxyMetricsA
   )
 }
 
-const HEALTH_VALUES: ReadonlyArray<WorkerHealthLabel> = ["unknown", "alive", "draining", "dead"]
+const HEALTH_VALUES: ReadonlyArray<WorkerHealthLabel> = [
+  "unknown",
+  "alive",
+  "not-ready",
+  "draining",
+  "dead",
+]
 
 function buildApi(): ProxyMetricsApi {
   const recordMessage = (opts: {
@@ -294,6 +345,14 @@ function buildApi(): ProxyMetricsApi {
       1
     )
 
+  const recordDecodeForwardPromoted = (
+    from: DecodeForwardPromotionReason
+  ): Effect.Effect<void> =>
+    Metric.update(
+      Metric.withAttributes(baseDecodeForwardPromoted, { from }),
+      1
+    )
+
   const setActiveDialogsEstimate = (count: number): Effect.Effect<void> =>
     Metric.update(activeDialogsEstimate, count)
 
@@ -304,6 +363,7 @@ function buildApi(): ProxyMetricsApi {
     recordHmacFailure,
     setWorkerHealth,
     recordCancelLookup,
+    recordDecodeForwardPromoted,
     setActiveDialogsEstimate,
   }
 }

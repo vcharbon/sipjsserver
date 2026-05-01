@@ -57,8 +57,22 @@ export const WorkerId = (raw: string): WorkerId => raw as WorkerId
  * distinction is preserved so future hysteresis on `dead → alive` recovery
  * (e.g. require N consecutive 200 OKs before re-admitting) does not also
  * penalize cold-start workers.
+ *
+ * `not-ready` is the state of a worker that has answered an OPTIONS probe
+ * with `503 + Reason: not-ready (boot drain)` (Slice E1 of the
+ * decode-forward-respawn fix): the worker process is alive, but its
+ * `WorkerReadiness` gate is still false because boot-time replication
+ * drain has not finished. In-dialog requests routed to this worker would
+ * miss because its sidecar Redis is empty / still hydrating, so the proxy
+ * promotes `decode_forward → decode_forward_backup` for cookies that name
+ * a `not-ready` primary.
  */
-export type WorkerHealth = "unknown" | "alive" | "draining" | "dead"
+export type WorkerHealth =
+  | "unknown"
+  | "alive"
+  | "not-ready"
+  | "draining"
+  | "dead"
 
 export interface WorkerEntry {
   readonly id: WorkerId
@@ -74,6 +88,18 @@ export interface WorkerEntry {
    * see `CancelBranchLru.Entry.expiresAtMs`).
    */
   readonly drainingSince?: number
+  /**
+   * Epoch milliseconds for the start of the worker's "fresh pod" window —
+   * Slice E3 of the decode-forward-respawn fix. The K8s registry sets it
+   * to the pod's `metadata.creationTimestamp`; the simulated/static
+   * registries set it to `Clock.currentTimeMillis` at admission. The
+   * `LoadBalancerStrategy` consults it to demote a still-fresh primary
+   * into `not-ready` for routing purposes regardless of the informer's
+   * current Ready opinion (closes the K8s informer race between pod
+   * birth and first probe failure). `undefined` means "no guard" — the
+   * worker is admitted on its current health as-is.
+   */
+  readonly firstSeenAtMs?: number
 }
 
 /**
