@@ -551,16 +551,8 @@ function executeK8s(
         return
       }
       case "respawn": {
-        // Slice 3b stub. Cluster facade has no respawn primitive yet —
-        // its addition lands with the broader pod-recovery story
-        // (slice 4 of the doc plan). Record skip rather than die so
-        // scenarios authored against the future API parse cleanly.
-        state.results.push(makeStepResult({
-          stepIndex: index,
-          step,
-          status: "skip",
-          error: "cluster.respawn() not yet implemented — slice 4 follow-up",
-        }))
+        yield* cluster.respawn(WorkerId(a.workerId))
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
         return
       }
       case "disconnect": {

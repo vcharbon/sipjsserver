@@ -34,10 +34,11 @@ import {
   Clock,
   Data,
   Effect,
+  Exit,
   Layer,
   Metric,
+  Scope,
   ServiceMap,
-  type Scope,
 } from "effect"
 import {
   PeerFabricControl,
@@ -116,6 +117,21 @@ export interface SimulatedK8sClusterApi {
 
   // -- Lifecycle primitives ------------------------------------------------
   readonly kill: (id: WorkerId, timing?: KillTiming) => Effect.Effect<void>
+  /**
+   * Bring a worker back after a `kill`. Pre-condition: the worker is
+   * currently in the dead/closed-scope state. Steps performed:
+   *   1. PeerFabric.rebootWorker — fresh storage handle.
+   *   2. WorkerConnectivity.reconnect — gate flag flipped on.
+   *   3. Registry remove + add (auto-stamps a fresh `firstSeenAtMs`).
+   *   4. Open a new worker scope (forked from the SUT scope) and run
+   *      the per-worker `buildWorker` closure against it. The closure
+   *      stands up the UdpTransport binding, ReplPuller pull loops,
+   *      runs ReadyGate (peer-log drain), and forks SipRouter ingest.
+   *
+   * Stub when the cluster wasn't built with worker-lifecycle support;
+   * see `SimulatedK8sClusterLayerWithLifecycleOpts`.
+   */
+  readonly respawn: (id: WorkerId) => Effect.Effect<void>
   readonly disconnect: (id: WorkerId) => Effect.Effect<void>
   readonly reconnect: (id: WorkerId) => Effect.Effect<void>
   readonly partition: (opts: {
@@ -179,11 +195,59 @@ export class K8sClusterAssertionError extends Data.TaggedError(
 }> {}
 
 // ---------------------------------------------------------------------------
+// Worker lifecycle handle (slice 4b-ii)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-worker lifecycle handle managed by the cluster service. Each
+ * worker owns a child scope forked from the SUT scope; closing it
+ * tears down the worker's UdpTransport binding, ReplPuller pull
+ * loops, ReadyGate fiber, and SipRouter ingest atomically. `respawn`
+ * closes the current scope and rebuilds against a fresh one.
+ */
+export interface WorkerRuntimeHandle {
+  readonly id: WorkerId
+  scope: Scope.Closeable
+  /** Re-runs the `buildWorker` closure against `scope`. */
+  readonly rebuild: (scope: Scope.Closeable) => Effect.Effect<void>
+}
+
+// ---------------------------------------------------------------------------
 // Layer factory
 // ---------------------------------------------------------------------------
 
 export interface SimulatedK8sClusterLayerOpts {
   readonly workers: ReadonlyArray<ClusterWorker>
+  /**
+   * Optional worker-lifecycle wiring. When supplied:
+   *   - `kill` appends a phase 5 that closes the worker's scope.
+   *   - `respawn` rebuilds the worker against a fresh child scope.
+   *
+   * Without it, `respawn` dies on call (matches the "stub" behaviour
+   * shipped in slice 3b before per-worker scopes were wired).
+   */
+  readonly lifecycle?: WorkerLifecycle
+}
+
+/**
+ * Worker-lifecycle wiring passed by `k8sFakeStackLayer`. The cluster
+ * service holds a reference to these handles (mutated in place: the
+ * `scope` field is replaced on respawn) so it can close + rebuild a
+ * worker without consulting other layers.
+ */
+export interface WorkerLifecycle {
+  /** Mutable map: WorkerId → live runtime handle. */
+  readonly handles: Map<string, WorkerRuntimeHandle>
+  /** Ambient scope that owns each worker's child scope. */
+  readonly sutScope: Scope.Scope
+  /** Re-add the worker to the registry post-respawn. */
+  readonly registryAdd: (id: WorkerId) => Effect.Effect<void>
+  /**
+   * Reset side-state owned by the surrounding stack on respawn (e.g.
+   * the per-peer ReplLog whose backing store was swapped out by
+   * PeerFabric.rebootWorker). Run BEFORE rebuilding the worker.
+   */
+  readonly onRebootSideEffects: (id: WorkerId) => Effect.Effect<void>
 }
 
 /**
@@ -206,6 +270,7 @@ export const SimulatedK8sClusterLayer = (
       const registry = yield* WorkerRegistrySimulatedControl
       const connectivity = yield* WorkerConnectivity
       const fabric = yield* PeerFabricControl
+      const lifecycle = opts.lifecycle
       // Plain array — `Queue.takeAll` in Effect v4 blocks on an empty
       // queue, which deadlocks `drainKillEvents` calls used as
       // pre-checks. The cluster runs single-fiber under tests, so a
@@ -256,6 +321,58 @@ export const SimulatedK8sClusterLayer = (
           // their own sidecars regardless.
           yield* fabric.killWorker(w.ordinal)
           yield* recordPhase(id, "fabric")
+          // Phase 4 (only with lifecycle wiring): close the worker's
+          // scope so its UdpTransport binding, ReplPuller pull loops,
+          // and SipRouter ingest fiber are interrupted cleanly. Until
+          // a respawn lands, the worker is fully gone from the SUT.
+          if (lifecycle !== undefined) {
+            const handle = lifecycle.handles.get(id as unknown as string)
+            if (handle !== undefined) {
+              yield* Scope.close(handle.scope, Exit.void)
+            }
+          }
+        })
+
+      const respawn: SimulatedK8sClusterApi["respawn"] = (id) =>
+        Effect.gen(function* () {
+          if (lifecycle === undefined) {
+            return yield* Effect.die(
+              new K8sClusterAssertionError({
+                message:
+                  `respawn(${id as unknown as string}): cluster was built without ` +
+                  `worker-lifecycle wiring — pass opts.lifecycle in SimulatedK8sClusterLayer.`,
+              })
+            )
+          }
+          const w = workerOf(id)
+          // 1. Fresh storage handle (mimics ephemeral sidecar Redis).
+          yield* fabric.rebootWorker(w.ordinal)
+          // 2. Network gate flipped back on.
+          yield* connectivity.reconnect(id as unknown as string)
+          // 3. Registry: re-add (kill set health=dead but kept the
+          //    entry; remove + add resets `firstSeenAtMs` via the
+          //    layer's autoStamp opt-in).
+          yield* registry.remove(id)
+          yield* lifecycle.registryAdd(id)
+          // 4. Surrounding-stack-side reset (e.g. rebuild this peer's
+          //    ReplLog so other workers see writes against the new
+          //    storage handle).
+          yield* lifecycle.onRebootSideEffects(id)
+          // 5. Open a fresh child scope and run the worker's
+          //    `rebuild` closure against it. The closure stands up
+          //    UdpTransport, ReplPuller, ReadyGate (drains peers),
+          //    then forks SipRouter ingest.
+          const newScope = yield* Scope.fork(lifecycle.sutScope, "sequential")
+          const handle = lifecycle.handles.get(id as unknown as string)
+          if (handle === undefined) {
+            return yield* Effect.die(
+              new K8sClusterAssertionError({
+                message: `respawn(${id as unknown as string}): no runtime handle in lifecycle map`,
+              })
+            )
+          }
+          yield* handle.rebuild(newScope)
+          handle.scope = newScope
         })
 
       const disconnect: SimulatedK8sClusterApi["disconnect"] = (id) =>
@@ -366,6 +483,7 @@ export const SimulatedK8sClusterLayer = (
         workers: opts.workers,
         workerOf,
         kill,
+        respawn,
         disconnect,
         reconnect,
         partition,

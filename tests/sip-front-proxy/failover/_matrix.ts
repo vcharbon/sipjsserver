@@ -137,21 +137,13 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
     s.cluster.kill(W1)
     s.pause(50)
 
-    if (c.switchPattern === "double") {
-      // Slice 4b-ii follow-up. Until per-worker scopes + respawn
-      // land, the matrix's double-switch column treats this as a
-      // single-switch with a noted gap so the file scaffolding
-      // (HTML/txt reports, name conventions) is in place ahead of
-      // time.
-      throw new Error(
-        `buildFailoverScenario: double-switch pattern requires cluster.respawn() — pending slice 4b-ii.`
-      )
-    }
-
-    // ── Single-switch: exercise the chosen method post-failover ─────
-
+    // ── Method (post-first-kill) — routes to backup via cookie ─────
+    //
+    // For BYE the method IS the teardown; for non-BYE we run the
+    // method first, then BYE-teardown later. Both routes traverse
+    // the proxy with `decode_forward_backup` because the cookie's
+    // primary (b2b-1) is now dead.
     if (c.method === "BYE") {
-      // BYE alice→bob OR bob→alice; both terminate the call.
       if (c.initiator === "alice") {
         const aliceByeTxn = aliceDialog.bye()
         const bobByeTxn = bobDialog.expect("BYE")
@@ -168,7 +160,6 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
       c.method === "UPDATE" ||
       c.method === "MESSAGE"
     ) {
-      // Transparent in-dialog request: send → relay → 200, then BYE.
       const cfg = transparentMethodConfig(c.method)
       if (c.initiator === "alice") {
         const txn = aliceDialog.send(c.method, cfg)
@@ -179,20 +170,40 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
         aliceDialog.expect(c.method).reply(200)
         txn.expect(200)
       }
-      // Always tear down via alice-BYE for predictability.
-      const aliceByeTxn = aliceDialog.bye()
-      const bobByeTxn = bobDialog.expect("BYE")
-      bobByeTxn.reply(200)
-      aliceByeTxn.expect(200)
     } else {
       throw new Error(
         `buildFailoverScenario: method "${c.method}" not yet wired — see slice 4b-iii follow-up`
       )
     }
 
-    // Routing-decision proof: every post-kill in-dialog request
-    // routed via the cookie was promoted to decode_forward_backup.
+    // Routing-decision proof: the method (or BYE) above was
+    // promoted to decode_forward_backup because b2b-1 is dead.
     s.cluster.expectRoutedTo(W2, { decision: "decode_forward_backup" })
+
+    // ── Double-switch: respawn primary, kill backup ────────────────
+    //
+    // Sequence runs whether the call is still alive (non-BYE method)
+    // or already terminated (BYE method). It exercises the
+    // per-worker scope close + rebuild + ReadyGate reverse-drain
+    // pipeline regardless. For the still-alive call, the
+    // post-respawn `pri:b2b-1:` partition reflects b2b-2's
+    // bak:b2b-1: state recovered via ReadyGate.
+    if (c.switchPattern === "double") {
+      s.cluster.respawn(W1)
+      // Allow ReplPuller to apply b2b-2's reverse-propagate entries
+      // and HealthProbe to flip W1 back to alive.
+      s.pause(5_000)
+      s.cluster.kill(W2)
+      s.pause(50)
+    }
+
+    // ── Teardown: BYE alice (skipped if BYE was the method) ────────
+    if (c.method !== "BYE") {
+      const aliceByeTxn = aliceDialog.bye()
+      const bobByeTxn = bobDialog.expect("BYE")
+      bobByeTxn.reply(200)
+      aliceByeTxn.expect(200)
+    }
 
     // Single-owner invariant.
     s.cluster.expectCallStateOn(W2, {
