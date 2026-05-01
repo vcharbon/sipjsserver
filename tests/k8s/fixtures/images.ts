@@ -12,6 +12,11 @@ export const IMAGE_TAG = "sipjsserver:dev"
 // runs don't fall over. Keep this matched to deploy/helm/b2bua-worker
 // values.yaml `redis.image.{repository,tag}`.
 export const REDIS_IMAGE = "redis:7-alpine"
+// SIPp test image. Built from tests/k8s/charts/sipp/Dockerfile and
+// referenced by tests/k8s/charts/sipp/values.yaml + sippJob fixtures.
+// Local build (single-arch), so plain `kind load docker-image` works.
+export const SIPP_IMAGE_TAG = "sipp:dev"
+export const SIPP_DOCKERFILE_DIR = resolve(REPO_ROOT, "tests/k8s/charts/sipp")
 
 export const dockerBuild = Effect.gen(function* () {
   yield* Effect.logInfo(`docker build -t ${IMAGE_TAG} ${REPO_ROOT}`)
@@ -25,6 +30,24 @@ export const kindLoad = Effect.gen(function* () {
   yield* exec(
     "kind",
     ["load", "docker-image", IMAGE_TAG, "--name", CLUSTER_NAME],
+    { timeoutMs: 5 * 60 * 1000 },
+  )
+})
+
+export const dockerBuildSipp = Effect.gen(function* () {
+  yield* Effect.logInfo(`docker build -t ${SIPP_IMAGE_TAG} ${SIPP_DOCKERFILE_DIR}`)
+  yield* exec("docker", ["build", "-t", SIPP_IMAGE_TAG, SIPP_DOCKERFILE_DIR], {
+    timeoutMs: 10 * 60 * 1000,
+  })
+})
+
+export const kindLoadSipp = Effect.gen(function* () {
+  yield* Effect.logInfo(
+    `kind load docker-image ${SIPP_IMAGE_TAG} --name ${CLUSTER_NAME}`,
+  )
+  yield* exec(
+    "kind",
+    ["load", "docker-image", SIPP_IMAGE_TAG, "--name", CLUSTER_NAME],
     { timeoutMs: 5 * 60 * 1000 },
   )
 })
@@ -86,5 +109,7 @@ export const ensureRedisImage = Effect.gen(function* () {
 export const buildAndLoad = Effect.gen(function* () {
   yield* dockerBuild
   yield* kindLoad
+  yield* dockerBuildSipp
+  yield* kindLoadSipp
   yield* ensureRedisImage
 })

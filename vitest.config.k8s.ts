@@ -22,6 +22,12 @@ import { defineConfig } from "vitest/config"
 export default defineConfig({
   test: {
     include: ["tests/k8s/**/*.test.ts"],
+    // Idempotent: ensures the kind cluster exists, all required images
+    // are built + side-loaded, and the proxy/worker/sipp charts are
+    // installed into the `sip-test` namespace before any test file
+    // loads. Lets `npx vitest run -c vitest.config.k8s.ts <file>` work
+    // against a fresh cluster without manual setup.
+    globalSetup: ["./tests/k8s/globalSetup.ts"],
     pool: "forks",
     forks: { singleFork: true },
     fileParallelism: false,
