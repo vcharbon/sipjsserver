@@ -1103,10 +1103,20 @@ export function getRuleState(call: Call, ruleId: string): unknown | undefined {
   return call.ruleState?.find((e) => e.ruleId === ruleId)?.state
 }
 
-/** Update or insert a rule state entry. */
+/** Update or insert a rule state entry.
+ *
+ * No-ops (returns the same call reference) when the new state is referentially
+ * equal to the existing entry's state, or when no entry exists and the new
+ * state is `undefined` — in either case `getRuleState` returns the same value.
+ *
+ * This reference-stability matters for the auto-flush guard in `RuleExecutor`,
+ * which compares `result.call` to the pre-rule call to detect state mutations.
+ */
 export function setRuleState(call: Call, ruleId: string, state: unknown): Call {
   const existing = call.ruleState ?? []
   const idx = existing.findIndex((e) => e.ruleId === ruleId)
+  if (idx < 0 && state === undefined) return call
+  if (idx >= 0 && existing[idx]!.state === state) return call
   const entry: RuleStateEntry = { ruleId, state }
   const updated = idx >= 0
     ? [...existing.slice(0, idx), entry, ...existing.slice(idx + 1)]

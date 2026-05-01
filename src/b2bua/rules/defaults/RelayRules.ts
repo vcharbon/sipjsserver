@@ -58,6 +58,24 @@ export const relayInfoRule: RuleDefinition<undefined, undefined> =
     name: "Relay INFO",
   })
 
+// ── relay-update ──────────────────────────────────────────────────────────
+
+/** Relay in-dialog UPDATE end-to-end (RFC 3311; payload-transparent). */
+export const relayUpdateRule: RuleDefinition<undefined, undefined> =
+  makeTransparentRelayRule("UPDATE", {
+    id: "relay-update",
+    name: "Relay UPDATE",
+  })
+
+// ── relay-message ─────────────────────────────────────────────────────────
+
+/** Relay in-dialog MESSAGE end-to-end (RFC 3428; payload-transparent). */
+export const relayMessageRule: RuleDefinition<undefined, undefined> =
+  makeTransparentRelayRule("MESSAGE", {
+    id: "relay-message",
+    name: "Relay MESSAGE",
+  })
+
 // ── relay-bye ──────────────────────────────────────────────
 
 /** Respond 200 to BYE sender, relay BYE to peer, terminate call. */

@@ -99,6 +99,24 @@ function addRuleAttribution(result: HandlerResult, ruleId: string, ruleName: str
   }
 }
 
+// ── Auto-flush ───────────────────────────────────────────────────────────
+//
+// If a rule mutated the call (reference inequality with the pre-rule call)
+// and didn't already emit `flush-redis`, append one. This guarantees that
+// every state-mutating rule persists the call to the call-state cache (and
+// thence the replication peer) before the next event lands.
+//
+// Action mutations always produce a new Call via immutable updateLeg /
+// updateDialog helpers, so reference equality is sound.
+function appendAutoFlush(callBefore: Call, result: HandlerResult): HandlerResult {
+  if (result.call === callBefore) return result
+  if (result.effects.some((e) => e.type === "flush-redis")) return result
+  return {
+    ...result,
+    effects: [...result.effects, { type: "flush-redis" }],
+  }
+}
+
 // ── Rule executor factory ──────────────────────────────────────────────────
 
 /**
@@ -223,7 +241,7 @@ export function executeRules(
               if (result.call.state === "terminating" && isFullyResolved(result.call)) {
                 result = { ...result, call: { ...result.call, state: "terminated" } }
               }
-              return enforceInvariants(callBefore, result)
+              return enforceInvariants(callBefore, appendAutoFlush(callBefore, result))
             }
           }
 
@@ -232,7 +250,7 @@ export function executeRules(
           if (result.call.state === "terminating" && isFullyResolved(result.call)) {
             result = { ...result, call: { ...result.call, state: "terminated" } }
           }
-          return enforceInvariants(callBefore, result)
+          return enforceInvariants(callBefore, appendAutoFlush(callBefore, result))
         }
 
         // ── Non-composed path ──
@@ -250,7 +268,7 @@ export function executeRules(
         }
 
         // Enforce invariants (limiter, timer, CDR, removal guarantees)
-        return enforceInvariants(callBefore, result)
+        return enforceInvariants(callBefore, appendAutoFlush(callBefore, result))
       }
 
       // ── No rule handled — fall back to default handler ──

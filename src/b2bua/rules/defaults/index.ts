@@ -8,7 +8,16 @@
 import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 
 // Relay rules
-import { relayOptionsRule, relayByeRule, relayAckRule, relayReinviteRule, relayPrackRule, relayInfoRule } from "./RelayRules.js"
+import {
+  relayOptionsRule,
+  relayByeRule,
+  relayAckRule,
+  relayReinviteRule,
+  relayPrackRule,
+  relayInfoRule,
+  relayUpdateRule,
+  relayMessageRule,
+} from "./RelayRules.js"
 
 // Lifecycle rules
 import { handleTimeoutRule, handleCancelRule, handle481Rule, resolveCancelResponseRule } from "./LifecycleRules.js"
@@ -78,6 +87,8 @@ export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
   // Default relay and lifecycle
   relayOptionsRule,
   relayInfoRule,
+  relayUpdateRule,
+  relayMessageRule,
   relayByeRule,
   relayAckRule,
   relayReinviteRule,
