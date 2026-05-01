@@ -47,6 +47,7 @@ import { RedisClient, RedisError } from "../redis/RedisClient.js"
 import {
   AtomicWriter,
   type AtomicWriterError,
+  type PropagateDirection,
 } from "../replication/AtomicWriter.js"
 
 // ---------------------------------------------------------------------------
@@ -66,10 +67,17 @@ export interface ScanEntry {
  * Slice 2 — per-write replication options. Pass `peer` only for calls
  * the LB has assigned a backup to; absent peer = no replication side
  * effect on this write.
+ *
+ * `direction` is the slice-2.4 propagate-direction tag (defaults to
+ * `"forward"` — the role==="pri" case where this worker is primary
+ * writing to a backup peer). Pass `"reverse"` from the role==="bak"
+ * write path so the receiver routes the apply to `pri:{self}:` rather
+ * than `bak:{caller}:`.
  */
 export interface PartitionedRelayWriteOptions {
   readonly peer?: string | undefined
   readonly propagateSetTtlSec?: number | undefined
+  readonly direction?: PropagateDirection | undefined
 }
 
 /**

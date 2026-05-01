@@ -24,6 +24,7 @@
  */
 
 import { Effect, Layer, PubSub, ServiceMap, Stream } from "effect"
+import type { PropagateDirection } from "./AtomicWriter.js"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +36,11 @@ import { Effect, Layer, PubSub, ServiceMap, Stream } from "effect"
  * script returned (or what the memory layer simulated). `owner` is
  * the worker N that owns the writes — long-poll subscribers tagged
  * with `caller=Y` only care about notifications where `peer === Y`.
+ *
+ * `direction` is the slice-2.4 propagate direction tag — forward when
+ * `owner` was acting as primary writing to backup peer `peer`; reverse
+ * when `owner` was acting as backup-on-behalf-of `peer` (the original
+ * primary) so the receiver can route the apply correctly.
  */
 export interface WriteNotification {
   readonly owner: string
@@ -42,6 +48,7 @@ export interface WriteNotification {
   readonly callRef: string
   readonly seq: number
   readonly epoch: number
+  readonly direction: PropagateDirection
 }
 
 export interface WriteNotifierApi {

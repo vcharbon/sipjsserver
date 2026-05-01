@@ -235,7 +235,8 @@ const HttpLayer = StatusServerLayer.pipe(
 
 const ReplPullerLayer = ReplPuller.redisLayer.pipe(
   Layer.provide(RedisLayer),
-  Layer.provide(AtomicWriterLayer)
+  Layer.provide(AtomicWriterLayer),
+  Layer.provide(AppConfigLayer)
 )
 
 /**

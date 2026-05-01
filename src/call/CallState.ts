@@ -26,6 +26,7 @@ import {
   type PartitionRole,
   type StorageError,
 } from "../cache/PartitionedRelayStorage.js"
+import type { PropagateDirection } from "../replication/AtomicWriter.js"
 import { AppConfig } from "../config/AppConfig.js"
 import { RedisError } from "../redis/RedisClient.js"
 import type { Call } from "./CallModel.js"
@@ -167,6 +168,20 @@ export class CallState extends ServiceMap.Service<
         // construction, !== selfOrdinal whenever role is "bak".
         return primary.length > 0 ? primary : undefined
       }
+
+      /**
+       * Slice 2.4 direction tag for the propagate stream. Forward when
+       * this worker is the call's primary (we ZADD into the backup
+       * peer's `propagate:{peer}` set on our sidecar; the receiver
+       * applies to `bak:{self}:`). Reverse when this worker is acting
+       * as backup-on-behalf-of the original primary (we ZADD into
+       * `propagate:{primary}` on our sidecar; on its eventual reboot
+       * the primary's ReadyGate drains it and applies the entries to
+       * its own `pri:{primary}:` partition — single-owner invariant
+       * preserved, spec §0).
+       */
+      const directionFor = (role: PartitionRole): PropagateDirection =>
+        role === "pri" ? "forward" : "reverse"
 
       // Slice 6: dual-write fan-out is gone. Replication is now driven
       // by the propagate stream + ReplPuller (slices 2-4): every write
@@ -318,9 +333,14 @@ export class CallState extends ServiceMap.Service<
         // indexes-fix): when role==="bak" we are taking over for the
         // original primary, so propagate to `primary` itself.
         const peerOpt = propagatePeerFor(role, primary, bumped._topology)
+        // Slice 2.4 direction tag: forward (role==="pri") lands in the
+        // peer's `bak:{self}:`; reverse (role==="bak") lands in the
+        // returning primary's `pri:{primary}:` after its ReadyGate drain.
+        const direction = directionFor(role)
         yield* storage
           .putCall(role, primary, callRef, json, indexes, ttl, {
             peer: peerOpt,
+            direction,
           })
           .pipe(Effect.mapError(toRedisErr))
 
@@ -371,8 +391,12 @@ export class CallState extends ServiceMap.Service<
           primary,
           call !== undefined ? call._topology : undefined
         )
+        const direction = directionFor(role)
         yield* storage
-          .deleteCall(role, primary, callRef, indexes, { peer: peerOpt })
+          .deleteCall(role, primary, callRef, indexes, {
+            peer: peerOpt,
+            direction,
+          })
           .pipe(Effect.mapError(toRedisErr))
       })
 
@@ -474,9 +498,11 @@ export class CallState extends ServiceMap.Service<
           // replication is implicit in the Lua write — no separate
           // fan-out.
           const peerOpt = propagatePeerFor(role, primary, bumped._topology)
+          const direction = directionFor(role)
           yield* storage
             .putCall(role, primary, callRef, json, indexes, ttl, {
               peer: peerOpt,
+              direction,
             })
             .pipe(Effect.mapError(toRedisErr))
           flushed++

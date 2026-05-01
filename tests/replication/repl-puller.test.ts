@@ -59,7 +59,7 @@ describe("ReplPuller — apply backlog from a peer's /replog stream", () => {
     const producer = setupProducer("worker-A")
     const consumer = consumerStore()
     const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
-    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter, "worker-B")
 
     return Effect.gen(function* () {
       const writer = yield* AtomicWriter
@@ -98,7 +98,7 @@ describe("ReplPuller — apply backlog from a peer's /replog stream", () => {
     const producer = setupProducer("worker-A")
     const consumer = consumerStore()
     const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
-    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter, "worker-B")
 
     return Effect.gen(function* () {
       const writer = yield* AtomicWriter
@@ -140,7 +140,7 @@ describe("ReplPuller — apply backlog from a peer's /replog stream", () => {
     const producer = setupProducer("worker-A")
     const consumer = consumerStore()
     const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
-    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter, "worker-B")
 
     return Effect.gen(function* () {
       const writer = yield* AtomicWriter
@@ -172,7 +172,7 @@ describe("ReplPuller — bak-side index reconstruction", () => {
     const producer = setupProducer("worker-A")
     const consumer = consumerStore()
     const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
-    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter, "worker-B")
 
     // Minimal Call-shaped JSON exercising every index-key branch
     // `callIndexKeys` produces: a-leg leg, b-leg leg+tag, b-leg
@@ -243,7 +243,7 @@ describe("ReplPuller — bak-side index reconstruction", () => {
     const producer = setupProducer("worker-A")
     const consumer = consumerStore()
     const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
-    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter, "worker-B")
 
     const callRef = "worker-A|cid-A|tag-A"
     const callBody = {
@@ -307,7 +307,7 @@ describe("ReplPuller — epoch mismatch resync", () => {
     const producer = setupProducer("worker-A")
     const consumer = consumerStore()
     const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
-    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter, "worker-B")
 
     return Effect.gen(function* () {
       const writer = yield* AtomicWriter
@@ -347,4 +347,156 @@ describe("ReplPuller — epoch mismatch resync", () => {
       expect(r.framesApplied).toBe(1)
     }).pipe(Effect.provide(producer.layer))
   })
+})
+
+describe("Slice 2.5 — reverse-direction apply lands in pri:{self}:", () => {
+  it.effect(
+    "a peer acting as backup-on-our-behalf propagates updates that the consumer applies to pri:{self}:",
+    () => {
+      // Scenario: the local worker (consumer, "worker-A") was the
+      // call's primary. While it was down, peer "worker-B" served
+      // requests as backup, writing into bak:worker-A: on its own
+      // sidecar and ZADDing reverse-direction entries into
+      // propagate:worker-A on its own sidecar. Now worker-A is back
+      // up, opens /replog?caller=worker-A against worker-B, and
+      // drains. The reverse entries must land in
+      // pri:worker-A:call:{ref} on worker-A's sidecar (single-owner
+      // invariant: backup never moves the call into its own pri:).
+      const producer = setupProducer("worker-B")
+      const consumer = consumerStore()
+      const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
+      const puller = ReplPuller.makeMemoryUnsafe(
+        consumer,
+        consumerWriter,
+        "worker-A"
+      )
+
+      // Minimal Call-shaped JSON so callIndexKeysFromUnknown produces
+      // a deterministic index list on apply.
+      const callRef = "worker-A|cid-A|tag-A"
+      const callBody = {
+        callRef,
+        aLeg: { callId: "cid-A", fromTag: "tag-A" },
+        bLegs: [],
+      }
+
+      return Effect.gen(function* () {
+        const writer = yield* AtomicWriter
+        // worker-B writes the call's authoritative state into its own
+        // bak:worker-A: partition (it is acting as backup for worker-A's
+        // primary call) and announces the update to worker-A via a
+        // reverse-direction entry in propagate:worker-A.
+        yield* writer.put(
+          "bak",
+          "worker-A",
+          callRef,
+          JSON.stringify(callBody),
+          [],
+          60,
+          { peer: "worker-A", direction: "reverse" }
+        )
+
+        // worker-A drains worker-B's /replog?caller=worker-A.
+        const replLog = yield* ReplLog
+        const result = yield* puller.applyStream(
+          "worker-B",
+          replLog.stream("worker-A", 0, { drainOnly: true })
+        )
+        expect(result.framesApplied).toBe(1)
+
+        // Reverse entry landed in worker-A's own pri: partition.
+        const priBody = MutableHashMap.get(
+          consumer,
+          AtomicWriter.callKey("pri", "worker-A", callRef)
+        )
+        expect(Option.isSome(priBody)).toBe(true)
+
+        // It did NOT land in bak:worker-B: (that would be the forward
+        // direction's target).
+        const bakBody = MutableHashMap.get(
+          consumer,
+          AtomicWriter.callKey("bak", "worker-B", callRef)
+        )
+        expect(Option.isSome(bakBody)).toBe(false)
+      }).pipe(Effect.provide(producer.layer))
+    }
+  )
+
+  it.effect(
+    "forward and reverse entries from the same peer route to different partitions on the consumer",
+    () => {
+      const producer = setupProducer("worker-B")
+      const consumer = consumerStore()
+      const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
+      const puller = ReplPuller.makeMemoryUnsafe(
+        consumer,
+        consumerWriter,
+        "worker-A"
+      )
+
+      const fwdRef = "worker-B|cid-F|tag-F"
+      const revRef = "worker-A|cid-R|tag-R"
+      const fwdBody = {
+        callRef: fwdRef,
+        aLeg: { callId: "cid-F", fromTag: "tag-F" },
+        bLegs: [],
+      }
+      const revBody = {
+        callRef: revRef,
+        aLeg: { callId: "cid-R", fromTag: "tag-R" },
+        bLegs: [],
+      }
+
+      return Effect.gen(function* () {
+        const writer = yield* AtomicWriter
+        // Forward: worker-B is primary for fwdRef, worker-A is its backup.
+        yield* writer.put(
+          "pri",
+          "worker-B",
+          fwdRef,
+          JSON.stringify(fwdBody),
+          [],
+          60,
+          { peer: "worker-A", direction: "forward" }
+        )
+        // Reverse: worker-B is acting as backup-on-behalf-of worker-A
+        // for revRef.
+        yield* writer.put(
+          "bak",
+          "worker-A",
+          revRef,
+          JSON.stringify(revBody),
+          [],
+          60,
+          { peer: "worker-A", direction: "reverse" }
+        )
+
+        const replLog = yield* ReplLog
+        const result = yield* puller.applyStream(
+          "worker-B",
+          replLog.stream("worker-A", 0, { drainOnly: true })
+        )
+        expect(result.framesApplied).toBe(2)
+
+        // Forward landed in bak:worker-B: on worker-A.
+        expect(
+          Option.isSome(
+            MutableHashMap.get(
+              consumer,
+              AtomicWriter.callKey("bak", "worker-B", fwdRef)
+            )
+          )
+        ).toBe(true)
+        // Reverse landed in pri:worker-A: on worker-A.
+        expect(
+          Option.isSome(
+            MutableHashMap.get(
+              consumer,
+              AtomicWriter.callKey("pri", "worker-A", revRef)
+            )
+          )
+        ).toBe(true)
+      }).pipe(Effect.provide(producer.layer))
+    }
+  )
 })

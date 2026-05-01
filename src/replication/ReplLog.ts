@@ -45,6 +45,7 @@ import {
   PartitionedRelayStorage,
   type StorageError,
 } from "../cache/PartitionedRelayStorage.js"
+import type { PropagateDirection } from "./AtomicWriter.js"
 import { EpochCounter } from "./EpochCounter.js"
 import {
   PropagateStream,
@@ -63,6 +64,15 @@ export type ReplLogFrame =
       readonly seq: number
       readonly callRef: string
       readonly state: unknown | null
+      /**
+       * Slice 2.4 propagate-direction tag. `forward` = emitter was the
+       * call's primary writing to a backup peer (caller); `reverse` =
+       * emitter was acting as backup-on-behalf-of caller (the original
+       * primary), so the consumer should apply to `pri:{self}:` rather
+       * than `bak:{emitter}:`. Default forward for backward compat with
+       * any drained-but-not-yet-rewritten producer state.
+       */
+      readonly direction: PropagateDirection
     }
   | { readonly type: "caught_up"; readonly at_seq: number }
   | { readonly type: "heartbeat"; readonly seq: number }
@@ -142,19 +152,16 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
       const notifier = yield* WriteNotifier
       const counter = yield* EpochCounter
 
-      // The call-body lookup uses the *primary* role — when the local
-      // worker emits an entry to a backup peer, the call is owned
-      // locally as "pri:{owner}:call:{ref}". We derive owner = our
-      // EpochCounter's owner. (Reverse-propagate case — the local
-      // worker is serving a request as backup and updates
-      // "bak:{w_pri}:call:{ref}" so the original primary recovers it
-      // on reboot — uses the same emit path with role/owner derived at
-      // write time and a `direction: "reverse"` tag on the entry.
-      // See docs/replication/call-cache-backup.md §0 for the invariant
-      // this preserves; the backup never moves the call into its own
-      // pri:. Slice 2.4 of the k8s-reliability rework adds the
-      // direction field to the wire format; Slice 3 assumes
-      // primary-side emission only.)
+      // Slice 2.4 direction-aware body lookup. Forward entries: the
+      // emitter is the call's primary, body lives at
+      // `pri:{ownerOrdinal}:call:{ref}` locally. Reverse entries: the
+      // emitter is acting as backup-on-behalf-of `caller` (the
+      // original primary, currently down or recovering), so the body
+      // lives at `bak:{caller}:call:{ref}` locally. The consumer
+      // (caller's ReplPuller) routes the apply to `pri:{caller}:` —
+      // i.e. its own pri partition — when it sees `direction:
+      // "reverse"` on the wire. The backup never moves the call into
+      // its own `pri:` (single-owner invariant, spec §0).
       const ownerOrdinal = counter.owner
 
       const stream = (
@@ -180,11 +187,18 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
           }).pipe(Effect.orElseSucceed(() => null))
 
         const fetchState = (
-          callRef: string
+          callRef: string,
+          direction: PropagateDirection
         ): Effect.Effect<unknown | null, ReplLogStreamError> =>
           Effect.gen(function* () {
+            // Forward emission ⇒ local worker is primary, body lives in
+            // pri:{ownerOrdinal}. Reverse emission ⇒ local worker is
+            // acting as backup for `caller` (the original primary) and
+            // the up-to-date body lives in bak:{caller}.
+            const role = direction === "forward" ? "pri" : "bak"
+            const owner = direction === "forward" ? ownerOrdinal : caller
             const raw = yield* storage
-              .getCall("pri", ownerOrdinal, callRef)
+              .getCall(role, owner, callRef)
               .pipe(Effect.mapError(wrapStorageErr))
             if (raw === null) return null
             return yield* safeParse(raw)
@@ -210,13 +224,14 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
               }
               const entryFrames = Stream.fromIterable(backlog).pipe(
                 Stream.mapEffect((e) =>
-                  fetchState(e.callRef).pipe(
+                  fetchState(e.callRef, e.direction).pipe(
                     Effect.map(
                       (state): ReplLogFrame => ({
                         type: "entry",
                         seq: e.seq,
                         callRef: e.callRef,
                         state,
+                        direction: e.direction,
                       })
                     )
                   )
@@ -239,13 +254,14 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
           notifier.subscribe.pipe(
             Stream.filter((n) => n.peer === caller),
             Stream.mapEffect((n) =>
-              fetchState(n.callRef).pipe(
+              fetchState(n.callRef, n.direction).pipe(
                 Effect.map(
                   (state): ReplLogFrame => ({
                     type: "entry",
                     seq: n.seq,
                     callRef: n.callRef,
                     state,
+                    direction: n.direction,
                   })
                 )
               )

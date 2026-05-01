@@ -31,7 +31,9 @@ import { AppConfig } from "../config/AppConfig.js"
 import { RedisClient } from "../redis/RedisClient.js"
 import {
   AtomicWriter,
+  parsePropagateMember,
   type MemoryStore,
+  type PropagateDirection,
 } from "./AtomicWriter.js"
 
 // ---------------------------------------------------------------------------
@@ -44,10 +46,17 @@ export class PropagateStreamError extends Data.TaggedError(
   readonly reason: string
 }> {}
 
-/** One entry in the sorted set, returned in seq-ascending order. */
+/**
+ * One entry in the sorted set, returned in seq-ascending order.
+ * `direction` is the slice-2.4 tag decoded from the member prefix
+ * (`f:{callRef}` → forward, `r:{callRef}` → reverse). Members that
+ * fail to decode (legacy un-tagged form, never emitted by the
+ * post-slice-2 producer) are skipped during read.
+ */
 export interface PropagateEntry {
   readonly callRef: string
   readonly seq: number
+  readonly direction: PropagateDirection
 }
 
 export interface PropagateStreamApi {
@@ -121,9 +130,15 @@ export class PropagateStream extends ServiceMap.Service<
             }).zrangebyscore(fullKey, ...args)
             const out: Array<PropagateEntry> = []
             for (let i = 0; i < flat.length; i += 2) {
-              const callRef = flat[i]!
+              const member = flat[i]!
               const seq = Number(flat[i + 1])
-              out.push({ callRef, seq })
+              const decoded = parsePropagateMember(member)
+              if (decoded === null) continue
+              out.push({
+                callRef: decoded.callRef,
+                seq,
+                direction: decoded.direction,
+              })
             }
             return out
           },
@@ -206,8 +221,15 @@ const makeMemoryUnsafe = (store: MemoryStore): PropagateStreamApi => {
       return yield* Effect.sync(() => {
         const set = liveSet(store, peer, ms)
         const all: Array<PropagateEntry> = []
-        for (const [callRef, seq] of Object.entries(set)) {
-          if (seq > sinceSeq) all.push({ callRef, seq })
+        for (const [member, seq] of Object.entries(set)) {
+          if (seq <= sinceSeq) continue
+          const decoded = parsePropagateMember(member)
+          if (decoded === null) continue
+          all.push({
+            callRef: decoded.callRef,
+            seq,
+            direction: decoded.direction,
+          })
         }
         all.sort((a, b) => a.seq - b.seq)
         if (limit !== undefined && limit > 0 && all.length > limit) {

@@ -1,10 +1,12 @@
 /**
  * ReplPuller — long-poll consumer that drains a peer's
  * `/replog?caller={self}` stream and applies entries to the local
- * sidecar's `bak:{peer}:` partition.
+ * sidecar.
  *
- * Slice 4 deliverable. Spec §7.3 (re-entrancy) and §6 (propagate
- * lifecycle) are the contract.
+ * Slice 4 deliverable; slice 2.5 of the k8s-reliability rework adds
+ * direction-aware apply routing. Spec §7.3 (re-entrancy) and §6
+ * (propagate lifecycle) are the contract; spec §0 (single-owner
+ * invariant) governs the apply target by direction.
  *
  * What this service does
  * ----------------------
@@ -15,10 +17,16 @@
  *      against P's worker. Read the `hello` frame.
  *   3. If `hello.epoch !== replpos.epoch`, reset `lastSeq=0` and reopen
  *      with `since=0` (full resync). Persist the new epoch.
- *   4. For each `entry` frame:
- *        - `state === null` ⇒ AtomicWriter.delete on local sidecar
- *          under role=bak, owner=P, callRef=entry.callRef.
- *        - `state !== null` ⇒ AtomicWriter.put with the streamed JSON.
+ *   4. For each `entry` frame, route the apply by `direction`:
+ *        - `forward` (peer was primary, self holds backup):
+ *            put/delete under role=bak, owner=P. Existing behaviour.
+ *        - `reverse` (peer was backup-on-our-behalf, self is the
+ *            original primary returning from an outage): put/delete
+ *            under role=pri, owner=selfOrdinal. The local
+ *            `pri:{self}:` partition rebuilds with whatever updates
+ *            the peer wrote while serving as our backup. The peer
+ *            never moves the call into its own pri: — single-owner
+ *            invariant (spec §0) preserved.
  *      After each successful apply, persist `replpos.lastSeq = entry.seq`.
  *   5. `caught_up` ⇒ initial drain finished (used by ReadyGate gating).
  *   6. `heartbeat` ⇒ no-op on the apply side; freshens
@@ -45,12 +53,14 @@ import {
   Stream,
 } from "effect"
 import { callIndexKeysFromUnknown } from "../call/CallModel.js"
+import { AppConfig } from "../config/AppConfig.js"
 import { RedisClient } from "../redis/RedisClient.js"
 import {
   AtomicWriter,
   type AtomicWriterApi,
   type AtomicWriterError,
   type MemoryStore,
+  type PropagateDirection,
 } from "./AtomicWriter.js"
 
 // ---------------------------------------------------------------------------
@@ -67,6 +77,13 @@ interface EntryFrame {
   readonly seq: number
   readonly callRef: string
   readonly state: unknown | null
+  /**
+   * Slice 2.4 propagate-direction tag. Optional on the wire for
+   * backward compatibility with any in-flight pre-slice-2 producer;
+   * the apply path treats `undefined` as `"forward"` to preserve the
+   * pre-rework behaviour.
+   */
+  readonly direction?: PropagateDirection | undefined
 }
 interface CaughtUpFrame {
   readonly type: "caught_up"
@@ -128,20 +145,24 @@ export class ReplPuller extends ServiceMap.Service<ReplPuller, ReplPullerApi>()(
   "@sipjsserver/replication/ReplPuller"
 ) {
   /**
-   * Memory-layer factory. `selfOrdinal` identifies the local worker —
-   * applies write to `bak:{peer}:` partitions of THIS worker's sidecar
-   * (the peer's primary copy lives on its own sidecar; we hold the
-   * backup copy here under the peer's ordinal).
+   * Memory-layer factory. `selfOrdinal` identifies the local worker
+   * (consumer): forward entries apply to `bak:{peer}:` (peer is the
+   * caller of the upstream `/replog` — i.e. the producer worker);
+   * reverse entries apply to `pri:{selfOrdinal}:` so a returning
+   * primary recovers its own state from a peer that was acting as
+   * backup-on-its-behalf.
    */
   static readonly makeMemoryUnsafe = (
     store: MemoryStore,
-    writer: AtomicWriterApi
-  ): ReplPullerApi => makeFromStores(memoryPosStore(store), writer)
+    writer: AtomicWriterApi,
+    selfOrdinal: string
+  ): ReplPullerApi =>
+    makeFromStores(memoryPosStore(store), writer, selfOrdinal)
 
   /**
-   * Production: backed by RedisClient (for `replpos:{peer}` bookkeeping)
-   * and the existing AtomicWriter service (for write apply). Both are
-   * required upstream.
+   * Production: backed by RedisClient (for `replpos:{peer}` bookkeeping),
+   * the existing AtomicWriter service (for write apply), and AppConfig
+   * (to resolve `selfOrdinal` for the reverse-direction apply path).
    *
    * `replpos:{peer}` lives in the local sidecar as a plain string holding
    * a JSON-encoded `ReplPos`. No TTL — this is small, persistent
@@ -153,12 +174,22 @@ export class ReplPuller extends ServiceMap.Service<ReplPuller, ReplPullerApi>()(
   static readonly redisLayer: Layer.Layer<
     ReplPuller,
     never,
-    RedisClient | AtomicWriter
+    RedisClient | AtomicWriter | AppConfig
   > = Layer.effect(
     ReplPuller,
     Effect.gen(function* () {
       const redis = yield* RedisClient
       const writer = yield* AtomicWriter
+      const config = yield* AppConfig
+      // Slice 2.5: same selfOrdinal resolution rule as CallState so
+      // the reverse-direction apply path lands in the correct
+      // `pri:{selfOrdinal}:` partition on this worker's sidecar.
+      const selfOrdinal =
+        config.workerOrdinalLabel !== undefined
+          ? config.workerOrdinalLabel
+          : config.workerIndex >= 0
+            ? String(config.workerIndex)
+            : "self"
 
       const posStore: ReplPosStore = {
         read: (peer) =>
@@ -193,7 +224,7 @@ export class ReplPuller extends ServiceMap.Service<ReplPuller, ReplPullerApi>()(
           }),
       }
 
-      return makeFromStores(posStore, writer)
+      return makeFromStores(posStore, writer, selfOrdinal)
     })
   )
 }
@@ -302,7 +333,8 @@ const memoryPosStore = (store: MemoryStore): ReplPosStore => ({
 
 const makeFromStores = (
   posStore: ReplPosStore,
-  writer: AtomicWriterApi
+  writer: AtomicWriterApi,
+  selfOrdinal: string
 ): ReplPullerApi => {
   const readPos = (peer: string): Effect.Effect<ReplPos> => posStore.read(peer)
 
@@ -318,8 +350,12 @@ const makeFromStores = (
   // the indexes for a delete event, so we remember them locally instead.
   // Bounded by the number of currently-replicated callRefs.
   const indexCache = MutableHashMap.empty<string, ReadonlyArray<string>>()
-  const indexCacheKey = (peer: string, callRef: string): string =>
-    `${peer} ${callRef}`
+  const indexCacheKey = (
+    peer: string,
+    direction: PropagateDirection,
+    callRef: string
+  ): string =>
+    `${peer}|${direction}|${callRef}`
 
   const applyStream = (
     peer: string,
@@ -353,17 +389,26 @@ const makeFromStores = (
               case "entry": {
                 // Idempotent: skip already-applied entries.
                 if (frame.seq <= currentPos.lastSeq) return
+                // Slice 2.5 direction-aware apply target. Forward
+                // (default) applies to bak:{peer}: on this worker;
+                // reverse applies to pri:{self}: so a returning
+                // primary recovers state the peer wrote while serving
+                // as backup-on-our-behalf.
+                const direction: PropagateDirection =
+                  frame.direction ?? "forward"
+                const role = direction === "forward" ? "bak" : "pri"
+                const owner = direction === "forward" ? peer : selfOrdinal
                 if (frame.state === null) {
                   // Recover the index set from the cache populated by
                   // the prior put apply. If absent (long downtime,
                   // out-of-order receipt without prior put) we fall
-                  // back to no-index DEL — the bak: call body is
-                  // removed and orphaned idx:* keys TTL out within one
+                  // back to no-index DEL — the call body is removed
+                  // and orphaned idx:* keys TTL out within one
                   // call-TTL window.
-                  const cacheKey = indexCacheKey(peer, frame.callRef)
+                  const cacheKey = indexCacheKey(peer, direction, frame.callRef)
                   const cached = MutableHashMap.get(indexCache, cacheKey)
                   const indexes = Option.isSome(cached) ? cached.value : []
-                  yield* writer.delete("bak", peer, frame.callRef, indexes)
+                  yield* writer.delete(role, owner, frame.callRef, indexes)
                   if (Option.isSome(cached)) {
                     MutableHashMap.remove(indexCache, cacheKey)
                   }
@@ -376,8 +421,8 @@ const makeFromStores = (
                   // `docs/plan/bye-takeover-replicated-indexes-fix.md`.
                   const indexes = callIndexKeysFromUnknown(frame.state)
                   yield* writer.put(
-                    "bak",
-                    peer,
+                    role,
+                    owner,
                     frame.callRef,
                     json,
                     indexes,
@@ -385,7 +430,7 @@ const makeFromStores = (
                   )
                   MutableHashMap.set(
                     indexCache,
-                    indexCacheKey(peer, frame.callRef),
+                    indexCacheKey(peer, direction, frame.callRef),
                     indexes
                   )
                 }

@@ -124,7 +124,7 @@ describe("ReadyGate — happy path", () => {
   it.effect("all peers drain to caught_up; readiness flips; unreconciled empty", () => {
     const consumer = consumerStore()
     const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
-    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter, "worker-B")
     const probe = readinessProbe()
 
     // Two peers, each with one entry in their propagate set.
@@ -183,7 +183,7 @@ describe("ReadyGate — empty cluster", () => {
   it.effect("no peers: readiness flips immediately, both lists empty", () => {
     const consumer = consumerStore()
     const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
-    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter, "worker-B")
     const probe = readinessProbe()
     const ReplogClientLayer = Layer.sync(ReplogClient, () => ({
       streamFromPeer: () => Stream.empty,
@@ -214,7 +214,7 @@ describe("ReadyGate — 30 s ceiling", () => {
   it.effect("a peer whose stream never ends is recorded as unreconciled", () => {
     const consumer = consumerStore()
     const consumerWriter = AtomicWriter.makeMemoryUnsafe(consumer)
-    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter)
+    const puller = ReplPuller.makeMemoryUnsafe(consumer, consumerWriter, "worker-B")
     const probe = readinessProbe()
 
     // Stream.never never produces a frame ⇒ caught_up never seen.

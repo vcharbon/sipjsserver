@@ -65,9 +65,10 @@ describe("AtomicWriter (memory) — propagate ZADD compaction", () => {
         lastResult = result
       }
       const set = readSet(store, "worker-B")
-      expect(Object.keys(set)).toEqual(["call-1"])
-      // Final seq should be 50 (INCR from 1..50 across 50 puts).
-      expect(set["call-1"]).toBe(50)
+      // Slice 2.4: members are direction-tagged (`f:` for forward).
+      // 50 forward writes still compact to a single member.
+      expect(Object.keys(set)).toEqual(["f:call-1"])
+      expect(set["f:call-1"]).toBe(50)
       expect(lastResult).not.toBeNull()
       expect(lastResult!.seq).toBe(50)
     })
@@ -86,8 +87,8 @@ describe("AtomicWriter (memory) — propagate ZADD compaction", () => {
         peer: "worker-B",
       })
       const set = readSet(store, "worker-B")
-      expect(set["ref-1"]).toBe(3)
-      expect(set["ref-2"]).toBe(2)
+      expect(set["f:ref-1"]).toBe(3)
+      expect(set["f:ref-2"]).toBe(2)
     })
   )
 
@@ -200,4 +201,55 @@ describe("PropagateStream — read-side over the same store", () => {
       expect(yield* stream.head("worker-B")).toBe(0)
     }).pipe(Effect.provide(PropagateStream.memoryLayerFromStore(store)))
   })
+})
+
+describe("Slice 2.4 — direction-tagged propagate members", () => {
+  it.effect("forward and reverse writes for the same callRef coexist as distinct members", () =>
+    Effect.gen(function* () {
+      const { store, writer } = setupMemory()
+      // Forward: this worker is primary for "call-1" with backup "worker-B".
+      yield* writer.put("pri", "worker-A", "call-1", "{}", [], 60, {
+        peer: "worker-B",
+        direction: "forward",
+      })
+      // Reverse: this worker is acting as backup for some other primary
+      // "worker-Z" on a different call "call-Z", propagating back so
+      // worker-Z recovers it on reboot.
+      yield* writer.put("bak", "worker-Z", "call-Z", "{}", [], 60, {
+        peer: "worker-Z",
+        direction: "reverse",
+      })
+      const setB = readSet(store, "worker-B")
+      const setZ = readSet(store, "worker-Z")
+      expect(setB["f:call-1"]).toBe(1)
+      expect(setZ["r:call-Z"]).toBe(1)
+    })
+  )
+
+  it.effect("PropagateStream.read surfaces direction decoded from the member prefix", () =>
+    Effect.gen(function* () {
+      const { store, writer } = setupMemory()
+      yield* writer.put("pri", "worker-A", "fwd-1", "{}", [], 60, {
+        peer: "worker-B",
+        direction: "forward",
+      })
+      yield* writer.put("bak", "worker-B", "rev-1", "{}", [], 60, {
+        peer: "worker-B",
+        direction: "reverse",
+      })
+      yield* Effect.provide(
+        Effect.gen(function* () {
+          const stream = yield* PropagateStream
+          const entries = yield* stream.read("worker-B", 0)
+          // Both entries are present; each carries its decoded direction.
+          const byRef = new Map(entries.map((e) => [e.callRef, e]))
+          expect(byRef.get("fwd-1")?.direction).toBe("forward")
+          expect(byRef.get("rev-1")?.direction).toBe("reverse")
+          expect(byRef.get("fwd-1")?.seq).toBe(1)
+          expect(byRef.get("rev-1")?.seq).toBe(2)
+        }),
+        PropagateStream.memoryLayerFromStore(store)
+      )
+    })
+  )
 })

@@ -50,6 +50,59 @@ import { WriteNotifier, type WriteNotifierApi } from "./WriteNotifier.js"
 
 export type PartitionRole = "pri" | "bak"
 
+/**
+ * Direction tag embedded in every `propagate:{peer}` member (slice 2.4
+ * of the k8s-reliability rework). Forward = local worker is the call's
+ * primary writing to a backup peer; reverse = local worker is acting
+ * as backup-on-behalf-of the original primary, propagating updates back
+ * so the primary's ReadyGate drain rebuilds `pri:{self}:` on reboot.
+ *
+ * Per the single-owner invariant a given callRef has a fixed role on
+ * any given worker, so a callRef never appears in both directions in
+ * the same `propagate:{peer}` set. The direction tag exists so the
+ * receiver can route the apply correctly:
+ *   - forward → `bak:{caller}:call:{ref}`  (existing)
+ *   - reverse → `pri:{self}:call:{ref}`    (slice 2.5 new branch)
+ */
+export type PropagateDirection = "forward" | "reverse"
+
+/** Compact prefix used in the propagate-set member encoding. */
+const directionTag = (d: PropagateDirection): "f" | "r" =>
+  d === "forward" ? "f" : "r"
+
+/**
+ * Build the propagate-set member string `${tag}:${callRef}` so a
+ * single ZSET can carry forward and reverse entries side by side
+ * without member collision while still preserving ZADD-replaces-score
+ * compaction per (direction, callRef) pair.
+ */
+export const propagateMember = (
+  direction: PropagateDirection,
+  callRef: string
+): string => `${directionTag(direction)}:${callRef}`
+
+/**
+ * Decode a propagate-set member back into `(direction, callRef)`.
+ * Returns `null` for legacy un-tagged members (pre-slice-2.4 wire
+ * format) so the consumer can either treat them as `forward` for
+ * backward compatibility or skip them with a warning. Production
+ * sidecars are emptyDir (cleared on pod restart) so the legacy form
+ * never persists across deploys.
+ */
+export const parsePropagateMember = (
+  member: string
+):
+  | { direction: PropagateDirection; callRef: string }
+  | null => {
+  if (member.length < 2 || member[1] !== ":") return null
+  const tag = member[0]
+  if (tag !== "f" && tag !== "r") return null
+  return {
+    direction: tag === "f" ? "forward" : "reverse",
+    callRef: member.slice(2),
+  }
+}
+
 /** Default sliding TTL on `propagate:{peer}` and `propagate_seq:{peer}`. */
 export const DEFAULT_PROPAGATE_SET_TTL_SEC = 3600
 
@@ -68,11 +121,16 @@ export class AtomicWriterError extends Data.TaggedError(
 /**
  * Options shared by every write API. `peer` is undefined for calls
  * without an LB-assigned backup; `propagateSetTtlSec` defaults to
- * `DEFAULT_PROPAGATE_SET_TTL_SEC` when omitted.
+ * `DEFAULT_PROPAGATE_SET_TTL_SEC` when omitted. `direction` defaults
+ * to `"forward"` (the role==="pri" case) — set explicitly to
+ * `"reverse"` from CallState's role==="bak" path so the primary's
+ * ReadyGate drain routes the entry to `pri:{self}:` rather than
+ * `bak:{caller}:`.
  */
 export interface PeerWriteOptions {
   readonly peer?: string | undefined
   readonly propagateSetTtlSec?: number | undefined
+  readonly direction?: PropagateDirection | undefined
 }
 
 export interface AtomicWriterApi {
@@ -193,11 +251,17 @@ return 1
 
   /**
    * PUT (with peer). KEYS = [callKey, idx1..idxK, propSet, propSeq, epochKey]
-   * ARGV = [ttlSec, json, callRef, propagateSetTtlSec]. Returns [seq, epoch].
+   * ARGV = [ttlSec, json, callRef, propagateSetTtlSec, propagateMember].
+   * Returns [seq, epoch].
+   *
+   * `propagateMember` is the slice-2.4 direction-tagged member string
+   * (`f:{callRef}` for forward, `r:{callRef}` for reverse) so the
+   * sorted set can carry both directions without collision.
    */
   static readonly PUT_WITH_PEER_LUA = `
 local ttl = tonumber(ARGV[1])
 local prop_ttl = tonumber(ARGV[4])
+local prop_member = ARGV[5]
 local idx_end = #KEYS - 3
 local prop_set = KEYS[#KEYS - 2]
 local prop_seq = KEYS[#KEYS - 1]
@@ -215,18 +279,20 @@ if not epoch then
   redis.call("SET", epoch_k, "1")
   epoch = "1"
 end
-redis.call("ZADD", prop_set, seq, ARGV[3])
+redis.call("ZADD", prop_set, seq, prop_member)
 redis.call("EXPIRE", prop_set, prop_ttl)
 return { seq, tonumber(epoch) }
 `
 
   /**
    * REFRESH (with peer). KEYS = [callKey, idx1..idxK, propSet, propSeq, epochKey]
-   * ARGV = [ttlSec, callRef, propagateSetTtlSec]. Returns [seq, epoch].
+   * ARGV = [ttlSec, callRef, propagateSetTtlSec, propagateMember].
+   * Returns [seq, epoch].
    */
   static readonly REFRESH_WITH_PEER_LUA = `
 local ttl = tonumber(ARGV[1])
 local prop_ttl = tonumber(ARGV[3])
+local prop_member = ARGV[4]
 local idx_end = #KEYS - 3
 local prop_set = KEYS[#KEYS - 2]
 local prop_seq = KEYS[#KEYS - 1]
@@ -243,14 +309,14 @@ if not epoch then
   redis.call("SET", epoch_k, "1")
   epoch = "1"
 end
-redis.call("ZADD", prop_set, seq, ARGV[2])
+redis.call("ZADD", prop_set, seq, prop_member)
 redis.call("EXPIRE", prop_set, prop_ttl)
 return { seq, tonumber(epoch) }
 `
 
   /**
    * DELETE (with peer). KEYS = [callKey, idx1..idxK, propSet, propSeq, epochKey]
-   * ARGV = [callRef, propagateSetTtlSec]. Returns [seq, epoch].
+   * ARGV = [callRef, propagateSetTtlSec, propagateMember]. Returns [seq, epoch].
    *
    * Slice 2 implementation hard-deletes the call key (matching pre-Slice-1
    * semantics). Slice 5 will switch to the tombstone retention path
@@ -258,6 +324,7 @@ return { seq, tonumber(epoch) }
    */
   static readonly DELETE_WITH_PEER_LUA = `
 local prop_ttl = tonumber(ARGV[2])
+local prop_member = ARGV[3]
 local idx_end = #KEYS - 3
 local prop_set = KEYS[#KEYS - 2]
 local prop_seq = KEYS[#KEYS - 1]
@@ -274,7 +341,7 @@ if not epoch then
   redis.call("SET", epoch_k, "1")
   epoch = "1"
 end
-redis.call("ZADD", prop_set, seq, ARGV[1])
+redis.call("ZADD", prop_set, seq, prop_member)
 redis.call("EXPIRE", prop_set, prop_ttl)
 return { seq, tonumber(epoch) }
 `
@@ -318,11 +385,19 @@ return { seq, tonumber(epoch) }
         owner: string,
         peer: string,
         callRef: string,
+        direction: PropagateDirection,
         result: AtomicWriteResult | null
       ): Effect.Effect<AtomicWriteResult | null> => {
         if (result === null) return Effect.succeed(null)
         return notifier
-          .publish({ owner, peer, callRef, seq: result.seq, epoch: result.epoch })
+          .publish({
+            owner,
+            peer,
+            callRef,
+            seq: result.seq,
+            epoch: result.epoch,
+            direction,
+          })
           .pipe(Effect.as(result))
       }
 
@@ -337,6 +412,7 @@ return { seq, tonumber(epoch) }
       ) => {
         const peer = opts?.peer
         const setTtl = opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        const direction: PropagateDirection = opts?.direction ?? "forward"
         if (peer === undefined || peer.length === 0) {
           const keys = buildBareKeys(role, owner, callRef, indexes)
           return redis
@@ -344,17 +420,19 @@ return { seq, tonumber(epoch) }
             .pipe(Effect.mapError(wrapWriterErr), Effect.as(null))
         }
         const keys = buildPeerKeys(role, owner, callRef, indexes, peer)
+        const member = propagateMember(direction, callRef)
         return redis
           .eval(AtomicWriter.PUT_WITH_PEER_LUA, keys, [
             ttlSec,
             json,
             callRef,
             setTtl,
+            member,
           ])
           .pipe(
             Effect.mapError(wrapWriterErr),
             Effect.map(parseLuaPair),
-            Effect.flatMap((r) => announce(owner, peer, callRef, r))
+            Effect.flatMap((r) => announce(owner, peer, callRef, direction, r))
           )
       }
 
@@ -368,6 +446,7 @@ return { seq, tonumber(epoch) }
       ) => {
         const peer = opts?.peer
         const setTtl = opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        const direction: PropagateDirection = opts?.direction ?? "forward"
         if (peer === undefined || peer.length === 0) {
           const keys = buildBareKeys(role, owner, callRef, indexes)
           return redis
@@ -375,16 +454,18 @@ return { seq, tonumber(epoch) }
             .pipe(Effect.mapError(wrapWriterErr), Effect.as(null))
         }
         const keys = buildPeerKeys(role, owner, callRef, indexes, peer)
+        const member = propagateMember(direction, callRef)
         return redis
           .eval(AtomicWriter.REFRESH_WITH_PEER_LUA, keys, [
             ttlSec,
             callRef,
             setTtl,
+            member,
           ])
           .pipe(
             Effect.mapError(wrapWriterErr),
             Effect.map(parseLuaPair),
-            Effect.flatMap((r) => announce(owner, peer, callRef, r))
+            Effect.flatMap((r) => announce(owner, peer, callRef, direction, r))
           )
       }
 
@@ -397,6 +478,7 @@ return { seq, tonumber(epoch) }
       ) => {
         const peer = opts?.peer
         const setTtl = opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        const direction: PropagateDirection = opts?.direction ?? "forward"
         if (peer === undefined || peer.length === 0) {
           const keys = buildBareKeys(role, owner, callRef, indexes)
           return redis
@@ -404,12 +486,17 @@ return { seq, tonumber(epoch) }
             .pipe(Effect.mapError(wrapWriterErr), Effect.as(null))
         }
         const keys = buildPeerKeys(role, owner, callRef, indexes, peer)
+        const member = propagateMember(direction, callRef)
         return redis
-          .eval(AtomicWriter.DELETE_WITH_PEER_LUA, keys, [callRef, setTtl])
+          .eval(AtomicWriter.DELETE_WITH_PEER_LUA, keys, [
+            callRef,
+            setTtl,
+            member,
+          ])
           .pipe(
             Effect.mapError(wrapWriterErr),
             Effect.map(parseLuaPair),
-            Effect.flatMap((r) => announce(owner, peer, callRef, r))
+            Effect.flatMap((r) => announce(owner, peer, callRef, direction, r))
           )
       }
 
@@ -595,17 +682,17 @@ const writePropagateSet = (
   })
 }
 
-/** Compact (ZADD-replaces-score): same callRef updates seq in place. */
+/** Compact (ZADD-replaces-score): same (direction, callRef) updates seq in place. */
 const propagateZAdd = (
   store: MemoryStore,
   peer: string,
-  callRef: string,
+  member: string,
   seq: number,
   setTtlSec: number,
   nowMs: number
 ): void => {
   const view = readPropagateSet(store, peer, nowMs)
-  view.entries[callRef] = seq
+  view.entries[member] = seq
   writePropagateSet(store, peer, view, setTtlSec, nowMs)
 }
 
@@ -629,6 +716,7 @@ const makeMemoryUnsafe = (
     owner: string,
     peer: string,
     callRef: string,
+    direction: PropagateDirection,
     result: AtomicWriteResult | null
   ): Effect.Effect<AtomicWriteResult | null> => {
     if (result === null || notifier === undefined) {
@@ -641,6 +729,7 @@ const makeMemoryUnsafe = (
         callRef,
         seq: result.seq,
         epoch: result.epoch,
+        direction,
       })
       .pipe(Effect.as(result))
   }
@@ -660,6 +749,7 @@ const makeMemoryUnsafe = (
         const peer = opts?.peer
         const setTtl =
           opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        const direction: PropagateDirection = opts?.direction ?? "forward"
         const result = yield* Effect.sync(() => {
           const expiresAtMs = ms + ttlSec * 1000
           putEntry(store, AtomicWriter.callKey(role, owner, callRef), {
@@ -675,11 +765,18 @@ const makeMemoryUnsafe = (
           if (peer === undefined || peer.length === 0) return null
           const epoch = ensureEpoch(store, owner)
           const seq = incrSeq(store, peer, setTtl, ms)
-          propagateZAdd(store, peer, callRef, seq, setTtl, ms)
+          propagateZAdd(
+            store,
+            peer,
+            propagateMember(direction, callRef),
+            seq,
+            setTtl,
+            ms
+          )
           return { seq, epoch } satisfies AtomicWriteResult
         })
         if (peer !== undefined && peer.length > 0) {
-          return yield* announce(owner, peer, callRef, result)
+          return yield* announce(owner, peer, callRef, direction, result)
         }
         return result
       })
@@ -699,6 +796,7 @@ const makeMemoryUnsafe = (
         const peer = opts?.peer
         const setTtl =
           opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        const direction: PropagateDirection = opts?.direction ?? "forward"
         const result = yield* Effect.sync(() => {
           const newExpire = ms + ttlSec * 1000
           extendIfPresent(
@@ -713,11 +811,18 @@ const makeMemoryUnsafe = (
           if (peer === undefined || peer.length === 0) return null
           const epoch = ensureEpoch(store, owner)
           const seq = incrSeq(store, peer, setTtl, ms)
-          propagateZAdd(store, peer, callRef, seq, setTtl, ms)
+          propagateZAdd(
+            store,
+            peer,
+            propagateMember(direction, callRef),
+            seq,
+            setTtl,
+            ms
+          )
           return { seq, epoch } satisfies AtomicWriteResult
         })
         if (peer !== undefined && peer.length > 0) {
-          return yield* announce(owner, peer, callRef, result)
+          return yield* announce(owner, peer, callRef, direction, result)
         }
         return result
       })
@@ -736,6 +841,7 @@ const makeMemoryUnsafe = (
         const peer = opts?.peer
         const setTtl =
           opts?.propagateSetTtlSec ?? DEFAULT_PROPAGATE_SET_TTL_SEC
+        const direction: PropagateDirection = opts?.direction ?? "forward"
         const result = yield* Effect.sync(() => {
           removeEntry(store, AtomicWriter.callKey(role, owner, callRef))
           for (const idx of indexes) {
@@ -744,11 +850,18 @@ const makeMemoryUnsafe = (
           if (peer === undefined || peer.length === 0) return null
           const epoch = ensureEpoch(store, owner)
           const seq = incrSeq(store, peer, setTtl, ms)
-          propagateZAdd(store, peer, callRef, seq, setTtl, ms)
+          propagateZAdd(
+            store,
+            peer,
+            propagateMember(direction, callRef),
+            seq,
+            setTtl,
+            ms
+          )
           return { seq, epoch } satisfies AtomicWriteResult
         })
         if (peer !== undefined && peer.length > 0) {
-          return yield* announce(owner, peer, callRef, result)
+          return yield* announce(owner, peer, callRef, direction, result)
         }
         return result
       })
