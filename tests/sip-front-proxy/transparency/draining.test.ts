@@ -63,7 +63,7 @@ const fx = proxyFakeStack({
 
 describe("transparency: draining model (D5)", () => {
   it.effect(
-    "in-dialog requests stay on draining worker until grace; ACK exempt forever",
+    "in-dialog requests stay on draining worker until grace; post-grace ACK joins the fallback (slice 4)",
     () =>
       runProxyScenario(
         {
@@ -211,7 +211,14 @@ describe("transparency: draining model (D5)", () => {
           expect(postParsed.type).toBe("request")
           expect(yield* wA.poll()).toBeNull()
 
-          // ── 6. ACK exemption: ACK with the same cookie still goes to w-A
+          // ── 6. Post-grace ACK falls back to w-B along with everything else.
+          //
+          // Slice 4 fix: a post-grace draining primary no longer holds an
+          // ACK exemption. The reasoning that previously kept ACK pinned
+          // ("only the worker that owns the INVITE transaction can
+          // complete it") doesn't survive failover: after the post-grace
+          // re-INVITE was served by w-B, the ACK is for w-B's
+          // transaction. Routing it back to w-A would 481-storm.
           const ackToA = Buffer.from(
             [
               `ACK sip:bob@${W_A_ADDR.host}:${W_A_ADDR.port} SIP/2.0`,
@@ -230,14 +237,13 @@ describe("transparency: draining model (D5)", () => {
           )
           yield* alice.send(ackToA, PROXY.port, PROXY.host)
           yield* pumpFor(TRANSIT_MS, 2)
-          const ackAtA = yield* wA.poll()
-          expect(ackAtA).not.toBeNull()
-          const ackParsed = parse(ackAtA!.raw)
+          const ackAtB = yield* wB.poll()
+          expect(ackAtB).not.toBeNull()
+          const ackParsed = parse(ackAtB!.raw)
           if (ackParsed.type !== "request") throw new Error("expected ACK")
           expect(ackParsed.method).toBe("ACK")
-          // w-B must NOT receive the ACK (exemption keeps it on the
-          // original worker even past grace).
-          expect(yield* wB.poll()).toBeNull()
+          // w-A must NOT receive the post-grace ACK.
+          expect(yield* wA.poll()).toBeNull()
         })
       ).pipe(Effect.provide(fx.layer))
   )

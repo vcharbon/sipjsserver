@@ -412,15 +412,21 @@ export const LoadBalancerStrategyLive: Layer.Layer<
         const primary = primaryOpt.value
 
         // ── Routing matrix ──────────────────────────────────────────────
-        // ACK / CANCEL exemption: always reach the original primary.
-        // The downstream worker is the only entity that can complete the
-        // INVITE transaction (RFC 3261 §13.2.2.4 / §9.1, §16.10) — even
-        // a not-ready respawn primary still owns its in-flight UAS state
-        // and would otherwise see a 481-storm if we re-routed. Checked
-        // BEFORE the alive shortcut so an ACK/CANCEL on a respawned
-        // primary doesn't silently re-route through a fresh-pod guard
-        // promotion either.
-        if (isAckOrCancel(msg)) {
+        // ACK / CANCEL exemption: when the primary is alive, skip the
+        // fresh-pod-guard promotion below and forward directly. The
+        // downstream worker is the only entity that can complete the
+        // INVITE transaction (RFC 3261 §13.2.2.4 / §9.1, §16.10) — a
+        // respawn that's already healthy still owns its in-flight UAS
+        // state. Doing this BEFORE the freshPodGuard check avoids
+        // promoting an ACK/CANCEL onto the backup when the primary is
+        // perfectly capable of handling it.
+        //
+        // We deliberately do NOT exempt ACK/CANCEL when the primary is
+        // dead: after failover, the backup served the most recent
+        // (re-)INVITE and owns its transaction, so the ACK MUST reach
+        // the backup. Falling through to `tryBackup(...)` below covers
+        // this case correctly.
+        if (primary.health === "alive" && isAckOrCancel(msg)) {
           return DecodeResult.forward(primary.address)
         }
         if (primary.health === "alive") {

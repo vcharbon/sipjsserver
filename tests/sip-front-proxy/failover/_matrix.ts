@@ -170,17 +170,36 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
         aliceDialog.expect(c.method).reply(200)
         txn.expect(200)
       }
-    } else if (c.method === "REINVITE" || c.method === "PRACK") {
-      // re-INVITE and PRACK are deferred follow-ups. The 16 BYE /
-      // INFO / UPDATE / MESSAGE matrix entries cover the full
-      // single + double switch pipeline; re-INVITE adds an
-      // offer/answer-tracker concern (post-failover ACK doesn't
-      // relay) that needs its own root-cause investigation, and
-      // PRACK has to happen during INVITE setup (Require: 100rel)
-      // so the matrix's "post-failover in-dialog method" shape
-      // doesn't fit cleanly. See the slice-4 plan §"Out of scope".
+    } else if (c.method === "REINVITE") {
+      // Delayed-offer re-INVITE: alice sends INVITE without body,
+      // bob replies 200 with offer, alice ACKs with answer. Mirrors
+      // `aliceReInviteFragment` in tests/scenarios/reinvite.ts.
+      if (c.initiator === "alice") {
+        const txn = aliceDialog.send("INVITE")
+        txn.expect(100)
+        bobDialog
+          .expect("INVITE")
+          .reply(200, { overrides: { body: sdpOffer(undefined, 30001) } })
+        txn.expect(200)
+        aliceDialog.ack({
+          build: () => ({ body: sdpAnswer(undefined, { port: 30001 }) }),
+        })
+        bobDialog.expect("ACK")
+      } else {
+        const txn = bobDialog.send("INVITE")
+        txn.expect(100)
+        aliceDialog
+          .expect("INVITE")
+          .reply(200, { overrides: { body: sdpOffer(undefined, 30001) } })
+        txn.expect(200)
+        bobDialog.ack({
+          build: () => ({ body: sdpAnswer(undefined, { port: 30001 }) }),
+        })
+        aliceDialog.expect("ACK")
+      }
+    } else if (c.method === "PRACK") {
       throw new Error(
-        `buildFailoverScenario: method "${c.method}" deferred — see slice 4 plan follow-ups`
+        `buildFailoverScenario: method "PRACK" deferred — needs Require:100rel setup during INVITE`
       )
     } else {
       throw new Error(

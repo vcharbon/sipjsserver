@@ -723,14 +723,18 @@ function executeK8s(
       case "expectRoutedTo": {
         const minCount = a.minCount ?? 1
         const decision = a.decision as RoutingDecisionKind
-        const before = state.routingMetricsBaseline ?? {
+        // Per-decision baseline: each decision kind tracks its own
+        // rolling counter so back-to-back assertions on different
+        // decision kinds at the end of a scenario both observe the
+        // full scenario's delta from their respective starting points.
+        const baseline = state.routingMetricsBaseline ?? {
           decisionTotalsByKind: new Map<RoutingDecisionKind, number>(),
           promotedTotal: 0,
         }
         const after = yield* cluster.snapshotRoutingMetrics
         const delta =
           (after.decisionTotalsByKind.get(decision) ?? 0) -
-          (before.decisionTotalsByKind.get(decision) ?? 0)
+          (baseline.decisionTotalsByKind.get(decision) ?? 0)
         if (delta < minCount) {
           state.results.push(makeStepResult({
             stepIndex: index,
@@ -741,9 +745,19 @@ function executeK8s(
           }))
           return
         }
-        // Roll the baseline forward so the next assertion measures
-        // only what happens between this call and the next.
-        state.routingMetricsBaseline = after
+        // Roll the baseline forward only for THIS decision kind.
+        // Other decisions keep their original starting point so a
+        // subsequent assertion on a different kind measures the
+        // full scenario's delta, not the gap since this assertion.
+        const nextDecisionTotals = new Map(baseline.decisionTotalsByKind)
+        nextDecisionTotals.set(
+          decision,
+          after.decisionTotalsByKind.get(decision) ?? 0,
+        )
+        state.routingMetricsBaseline = {
+          decisionTotalsByKind: nextDecisionTotals,
+          promotedTotal: baseline.promotedTotal,
+        }
         state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
         return
       }
@@ -1404,12 +1418,29 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
   // must NOT seed the dialog target — otherwise a subsequent in-dialog
   // request on the same agent would address its own contact instead of the
   // peer's.
+  //
+  // RFC 3261 §12.2.1.2 also defines "target refresh": a 2xx response to an
+  // in-dialog re-INVITE / UPDATE updates the dialog's remote target to the
+  // response's Contact. We cover that case by always updating the target on
+  // an INVITE 2xx response (initial AND re-INVITE) — the same field
+  // captures both flows. Important for failover scenarios where a re-INVITE
+  // 200 OK from a backup-promoted worker carries that worker's contact, and
+  // the subsequent ACK MUST target that contact, not the original primary's.
   const contactUri = msg.parsed.contact?.uri
   const cseqForContact = msg.type === "response" ? msg.parsed.cseq.method : undefined
-  const isDialogEstablishingMessage =
-    (msg.type === "response" && cseqForContact === "INVITE") ||
-    (msg.type === "request" && msg.method === "INVITE")
-  if (contactUri && !ds.remoteContact && isDialogEstablishingMessage) {
+  const isDialogEstablishingRequest =
+    msg.type === "request" && msg.method === "INVITE"
+  const isInviteOrUpdate2xx =
+    msg.type === "response" &&
+    msg.status >= 200 &&
+    msg.status < 300 &&
+    (cseqForContact === "INVITE" || cseqForContact === "UPDATE")
+  if (contactUri && isDialogEstablishingRequest && !ds.remoteContact) {
+    ds.remoteContact = contactUri
+  } else if (contactUri && isInviteOrUpdate2xx) {
+    // Target refresh OR initial-dialog 2xx — always update so re-INVITEs
+    // routed via a different worker after failover land on the right
+    // contact for subsequent in-dialog requests.
     ds.remoteContact = contactUri
   }
 

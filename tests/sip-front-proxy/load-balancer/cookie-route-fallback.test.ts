@@ -184,16 +184,19 @@ describe("sip-front-proxy/load-balancer — cookie route fallback to w_bak", () 
   )
 
   it.effect(
-    "ACK on a dead primary still goes to the dead worker (RFC 3261 §13.2.2.4)",
+    "ACK on a dead primary follows the same w_bak fallback as other in-dialog requests",
     () =>
       runProxyScenario(
         {
-          name: "load-balancer.cookie-ack-pinned-on-death",
+          name: "load-balancer.cookie-ack-fallback-on-death",
           description:
-            "ACK is exempt from the dead-primary→backup fallback: even with a v2\n" +
-            "cookie carrying a live w_bak, ACK MUST reach the worker that owns the\n" +
-            "INVITE transaction (or its UAC times out). Asserts ACK does NOT route\n" +
-            "to B even when A is dead.",
+            "Slice 4 bug fix: when the cookie's primary is dead, ACK must route to\n" +
+            "the cookie's `w_bak` along with every other in-dialog method. After\n" +
+            "failover the backup served the most recent (re-)INVITE so it owns the\n" +
+            "transaction the ACK is acknowledging. The earlier behaviour (ACK pinned\n" +
+            "to the dead primary) caused 5s ACK timeouts in re-INVITE-after-failover\n" +
+            "scenarios because the ACK never reached the backup that 200'd the\n" +
+            "re-INVITE.",
         },
         Effect.gen(function* () {
           const proxy = yield* ProxyCore
@@ -274,12 +277,12 @@ describe("sip-front-proxy/load-balancer — cookie route fallback to w_bak", () 
           yield* alice.send(ack, proxy.localAddress.port, proxy.localAddress.ip)
           yield* pumpFor(TRANSIT_MS)
 
-          // ACK lands on the dead primary, NOT on the backup.
+          // ACK lands on the alive backup, NOT on the dead primary.
           const ackAtA = yield* aEp.poll()
           const ackAtB = yield* bEp.poll()
-          expect(ackAtA).not.toBeNull()
-          expect(ackAtB).toBeNull()
-          const ackParsed = parse(ackAtA!.raw)
+          expect(ackAtA).toBeNull()
+          expect(ackAtB).not.toBeNull()
+          const ackParsed = parse(ackAtB!.raw)
           if (ackParsed.type !== "request") throw new Error("expected request")
           expect(ackParsed.method).toBe("ACK")
         })

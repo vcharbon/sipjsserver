@@ -179,11 +179,13 @@ describe("sip-front-proxy/load-balancer — decode_forward honours not-ready (Sl
   )
 
   it.effect(
-    "ACK on a not-ready primary still goes to A (RFC 3261 §13.2.2.4 exemption)",
+    "ACK on a not-ready primary follows w_bak fallback (slice 4 fix)",
     () => {
-      // ACK is the one in-dialog request that MUST reach the original
-      // primary even when its health is degraded, because only the worker
-      // that owns the INVITE transaction can complete the handshake.
+      // Slice 4 bug fix: when the primary is `not-ready` (e.g. a respawn
+      // mid-ReadyGate), ACK no longer pins to that primary — the worker
+      // can't complete a transaction it never received the INVITE for, so
+      // routing the ACK to it would 481-storm. Instead we fall through to
+      // `w_bak` along with every other in-dialog method.
       const fx = proxyFakeStack({
         proxyAddr: PROXY,
         workers: [
@@ -222,12 +224,12 @@ describe("sip-front-proxy/load-balancer — decode_forward honours not-ready (Sl
         yield* alice.send(ack, proxy.localAddress.port, proxy.localAddress.ip)
         yield* pumpFor(TRANSIT_MS)
 
-        // ACK MUST reach A despite the not-ready demotion.
+        // ACK lands on alive backup B, NOT on the not-ready primary.
         const ackAtA = yield* aEp.poll()
         const ackAtB = yield* bEp.poll()
-        expect(ackAtA).not.toBeNull()
-        expect(ackAtB).toBeNull()
-        const ackParsed = parse(ackAtA!.raw)
+        expect(ackAtA).toBeNull()
+        expect(ackAtB).not.toBeNull()
+        const ackParsed = parse(ackAtB!.raw)
         if (ackParsed.type !== "request") throw new Error("expected request")
         expect(ackParsed.method).toBe("ACK")
       }).pipe(Effect.provide(fx.layer))
