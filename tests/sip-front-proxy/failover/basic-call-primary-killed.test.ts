@@ -132,6 +132,10 @@ const failoverScenario = scenario("basic-call-primary-killed", (s) => {
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
 
+  // Routing-decision proof: the BYE was promoted from `decode_forward`
+  // to `decode_forward_backup` (cookie's primary was dead-ROUtable).
+  s.cluster.expectRoutedTo(W2, { decision: "decode_forward_backup" })
+
   // Single-owner invariant (post-routing): backup MUST NOT move the
   // call into its own pri: even when serving a request as backup-on-
   // behalf-of-primary. The assertion holds whether or not the b-leg

@@ -184,7 +184,104 @@ export interface InfraStep {
   readonly group?: number
 }
 
-export type Step = SendStep | ExpectStep | PauseStep | InfraStep
+// ---------------------------------------------------------------------------
+// K8s cluster steps (slice 3b — failover harness DSL extensions)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-phase timing knobs for `K8sStep.kill`. Mirrors `KillTiming` in
+ * [tests/support/SimulatedK8sCluster.ts](../../support/SimulatedK8sCluster.ts) — duplicated
+ * here so the framework AST stays free of cluster-specific imports.
+ */
+export interface K8sKillTiming {
+  readonly drainHoldMs?: number
+  readonly disconnectGapMs?: number
+  readonly fabricKillDelayMs?: number
+}
+
+export type K8sKillPhase = "drain" | "disconnect" | "registry" | "fabric"
+
+export type K8sPartitionDirection = "from-to" | "to-from" | "both"
+
+export type K8sStepAction =
+  | { readonly kind: "kill"; readonly workerId: string; readonly timing?: K8sKillTiming }
+  | { readonly kind: "respawn"; readonly workerId: string }
+  | { readonly kind: "disconnect"; readonly workerId: string }
+  | { readonly kind: "reconnect"; readonly workerId: string }
+  | {
+      readonly kind: "partition"
+      readonly from: string
+      readonly to: string
+      readonly direction: K8sPartitionDirection
+    }
+  | { readonly kind: "heal"; readonly a: string; readonly b: string }
+  | {
+      readonly kind: "expectReplicatedTo"
+      readonly workerId: string
+      readonly primary: string
+      readonly callRef?: string
+    }
+  | {
+      readonly kind: "expectCallStateOn"
+      readonly workerId: string
+      readonly partition: "pri" | "bak"
+      readonly owner: string
+      readonly callRef?: string
+      readonly present?: boolean
+    }
+  | {
+      readonly kind: "expectKillPhase"
+      readonly workerId: string
+      readonly phase: K8sKillPhase
+      readonly minAtMs?: number
+      readonly maxAtMs?: number
+    }
+  | {
+      /**
+       * Assert that, since the previous baseline (auto-snapshotted at
+       * scenario start or at the prior `expectRoutedTo` call), the proxy
+       * recorded at least `minCount` (default 1) routing decisions of
+       * the given kind that hit `workerId`.
+       *
+       * Backed by `sipfp_decode_forward_promoted_total` and
+       * `sip_routing_decision_total` snapshots. The `decision` field
+       * narrows the kind being asserted.
+       */
+      readonly kind: "expectRoutedTo"
+      readonly workerId: string
+      readonly decision: K8sRoutingDecisionKind
+      readonly minCount?: number
+    }
+
+/**
+ * Routing-decision kinds the failover matrix asserts on. Mirrors the
+ * proxy-side `RoutingDecisionKind` enum but kept here so the framework
+ * AST stays free of cross-package imports.
+ */
+export type K8sRoutingDecisionKind =
+  | "select_new"
+  | "decode_forward"
+  | "decode_forward_backup"
+  | "decode_reject"
+  | "decode_unknown"
+  | "cancel_lookup_hit"
+  | "cancel_lookup_miss"
+
+/**
+ * Cluster lifecycle / assertion step. Dispatched by the interpreter to
+ * the `SimulatedK8sCluster` service (provided by the k8s SUT layer).
+ * Skipped with a "skip" status when no cluster is in scope (so legacy
+ * SUTs accept these scenarios as no-ops with a clear marker).
+ */
+export interface K8sStep {
+  readonly type: "k8s"
+  readonly action: K8sStepAction
+  readonly ref: StepRef
+  /** Parallel group index (set by parallel() composition). */
+  readonly group?: number
+}
+
+export type Step = SendStep | ExpectStep | PauseStep | InfraStep | K8sStep
 
 // ---------------------------------------------------------------------------
 // SUT (System Under Test) target
@@ -310,8 +407,21 @@ export type ScenarioTier = "short" | "medium" | "long"
  * B2BUA at all). Topology-specific scenarios opt in via
  * `.runOn([...])`.
  */
-export type Sut = "b2bonly" | "proxy+b2b" | "sipproxyHA" | "registrarFrontProxy"
+export type Sut =
+  | "b2bonly"
+  | "proxy+b2b"
+  | "sipproxyHA"
+  | "registrarFrontProxy"
+  | "k8sFailover"
 
+/**
+ * Curated matrix of SUTs the e2e-fake-clock loop iterates. The `Sut`
+ * type also includes `k8sFailover`, but that one is only consumed by
+ * focused failover tests under `tests/sip-front-proxy/failover/` —
+ * they construct their own runner with `sut: "k8sFailover"`. Keeping
+ * it out of `ALL_SUTS` avoids spawning empty `describe` blocks on the
+ * matrix-driven test files.
+ */
 export const ALL_SUTS: readonly Sut[] = [
   "b2bonly",
   "proxy+b2b",

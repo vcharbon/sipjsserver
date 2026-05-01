@@ -7,12 +7,19 @@
  * Shared by both simulated and live backends — only the transport differs.
  */
 
-import { Clock, Effect, Option, Result } from "effect"
+import { Cause, Clock, Effect, Fiber, Option, Result } from "effect"
 import type { SipMessage, SipRequest } from "../../../src/sip/types.js"
 import { SipParser } from "../../../src/sip/Parser.js"
 import { hydrateRequest } from "../../../src/sip/parsers/extract-fields.js"
 import { PeerFabricControl } from "../../../src/cache/PeerFabric.js"
 import { WorkerOrdinal } from "../../../src/cache/PeerCachePort.js"
+import { WorkerId } from "../../../src/sip-front-proxy/index.js"
+import {
+  SimulatedK8sCluster,
+  type KillEvent,
+  type RoutingDecisionKind,
+  type RoutingMetricsSnapshot,
+} from "../../support/SimulatedK8sCluster.js"
 
 /**
  * Build a synthetic placeholder request for trace entries that record an
@@ -40,6 +47,7 @@ import type {
   AgentConfig,
   AgentInfo,
   ExpectStep,
+  K8sStep,
   NetworkTag,
   Participant,
   Scenario,
@@ -109,6 +117,20 @@ interface InterpreterState {
   readonly allowedReemission: Array<{ agent: string; method?: string | undefined; statusCode?: number | undefined }>
   /** RFC 3264 offer/answer correlation tracker shared across agents. */
   readonly offerAnswer: OfferAnswerTracker
+  /**
+   * Slice 3b: accumulating kill-phase log. We drain `SimulatedK8sCluster
+   * .drainKillEvents` lazily (right before each `expectKillPhase`) and
+   * append into this list so multiple assertions on the same kill don't
+   * fight over a one-shot drain.
+   */
+  readonly k8sKillEvents: KillEvent[]
+  /**
+   * Slice 4b: rolling routing-metrics baseline. Captured lazily on the
+   * first `expectRoutedTo` call (or when explicitly reset), then replaced
+   * after each successful assertion so consecutive `expectRoutedTo` calls
+   * each measure the delta since the previous one.
+   */
+  routingMetricsBaseline?: RoutingMetricsSnapshot | undefined
   callNumber: number
 }
 
@@ -222,7 +244,30 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     unexpectedMessages: [],
     allowedReemission: [...(scenario.allowedExtras ?? [])],
     offerAnswer: new OfferAnswerTracker(),
+    k8sKillEvents: [],
     callNumber: 0,
+  }
+
+  // --- Capture routing-metrics baseline BEFORE any step runs ---
+  //
+  // The first `expectRoutedTo` in the scenario asserts a delta against
+  // this baseline; subsequent `expectRoutedTo` calls re-baseline after
+  // each successful assertion. We snapshot here (rather than lazily on
+  // first assertion) because the proxy may have already incremented
+  // counters by the time the assertion is reached — any pre-assertion
+  // routing decisions must contribute to the delta the test cares about.
+  //
+  // Skipped when the scenario has no `expectRoutedTo` step OR when the
+  // SimulatedK8sCluster service isn't in scope (non-k8s SUT).
+  const needsRoutingBaseline = scenario.steps.some(
+    (s) => s.type === "k8s" && s.action.kind === "expectRoutedTo"
+  )
+  if (needsRoutingBaseline) {
+    const clusterOpt = yield* Effect.serviceOption(SimulatedK8sCluster)
+    if (Option.isSome(clusterOpt)) {
+      state.routingMetricsBaseline =
+        yield* clusterOpt.value.snapshotRoutingMetrics
+    }
   }
 
   // --- Execute steps ---
@@ -392,6 +437,8 @@ function executeStep(
       return executePause(step, index, state)
     case "infra":
       return executeInfra(step, index, state)
+    case "k8s":
+      return executeK8s(step, index, state)
   }
 }
 
@@ -442,6 +489,279 @@ function executeInfra(
         return
     }
   })
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3b: k8s cluster step dispatch
+// ---------------------------------------------------------------------------
+
+/**
+ * Dispatch a `K8sStep` action against the `SimulatedK8sCluster` service
+ * provided by the `k8sFailover` SUT layer. When the service is absent
+ * (any non-k8s SUT) every k8s step is recorded as `skip` with a clear
+ * note — that lets the same scenario run unchanged across SUTs without
+ * the assertions silently passing.
+ *
+ * `kill` is special: any non-zero `KillTiming` gap blocks on
+ * `Effect.sleep`, which under TestClock would deadlock if we awaited
+ * inline. We fork the kill, advance the clock by the configured total,
+ * then join — the cluster's internal `recordPhase` log is consumed
+ * later by `expectKillPhase` via `drainKillEvents`.
+ */
+function executeK8s(
+  step: K8sStep,
+  index: number,
+  state: InterpreterState
+): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const clusterOpt = yield* Effect.serviceOption(SimulatedK8sCluster)
+    if (Option.isNone(clusterOpt)) {
+      state.results.push(makeStepResult({
+        stepIndex: index,
+        step,
+        status: "skip",
+        error:
+          `K8sStep "${step.action.kind}" — no SimulatedK8sCluster in scope; ` +
+          `scenario should run on the k8sFailover SUT.`,
+      }))
+      return
+    }
+    const cluster = clusterOpt.value
+    const a = step.action
+
+    switch (a.kind) {
+      case "kill": {
+        const t = a.timing ?? {}
+        const total =
+          (t.drainHoldMs ?? 0) +
+          (t.disconnectGapMs ?? 0) +
+          (t.fabricKillDelayMs ?? 0)
+        if (total === 0) {
+          yield* cluster.kill(WorkerId(a.workerId), t)
+        } else {
+          const fiber = yield* Effect.forkScoped(
+            cluster.kill(WorkerId(a.workerId), t)
+          )
+          // Advance virtual time enough to cover every non-zero gap.
+          // A small +5ms buffer lets the post-fabric finalizer settle.
+          yield* state.sleep(total + 5)
+          yield* Fiber.join(fiber)
+        }
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "respawn": {
+        // Slice 3b stub. Cluster facade has no respawn primitive yet —
+        // its addition lands with the broader pod-recovery story
+        // (slice 4 of the doc plan). Record skip rather than die so
+        // scenarios authored against the future API parse cleanly.
+        state.results.push(makeStepResult({
+          stepIndex: index,
+          step,
+          status: "skip",
+          error: "cluster.respawn() not yet implemented — slice 4 follow-up",
+        }))
+        return
+      }
+      case "disconnect": {
+        yield* cluster.disconnect(WorkerId(a.workerId))
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "reconnect": {
+        yield* cluster.reconnect(WorkerId(a.workerId))
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "partition": {
+        yield* cluster.partition({
+          from: WorkerId(a.from),
+          to: WorkerId(a.to),
+          direction: a.direction,
+        })
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "heal": {
+        yield* cluster.heal(WorkerId(a.a), WorkerId(a.b))
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "expectReplicatedTo": {
+        const peerId = WorkerId(a.workerId)
+        const primaryId = WorkerId(a.primary)
+        if (a.callRef !== undefined) {
+          const exit = yield* Effect.exit(
+            cluster.expectReplicatedTo(peerId, {
+              callRef: a.callRef,
+              primary: primaryId,
+            })
+          )
+          if (exit._tag === "Failure") {
+            state.results.push(makeStepResult({
+              stepIndex: index,
+              step,
+              status: "fail",
+              error: `expectReplicatedTo failed: ${formatCause(exit.cause)}`,
+            }))
+            return
+          }
+        } else {
+          // No callRef → assert at least one bak:{primary}: entry on
+          // the named peer. Useful when the scenario doesn't pre-compute
+          // the exact callRef (random from-tag).
+          const snap = yield* cluster.snapshotPeer(peerId)
+          const prefix = `bak:${a.primary}:call:`
+          const found = snap.entries.some((e) => e.key.startsWith(prefix))
+          if (!found) {
+            const known = snap.entries.map((e) => e.key).join(", ")
+            state.results.push(makeStepResult({
+              stepIndex: index,
+              step,
+              status: "fail",
+              error:
+                `expectReplicatedTo: peer ${a.workerId} has no entry under ` +
+                `"${prefix}*". Present: [${known}]`,
+            }))
+            return
+          }
+        }
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "expectCallStateOn": {
+        const peerId = WorkerId(a.workerId)
+        const ownerId = WorkerId(a.owner)
+        const present = a.present ?? true
+        if (a.callRef !== undefined) {
+          const exit = yield* Effect.exit(
+            cluster.expectCallStateOn(peerId, {
+              callRef: a.callRef,
+              partition: a.partition,
+              owner: ownerId,
+              present,
+            })
+          )
+          if (exit._tag === "Failure") {
+            state.results.push(makeStepResult({
+              stepIndex: index,
+              step,
+              status: "fail",
+              error: `expectCallStateOn failed: ${formatCause(exit.cause)}`,
+            }))
+            return
+          }
+        } else {
+          const snap = yield* cluster.snapshotPeer(peerId)
+          const prefix = `${a.partition}:${a.owner}:call:`
+          const found = snap.entries.some((e) => e.key.startsWith(prefix))
+          if (present && !found) {
+            const known = snap.entries.map((e) => e.key).join(", ")
+            state.results.push(makeStepResult({
+              stepIndex: index,
+              step,
+              status: "fail",
+              error:
+                `expectCallStateOn: peer ${a.workerId} has no entry under ` +
+                `"${prefix}*". Present: [${known}]`,
+            }))
+            return
+          }
+          if (!present && found) {
+            state.results.push(makeStepResult({
+              stepIndex: index,
+              step,
+              status: "fail",
+              error:
+                `expectCallStateOn: peer ${a.workerId} unexpectedly has an ` +
+                `entry matching "${prefix}*".`,
+            }))
+            return
+          }
+        }
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "expectKillPhase": {
+        // Drain whatever the cluster has accumulated since the last
+        // call and fold it into the running log. Multiple assertions
+        // on the same kill timeline therefore observe a stable view.
+        const fresh = yield* cluster.drainKillEvents
+        for (const e of fresh) state.k8sKillEvents.push(e)
+        const match = state.k8sKillEvents.find(
+          (e) =>
+            (e.workerId as unknown as string) === a.workerId &&
+            e.phase === a.phase
+        )
+        if (match === undefined) {
+          state.results.push(makeStepResult({
+            stepIndex: index,
+            step,
+            status: "fail",
+            error:
+              `expectKillPhase: no "${a.phase}" event recorded for worker ` +
+              `${a.workerId}. Recorded: ` +
+              state.k8sKillEvents
+                .map((e) => `${e.workerId as unknown as string}:${e.phase}@${e.atMs}`)
+                .join(", "),
+          }))
+          return
+        }
+        if (a.minAtMs !== undefined && match.atMs < a.minAtMs) {
+          state.results.push(makeStepResult({
+            stepIndex: index,
+            step,
+            status: "fail",
+            error: `expectKillPhase: phase "${a.phase}" fired at t=${match.atMs} but expected ≥ ${a.minAtMs}`,
+          }))
+          return
+        }
+        if (a.maxAtMs !== undefined && match.atMs > a.maxAtMs) {
+          state.results.push(makeStepResult({
+            stepIndex: index,
+            step,
+            status: "fail",
+            error: `expectKillPhase: phase "${a.phase}" fired at t=${match.atMs} but expected ≤ ${a.maxAtMs}`,
+          }))
+          return
+        }
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "expectRoutedTo": {
+        const minCount = a.minCount ?? 1
+        const decision = a.decision as RoutingDecisionKind
+        const before = state.routingMetricsBaseline ?? {
+          decisionTotalsByKind: new Map<RoutingDecisionKind, number>(),
+          promotedTotal: 0,
+        }
+        const after = yield* cluster.snapshotRoutingMetrics
+        const delta =
+          (after.decisionTotalsByKind.get(decision) ?? 0) -
+          (before.decisionTotalsByKind.get(decision) ?? 0)
+        if (delta < minCount) {
+          state.results.push(makeStepResult({
+            stepIndex: index,
+            step,
+            status: "fail",
+            error:
+              `expectRoutedTo: decision="${decision}" delta=${delta}, expected ≥ ${minCount}`,
+          }))
+          return
+        }
+        // Roll the baseline forward so the next assertion measures
+        // only what happens between this call and the next.
+        state.routingMetricsBaseline = after
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+    }
+  })
+}
+
+/** Best-effort cause → string for assertion error messages. */
+function formatCause<E>(cause: Cause.Cause<E>): string {
+  return Cause.pretty(cause)
 }
 
 function executeSend(

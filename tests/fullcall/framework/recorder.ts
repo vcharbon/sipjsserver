@@ -12,6 +12,12 @@ import type {
   AllowedExtraPattern,
   ExpectRef,
   HeaderOverrides,
+  K8sKillPhase,
+  K8sKillTiming,
+  K8sPartitionDirection,
+  K8sRoutingDecisionKind,
+  K8sStep,
+  K8sStepAction,
   MessageContext,
   SendStep,
   ExpectStep,
@@ -204,10 +210,74 @@ type InternalExpect = (methodOrStatusCode: string | number, opts?: ExpectOpts) =
 // Scenario context (the `s` parameter in scenario builders)
 // ---------------------------------------------------------------------------
 
+/**
+ * Cluster control / assertion surface — slice 3b of the k8s reliability
+ * rework. Methods record `K8sStep` entries the interpreter dispatches
+ * against a `SimulatedK8sCluster` provided by the `k8sFailover` SUT
+ * layer. On non-k8s SUTs the interpreter records each step as `skip`
+ * with a clear note (so a scenario authored against the failover
+ * harness fails loudly only when actively run on a non-k8s SUT).
+ */
+export interface ClusterContext {
+  /** Tear down a worker through the multi-phase pipeline. */
+  kill(workerId: string, timing?: K8sKillTiming): void
+  /** Bring a worker back. Stub for slice 3b — interpreter records skip. */
+  respawn(workerId: string): void
+  /** Flip the worker's outbound network gate off (registry untouched). */
+  disconnect(workerId: string): void
+  /** Restore the worker's outbound network gate. */
+  reconnect(workerId: string): void
+  /** Asymmetric or bidirectional partition between two workers. */
+  partition(opts: {
+    from: string
+    to: string
+    direction: K8sPartitionDirection
+  }): void
+  /** Heal any prior partition between the two workers. */
+  heal(a: string, b: string): void
+  /** Assert the call's `bak:{primary}:` partition entry exists on `workerId`. */
+  expectReplicatedTo(
+    workerId: string,
+    opts: { primary: string; callRef?: string }
+  ): void
+  /** Assert (or refute) the call's presence in the named partition. */
+  expectCallStateOn(
+    workerId: string,
+    opts: {
+      partition: "pri" | "bak"
+      owner: string
+      callRef?: string
+      present?: boolean
+    }
+  ): void
+  /** Assert a recorded kill phase fired (optionally within a virtual-time window). */
+  expectKillPhase(
+    workerId: string,
+    phase: K8sKillPhase,
+    opts?: { minAtMs?: number; maxAtMs?: number }
+  ): void
+  /**
+   * Assert that since the previous baseline (auto-snapshotted at
+   * scenario start, refreshed after each `expectRoutedTo` call) the
+   * proxy recorded at least `minCount` (default 1) routing decisions
+   * of the given `decision` kind. Currently only verifies the global
+   * counter delta — the per-worker filter is best-effort: when the
+   * decision is `decode_forward_backup`, any matching delta proves
+   * that the proxy promoted to backup, which is the failover signal
+   * the matrix tests assert on.
+   */
+  expectRoutedTo(
+    workerId: string,
+    opts: { decision: K8sRoutingDecisionKind; minCount?: number }
+  ): void
+}
+
 export interface ScenarioContext {
   agent(name: string, config: AgentConfig): AgentProxy
   pause(durationMs: number): void
   contactOf(agentName: string): string
+  /** Slice 3b: cluster lifecycle + assertion surface. */
+  readonly cluster: ClusterContext
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +501,74 @@ export function record(
     }
   }
 
+  const recordK8s = (action: K8sStepAction): void => {
+    const ref = makeStepRef()
+    const step: K8sStep = { type: "k8s", action, ref }
+    steps.push(step)
+  }
+
+  const cluster: ClusterContext = {
+    kill(workerId, timing) {
+      recordK8s(
+        timing !== undefined
+          ? { kind: "kill", workerId, timing }
+          : { kind: "kill", workerId }
+      )
+    },
+    respawn(workerId) {
+      recordK8s({ kind: "respawn", workerId })
+    },
+    disconnect(workerId) {
+      recordK8s({ kind: "disconnect", workerId })
+    },
+    reconnect(workerId) {
+      recordK8s({ kind: "reconnect", workerId })
+    },
+    partition({ from, to, direction }) {
+      recordK8s({ kind: "partition", from, to, direction })
+    },
+    heal(a, b) {
+      recordK8s({ kind: "heal", a, b })
+    },
+    expectReplicatedTo(workerId, { primary, callRef }) {
+      recordK8s(
+        callRef !== undefined
+          ? { kind: "expectReplicatedTo", workerId, primary, callRef }
+          : { kind: "expectReplicatedTo", workerId, primary }
+      )
+    },
+    expectCallStateOn(workerId, opts) {
+      const action: K8sStepAction = {
+        kind: "expectCallStateOn",
+        workerId,
+        partition: opts.partition,
+        owner: opts.owner,
+        ...(opts.callRef !== undefined ? { callRef: opts.callRef } : {}),
+        ...(opts.present !== undefined ? { present: opts.present } : {}),
+      }
+      recordK8s(action)
+    },
+    expectKillPhase(workerId, phase, opts) {
+      const action: K8sStepAction = {
+        kind: "expectKillPhase",
+        workerId,
+        phase,
+        ...(opts?.minAtMs !== undefined ? { minAtMs: opts.minAtMs } : {}),
+        ...(opts?.maxAtMs !== undefined ? { maxAtMs: opts.maxAtMs } : {}),
+      }
+      recordK8s(action)
+    },
+    expectRoutedTo(workerId, opts) {
+      const action: K8sStepAction = {
+        kind: "expectRoutedTo",
+        workerId,
+        decision: opts.decision,
+        ...(opts.minCount !== undefined ? { minCount: opts.minCount } : {}),
+      }
+      recordK8s(action)
+    },
+  }
+
   const ctx: ScenarioContext = {
     agent(name, config) {
       agents[name] = config
@@ -442,6 +580,7 @@ export function record(
     contactOf(agentName) {
       return `{{agent:${agentName}:contact}}`
     },
+    cluster,
   }
 
   builder(ctx)

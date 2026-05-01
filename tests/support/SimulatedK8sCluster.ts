@@ -1,0 +1,396 @@
+/**
+ * SimulatedK8sCluster — slice 3.1 façade that bundles every test-side
+ * lever needed to simulate K8s pod lifecycle and partition events
+ * deterministically under TestClock.
+ *
+ * Owns nothing of its own: it composes the existing primitives —
+ *   - `WorkerRegistrySimulatedControl` (registry membership + health)
+ *   - `WorkerConnectivity` (per-worker network gate flips)
+ *   - `PeerFabricControl` (per-peer storage health + snapshots)
+ *   - `MetricsRegistry` (counter snapshots for routing assertions)
+ *
+ * — into a single service surface so failover scenarios can read like
+ * the plan's pseudocode (`s.cluster.kill("b2b-1")`, etc.) without
+ * threading four service tags through every step. Workers are
+ * pre-allocated by the surrounding `k8sFakeStackLayer` (slice 3.2);
+ * this MVP does not support dynamic addWorker — the per-worker scope
+ * lifecycle plumbing that demands lands in a follow-up.
+ *
+ * Invariants:
+ *   - `kill` is multi-phase by default: network disconnect → registry
+ *     setHealth("dead") → PeerFabricControl.killWorker. Each phase
+ *     emits an event into `phaseEvents` so `expectKillPhase` can
+ *     assert the timeline. The defaults (immediate / 0ms gaps) are
+ *     enough for the first failover test; tunable gaps land later.
+ *   - `respawn` reverses kill: PeerFabricControl.rebootWorker (clears
+ *     storage), registry.add (with a fresh `firstSeenAtMs` via the
+ *     auto-stamp opt-in), connectivity.reconnect.
+ *   - Snapshot reads are pure — `expectReplicatedTo` /
+ *     `expectCallStateOn` consult `PeerFabricControl.snapshotPeer`
+ *     and never mutate.
+ */
+
+import {
+  Clock,
+  Data,
+  Effect,
+  Layer,
+  Metric,
+  ServiceMap,
+  type Scope,
+} from "effect"
+import {
+  PeerFabricControl,
+  type PeerSnapshot,
+} from "../../src/cache/PeerFabric.js"
+import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
+import {
+  WorkerId,
+  WorkerRegistrySimulatedControl,
+  type SocketAddr,
+} from "../../src/sip-front-proxy/index.js"
+import { WorkerConnectivity } from "./WorkerConnectivity.js"
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-phase timing knobs for the kill pipeline. Defaults are zero
+ * gaps (kill-9 semantics). Non-zero gaps interleave virtual-time
+ * sleeps via the surrounding `Clock`, letting the test reproduce
+ * conntrack-stale windows or graceful-drain holds without real
+ * wall-clock latency.
+ */
+export interface KillTiming {
+  /** ms the worker spends in registry health="draining" before disconnect. 0 = skip. */
+  readonly drainHoldMs?: number
+  /** ms between phase-1 disconnect and phase-3 registry-remove (health=dead). */
+  readonly disconnectGapMs?: number
+  /** ms between registry-remove and phase-4 PeerFabricControl.killWorker. */
+  readonly fabricKillDelayMs?: number
+}
+
+export type KillPhase = "drain" | "disconnect" | "registry" | "fabric"
+
+export interface KillEvent {
+  readonly workerId: WorkerId
+  readonly phase: KillPhase
+  readonly atMs: number
+}
+
+export interface ClusterWorker {
+  readonly id: WorkerId
+  readonly ordinal: WorkerOrdinal
+  readonly address: SocketAddr
+}
+
+/** Routing-decision kinds tracked by `sip_routing_decision_total{kind}`. */
+export type RoutingDecisionKind =
+  | "select_new"
+  | "decode_forward"
+  | "decode_forward_backup"
+  | "decode_reject"
+  | "decode_unknown"
+  | "cancel_lookup_hit"
+  | "cancel_lookup_miss"
+
+/**
+ * Point-in-time snapshot of the routing-decision counters. Tests use a
+ * baseline snapshot + a post-action snapshot to assert deltas without
+ * coupling to absolute counter values.
+ */
+export interface RoutingMetricsSnapshot {
+  /** Total `sip_routing_decision_total{kind}` aggregated across all strategies. */
+  readonly decisionTotalsByKind: ReadonlyMap<RoutingDecisionKind, number>
+  /** Total `sipfp_decode_forward_promoted_total{from}` aggregated across all reasons. */
+  readonly promotedTotal: number
+}
+
+export interface SimulatedK8sClusterApi {
+  /** Static handle on every worker pre-allocated by the layer. */
+  readonly workers: ReadonlyArray<ClusterWorker>
+
+  /** Lookup by id; throws if unknown (programmer error in tests). */
+  readonly workerOf: (id: WorkerId) => ClusterWorker
+
+  // -- Lifecycle primitives ------------------------------------------------
+  readonly kill: (id: WorkerId, timing?: KillTiming) => Effect.Effect<void>
+  readonly disconnect: (id: WorkerId) => Effect.Effect<void>
+  readonly reconnect: (id: WorkerId) => Effect.Effect<void>
+  readonly partition: (opts: {
+    readonly from: WorkerId
+    readonly to: WorkerId
+    readonly direction: "from-to" | "to-from" | "both"
+  }) => Effect.Effect<void>
+  readonly heal: (a: WorkerId, b: WorkerId) => Effect.Effect<void>
+
+  // -- Observation ---------------------------------------------------------
+  /** Drain (and clear) every recorded kill phase event so far. */
+  readonly drainKillEvents: Effect.Effect<ReadonlyArray<KillEvent>>
+  readonly snapshotPeer: (id: WorkerId) => Effect.Effect<PeerSnapshot>
+  /**
+   * Aggregate the proxy's routing-decision counters into a structured
+   * snapshot. The test interpreter holds a per-scenario baseline and
+   * computes deltas across `expectRoutedTo` calls.
+   */
+  readonly snapshotRoutingMetrics: Effect.Effect<RoutingMetricsSnapshot>
+
+  // -- Convenience assertions ---------------------------------------------
+  /**
+   * Assert the call's bak partition entry exists on `id`. The partition
+   * key is `bak:{primary}:call:{callRef}` — `primary` is decoded from the
+   * callRef's first segment (slice 4 Option C). Returns the raw JSON
+   * string on success.
+   */
+  readonly expectReplicatedTo: (
+    id: WorkerId,
+    opts: { readonly callRef: string; readonly primary: WorkerId }
+  ) => Effect.Effect<string>
+
+  /**
+   * Assert the call lives in the named partition on `id`. `partition`
+   * narrows expected role; `present: false` asserts absence.
+   */
+  readonly expectCallStateOn: (
+    id: WorkerId,
+    opts: {
+      readonly callRef: string
+      readonly partition: "pri" | "bak"
+      readonly owner: WorkerId
+      readonly present?: boolean
+    }
+  ) => Effect.Effect<void>
+}
+
+export class SimulatedK8sCluster extends ServiceMap.Service<
+  SimulatedK8sCluster,
+  SimulatedK8sClusterApi
+>()("@sipjsserver/test-support/SimulatedK8sCluster") {}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+export class K8sClusterAssertionError extends Data.TaggedError(
+  "K8sClusterAssertionError"
+)<{
+  readonly message: string
+}> {}
+
+// ---------------------------------------------------------------------------
+// Layer factory
+// ---------------------------------------------------------------------------
+
+export interface SimulatedK8sClusterLayerOpts {
+  readonly workers: ReadonlyArray<ClusterWorker>
+}
+
+/**
+ * Build the cluster service against the pre-allocated worker set. The
+ * surrounding `k8sFakeStackLayer` is responsible for actually
+ * materialising those workers (each B2BUA's UdpTransport binding,
+ * router fiber, storage layer) — this layer just wires the control
+ * plane that mutates / observes them.
+ */
+export const SimulatedK8sClusterLayer = (
+  opts: SimulatedK8sClusterLayerOpts
+): Layer.Layer<
+  SimulatedK8sCluster,
+  never,
+  WorkerRegistrySimulatedControl | WorkerConnectivity | PeerFabricControl
+> =>
+  Layer.effect(
+    SimulatedK8sCluster,
+    Effect.gen(function* () {
+      const registry = yield* WorkerRegistrySimulatedControl
+      const connectivity = yield* WorkerConnectivity
+      const fabric = yield* PeerFabricControl
+      // Plain array — `Queue.takeAll` in Effect v4 blocks on an empty
+      // queue, which deadlocks `drainKillEvents` calls used as
+      // pre-checks. The cluster runs single-fiber under tests, so a
+      // mutable array is the simplest correct surface.
+      const phaseEvents: KillEvent[] = []
+
+      const byId = new Map<string, ClusterWorker>(
+        opts.workers.map((w) => [w.id as unknown as string, w])
+      )
+
+      const workerOf: SimulatedK8sClusterApi["workerOf"] = (id) => {
+        const w = byId.get(id as unknown as string)
+        if (w === undefined) {
+          throw new Error(`SimulatedK8sCluster: unknown worker "${id}"`)
+        }
+        return w
+      }
+
+      const recordPhase = (workerId: WorkerId, phase: KillPhase) =>
+        Effect.gen(function* () {
+          const atMs = yield* Clock.currentTimeMillis
+          phaseEvents.push({ workerId, phase, atMs })
+        })
+
+      const sleepIfPositive = (ms: number | undefined) =>
+        ms !== undefined && ms > 0 ? Effect.sleep(`${ms} millis`) : Effect.void
+
+      const kill: SimulatedK8sClusterApi["kill"] = (id, timing) =>
+        Effect.gen(function* () {
+          const w = workerOf(id)
+          const t = timing ?? {}
+          // Phase 0: optional graceful-drain hold.
+          if (t.drainHoldMs !== undefined && t.drainHoldMs > 0) {
+            yield* registry.setHealth(id, "draining")
+            yield* recordPhase(id, "drain")
+            yield* sleepIfPositive(t.drainHoldMs)
+          }
+          // Phase 1: network disconnect.
+          yield* connectivity.disconnect(id as unknown as string)
+          yield* recordPhase(id, "disconnect")
+          yield* sleepIfPositive(t.disconnectGapMs)
+          // Phase 2: registry health → dead.
+          yield* registry.setHealth(id, "dead")
+          yield* recordPhase(id, "registry")
+          yield* sleepIfPositive(t.fabricKillDelayMs)
+          // Phase 3: peer-fabric storage marked dead. Storage retained
+          // for inspection — backups serve from `bak:{primary}` on
+          // their own sidecars regardless.
+          yield* fabric.killWorker(w.ordinal)
+          yield* recordPhase(id, "fabric")
+        })
+
+      const disconnect: SimulatedK8sClusterApi["disconnect"] = (id) =>
+        connectivity.disconnect(id as unknown as string)
+
+      const reconnect: SimulatedK8sClusterApi["reconnect"] = (id) =>
+        connectivity.reconnect(id as unknown as string)
+
+      const partition: SimulatedK8sClusterApi["partition"] = ({
+        from,
+        to,
+        direction,
+      }) =>
+        connectivity.partition({
+          from: from as unknown as string,
+          to: to as unknown as string,
+          direction,
+        })
+
+      const heal: SimulatedK8sClusterApi["heal"] = (a, b) =>
+        connectivity.heal(a as unknown as string, b as unknown as string)
+
+      const drainKillEvents: SimulatedK8sClusterApi["drainKillEvents"] =
+        Effect.sync(() => {
+          const out = phaseEvents.slice()
+          phaseEvents.length = 0
+          return out
+        })
+
+      const snapshotPeer: SimulatedK8sClusterApi["snapshotPeer"] = (id) =>
+        fabric.snapshotPeer(workerOf(id).ordinal)
+
+      const snapshotRoutingMetrics: SimulatedK8sClusterApi["snapshotRoutingMetrics"] =
+        Effect.gen(function* () {
+          const snaps = yield* Metric.snapshot
+          const decisionTotalsByKind = new Map<RoutingDecisionKind, number>()
+          let promotedTotal = 0
+          for (const s of snaps) {
+            if (s.id === "sip_routing_decision_total" && s.type === "Counter") {
+              const kind = s.attributes?.kind as RoutingDecisionKind | undefined
+              if (kind === undefined) continue
+              const count = Number(s.state.count)
+              decisionTotalsByKind.set(
+                kind,
+                (decisionTotalsByKind.get(kind) ?? 0) + count
+              )
+            } else if (
+              s.id === "sipfp_decode_forward_promoted_total" &&
+              s.type === "Counter"
+            ) {
+              promotedTotal += Number(s.state.count)
+            }
+          }
+          return { decisionTotalsByKind, promotedTotal }
+        })
+
+      const partitionKey = (
+        role: "pri" | "bak",
+        owner: WorkerId,
+        callRef: string
+      ): string => `${role}:${owner as unknown as string}:call:${callRef}`
+
+      const expectReplicatedTo: SimulatedK8sClusterApi["expectReplicatedTo"] = (
+        id,
+        { callRef, primary }
+      ) =>
+        Effect.gen(function* () {
+          const snap = yield* fabric.snapshotPeer(workerOf(id).ordinal)
+          const key = partitionKey("bak", primary, callRef)
+          const found = snap.entries.find((e) => e.key === key)
+          if (found === undefined) {
+            const known = snap.entries.map((e) => e.key).join(", ")
+            return yield* Effect.die(
+              new K8sClusterAssertionError({
+                message: `expectReplicatedTo: peer ${id} missing key "${key}". Present: [${known}]`,
+              })
+            )
+          }
+          return found.value
+        })
+
+      const expectCallStateOn: SimulatedK8sClusterApi["expectCallStateOn"] = (
+        id,
+        { callRef, partition: role, owner, present = true }
+      ) =>
+        Effect.gen(function* () {
+          const snap = yield* fabric.snapshotPeer(workerOf(id).ordinal)
+          const key = partitionKey(role, owner, callRef)
+          const found = snap.entries.some((e) => e.key === key)
+          if (present && !found) {
+            const known = snap.entries.map((e) => e.key).join(", ")
+            return yield* Effect.die(
+              new K8sClusterAssertionError({
+                message: `expectCallStateOn: peer ${id} missing key "${key}". Present: [${known}]`,
+              })
+            )
+          }
+          if (!present && found) {
+            return yield* Effect.die(
+              new K8sClusterAssertionError({
+                message: `expectCallStateOn: peer ${id} unexpectedly has key "${key}".`,
+              })
+            )
+          }
+        })
+
+      return {
+        workers: opts.workers,
+        workerOf,
+        kill,
+        disconnect,
+        reconnect,
+        partition,
+        heal,
+        drainKillEvents,
+        snapshotPeer,
+        snapshotRoutingMetrics,
+        expectReplicatedTo,
+        expectCallStateOn,
+      }
+    })
+  )
+
+// ---------------------------------------------------------------------------
+// Helpers re-exported for tests
+// ---------------------------------------------------------------------------
+
+export const makeClusterWorker = (
+  id: WorkerId,
+  address: SocketAddr
+): ClusterWorker => ({
+  id,
+  ordinal: WorkerOrdinal(id as unknown as string),
+  address,
+})
+
+// Suppress unused-import warning when the file evolves; keep for future use.
+export type { Scope }
