@@ -170,6 +170,18 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
         aliceDialog.expect(c.method).reply(200)
         txn.expect(200)
       }
+    } else if (c.method === "REINVITE" || c.method === "PRACK") {
+      // re-INVITE and PRACK are deferred follow-ups. The 16 BYE /
+      // INFO / UPDATE / MESSAGE matrix entries cover the full
+      // single + double switch pipeline; re-INVITE adds an
+      // offer/answer-tracker concern (post-failover ACK doesn't
+      // relay) that needs its own root-cause investigation, and
+      // PRACK has to happen during INVITE setup (Require: 100rel)
+      // so the matrix's "post-failover in-dialog method" shape
+      // doesn't fit cleanly. See the slice-4 plan §"Out of scope".
+      throw new Error(
+        `buildFailoverScenario: method "${c.method}" deferred — see slice 4 plan follow-ups`
+      )
     } else {
       throw new Error(
         `buildFailoverScenario: method "${c.method}" not yet wired — see slice 4b-iii follow-up`
