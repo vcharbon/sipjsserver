@@ -56,6 +56,20 @@ npm run dev
 # Run the perf test
 ./sipp-perf.sh [num_calls] [concurrency] [rate]
 
+
+Quick start:
+
+
+# Single-node (default) — verify worker process has no leak since recent change
+WARMUP_CALLS=1000 STRESS_CALLS=8000 RATE=80 ./sippperftest/memleak-test.sh
+
+# Full LB + workers via kind k8s
+WARMUP_CALLS=200 STRESS_CALLS=2000 RATE=50  ./sippperftest/memleak-test.sh --mode k8s
+
+# Iterate without rebuilding/reinstalling
+WARMUP_CALLS=200 STRESS_CALLS=2000 RATE=50 ./sippperftest/memleak-test.sh --mode k8s --skip-install --keep
+
+
 # Examples
 ./sipp-perf.sh              # defaults: 1000 calls, 10 concurrent, 50 cps
 ./sipp-perf.sh 500000 50000 100  # 5000 calls, 50 concurrent, 200 cps
@@ -75,6 +89,17 @@ Sustained load with no call cap. Runs until interrupted with Ctrl-C.
 
 ### `memleak-test.sh` — Automated memory leak + performance analysis
 
+Two modes, one entrypoint:
+
+- `--mode single` (**default**) — Run the B2BUA as a local process and verify
+  no leak in the worker processes themselves. Fast, no Kubernetes required.
+- `--mode k8s` — Bring up the kind cluster + helm stack and route load through
+  the in-cluster `sip-front-proxy` (load balancer) → `b2bua-worker` → `sipp-uas`
+  so the report covers the LB, every worker pod, and their Redis sidecars.
+  Delegates to `memleak-test-k8s.sh`.
+
+#### `--mode single` (default)
+
 Fully automated harness that:
 1. Flushes Redis
 2. Builds and starts the B2BUA with memory caps + `--expose-gc`
@@ -85,12 +110,36 @@ Fully automated harness that:
 7. Compares baseline vs stress and prints a detailed report
 8. Runs `analyze-perf.py` to generate charts, CPU hotpath heatmap, and performance summary
 
+#### `--mode k8s` — full LB + worker view
+
+Adds proxy-side observation on top of the worker-side checks:
+1. `tsx tests/k8s/scripts/up-if-needed.ts` (idempotent) and rebuilds the
+   container image into the kind cluster
+2. Helm-installs sipp + b2bua-worker (with the
+   `sippperftest/values-memleak-worker.yaml` overlay that enables
+   `--expose-gc`) + sip-front-proxy into namespace `memleak-test`
+3. Discovers the running worker and proxy pods
+4. Runs warmup + stress sipp UAC `Job`s in-cluster, targeting
+   `sip-front-proxy:5060` so every call traverses the load balancer
+5. Samples memory every 2s during stress:
+   - **Workers** — `kubectl exec` → `wget /debug/memory` (heap, mapSizes,
+     GC, event-loop lag, CPU)
+   - **Proxies** — `kubectl exec` → `cat /proc/1/status` (VmRSS, VmHWM,
+     VmData; the proxy entrypoint doesn't expose a debug HTTP endpoint)
+6. Drains by polling each worker's summed `callsMap`
+7. Compares baseline vs stress per pod and prints a report with linear
+   regression on the timeseries (slope MB/hour + R²)
+
+The namespace is torn down on exit by default; pass `--keep` to inspect
+state afterwards. Use `--skip-install` to reuse an already-installed
+stack (much faster on iterative runs).
+
 #### Quick start
 
 ```bash
 cd sippperftest
 
-# Default: 1000 warmup + 50000 stress calls at 200 cps, 2 workers
+# Single-node mode (default): 1000 warmup + 50000 stress calls @ 200 cps
 ./memleak-test.sh
 
 # Quick validation with low traffic
@@ -101,6 +150,15 @@ WARMUP_CALLS=200 STRESS_CALLS=2000 RATE=50 ./memleak-test.sh
 
 # Custom configuration
 WARMUP_CALLS=1000 STRESS_CALLS=1000000 RATE=300 CLUSTER_WORKERS=4 ./memleak-test.sh --heap-dump
+
+# K8s mode — full proxy + worker view through the kind LB
+./memleak-test.sh --mode k8s
+
+# K8s with heap snapshots, low traffic, keep namespace afterwards
+WARMUP_CALLS=200 STRESS_CALLS=2000 RATE=50 ./memleak-test.sh --mode k8s --heap-dump --keep
+
+# Iterate without rebuilding/reinstalling on every run
+./memleak-test.sh --mode k8s --skip-install --keep
 ```
 
 #### Configuration
@@ -119,13 +177,31 @@ WARMUP_CALLS=1000 STRESS_CALLS=1000000 RATE=300 CLUSTER_WORKERS=4 ./memleak-test
 | `B2BUA_HOST` | 127.0.0.1 | B2BUA address |
 | `B2BUA_PORT` | 5060 | B2BUA SIP port |
 
+| Environment Variable (k8s mode) | Default | Description |
+|---------------------|---------|-------------|
+| `K8S_TEST_NAMESPACE` | `memleak-test` | Namespace into which the helm charts are installed |
+| `WORKER_REPLICAS` | 2 | b2bua-worker StatefulSet replica count |
+| `PROXY_REPLICAS` | 2 | sip-front-proxy Deployment replica count |
+| `SAMPLE_INTERVAL` | 2 | Memory sampling interval during stress (seconds) |
+| `SCENARIO` | `uac-basic.xml` | SIPp scenario from `tests/k8s/charts/sipp/scenarios/` |
+| `DRAIN_TIMEOUT` | 90 | Hard cap (seconds) on the per-phase drain wait |
+
 | CLI Flag | Description |
 |----------|-------------|
+| `--mode single` (default) | Single-node B2BUA mode (no Kubernetes) |
+| `--mode k8s` | Route load through the in-cluster sip-front-proxy + b2bua-worker stack |
 | `--heap-dump` | Trigger V8 heap snapshots after stress (saved to `/tmp/heapdumps/`) |
+| `--skip-install` (k8s only) | Reuse an existing stack in `K8S_TEST_NAMESPACE` |
+| `--keep` (k8s only) | Don't delete the namespace on exit |
+
+K8s-mode prerequisites: `kind`, `kubectl`, `helm`, `docker`, `npx` / `tsx`,
+`jq`, `python3`. The cluster definition lives at
+[tests/k8s/cluster.yaml](../tests/k8s/cluster.yaml); image build + load is
+handled by [tests/k8s/scripts/images.ts](../tests/k8s/scripts/images.ts).
 
 #### Output
 
-Results are saved to `/tmp/memleak-results/YYYYMMDD-HHMMSS/`:
+Single mode — results are saved to `/tmp/memleak-results/YYYYMMDD-HHMMSS/`:
 
 | File | Contents |
 |------|----------|
@@ -139,6 +215,19 @@ Results are saved to `/tmp/memleak-results/YYYYMMDD-HHMMSS/`:
 | `redis-residual.txt` | Residual Redis key counts after shutdown |
 | `*.heapsnapshot` | V8 heap snapshots (only with `--heap-dump`) |
 | `*.cpuprofile` | V8 CPU profiles captured mid-stress (10s sample) |
+
+K8s mode — results are saved to `/tmp/memleak-results-k8s/YYYYMMDD-HHMMSS/`:
+
+| File | Contents |
+|------|----------|
+| `baseline-workers.jsonl` | One `/debug/memory` snapshot per worker pod after warmup drain |
+| `baseline-proxies.jsonl` | One `/proc/1/status`-derived snapshot per proxy pod after warmup drain |
+| `stress-workers.jsonl` | Same, after stress drain |
+| `stress-proxies.jsonl` | Same, after stress drain |
+| `memory-timeseries-workers.jsonl` | Worker memory sampled every `SAMPLE_INTERVAL`s during stress |
+| `memory-timeseries-proxies.jsonl` | Proxy memory sampled every `SAMPLE_INTERVAL`s during stress |
+| `warmup.log` / `stress.log` | SIPp UAC Job logs (cumulative call counters parsed from these) |
+| `heapdumps-<pod>/` | V8 heap snapshots from each worker pod (only with `--heap-dump`) |
 
 #### Interpreting the report
 

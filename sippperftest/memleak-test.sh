@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 # Memory leak detection harness for the SIP B2BUA.
 #
-# Flow:
+# Two modes:
+#   single  (default) — Run the B2BUA as a local process; verify no leak
+#                        in the worker processes themselves. Best for
+#                        quick "did I just regress" checks.
+#   k8s              — Bring up the kind cluster + helm stack and route
+#                        load through the in-cluster sip-front-proxy
+#                        (load balancer) → b2bua-worker → sipp-uas. Full
+#                        view including the LB. Delegates to
+#                        memleak-test-k8s.sh.
+#
+# Flow (single mode):
 #   1. Flush Redis
 #   2. Build & launch B2BUA with memory caps + --expose-gc
 #   3. Run a short warmup SIPp load → capture baseline memory
@@ -10,7 +20,8 @@
 #   6. Compare baseline vs stress → print report
 #
 # Usage:
-#   ./memleak-test.sh [--heap-dump]
+#   ./memleak-test.sh [--heap-dump]                     # single (default)
+#   ./memleak-test.sh --mode k8s [--heap-dump] [--keep] # full LB + workers
 #
 # Configuration via env vars (see defaults below).
 set -euo pipefail
@@ -18,6 +29,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 RESULTS_DIR="/tmp/memleak-results/$(date +%Y%m%d-%H%M%S)"
+
+# ── Mode dispatch (must run before flag parsing so we can hand off
+#    unrecognised flags to the k8s sub-script untouched) ────────────
+MODE="single"
+PASSTHROUGH=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --mode)
+      MODE="${2:-}"; shift 2
+      ;;
+    --mode=*)
+      MODE="${1#--mode=}"; shift
+      ;;
+    *)
+      PASSTHROUGH+=("$1"); shift
+      ;;
+  esac
+done
+set -- "${PASSTHROUGH[@]}"
+
+if [ "$MODE" = "k8s" ]; then
+  exec "$SCRIPT_DIR/memleak-test-k8s.sh" "$@"
+elif [ "$MODE" != "single" ]; then
+  echo "ERROR: unknown --mode '$MODE'. Expected 'single' or 'k8s'."
+  exit 1
+fi
 
 # ── Configuration ────────────────────────────────────────────────────
 UAS_HOST="${UAS_HOST:-127.0.0.1}"

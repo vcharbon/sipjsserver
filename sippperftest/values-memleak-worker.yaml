@@ -1,0 +1,21 @@
+# Memleak overlay for the b2bua-worker chart.
+# Layered on top of tests/k8s/values/b2bua-worker.yaml when running
+# `memleak-test.sh --mode k8s`. Adds:
+#   - NODE_OPTIONS with --expose-gc + heap cap so /debug/gc has effect
+#     (StatusServer requires `globalThis.gc` to actually collect)
+#   - B2BUA_EXPOSE_GC=1 mirrors the local-mode env from memleak-test.sh
+#
+# Helm merges extraEnv arrays naively (replaces the whole array), so we
+# repeat the upstream values entries here. Keep this in sync with
+# tests/k8s/values/b2bua-worker.yaml.
+extraEnv:
+  - name: REDIS_URL
+    value: "redis://localhost:6379"
+  - name: SIP_LOCAL_IP
+    value: "$(POD_IP)"
+  - name: CALL_CONTROL_URL
+    value: "http://call-control:8080"
+  - name: NODE_OPTIONS
+    value: "--max-old-space-size=600 --expose-gc"
+  - name: B2BUA_EXPOSE_GC
+    value: "1"
