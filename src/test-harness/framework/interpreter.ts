@@ -8,18 +8,18 @@
  */
 
 import { Cause, Clock, Effect, Fiber, Option, Result } from "effect"
-import type { SipMessage, SipRequest } from "../../../src/sip/types.js"
-import { SipParser } from "../../../src/sip/Parser.js"
-import { hydrateRequest } from "../../../src/sip/parsers/extract-fields.js"
-import { PeerFabricControl } from "../../../src/cache/PeerFabric.js"
-import { WorkerOrdinal } from "../../../src/cache/PeerCachePort.js"
-import { WorkerId } from "../../../src/sip-front-proxy/index.js"
+import type { SipMessage, SipRequest } from "../../sip/types.js"
+import { SipParser } from "../../sip/Parser.js"
+import { hydrateRequest } from "../../sip/parsers/extract-fields.js"
+import { PeerFabricControl } from "../../cache/PeerFabric.js"
+import { WorkerOrdinal } from "../../cache/PeerCachePort.js"
+import { WorkerId } from "../../sip-front-proxy/index.js"
 import {
   SimulatedK8sCluster,
   type KillEvent,
   type RoutingDecisionKind,
   type RoutingMetricsSnapshot,
-} from "../../support/SimulatedK8sCluster.js"
+} from "../internal/SimulatedK8sCluster.js"
 
 /**
  * Build a synthetic placeholder request for trace entries that record an
@@ -42,7 +42,7 @@ function makePlaceholderRequest(method: string): SipRequest {
     raw: Buffer.alloc(0),
   })
 }
-import { getHeaders } from "../../../src/sip/MessageHelpers.js"
+import { getHeaders } from "../../sip/MessageHelpers.js"
 import type {
   AgentConfig,
   AgentInfo,
@@ -470,11 +470,11 @@ function executeInfra(
     switch (step.action) {
       case "crash":
         yield* ctl.killWorker(peer)
-        state.results.push(makeStepResult({ stepIndex: index, step, status: "ok" }))
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
         return
       case "restart":
         yield* ctl.rebootWorker(peer)
-        state.results.push(makeStepResult({ stepIndex: index, step, status: "ok" }))
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
         return
       case "partition":
         // The current InfraStep type carries only one `target`. Real
@@ -513,7 +513,7 @@ function executeK8s(
   index: number,
   state: InterpreterState
 ): Effect.Effect<void> {
-  return Effect.gen(function* () {
+  return Effect.scoped(Effect.gen(function* () {
     const clusterOpt = yield* Effect.serviceOption(SimulatedK8sCluster)
     if (Option.isNone(clusterOpt)) {
       state.results.push(makeStepResult({
@@ -765,7 +765,7 @@ function executeK8s(
         return
       }
     }
-  })
+  }))
 }
 
 /** Best-effort cause → string for assertion error messages. */

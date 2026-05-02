@@ -11,11 +11,11 @@
  * Serializer.serialize() from the main codebase.
  */
 
-import type { SipHeader, SipMessage, SipRequest, SipResponse } from "../../../src/sip/types.js"
-import { newBranch, newTag, newCallId, getHeader, getHeaders } from "../../../src/sip/MessageHelpers.js"
-import { serialize } from "../../../src/sip/Serializer.js"
-import { hydrateRequest, hydrateResponse } from "../../../src/sip/parsers/extract-fields.js"
-import { parseNameAddr, parseCSeq } from "../../../src/sip/parsers/custom/structured-headers.js"
+import type { SipHeader, SipMessage, SipRequest, SipResponse } from "../../sip/types.js"
+import { newBranch, newTag, newCallId, getHeader, getHeaders } from "../../sip/MessageHelpers.js"
+import { serialize } from "../../sip/Serializer.js"
+import { hydrateRequest, hydrateResponse } from "../../sip/parsers/extract-fields.js"
+import { parseNameAddr, parseCSeq } from "../../sip/parsers/custom/structured-headers.js"
 import type {
   AgentInfo,
   HeaderOverrides,

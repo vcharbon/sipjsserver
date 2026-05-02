@@ -6,7 +6,7 @@
  * No SIP messages are sent during recording.
  */
 
-import type { SipMessage } from "../../../src/sip/types.js"
+import type { SipMessage } from "../../sip/types.js"
 import type {
   AgentConfig,
   AllowedExtraPattern,

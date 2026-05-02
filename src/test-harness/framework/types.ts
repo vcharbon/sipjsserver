@@ -7,8 +7,8 @@
 
 import type { Effect, Layer, Scope } from "effect"
 import { Data } from "effect"
-import type { SipHeader, SipMessage } from "../../../src/sip/types.js"
-import type { NetworkTraceEntry } from "../../../src/sip/SignalingNetwork.js"
+import type { SipHeader, SipMessage } from "../../sip/types.js"
+import type { NetworkTraceEntry } from "../../sip/SignalingNetwork.js"
 import type { ValidationCheckName, ValidationOverrides } from "./validation.js"
 
 // ---------------------------------------------------------------------------

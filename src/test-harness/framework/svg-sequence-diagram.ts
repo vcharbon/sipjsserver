@@ -6,7 +6,7 @@
  * click targets for message inspection, and timing annotations.
  */
 
-import type { SipMessage } from "../../../src/sip/types.js"
+import type { SipMessage } from "../../sip/types.js"
 import type { NetworkTag, Participant, TraceEntry } from "./types.js"
 
 // ---------------------------------------------------------------------------

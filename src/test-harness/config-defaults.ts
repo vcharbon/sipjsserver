@@ -9,7 +9,7 @@
  * service boundary) prevents accidental production reuse.
  */
 
-import type { AppConfigData } from "../../src/config/AppConfig.js"
+import type { AppConfigData } from "../config/AppConfig.js"
 
 /**
  * Return a sensible default AppConfigData for in-memory / fake-stack tests.
@@ -22,6 +22,7 @@ export function testAppConfigDefaults(overrides?: Partial<AppConfigData>): AppCo
   return {
     sipLocalIp: "127.0.0.1",
     sipLocalPort: 15060,
+    workerServiceName: "b2bua-worker",
     redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
     redisKeyPrefix: `test-${Date.now()}`,
     limiterWindowSeconds: 300,

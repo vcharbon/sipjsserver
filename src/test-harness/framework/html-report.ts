@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { ScenarioResult } from "./types.js"
 import { renderSequenceDiagram, serializeMessage } from "./svg-sequence-diagram.js"
-import { ruleRegistry } from "../../../src/b2bua/B2buaCore.js"
+import { ruleRegistry } from "../../b2bua/B2buaCore.js"
 import { snapshot as ruleSnapshot } from "./rule-usage-collector.js"
 
 // ---------------------------------------------------------------------------

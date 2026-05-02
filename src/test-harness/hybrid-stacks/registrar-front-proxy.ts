@@ -22,7 +22,7 @@
  */
 
 import { Effect, Layer } from "effect"
-import type { AppConfigData } from "../../src/config/AppConfig.js"
+import type { AppConfigData } from "../../config/AppConfig.js"
 import {
   CancelBranchLru,
   CoreToExtRoutingStrategy,
@@ -35,8 +35,8 @@ import {
   RegistrarProxyConfig,
   type SocketAddr,
   workerRegistryControlNoopLayer,
-} from "../../src/sip-front-proxy/index.js"
-import { fromString as staticRegistryFromString } from "../../src/sip-front-proxy/registry/static.js"
+} from "../../sip-front-proxy/index.js"
+import { fromString as staticRegistryFromString } from "../../sip-front-proxy/registry/static.js"
 
 export interface RegistrarFrontProxyHybridStackOpts {
   readonly config: AppConfigData

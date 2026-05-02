@@ -7,7 +7,7 @@
  */
 
 import { Result } from "effect"
-import type { SipMessage, SipHeader } from "../../../src/sip/types.js"
+import type { SipMessage, SipHeader } from "../../sip/types.js"
 import type { AgentDialogState } from "./message-builder.js"
 
 // ---------------------------------------------------------------------------
@@ -702,9 +702,10 @@ export function runValidationChecks(
   overrides: ValidationOverrides | undefined,
   errors: string[]
 ): void {
+  const overrideMap = overrides as Record<ValidationCheckName, ValidationFn | undefined> | undefined
   for (const [name, defaultFn] of Object.entries(defaultChecks) as Array<[ValidationCheckName, ValidationFn]>) {
     if (skipSet.has(name)) continue
-    const fn = overrides?.[name] ?? defaultFn
+    const fn = overrideMap?.[name] ?? defaultFn
     const checkErrors = fn(msg, dialogState, correlatedRequest)
     errors.push(...checkErrors)
   }

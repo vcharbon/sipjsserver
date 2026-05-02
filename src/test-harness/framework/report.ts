@@ -91,6 +91,8 @@ function stepDescription(step: Step): string {
       return `pause ${step.duration}ms`
     case "infra":
       return `${step.action} ${step.target}`
+    case "k8s":
+      return `k8s ${step.action.kind}`
   }
 }
 

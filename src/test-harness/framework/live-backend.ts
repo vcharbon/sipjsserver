@@ -18,7 +18,7 @@
 import { Effect } from "effect"
 import type { AgentInfo, NetworkTag, TestTransport } from "./types.js"
 import { DEFAULT_NETWORK, TransportError } from "./types.js"
-import { SignalingNetwork, type UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
+import { SignalingNetwork, type UdpEndpoint } from "../../sip/SignalingNetwork.js"
 
 interface LiveAgent {
   readonly ip: string
@@ -97,11 +97,11 @@ export function createLiveTransport(opts?: {
             queueMax: AGENT_QUEUE_MAX,
           }).pipe(
             Effect.catch((err) =>
-              new TransportError({
+              Effect.fail(new TransportError({
                 message:
                   `Failed to bind agent "${name}" at ${requestedIp}:${config.port ?? 0} on network ${agentNetwork}: ${err.message}`,
                 cause: err,
-              })
+              }))
             )
           )
 
@@ -134,7 +134,11 @@ export function createLiveTransport(opts?: {
       // `realTracing` (not `real`): the fullcall framework drains the
       // network trace via `simulated-backend.ts`'s `drainTrace()` to
       // build hop-by-hop reports. Production MUST use `real`.
-      }).pipe(useExternalNetwork ? (e) => e : Effect.provide(SignalingNetwork.realTracing)),
+      }).pipe(
+        useExternalNetwork
+          ? (e) => e as Effect.Effect<Record<string, AgentInfo>, TransportError, never>
+          : Effect.provide(SignalingNetwork.realTracing)
+      ),
 
     send: (agentName, buf, port, address) =>
       Effect.gen(function* () {
@@ -144,7 +148,7 @@ export function createLiveTransport(opts?: {
         }
         yield* agent.endpoint.send(buf, port, address).pipe(
           Effect.catch((err) =>
-            new TransportError({ message: err.message, cause: err })
+            Effect.fail(new TransportError({ message: err.message, cause: err }))
           )
         )
       }),

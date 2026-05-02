@@ -34,30 +34,30 @@ import { Effect, Layer } from "effect"
 import type { Scope } from "effect"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { executeScenario } from "../fullcall/framework/interpreter.js"
-import { createLiveTransport } from "../fullcall/framework/live-backend.js"
-import { formatReport } from "../fullcall/framework/report.js"
+import { executeScenario } from "./framework/interpreter.js"
+import { createLiveTransport } from "./framework/live-backend.js"
+import { formatReport } from "./framework/report.js"
 import {
   writeScenarioReport,
   writeIndexReport,
-} from "../fullcall/framework/html-report.js"
-import { writeTextReports } from "../fullcall/framework/text-report.js"
+} from "./framework/html-report.js"
+import { writeTextReports } from "./framework/text-report.js"
 import type {
   NetworkTag,
   Scenario,
   ScenarioResult,
   TestTransport,
-} from "../fullcall/framework/types.js"
+} from "./framework/types.js"
 import {
   ProxyCore,
   type SocketAddr,
-} from "../../src/sip-front-proxy/index.js"
+} from "../sip-front-proxy/index.js"
 import {
   SignalingNetwork,
   type NetworkTraceEntry,
-} from "../../src/sip/SignalingNetwork.js"
-import type { AppConfigData } from "../../src/config/AppConfig.js"
-import { registrarFrontProxyHybridStackLayer } from "./registrarFrontProxyHybridStack.js"
+} from "../sip/SignalingNetwork.js"
+import type { AppConfigData } from "../config/AppConfig.js"
+import { registrarFrontProxyHybridStackLayer } from "./hybrid-stacks/registrar-front-proxy.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -125,6 +125,7 @@ function defaultHybridAppConfig(): AppConfigData {
   return {
     sipLocalIp: "0.0.0.0",
     sipLocalPort: 5060,
+    workerServiceName: "b2bua-worker",
     redisUrl: "redis://unused",
     redisKeyPrefix: "hybrid",
     limiterWindowSeconds: 300,
@@ -345,4 +346,54 @@ export function hybridProxyCoreDestination(
   corePort: number = 25081,
 ): { readonly host: string; readonly port: number } {
   return { host: advertisedIp, port: corePort }
+}
+
+// ---------------------------------------------------------------------------
+// Consumer-facing convenience wrapper
+// ---------------------------------------------------------------------------
+
+export interface RegistrarTestProxyRunnerOptions {
+  /**
+   * Where the in-process registrar front-proxy forwards out-of-registrar
+   * INVITEs — the consumer's third-party SUT (PBX / SBC / b2bua) on a
+   * real IP:port.
+   */
+  readonly coreDestination: SocketAddr
+  /**
+   * IP address that alice / bob and the proxy advertise in Contact / Via /
+   * From URIs. Must be reachable from the consumer's SUT for in-bound SIP
+   * to come back. Default `127.0.0.1` (local-only test SUTs).
+   */
+  readonly advertisedIp?: string
+  /** Proxy ext UDP port (where alice/bob send REGISTER + INVITE). */
+  readonly extPort?: number
+  /** Proxy core UDP port (where the SUT sends b-leg traffic). */
+  readonly corePort?: number
+  /** Output directory for HTML / global.txt reports. */
+  readonly outputDir?: string
+}
+
+/**
+ * One-call factory for the use-case-#1 hybrid harness:
+ * fake in-process alice/bob agents + an in-process registrar front-proxy
+ * that forwards out-of-registrar INVITEs to the consumer's real SIP
+ * system at `opts.coreDestination`. Returns a function that takes a
+ * `Scenario` and returns an `Effect<void>`; awaiting it runs the
+ * scenario and writes reports into `opts.outputDir`.
+ *
+ * Use [flushHybridIndexReport] in an `afterAll` hook to emit the
+ * combined HTML index for all scenarios that landed in the same
+ * `outputDir`.
+ */
+export function createRegistrarTestProxyRunner(
+  opts: RegistrarTestProxyRunnerOptions,
+) {
+  return createHybridRunner({
+    advertisedIp: opts.advertisedIp ?? "127.0.0.1",
+    extPort: opts.extPort ?? 25080,
+    corePort: opts.corePort ?? 25081,
+    kindHost: opts.coreDestination.host,
+    kindPort: opts.coreDestination.port,
+    outputDir: opts.outputDir ?? "test-results/registrar-test-proxy",
+  })
 }

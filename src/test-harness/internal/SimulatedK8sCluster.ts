@@ -43,15 +43,15 @@ import {
 import {
   PeerFabricControl,
   type PeerSnapshot,
-} from "../../src/cache/PeerFabric.js"
-import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
-import { CallState } from "../../src/call/CallState.js"
-import { TimerService } from "../../src/call/TimerService.js"
+} from "../../cache/PeerFabric.js"
+import { WorkerOrdinal } from "../../cache/PeerCachePort.js"
+import { CallState } from "../../call/CallState.js"
+import { TimerService } from "../../call/TimerService.js"
 import {
   WorkerId,
   WorkerRegistrySimulatedControl,
   type SocketAddr,
-} from "../../src/sip-front-proxy/index.js"
+} from "../../sip-front-proxy/index.js"
 import { WorkerConnectivity } from "./WorkerConnectivity.js"
 
 // ---------------------------------------------------------------------------

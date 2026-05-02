@@ -42,7 +42,7 @@ import {
   ConnectivityGate,
   type ConnectivityAddress,
   type ConnectivityGateApi,
-} from "../../src/sip/ConnectivityGate.js"
+} from "../../sip/ConnectivityGate.js"
 
 // ---------------------------------------------------------------------------
 // Public API

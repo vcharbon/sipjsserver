@@ -21,8 +21,8 @@
  * the transitional message is still within the "early dialog" window.
  */
 
-import type { SipMessage } from "../../../src/sip/types.js"
-import { classifySdp } from "../helpers/sdp.js"
+import type { SipMessage } from "../../sip/types.js"
+import { classifySdp } from "./helpers/sdp.js"
 
 export interface PendingOffer {
   readonly party: string
