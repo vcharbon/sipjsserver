@@ -19,8 +19,8 @@
  * each agent's `agentInfo.ip` via `transportAdvertisedIp`.
  */
 
-import { scenario } from "../../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../../fullcall/helpers/sdp.js"
+import { scenario } from "../../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../../src/test-harness/framework/helpers/sdp.js"
 
 const ALICE_PORT = 25060
 const BOB_PORT = 25061

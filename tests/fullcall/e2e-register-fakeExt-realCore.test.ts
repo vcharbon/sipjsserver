@@ -27,7 +27,7 @@ import {
   createHybridRunner,
   discoverHostReachableIp,
   flushHybridIndexReport,
-} from "../support/hybridRunner.js"
+} from "../../src/test-harness/hybrid-runner.js"
 
 const OUTPUT_DIR = "test-results/real-clock/registrarFrontProxy-kind"
 const E2E_KIND_ENABLED = process.env.E2E_KIND === "1"

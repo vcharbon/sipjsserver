@@ -20,7 +20,7 @@ import { mockCallReferBehavior } from "../../src/decision/adapters/http-referenc
 import { CallDecisionEngine } from "../../src/decision/CallDecisionEngine.js"
 import { MockCallControlLayer } from "../fullcall/framework/MockCallControlLayer.js"
 import { AppConfig } from "../../src/config/AppConfig.js"
-import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 
 // ── Schema roundtrip ─────────────────────────────────────────────────────────
 

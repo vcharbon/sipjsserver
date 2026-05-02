@@ -11,8 +11,8 @@
  * the same B2BUA instance sharing Redis limiter state.
  */
 
-import { scenario, parallel } from "../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
+import { scenario, parallel } from "../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 
 const limiterInstruction = JSON.stringify({
   action: "route",

@@ -18,7 +18,7 @@ import {
   referAllowFullATimeout,
 } from "../../scenarios/refer-full-transfer.js"
 import { createSimulatedRunner, expectNoCdr, flushIndexReport } from "../../support/harness.js"
-import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "../framework/types.js"
+import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "../../../src/test-harness/framework/types.js"
 
 // FIXME(test-framework): pending re-INVITE on alice + 24h sweep retransmits
 // generate "unexpected message" failures. The B2BUA cleanup is correct.

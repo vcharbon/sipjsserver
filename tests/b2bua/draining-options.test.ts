@@ -27,7 +27,7 @@ import { SipRouter } from "../../src/sip/SipRouter.js"
 import { customParser } from "../../src/sip/parsers/custom/index.js"
 import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { fakeStackLayer } from "../support/fakeStack.js"
-import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 
 const SIP_PORT = 15060
 const UAC = { ip: "127.0.0.1", port: 25060 }

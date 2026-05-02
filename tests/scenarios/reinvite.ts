@@ -6,9 +6,9 @@
  * 3. crossingReInvite — Both sides send re-INVITE simultaneously (glare → 491)
  */
 
-import { scenario } from "../fullcall/framework/dsl.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { callSetup } from "./bye-directions.js"
-import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
+import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipMessage } from "../../src/sip/types.js"
 
 /** Helper to check a message carries a non-empty body. */

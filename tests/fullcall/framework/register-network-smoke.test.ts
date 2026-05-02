@@ -16,11 +16,11 @@ import { describe, expect, it } from "vitest"
 import { mkdtempSync, readFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { record } from "./recorder.js"
+import { record } from "../../../src/test-harness/framework/recorder.js"
 import { hydrateRequest } from "../../../src/sip/parsers/extract-fields.js"
-import { writeScenarioReport } from "./html-report.js"
-import { writeTextReports } from "./text-report.js"
-import type { ScenarioResult, TraceEntry } from "./types.js"
+import { writeScenarioReport } from "../../../src/test-harness/framework/html-report.js"
+import { writeTextReports } from "../../../src/test-harness/framework/text-report.js"
+import type { ScenarioResult, TraceEntry } from "../../../src/test-harness/framework/types.js"
 
 describe("agent.register DSL", () => {
   it("produces a REGISTER SendStep with To=AOR and From=AOR", () => {

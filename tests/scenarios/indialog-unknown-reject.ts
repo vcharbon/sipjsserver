@@ -10,8 +10,8 @@
  * identifiers that don't match any active call.
  */
 
-import { scenario } from "../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 
 /**
  * A stranger sends BYE, INVITE (re-INVITE), and OPTIONS to the B2BUA

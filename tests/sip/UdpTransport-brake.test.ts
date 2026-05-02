@@ -20,7 +20,7 @@ import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../src/sip/SignalingNetwork.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
-import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 
 const TRANSIT_MS = 15
 const QUEUE_MAX = 5

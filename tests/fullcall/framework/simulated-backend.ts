@@ -13,25 +13,25 @@
  */
 
 import { Effect, Option } from "effect"
-import type { AgentInfo, NetworkTag, TestTransport } from "./types.js"
-import { DEFAULT_NETWORK } from "./types.js"
+import type { AgentInfo, NetworkTag, TestTransport } from "../../../src/test-harness/framework/types.js"
+import { DEFAULT_NETWORK } from "../../../src/test-harness/framework/types.js"
 import { pumpAll } from "../../support/pumpAll.js"
-import { TransportError } from "./types.js"
+import { TransportError } from "../../../src/test-harness/framework/types.js"
 import type { UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
 import { SignalingNetwork } from "../../../src/sip/SignalingNetwork.js"
 import { SipRouter } from "../../../src/sip/SipRouter.js"
 import { type AppConfigData } from "../../../src/config/AppConfig.js"
-import { testAppConfigDefaults } from "../../support/testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../../src/test-harness/config-defaults.js"
 import { CallState } from "../../../src/call/CallState.js"
 import { TimerService } from "../../../src/call/TimerService.js"
-import { SimulatedK8sCluster } from "../../support/SimulatedK8sCluster.js"
+import { SimulatedK8sCluster } from "../../../src/test-harness/internal/SimulatedK8sCluster.js"
 import { buildHandlers, ruleRegistry } from "../../../src/b2bua/B2buaCore.js"
 import {
   disableRule,
   transformRegistry,
   type RuleRegistry,
 } from "../../../src/b2bua/rules/framework/RuleRegistry.js"
-import { recordFiring } from "./rule-usage-collector.js"
+import { recordFiring } from "../../../src/test-harness/framework/rule-usage-collector.js"
 import { DEFAULT_TRANSIT_DELAY_MS, fakeStackLayer } from "../../support/fakeStack.js"
 import {
   HA_PROXY_ADDR,

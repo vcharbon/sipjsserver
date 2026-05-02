@@ -13,8 +13,8 @@
  * This exercises the cancel-200-crossing rule in CornerCaseRules.ts.
  */
 
-import { scenario } from "../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 
 export const cancelCrossing200Ok = scenario("cancel-200ok-crossing", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })

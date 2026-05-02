@@ -12,7 +12,7 @@
  * fabric hop is the proxy's 404 reply on the core endpoint.
  */
 
-import { scenario } from "../../fullcall/framework/dsl.js"
+import { scenario } from "../../../src/test-harness/framework/dsl.js"
 import {
   CORE_INGRESS,
   coreIp,

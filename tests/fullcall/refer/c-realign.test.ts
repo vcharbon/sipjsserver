@@ -19,7 +19,7 @@ import {
   referAllowCRealignBNonBye,
 } from "../../scenarios/refer-c-realign.js"
 import { createSimulatedRunner, expectNoCdr, flushIndexReport } from "../../support/harness.js"
-import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "../framework/types.js"
+import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "../../../src/test-harness/framework/types.js"
 
 // FIXME(test-framework): pending re-INVITE on charlie + 24h sweep produces a
 // fake-clock event-ordering race that prevents 2/3 BYE 200 OK responses from

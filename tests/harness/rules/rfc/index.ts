@@ -21,11 +21,11 @@ import {
   correlateResponse,
   runValidationChecks,
   type ValidationCheckName,
-} from "../../../fullcall/framework/validation.js"
+} from "../../../../src/test-harness/framework/validation.js"
 import {
   createAgentDialogState,
   type AgentDialogState,
-} from "../../../fullcall/framework/message-builder.js"
+} from "../../../../src/test-harness/framework/message-builder.js"
 import { midDialogFromUriRule } from "./mid-dialog-from-uri.js"
 import { midDialogRouteRule } from "./mid-dialog-route.js"
 import { sdpOriginContinuityRule } from "./sdp-o-continuity.js"

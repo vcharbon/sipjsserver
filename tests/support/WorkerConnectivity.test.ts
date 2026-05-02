@@ -39,7 +39,7 @@ import {
 import {
   WorkerConnectivity,
   WorkerConnectivityLayer,
-} from "./WorkerConnectivity.js"
+} from "../../src/test-harness/internal/WorkerConnectivity.js"
 
 // ---------------------------------------------------------------------------
 // UDP fabric — SignalingNetwork.simulated

@@ -31,7 +31,7 @@ import {
   type Call,
   type Leg,
 } from "../../src/call/CallModel.js"
-import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 
 const A = WorkerOrdinal("A")
 const B = WorkerOrdinal("B")

@@ -15,7 +15,7 @@ import { describe, it } from "@effect/vitest"
 import { afterAll } from "vitest"
 import { referOverallSafetyFires } from "../../scenarios/refer-timers.js"
 import { createSimulatedRunner, expectNoCdr, flushIndexReport } from "../../support/harness.js"
-import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "../framework/types.js"
+import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "../../../src/test-harness/framework/types.js"
 
 // FIXME(test-framework): same fake-clock event-ordering race as
 // refer-allow-c-realign-c-timeout. The B2BUA is correct; the test

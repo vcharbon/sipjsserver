@@ -41,7 +41,7 @@ import {
   flushIndexReport,
   skipCdrCheck,
 } from "../support/harness.js"
-import { ALL_SUTS } from "./framework/types.js"
+import { ALL_SUTS } from "../../src/test-harness/framework/types.js"
 
 // ── Per-scenario CDR-check overrides ────────────────────────────────────────
 //

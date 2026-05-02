@@ -9,8 +9,8 @@
  * CANCEL transaction shape.
  */
 
-import { scenario } from "../fullcall/framework/dsl.js"
-import { sdpOffer } from "../fullcall/helpers/sdp.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
+import { sdpOffer } from "../../src/test-harness/framework/helpers/sdp.js"
 import { LabelRegistry, type ScenarioBuildResult, type ScenarioScript } from "../harness/runner.js"
 
 export const cancelCall: ScenarioScript = (sc) => {

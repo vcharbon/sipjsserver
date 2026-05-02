@@ -25,8 +25,8 @@
  * hops painted by the proxy participants `proxy(ext)` and `proxy(core)`.
  */
 
-import { scenario } from "../../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../../fullcall/helpers/sdp.js"
+import { scenario } from "../../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../../src/test-harness/framework/helpers/sdp.js"
 import {
   CORE_DESTINATION,
   EXT_INGRESS,

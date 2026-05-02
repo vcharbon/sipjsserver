@@ -14,11 +14,11 @@ import { Effect } from "effect"
 import type { Layer, Scope } from "effect"
 import * as TestClock from "effect/testing/TestClock"
 import type { AppConfigData } from "../../src/config/AppConfig.js"
-import { executeScenario } from "../fullcall/framework/interpreter.js"
+import { executeScenario } from "../../src/test-harness/framework/interpreter.js"
 import { createSimulatedTransport } from "../fullcall/framework/simulated-backend.js"
 import {
   type ComposableScenario,
-} from "../fullcall/framework/dsl.js"
+} from "../../src/test-harness/framework/dsl.js"
 import type {
   ExpectStep,
   Scenario,
@@ -26,8 +26,8 @@ import type {
   SendStep,
   Step,
   TestTransport,
-} from "../fullcall/framework/types.js"
-import type { ValidationCheckName } from "../fullcall/framework/validation.js"
+} from "../../src/test-harness/framework/types.js"
+import type { ValidationCheckName } from "../../src/test-harness/framework/validation.js"
 import { extractRecordings } from "./recording-extractor.js"
 import type { CallRecording } from "./recording.js"
 import {

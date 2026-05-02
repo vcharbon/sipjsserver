@@ -11,7 +11,7 @@ import { Buffer } from "node:buffer"
 import type { SipMessage } from "../../src/sip/types.js"
 import { serialize } from "../../src/sip/Serializer.js"
 import { getHeader } from "../../src/sip/MessageHelpers.js"
-import type { ScenarioResult } from "../fullcall/framework/types.js"
+import type { ScenarioResult } from "../../src/test-harness/framework/types.js"
 import type {
   CallRecording,
   RecordedMessage,

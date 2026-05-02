@@ -20,8 +20,8 @@
  * delayed-offer 200" as Alice's violation, not a B2BUA bug.
  */
 
-import { scenario } from "../fullcall/framework/dsl.js"
-import { sdpOffer } from "../fullcall/helpers/sdp.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
+import { sdpOffer } from "../../src/test-harness/framework/helpers/sdp.js"
 
 const BOB_PORT = 5695
 

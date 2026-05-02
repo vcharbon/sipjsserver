@@ -19,7 +19,7 @@ import {
   referSecondDuringAuthorizing,
 } from "../../scenarios/refer-reject.js"
 import { createSimulatedRunner, flushIndexReport } from "../../support/harness.js"
-import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "../framework/types.js"
+import { ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "../../../src/test-harness/framework/types.js"
 
 const OUTPUT_DIR = "test-results/fake-clock"
 

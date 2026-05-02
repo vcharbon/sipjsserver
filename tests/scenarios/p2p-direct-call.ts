@@ -7,8 +7,8 @@
  * Flow: INVITE -> 180 -> 200 -> ACK -> BYE -> 200
  */
 
-import { scenario } from "../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 
 export const ALICE_PORT = 25060
 export const BOB_PORT = 25061

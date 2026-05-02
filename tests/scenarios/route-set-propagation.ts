@@ -28,8 +28,8 @@
  *     loose-route flow lands on both legs.
  */
 
-import { scenario } from "../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipHeader } from "../../src/sip/types.js"
 
 function getHeader(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {

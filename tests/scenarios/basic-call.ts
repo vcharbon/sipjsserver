@@ -13,9 +13,9 @@
  *     proxy address, Call-ID, and BYE direction. Used by the HA SUT's
  *     `two-calls-routed-to-two-workers` scenario.
  */
-import { scenario } from "../fullcall/framework/dsl.js"
-import type { ScenarioContext } from "../fullcall/framework/recorder.js"
-import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
+import type { ScenarioContext } from "../../src/test-harness/framework/recorder.js"
+import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipHeader } from "../../src/sip/types.js"
 
 function getHeaderValue(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {

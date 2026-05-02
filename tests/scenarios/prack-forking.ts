@@ -26,8 +26,8 @@
  * baseline+2 (PRACK was baseline+1), not baseline+3.
  */
 
-import { scenario } from "../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipMessage } from "../../src/sip/types.js"
 import { parseNameAddr } from "../../src/sip/parsers/custom/structured-headers.js"
 

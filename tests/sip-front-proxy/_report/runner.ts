@@ -35,14 +35,14 @@ import { customParser } from "../../../src/sip/parsers/custom/index.js"
 import type { SipMessage } from "../../../src/sip/types.js"
 import {
   writeScenarioReport,
-} from "../../fullcall/framework/html-report.js"
-import { writeTextReports } from "../../fullcall/framework/text-report.js"
+} from "../../../src/test-harness/framework/html-report.js"
+import { writeTextReports } from "../../../src/test-harness/framework/text-report.js"
 import type {
   Participant,
   ScenarioResult,
   TraceEntry,
-} from "../../fullcall/framework/types.js"
-import { DEFAULT_NETWORK } from "../../fullcall/framework/types.js"
+} from "../../../src/test-harness/framework/types.js"
+import { DEFAULT_NETWORK } from "../../../src/test-harness/framework/types.js"
 import { ProxyParticipants, ProxyParticipantsLive } from "./recorder.js"
 
 export {

@@ -10,7 +10,7 @@
  * carries the `ext` network tag end-to-end.
  */
 
-import { scenario } from "../../fullcall/framework/dsl.js"
+import { scenario } from "../../../src/test-harness/framework/dsl.js"
 import { extIp } from "../../support/registrarFrontProxyFakeStack.js"
 import type { SipHeader } from "../../../src/sip/types.js"
 

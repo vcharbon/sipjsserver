@@ -40,7 +40,7 @@
  * Sequential — concurrency under TestClock is the next slice's concern.
  */
 
-import { scenario } from "../../fullcall/framework/dsl.js"
+import { scenario } from "../../../src/test-harness/framework/dsl.js"
 import {
   HA_PROXY_ADDR,
   haAliceIp,

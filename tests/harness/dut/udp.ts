@@ -18,8 +18,8 @@
  */
 
 import { Effect } from "effect"
-import { createLiveTransport } from "../../fullcall/framework/live-backend.js"
-import type { TestTransport } from "../../fullcall/framework/types.js"
+import { createLiveTransport } from "../../../src/test-harness/framework/live-backend.js"
+import type { TestTransport } from "../../../src/test-harness/framework/types.js"
 import type {
   AgentBind,
   DutAgentConfig,

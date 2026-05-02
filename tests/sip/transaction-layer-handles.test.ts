@@ -9,7 +9,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import { TransactionLayer } from "../../src/sip/TransactionLayer.js"
 import { fakeStackLayer } from "../support/fakeStack.js"
-import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 import type { SipRequest } from "../../src/sip/types.js"
 import { hydrateRequest } from "../../src/sip/parsers/extract-fields.js"
 

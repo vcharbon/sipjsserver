@@ -16,8 +16,8 @@
  * scenario doesn't bake in the host gateway IP.
  */
 
-import { scenario } from "../../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../../fullcall/helpers/sdp.js"
+import { scenario } from "../../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../../src/test-harness/framework/helpers/sdp.js"
 
 const ALICE_PORT = 25062
 const BOB1_PORT = 25063

@@ -11,7 +11,7 @@
  * scenario can fast-forward an hour without burning real wall time.
  */
 
-import { scenario } from "../../fullcall/framework/dsl.js"
+import { scenario } from "../../../src/test-harness/framework/dsl.js"
 import {
   CORE_INGRESS,
   coreIp,

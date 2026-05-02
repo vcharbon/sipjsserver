@@ -55,7 +55,7 @@ import { WriteNotifier } from "../../src/replication/WriteNotifier.js"
 import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
 import { CdrWriter, makeCdrRecordsBuffer } from "../../src/cdr/CdrWriter.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
-import { WorkerConnectivity, WorkerConnectivityLayer } from "./WorkerConnectivity.js"
+import { WorkerConnectivity, WorkerConnectivityLayer } from "../../src/test-harness/internal/WorkerConnectivity.js"
 import {
   SimulatedK8sCluster,
   SimulatedK8sClusterLayer,
@@ -63,7 +63,7 @@ import {
   type WorkerLifecycle,
   type WorkerRuntimeHandle,
   makeClusterWorker,
-} from "./SimulatedK8sCluster.js"
+} from "../../src/test-harness/internal/SimulatedK8sCluster.js"
 
 // ---------------------------------------------------------------------------
 // Topology constants (kept in sync with `proxyB2bFakeStack.HA_*` so traces

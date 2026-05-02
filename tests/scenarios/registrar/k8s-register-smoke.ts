@@ -10,7 +10,7 @@
  * scenario exists only to validate the network plumbing end-to-end.
  */
 
-import { scenario } from "../../fullcall/framework/dsl.js"
+import { scenario } from "../../../src/test-harness/framework/dsl.js"
 
 export const k8sRegisterSmoke = scenario("k8s-register-smoke", (s) => {
   // No `network` tag — the kind cluster is one fabric from the test's

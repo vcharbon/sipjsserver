@@ -19,9 +19,9 @@
  * `switchPattern` param) advances each scenario from "skip" to "run".
  */
 
-import { scenario, type ComposableScenario } from "../../fullcall/framework/dsl.js"
+import { scenario, type ComposableScenario } from "../../../src/test-harness/framework/dsl.js"
 import { K8S_PROXY_ADDR, k8sWorkerId } from "../../support/k8sFakeStack.js"
-import { sdpAnswer, sdpOffer } from "../../fullcall/helpers/sdp.js"
+import { sdpAnswer, sdpOffer } from "../../../src/test-harness/framework/helpers/sdp.js"
 import { CALLID_TO_W1 } from "../../scenarios/ha/two-calls-routed-to-two-workers.js"
 
 export type Method = "BYE" | "INFO" | "UPDATE" | "MESSAGE" | "REINVITE" | "PRACK"

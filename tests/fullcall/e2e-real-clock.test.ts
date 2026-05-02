@@ -13,7 +13,7 @@
 
 import { describe, it } from "@effect/vitest"
 import { afterAll } from "vitest"
-import type { ScenarioTier } from "./framework/types.js"
+import type { ScenarioTier } from "../../src/test-harness/framework/types.js"
 import { basicCall } from "../scenarios/basic-call.js"
 import { callReject } from "../scenarios/call-reject.js"
 import { cancelCall } from "../scenarios/cancel.js"

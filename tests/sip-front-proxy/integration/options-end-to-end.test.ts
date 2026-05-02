@@ -46,7 +46,7 @@ import {
   type WorkerHealth,
 } from "../../../src/sip-front-proxy/index.js"
 import { fakeStackLayer } from "../../support/fakeStack.js"
-import { testAppConfigDefaults } from "../../support/testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../../src/test-harness/config-defaults.js"
 
 // ── Constants ──────────────────────────────────────────────────────────
 const SIP_PORT = 15060                // B2BUA bind

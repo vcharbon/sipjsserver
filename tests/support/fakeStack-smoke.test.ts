@@ -5,7 +5,7 @@ import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { SipRouter } from "../../src/sip/SipRouter.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { fakeStackLayer } from "./fakeStack.js"
-import { testAppConfigDefaults } from "./testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 
 describe("fakeStackLayer", () => {
   it.effect("exposes router + shared SignalingNetwork", () =>

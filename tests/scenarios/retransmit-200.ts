@@ -11,8 +11,8 @@
  * "confirmed".
  */
 
-import { scenario } from "../fullcall/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../fullcall/helpers/sdp.js"
+import { scenario } from "../../src/test-harness/framework/dsl.js"
+import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 
 export const retransmit200 = scenario("retransmit-200", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })

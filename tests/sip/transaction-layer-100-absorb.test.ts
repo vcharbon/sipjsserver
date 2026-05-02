@@ -22,7 +22,7 @@ import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { TransactionLayer } from "../../src/sip/TransactionLayer.js"
 import { OverloadController } from "../../src/b2bua/OverloadController.js"
 import { SipParser } from "../../src/sip/Parser.js"
-import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 
 const TRANSIT_MS = 5
 const B2BUA_IP = "127.0.0.1"

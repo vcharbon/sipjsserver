@@ -33,7 +33,7 @@ import {
   type Call,
   type Leg,
 } from "../../src/call/CallModel.js"
-import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
+import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 import { NoOpCdrLayer } from "../support/networkLeaves.js"
 
 const A = WorkerOrdinal("A")

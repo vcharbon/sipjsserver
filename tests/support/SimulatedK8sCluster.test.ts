@@ -18,8 +18,8 @@ import {
   k8sWorkerId,
   K8S_PROXY_ADDR,
 } from "./k8sFakeStack.js"
-import { SimulatedK8sCluster } from "./SimulatedK8sCluster.js"
-import { testAppConfigDefaults } from "./testAppConfigDefaults.js"
+import { SimulatedK8sCluster } from "../../src/test-harness/internal/SimulatedK8sCluster.js"
+import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 import {
   HandlerRegistry,
   type EventHandler,
