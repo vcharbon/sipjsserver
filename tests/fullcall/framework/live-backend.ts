@@ -131,7 +131,10 @@ export function createLiveTransport(opts?: {
 
         yield* Effect.addFinalizer(() => Effect.sync(() => agents.clear()))
         return agentInfos
-      }).pipe(useExternalNetwork ? (e) => e : Effect.provide(SignalingNetwork.real)),
+      // `realTracing` (not `real`): the fullcall framework drains the
+      // network trace via `simulated-backend.ts`'s `drainTrace()` to
+      // build hop-by-hop reports. Production MUST use `real`.
+      }).pipe(useExternalNetwork ? (e) => e : Effect.provide(SignalingNetwork.realTracing)),
 
     send: (agentName, buf, port, address) =>
       Effect.gen(function* () {

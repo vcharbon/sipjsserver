@@ -240,3 +240,35 @@ describe("SignalingNetwork.real — bind error surfacing", () => {
     }).pipe(Effect.provide(SignalingNetwork.real))
   )
 })
+
+describe("SignalingNetwork.real vs realTracing — drainTrace partition", () => {
+  // Regression: production layer MUST NOT accumulate NetworkTraceEntry on
+  // every send/recv, otherwise every SIP frame's Buffer is retained for
+  // process lifetime (root cause of an arrayBuffers leak). The two
+  // layers are wire-equivalent; only `drainTrace()` differs.
+
+  it.live("real: drainTrace returns empty even after a send", () =>
+    Effect.gen(function* () {
+      const net = yield* SignalingNetwork
+      const ep = yield* net.bindUdp({ ip: "127.0.0.1", port: 0, queueMax: 16 })
+      yield* ep.send(Buffer.from("ping"), ep.localAddress.port, "127.0.0.1")
+      const drained = yield* net.drainTrace()
+      expect(drained.length).toBe(0)
+    }).pipe(Effect.provide(SignalingNetwork.real))
+  )
+
+  it.live("realTracing: drainTrace returns the send entry", () =>
+    Effect.gen(function* () {
+      const net = yield* SignalingNetwork
+      const ep = yield* net.bindUdp({ ip: "127.0.0.1", port: 0, queueMax: 16 })
+      yield* ep.send(Buffer.from("ping"), ep.localAddress.port, "127.0.0.1")
+      // Pull the recv side too so we exercise both push paths.
+      yield* pullOne(ep)
+      const drained = yield* net.drainTrace()
+      expect(drained.length).toBeGreaterThanOrEqual(1)
+      // Second drain returns [] (clear-on-read).
+      const second = yield* net.drainTrace()
+      expect(second.length).toBe(0)
+    }).pipe(Effect.provide(SignalingNetwork.realTracing))
+  )
+})

@@ -240,172 +240,42 @@ export class SignalingNetwork extends ServiceMap.Service<
   // Real (dgram-backed) implementation
   // -------------------------------------------------------------------------
 
+  /**
+   * Production layer — `dgram`-backed, **trace recording disabled**.
+   *
+   * `drainTrace()` on this layer always returns an empty array; the
+   * send/recv hot paths never allocate a `NetworkTraceEntry` and never
+   * retain the inbound/outbound `Buffer`. This is what `bin/proxy.ts`
+   * and `dist/main.js` must use; using `realTracing` in production
+   * causes unbounded `arrayBuffers` growth (every SIP frame retained
+   * for the lifetime of the process — see git history of this file
+   * for the original observation).
+   */
   static readonly real: Layer.Layer<SignalingNetwork> = Layer.sync(
     SignalingNetwork,
-    () => {
-      // Per-layer-instance recording buffer. Mirrors the simulated impl's
-      // `drainTrace`: every successful `send()` and every accepted recv
-      // pushes one entry. Real UDP gives us no cross-process clock, so
-      // `sentMs` and `deliveredMs` are stamped from the local `Date.now()`
-      // at the moment of send / recv respectively. For round-trips the
-      // sender's send-entry pairs with the receiver's recv-entry on the
-      // remote endpoint by `(src, dst, raw)` — but the trace renderer just
-      // sorts by timestamp, so the pair appears as two adjacent entries.
-      //
-      // `Layer.sync` (vs `Layer.succeed` with a literal) makes this state
-      // per-instance: each test that builds the layer gets its own buffer,
-      // matching the simulated layer's lifecycle and avoiding cross-test
-      // bleed.
-      const trace: NetworkTraceEntry[] = []
-      return ({
-      bindUdp: (opts) =>
-        Effect.gen(function* () {
-          const queue = yield* Queue.bounded<UdpPacket, Cause.Done>(opts.queueMax)
-          const counters: UdpEndpointCounters = {
-            enqueued: 0,
-            tailDropped: 0,
-            preIngressDropped: 0,
-            preIngressReplies: 0,
-          }
+    () => makeRealImpl({ recordTrace: false })
+  )
 
-          const socket = yield* Effect.acquireRelease(
-            Effect.callback<dgram.Socket, BindError>((resume) => {
-              const sock = dgram.createSocket({
-                type: "udp4",
-                reusePort: opts.reusePort ?? false,
-              })
-              sock.once("listening", () => resume(Effect.succeed(sock)))
-              sock.once("error", (err: Error) =>
-                resume(
-                  Effect.fail(
-                    new BindError({
-                      reason: "os_error",
-                      ip: opts.ip,
-                      port: opts.port,
-                      message: err.message,
-                    })
-                  )
-                )
-              )
-              sock.bind(opts.port, opts.ip)
-            }),
-            (sock) =>
-              Effect.callback<void>((resume) => {
-                sock.close(() => resume(Effect.void))
-              })
-          )
-
-          // Attach recv handler and detach on scope close. Must run inside
-          // acquireRelease so the listener is removed even if a later
-          // finalizer fails.
-          yield* Effect.acquireRelease(
-            Effect.sync(() => {
-              const preIngress = opts.preIngress
-              const handler = (raw: Buffer, rinfo: dgram.RemoteInfo) => {
-                const depth = Queue.sizeUnsafe(queue)
-                const src: RemoteInfo = { address: rinfo.address, port: rinfo.port }
-                const action = preIngress !== undefined
-                  ? preIngress(raw, src, depth)
-                  : PreIngressAction.accept()
-                switch (action._tag) {
-                  case "drop":
-                    counters.preIngressDropped++
-                    return
-                  case "reply": {
-                    counters.preIngressReplies++
-                    // Fire-and-forget: wire-level send back to the source.
-                    // Socket errors surface on the "error" handler below.
-                    socket.send(action.buf, 0, action.buf.length, rinfo.port, rinfo.address, () => {})
-                    return
-                  }
-                  case "accept": {
-                    const arrivalMs = Date.now()
-                    if (!Queue.offerUnsafe(queue, { raw, rinfo: src, arrivalMs })) {
-                      counters.tailDropped++
-                      return
-                    }
-                    counters.enqueued++
-                    trace.push({
-                      raw,
-                      src: { ip: src.address, port: src.port },
-                      dst: { ip: localAddress.ip, port: localAddress.port },
-                      sentMs: arrivalMs,
-                      deliveredMs: arrivalMs,
-                      delivered: true,
-                    })
-                  }
-                }
-              }
-              const errorHandler = (err: Error) => {
-                // Log via console to avoid pulling in structured logging here.
-                // Real callers can subscribe additional handlers if needed.
-                console.error(`[SignalingNetwork.real] socket error: ${err.message}`)
-              }
-              socket.on("message", handler)
-              socket.on("error", errorHandler)
-              return { handler, errorHandler }
-            }),
-            ({ handler, errorHandler }) =>
-              Effect.sync(() => {
-                socket.off("message", handler)
-                socket.off("error", errorHandler)
-                Queue.endUnsafe(queue)
-              })
-          )
-
-          const addr = socket.address()
-          const localAddress = { ip: addr.address, port: addr.port }
-
-          const send: UdpEndpoint["send"] = (buf, dstPort, dstAddress) =>
-            Effect.callback<void, SendError>((resume) => {
-              const sentMs = Date.now()
-              socket.send(buf, 0, buf.length, dstPort, dstAddress, (err) => {
-                if (err === null || err === undefined) {
-                  trace.push({
-                    raw: buf,
-                    src: { ip: localAddress.ip, port: localAddress.port },
-                    dst: { ip: dstAddress, port: dstPort },
-                    sentMs,
-                    deliveredMs: sentMs,
-                    delivered: true,
-                  })
-                }
-                resume(
-                  err
-                    ? Effect.fail(new SendError({ message: err.message }))
-                    : Effect.void
-                )
-              })
-            })
-
-          const poll = () =>
-            Effect.map(Queue.poll(queue), (opt) => Option.getOrNull(opt))
-          const take = () => Queue.take(queue).pipe(Effect.orDie)
-
-          const endpoint: UdpEndpoint = {
-            localAddress,
-            send,
-            messages: Stream.fromQueue(queue),
-            poll,
-            take,
-            queueDepth: () => Queue.sizeUnsafe(queue),
-            queueMax: opts.queueMax,
-            counters,
-          }
-          return endpoint
-        }),
-
-      drainUndeliverable: () => Effect.succeed([]),
-      drainTrace: () =>
-        Effect.sync(() => {
-          const out = trace.slice()
-          trace.length = 0
-          return out as ReadonlyArray<NetworkTraceEntry>
-        }),
-      transitDelayMs: undefined,
-      inFlight: () => 0,
-      })
-    }
+  /**
+   * Functional-test layer — `dgram`-backed, **trace recording enabled**.
+   *
+   * Identical wire behaviour to `real`. Additionally records every
+   * accepted recv and every successful send into an in-memory buffer;
+   * `drainTrace()` returns + clears that buffer. Test harnesses
+   * (`tests/sip-front-proxy/_report/runner.ts`,
+   * `tests/support/hybridRunner.ts`,
+   * `tests/fullcall/framework/simulated-backend.ts`) use this so they
+   * can reconstruct the full hop-by-hop SIP exchange even across
+   * proxy↔worker boundaries that no test agent would otherwise see.
+   *
+   * **Never** layer this in production. The trace buffer is unbounded
+   * and pins every `Buffer` payload — at SIP traffic rates this is a
+   * leak. The split into a separate symbol exists so production code
+   * paths can't accidentally enable recording.
+   */
+  static readonly realTracing: Layer.Layer<SignalingNetwork> = Layer.sync(
+    SignalingNetwork,
+    () => makeRealImpl({ recordTrace: true })
   )
 
   // -------------------------------------------------------------------------
@@ -648,4 +518,174 @@ export class SignalingNetwork extends ServiceMap.Service<
         }
       })
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Shared real-network implementation factory (used by SignalingNetwork.real
+// and SignalingNetwork.realTracing). The only difference between the two
+// layers is `recordTrace`: when false, the per-packet `trace.push(...)`
+// calls are skipped — no `NetworkTraceEntry` is allocated, no `Buffer` is
+// retained — so the production hot path stays leak-free.
+// ─────────────────────────────────────────────────────────────────────────
+function makeRealImpl({
+  recordTrace,
+}: {
+  readonly recordTrace: boolean
+}) {
+  // Per-instance trace buffer. Always allocated; `recordTrace` gates the
+  // writes. Drains return [] on the non-recording layer regardless of
+  // contents (defence in depth).
+  const trace: NetworkTraceEntry[] = []
+
+  return {
+    bindUdp: (opts: BindUdpOpts) =>
+      Effect.gen(function* () {
+        const queue = yield* Queue.bounded<UdpPacket, Cause.Done>(opts.queueMax)
+        const counters: UdpEndpointCounters = {
+          enqueued: 0,
+          tailDropped: 0,
+          preIngressDropped: 0,
+          preIngressReplies: 0,
+        }
+
+        const socket = yield* Effect.acquireRelease(
+          Effect.callback<dgram.Socket, BindError>((resume) => {
+            const sock = dgram.createSocket({
+              type: "udp4",
+              reusePort: opts.reusePort ?? false,
+            })
+            sock.once("listening", () => resume(Effect.succeed(sock)))
+            sock.once("error", (err: Error) =>
+              resume(
+                Effect.fail(
+                  new BindError({
+                    reason: "os_error",
+                    ip: opts.ip,
+                    port: opts.port,
+                    message: err.message,
+                  })
+                )
+              )
+            )
+            sock.bind(opts.port, opts.ip)
+          }),
+          (sock) =>
+            Effect.callback<void>((resume) => {
+              sock.close(() => resume(Effect.void))
+            })
+        )
+
+        // Attach recv handler and detach on scope close. Must run inside
+        // acquireRelease so the listener is removed even if a later
+        // finalizer fails.
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            const preIngress = opts.preIngress
+            const handler = (raw: Buffer, rinfo: dgram.RemoteInfo) => {
+              const depth = Queue.sizeUnsafe(queue)
+              const src: RemoteInfo = { address: rinfo.address, port: rinfo.port }
+              const action = preIngress !== undefined
+                ? preIngress(raw, src, depth)
+                : PreIngressAction.accept()
+              switch (action._tag) {
+                case "drop":
+                  counters.preIngressDropped++
+                  return
+                case "reply": {
+                  counters.preIngressReplies++
+                  // Fire-and-forget: wire-level send back to the source.
+                  // Socket errors surface on the "error" handler below.
+                  socket.send(action.buf, 0, action.buf.length, rinfo.port, rinfo.address, () => {})
+                  return
+                }
+                case "accept": {
+                  const arrivalMs = Date.now()
+                  if (!Queue.offerUnsafe(queue, { raw, rinfo: src, arrivalMs })) {
+                    counters.tailDropped++
+                    return
+                  }
+                  counters.enqueued++
+                  if (recordTrace) {
+                    trace.push({
+                      raw,
+                      src: { ip: src.address, port: src.port },
+                      dst: { ip: localAddress.ip, port: localAddress.port },
+                      sentMs: arrivalMs,
+                      deliveredMs: arrivalMs,
+                      delivered: true,
+                    })
+                  }
+                }
+              }
+            }
+            const errorHandler = (err: Error) => {
+              // Log via console to avoid pulling in structured logging here.
+              // Real callers can subscribe additional handlers if needed.
+              console.error(`[SignalingNetwork.real] socket error: ${err.message}`)
+            }
+            socket.on("message", handler)
+            socket.on("error", errorHandler)
+            return { handler, errorHandler }
+          }),
+          ({ handler, errorHandler }) =>
+            Effect.sync(() => {
+              socket.off("message", handler)
+              socket.off("error", errorHandler)
+              Queue.endUnsafe(queue)
+            })
+        )
+
+        const addr = socket.address()
+        const localAddress = { ip: addr.address, port: addr.port }
+
+        const send: UdpEndpoint["send"] = (buf, dstPort, dstAddress) =>
+          Effect.callback<void, SendError>((resume) => {
+            const sentMs = Date.now()
+            socket.send(buf, 0, buf.length, dstPort, dstAddress, (err) => {
+              if ((err === null || err === undefined) && recordTrace) {
+                trace.push({
+                  raw: buf,
+                  src: { ip: localAddress.ip, port: localAddress.port },
+                  dst: { ip: dstAddress, port: dstPort },
+                  sentMs,
+                  deliveredMs: sentMs,
+                  delivered: true,
+                })
+              }
+              resume(
+                err
+                  ? Effect.fail(new SendError({ message: err.message }))
+                  : Effect.void
+              )
+            })
+          })
+
+        const poll = () =>
+          Effect.map(Queue.poll(queue), (opt) => Option.getOrNull(opt))
+        const take = () => Queue.take(queue).pipe(Effect.orDie)
+
+        const endpoint: UdpEndpoint = {
+          localAddress,
+          send,
+          messages: Stream.fromQueue(queue),
+          poll,
+          take,
+          queueDepth: () => Queue.sizeUnsafe(queue),
+          queueMax: opts.queueMax,
+          counters,
+        }
+        return endpoint
+      }),
+
+    drainUndeliverable: () => Effect.succeed([]),
+    drainTrace: () =>
+      Effect.sync(() => {
+        if (!recordTrace) return [] as ReadonlyArray<NetworkTraceEntry>
+        const out = trace.slice()
+        trace.length = 0
+        return out as ReadonlyArray<NetworkTraceEntry>
+      }),
+    transitDelayMs: undefined,
+    inFlight: () => 0,
+  }
 }

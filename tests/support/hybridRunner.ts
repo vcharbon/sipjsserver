@@ -254,9 +254,12 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
   const target = { host: endpoints.extAdvertised.host, port: endpoints.extAdvertised.port }
 
   // Build the proxy SUT layer (requires SignalingNetwork from R) and the
-  // shared `SignalingNetwork.real` layer; merge them so the network is
-  // built ONCE and shared between the proxy and the agent transport.
-  const sharedNetworkLayer = SignalingNetwork.real
+  // shared `SignalingNetwork.realTracing` layer; merge them so the
+  // network is built ONCE and shared between the proxy and the agent
+  // transport. `realTracing` (not `real`): this runner calls
+  // `drainTrace()` at line 296 below to render hop-by-hop reports;
+  // production layers MUST use `real` (recording disabled).
+  const sharedNetworkLayer = SignalingNetwork.realTracing
   const proxySutLayer = registrarFrontProxyHybridStackLayer({
     config: defaultHybridAppConfig(),
     extBind: endpoints.extBind,

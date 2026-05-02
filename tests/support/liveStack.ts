@@ -50,7 +50,11 @@ export function liveStackLayer(opts: {
 }) {
   const AppConfigLayer = Layer.succeed(AppConfig, opts.config)
   const MetricsLayer = MetricsRegistry.layer
-  const NetworkLayer = SignalingNetwork.real
+  // `realTracing` (not `real`): the live harness renders hop-by-hop
+  // reports via `drainTrace()`. Production layers MUST use `real`
+  // (recording disabled) — `realTracing` retains every Buffer payload
+  // forever, which leaks under sustained load.
+  const NetworkLayer = SignalingNetwork.realTracing
 
   const RedisLayer = RedisClient.layer.pipe(Layer.provide(AppConfigLayer))
 

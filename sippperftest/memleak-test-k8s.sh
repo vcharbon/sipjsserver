@@ -379,6 +379,15 @@ if [ "$HEAP_DUMP" -eq 1 ]; then
   echo "    Triggering baseline heap snapshots on workers..."
   trigger_worker_heap_snapshot
   sleep 5
+  # Rename baseline snapshots so they don't get overwritten/confused
+  # with the stress snapshots written into the same /tmp/heapdumps dir.
+  for pod in "${WORKER_PODS[@]}"; do
+    kubectl -n "$NAMESPACE" exec "$pod" -c worker -- sh -c \
+      'for f in /tmp/heapdumps/*.heapsnapshot; do
+         [ -e "$f" ] || continue
+         case "$f" in *.baseline.heapsnapshot) ;; *) mv "$f" "${f%.heapsnapshot}.baseline.heapsnapshot" ;; esac
+       done' >/dev/null 2>&1 || true
+  done
 fi
 
 # ── Step 6: Run stress ──────────────────────────────────────────────
