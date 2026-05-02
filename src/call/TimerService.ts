@@ -58,8 +58,14 @@ export class TimerService extends ServiceMap.Service<
         const timerEffect = Effect.gen(function* () {
           yield* Effect.sleep(Duration.millis(delayMs))
           yield* handler(callRef, entry.type, entry.legId)
-          MutableHashMap.remove(fibersMap, entry.id)
-        }).pipe(Effect.catchCause(logTimerFailure(entry.id, entry.type, callRef)))
+        }).pipe(
+          // The handler may invoke cancel-all-timers (begin-termination does),
+          // which interrupts this fiber from the inside. Use `onExit` so the
+          // fibersMap entry is removed regardless of whether the handler
+          // completes normally, fails, or is self-interrupted.
+          Effect.onExit(() => Effect.sync(() => MutableHashMap.remove(fibersMap, entry.id))),
+          Effect.catchCause(logTimerFailure(entry.id, entry.type, callRef)),
+        )
 
         const fiber = yield* Effect.forkDetach(timerEffect)
         MutableHashMap.set(fibersMap, entry.id, { fiber, callRef })

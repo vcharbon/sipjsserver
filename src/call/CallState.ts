@@ -28,9 +28,10 @@ import {
 } from "../cache/PartitionedRelayStorage.js"
 import type { PropagateDirection } from "../replication/AtomicWriter.js"
 import { AppConfig } from "../config/AppConfig.js"
+import { CdrWriter } from "../cdr/CdrWriter.js"
 import { RedisError } from "../redis/RedisClient.js"
 import type { Call } from "./CallModel.js"
-import { Call as CallSchema, callIndexKeys, parseCallRef } from "./CallModel.js"
+import { Call as CallSchema, callIndexKeys, isFullyResolved, parseCallRef, setByeDisposition } from "./CallModel.js"
 
 const JsonCallSchema = Schema.fromJsonString(CallSchema)
 
@@ -72,7 +73,7 @@ export class CallState extends ServiceMap.Service<
     /** Get stats for the status endpoint. */
     readonly stats: () => Effect.Effect<{ concurrent: number; total: number }>
     /** Synchronous stats snapshot (for metrics interval — no Effect needed). */
-    readonly statsSync: () => { concurrent: number; total: number; sipIndexSize: number; semaphoresSize: number }
+    readonly statsSync: () => { concurrent: number; total: number; sipIndexSize: number; semaphoresSize: number; removeInvocations: number; orphanSweepRecoveredCount: number }
     /** Load all calls owned by a specific worker from the cache (for crash recovery). */
     readonly loadOwnedCalls: (workerIndex: number) => Effect.Effect<ReadonlyArray<Call>, RedisError>
     /** Flush all in-memory calls to the cache (for graceful shutdown). */
@@ -84,6 +85,7 @@ export class CallState extends ServiceMap.Service<
     Effect.gen(function* () {
       const storage = yield* PartitionedRelayStorage
       const config = yield* AppConfig
+      const cdr = yield* CdrWriter
       const ttl = config.callContextTtlSec
       // Slice 4/5: this worker's ordinal, used to compute
       // `(role, primary)` from a callRef. Prefers the explicit
@@ -105,6 +107,13 @@ export class CallState extends ServiceMap.Service<
       const totalRef = yield* Ref.make(0)
       // Plain mutable counter shadowing totalRef for sync reads (metrics interval).
       let totalSync = 0
+      // Diagnostic: count remove() invocations.
+      let removeInvocations = 0
+      // Counts calls the orphan sweep had to recover (rule path missed the
+      // terminating→terminated transition or worker crashed mid-cleanup).
+      // Should stay at 0 in healthy systems; non-zero indicates the sweep
+      // is the only thing keeping CDR/Redis state consistent.
+      let orphanSweepRecoveredCount = 0
 
       // Slice 4: convert StorageError → RedisError to keep CallState's
       // declared error type stable for downstream catchers.
@@ -247,7 +256,17 @@ export class CallState extends ServiceMap.Service<
           .getCall(role, primary, callRef)
           .pipe(Effect.mapError(toRedisErr))
         if (json === null) {
+          // No call exists for this callRef — neither in memory nor cache.
+          // The semaphore that `getSemaphore` just inserted is now orphaned:
+          // the caller will not invoke `remove(callRef)` (there's no call to
+          // remove), and the orphan sweep at the bottom of this layer only
+          // iterates callsMap so it would never see this entry. Without this
+          // cleanup, every misrouted request / late retransmission / cross-
+          // worker stray packet would leak one SemaphoreImpl until process
+          // restart. See sippperftest investigation 2026-05-02 for the
+          // measured leak rate (~2 sems per call under 100 cps + 2 workers).
           yield* Semaphore.release(sem, 1)
+          yield* Effect.sync(() => MutableHashMap.remove(semaphores, callRef))
           return undefined
         }
 
@@ -269,6 +288,10 @@ export class CallState extends ServiceMap.Service<
               .pipe(Effect.mapError(toRedisErr))
           }
           yield* Semaphore.release(sem, 1)
+          // Same orphan-semaphore cleanup as the json===null branch above.
+          // Without this, every retransmitted message for an already-
+          // terminated call leaks a SemaphoreImpl.
+          yield* Effect.sync(() => MutableHashMap.remove(semaphores, callRef))
           return undefined
         }
 
@@ -355,6 +378,9 @@ export class CallState extends ServiceMap.Service<
       const remove = Effect.fnUntraced(function* (callRef: string) {
         const call = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
 
+        // Diagnostic: count remove() invocations to detect missed cleanups.
+        removeInvocations++
+
         // Clean memory + SIP index
         yield* Effect.sync(() => {
           MutableHashMap.remove(callsMap, callRef)
@@ -430,11 +456,13 @@ export class CallState extends ServiceMap.Service<
         return { concurrent: MutableHashMap.size(callsMap), total }
       })
 
-      const statsSync = (): { concurrent: number; total: number; sipIndexSize: number; semaphoresSize: number } => ({
+      const statsSync = (): { concurrent: number; total: number; sipIndexSize: number; semaphoresSize: number; removeInvocations: number; orphanSweepRecoveredCount: number } => ({
         concurrent: MutableHashMap.size(callsMap),
         total: totalSync,
         sipIndexSize: MutableHashMap.size(sipIndex),
         semaphoresSize: MutableHashMap.size(semaphores),
+        removeInvocations,
+        orphanSweepRecoveredCount,
       })
 
       const loadOwnedCalls = Effect.fnUntraced(function* (workerIndex: number) {
@@ -511,32 +539,90 @@ export class CallState extends ServiceMap.Service<
       })
 
       // ── Orphan sweep ──────────────────────────────────────────────────
-      // Safety net: remove calls stuck in terminal state (terminated/terminating)
-      // from in-memory maps. These should have been cleaned up by the normal
-      // remove() path, but can leak if a handler throws after checkout.
-      // Uses setInterval (not Effect.sleep) to avoid TestClock issues in tests.
-      const ORPHAN_SWEEP_INTERVAL = 60_000 // 60s between sweeps
-      const orphanSweepInterval = setInterval(() => {
+      // Last-line recovery: if the rule-engine cleanup path missed a call (or
+      // the worker crashed mid-cleanup), the sweep performs the *full* set of
+      // side effects the normal `remove-call` rule effect would have done —
+      // CDR write, Redis delete, replication tombstone — so a missed rule path
+      // becomes a perf hit, not a correctness loss. Forks a daemon fiber that
+      // sleeps on the active Clock; under TestClock the sleep parks until
+      // `TestClock.adjust` advances past the interval, so fake-clock tests see
+      // no sweep activity unless they explicitly opt in.
+      const ORPHAN_SWEEP_INTERVAL_MS = 60_000
+
+      const sweepOnce = Effect.gen(function* () {
+        const orphans: Array<{ callRef: string; call: Call }> = []
         for (const [callRef, call] of callsMap) {
           if (call.state === "terminated" || call.state === "terminating") {
-            // In-memory cleanup only — cache TTL handles persistence expiry
-            MutableHashMap.remove(callsMap, callRef)
-            MutableHashMap.remove(semaphores, callRef)
-            MutableHashMap.remove(sipIndex, `${call.aLeg.callId}|${call.aLeg.fromTag}`)
-            for (const bLeg of call.bLegs) {
-              MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`)
-              MutableHashMap.remove(sipIndex, bLeg.callId)
-              for (const dialog of bLeg.dialogs) {
-                const bTag = dialog.sip.remoteTag
-                if (bTag) MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bTag}`)
-              }
-            }
-            console.warn(`[CallState] Orphan sweep: removed ${call.state} call ${callRef}`)
+            orphans.push({ callRef, call })
           }
         }
-      }, ORPHAN_SWEEP_INTERVAL)
-      orphanSweepInterval.unref()
-      yield* Effect.addFinalizer(() => Effect.sync(() => clearInterval(orphanSweepInterval)))
+        for (const { callRef, call: original } of orphans) {
+          // Force-resolve any leg whose BYE never reached terminal disposition
+          // so isFullyResolved() returns true and the CDR / cleanup record is
+          // internally consistent. Mirrors what `terminating-safety-timeout`
+          // would have produced if the rule path had completed.
+          let promoted = original
+          if (promoted.state === "terminating") {
+            for (const leg of [promoted.aLeg, ...promoted.bLegs]) {
+              const bd = leg.byeDisposition
+              if (bd === undefined || bd === "bye_sent") {
+                promoted = setByeDisposition(promoted, leg.legId, "bye_timeout")
+              }
+            }
+            if (isFullyResolved(promoted)) {
+              promoted = { ...promoted, state: "terminated" }
+            }
+          }
+
+          yield* Effect.logWarning(
+            `[CallState] Orphan sweep recovering ${original.state} call ${callRef}` +
+              ` (age ${Date.now() - promoted.createdAt}ms)`
+          )
+
+          yield* cdr.write(promoted).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logError(`Orphan sweep CDR write failed for ${callRef}`, cause)
+            )
+          )
+
+          // Mirror remove(): drop in-memory state, then atomic Redis delete +
+          // tombstone propagation. Ignore RedisError so one failing peer
+          // doesn't stop the rest of the sweep.
+          MutableHashMap.remove(callsMap, callRef)
+          MutableHashMap.remove(semaphores, callRef)
+          MutableHashMap.remove(sipIndex, `${promoted.aLeg.callId}|${promoted.aLeg.fromTag}`)
+          for (const bLeg of promoted.bLegs) {
+            MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`)
+            MutableHashMap.remove(sipIndex, bLeg.callId)
+            for (const dialog of bLeg.dialogs) {
+              const bTag = dialog.sip.remoteTag
+              if (bTag) MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bTag}`)
+            }
+          }
+          const { role, primary } = partitionOf(callRef)
+          const indexes = callIndexKeys(promoted)
+          const peerOpt = propagatePeerFor(role, primary, promoted._topology)
+          const direction = directionFor(role)
+          yield* storage
+            .deleteCall(role, primary, callRef, indexes, { peer: peerOpt, direction })
+            .pipe(
+              Effect.catchTag("PartitionedRelayStorageError", (e) =>
+                Effect.logError(`Orphan sweep Redis delete failed for ${callRef}: ${e.reason}`)
+              )
+            )
+
+          orphanSweepRecoveredCount++
+        }
+      })
+
+      yield* Effect.forkDetach(
+        Effect.gen(function* () {
+          while (true) {
+            yield* Effect.sleep(ORPHAN_SWEEP_INTERVAL_MS)
+            yield* sweepOnce
+          }
+        })
+      )
 
       return { create, checkout, update, peek, release, flushToRedis, remove, resolveFromSipKey, stats, statsSync, loadOwnedCalls, flushAllCalls }
     })

@@ -574,9 +574,12 @@ describe("begin-termination reach (composite)", () => {
     const safety = result.call.timers[result.call.timers.length - 1]!
     expect(safety.type).toBe("terminating_timeout")
 
-    // Effects: cancel-all-timers, schedule-timer, write-cdr, flush-redis.
+    // Effects: cancel-all-timers, schedule-timer, flush-redis. CDR is written
+    // exactly once when the call reaches "terminated" (InvariantEnforcer
+    // injects write-cdr then) — emitting it here too produced a duplicate
+    // record per call.
     const effectTypes = result.effects.map((e) => e.type)
-    expect(effectTypes).toEqual(["cancel-all-timers", "schedule-timer", "write-cdr", "flush-redis"])
+    expect(effectTypes).toEqual(["cancel-all-timers", "schedule-timer", "flush-redis"])
 
     // Two BYE envelopes.
     const labels = result.outbound.map((o) => o.label)

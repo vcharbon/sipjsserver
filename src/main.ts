@@ -162,7 +162,8 @@ const SipLayer = B2buaCoreLayer.pipe(
 
 const CallStateLayer = CallState.layer.pipe(
   Layer.provide(AppConfigLayer),
-  Layer.provide(CallStateCacheLayer)
+  Layer.provide(CallStateCacheLayer),
+  Layer.provide(CdrLayer)
 )
 
 // Replication services for the server side of `/replog`. EpochCounter

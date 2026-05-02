@@ -35,8 +35,40 @@ import { deregisterViaExpiresZero } from "../scenarios/registrar/deregister-via-
 import { ttlExpiryUnderTestClock } from "../scenarios/registrar/ttl-expiry-under-testclock.js"
 import { extCallToCoreDestination } from "../scenarios/registrar/ext-call-to-core-destination.js"
 import { coreCallToRegisteredExt } from "../scenarios/registrar/core-call-to-registered-ext.js"
-import { createSimulatedRunner, flushIndexReport } from "../support/harness.js"
+import {
+  createSimulatedRunner,
+  expectCdrCount,
+  flushIndexReport,
+  skipCdrCheck,
+} from "../support/harness.js"
 import { ALL_SUTS } from "./framework/types.js"
+
+// ── Per-scenario CDR-check overrides ────────────────────────────────────────
+//
+// suppress-18x-failover-reject exercises the 503-then-failover path. After
+// the underlying B2BUA cleanup bug fix (routeFailureRule now sets
+// byeDisposition="rejected" on the failed leg), the call cleanly transitions
+// to "terminated" and writes its single CDR.
+expectCdrCount("suppress-18x-failover-reject", 1)
+
+// Multi-worker SUTs share a single CdrWriter buffer across all workers
+// (sipproxyHAFakeStackLayer / k8sFakeStackLayer wire the same
+// `CdrWriter.sharedTestLayer(buffer)` into every b2bua and merge it at the
+// outer scope). For these SUTs we use `expectCdrCount` to declare the
+// expected total CDR count across the cluster.
+//
+// `two-calls-routed-to-two-workers` creates 2 distinct calls (one per
+// worker). Both go through full BYE round-trip → 2 CDR records aggregated
+// across both workers via `CdrWriter.sharedTestLayer(buffer)`.
+expectCdrCount("two-calls-routed-to-two-workers", 2)
+
+// registrarFrontProxy is a pure SIP proxy (no B2BUA, no CallState, no
+// CdrWriter in scope). Harness skip is the only sound option.
+skipCdrCheck("register-happy-path")
+skipCdrCheck("deregister-via-expires-zero")
+skipCdrCheck("ttl-expiry-under-testclock")
+skipCdrCheck("ext-call-to-core-destination")
+skipCdrCheck("core-call-to-registered-ext")
 
 const OUTPUT_DIR = "test-results/fake-clock"
 

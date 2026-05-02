@@ -51,6 +51,10 @@ When spawning subagents via Task(), always include in the task description:
 
 On complex multi slice tasks with on line comment the intermediate slice.
 
+## test strategy
+
+Never deactivate failing test without proper investigation first and explicit confirmation. If the test cannot be fixed in the scope create a dedicated precursor plan.
+
 ## File creation
 
 - Use the `Write` tool to create files. Never use `cat`, `echo`, heredoc (`<< EOF`), or shell redirection.

@@ -40,7 +40,7 @@ export const routeFailureRule = defineRule({
 
       const actions: RuleAction[] = [
         { type: "add-cdr-event", eventType: "reject" as const, legId: ctx.sourceLeg.legId, statusCode: resp.status, reason: resp.reason },
-        { type: "terminate-leg", legId: ctx.sourceLeg.legId },
+        { type: "terminate-leg", legId: ctx.sourceLeg.legId, byeDisposition: "rejected" as const },
       ]
 
       // Try /call/failure for potential failover

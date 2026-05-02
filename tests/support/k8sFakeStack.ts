@@ -51,6 +51,7 @@ import { ReplPuller } from "../../src/replication/ReplPuller.js"
 import { ReplogClient, ReadyGate } from "../../src/replication/ReadyGate.js"
 import { WriteNotifier } from "../../src/replication/WriteNotifier.js"
 import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
+import { CdrWriter, makeCdrRecordsBuffer } from "../../src/cdr/CdrWriter.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
 import { WorkerConnectivity, WorkerConnectivityLayer } from "./WorkerConnectivity.js"
 import {
@@ -197,6 +198,13 @@ export function k8sFakeStackLayer(opts: K8sFakeStackOpts) {
     })
   ).pipe(Layer.provideMerge(Probe))
 
+  // Shared CDR buffer for the whole cluster — every worker writes into
+  // this single in-memory array so the harness can verify cross-worker
+  // CDR behaviour (BYE-on-backup after primary takeover still produces
+  // exactly one CDR, etc.).
+  const cdrBuffer = makeCdrRecordsBuffer()
+  const sharedCdrLayer = CdrWriter.sharedTestLayer(cdrBuffer)
+
   // The cluster + workers + replication all live in one effect so
   // the per-worker handles, peer logs, and lifecycle wiring share
   // one closure. This replaces the previous eager `Workers` layer
@@ -206,11 +214,13 @@ export function k8sFakeStackLayer(opts: K8sFakeStackOpts) {
     fabricBuilt.fabric,
     opts.config,
     opts.handlers,
+    sharedCdrLayer,
   )
 
   return Layer.mergeAll(
     ProbeAutoStart,
     fabricBuilt.layer,
+    sharedCdrLayer,
     ClusterAndWorkers.pipe(
       Layer.provideMerge(ProbeAutoStart),
       Layer.provideMerge(fabricBuilt.layer),
@@ -248,6 +258,7 @@ function buildClusterWithWorkersLayer(
   fabric: PeerFabricApi,
   baseConfig: AppConfigData,
   handlers: HandlerRegistry,
+  sharedCdrLayer: Layer.Layer<CdrWriter>,
 ): Layer.Layer<
   SimulatedK8sCluster,
   never,
@@ -305,6 +316,7 @@ function buildClusterWithWorkersLayer(
             b2buaWorkerStackLayer({
               config: perWorkerConfig(baseConfig, w.address, w.id as unknown as string),
               storageLayer: fabric.storageLayerOf(w.ordinal),
+              cdrLayer: sharedCdrLayer,
             }),
             fabric.cachePortLayerOf(w.ordinal),
           )

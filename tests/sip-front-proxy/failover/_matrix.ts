@@ -207,6 +207,13 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
       )
     }
 
+    // Drain in-flight responses (e.g. bob's 200 OK to a backup-relayed BYE
+    // that needs to land on b2b-2 to drive the call to "terminated" and
+    // fire write-cdr). `.skipFinalSweep()` below disables the implicit
+    // 24h end-of-scenario advance, so without an explicit pump here the
+    // last reply sits in the simulated network queue and the call leaks.
+    s.pause(100)
+
     // Routing-decision proof: the method (or BYE) above was
     // promoted to decode_forward_backup because b2b-1 is dead.
     s.cluster.expectRoutedTo(W2, { decision: "decode_forward_backup" })
@@ -234,6 +241,12 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
       const bobByeTxn = bobDialog.expect("BYE")
       bobByeTxn.reply(200)
       aliceByeTxn.expect(200)
+      // Drain bob's 200 OK back through the active worker so the call
+      // reaches "terminated" and write-cdr fires before scope close.
+      // `.skipFinalSweep()` disables the implicit 24h end-of-scenario
+      // advance, so without this pump the response sits in the simulated
+      // network queue and the call leaks (no CDR emitted).
+      s.pause(100)
     }
 
     // Single-owner invariant.

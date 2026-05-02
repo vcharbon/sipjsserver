@@ -16,6 +16,7 @@ import { addCallControlRoutes } from "../decision/adapters/http-reference/MockSe
 import { MetricsRegistry, type MetricsRegistryState } from "../observability/MetricsRegistry.js"
 import { addReplLogRoutes, ReplLog } from "../replication/ReplLog.js"
 import { ReplMetrics, type ReplMetricsSnapshot } from "../replication/ReplMetrics.js"
+import { getByeDispositionInvariantViolationCount } from "../b2bua/rules/framework/ByeDispositionInvariant.js"
 
 
 /** Start a V8 CPU profile in the current process, write to dir after durationMs. */
@@ -375,6 +376,11 @@ export const StatusServerLayer: Layer.Layer<
           Effect.gen(function* () {
             const memUsage = process.memoryUsage()
             const cpuUsg = process.cpuUsage()
+            // Sample CallState map sizes from THIS process. In single-
+            // process deployments (k8s b2bua-worker pods) `workers[]`
+            // below is empty, so without this block the leak harness
+            // would see no map-size data at all.
+            const callStateStats = callState.statsSync()
             const workerData = registry.workers.map((w, i) =>
               w === undefined
                 ? { worker: i, status: "no_data" as const }
@@ -403,6 +409,15 @@ export const StatusServerLayer: Layer.Layer<
                   user: cpuUsg.user,
                   system: cpuUsg.system,
                 },
+                mapSizes: {
+                  callsMap: callStateStats.concurrent,
+                  sipIndex: callStateStats.sipIndexSize,
+                  semaphores: callStateStats.semaphoresSize,
+                },
+                callStateRemoveInvocations: callStateStats.removeInvocations,
+                callStateOrphanSweepRecovered: callStateStats.orphanSweepRecoveredCount,
+                byeDispositionInvariantViolations: getByeDispositionInvariantViolationCount(),
+                callStateTotal: callStateStats.total,
               },
               workers: workerData,
               timestamp: Date.now(),

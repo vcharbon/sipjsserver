@@ -497,21 +497,50 @@ for pod, sw in s_by_pod.items():
         if k == "heapUsed" and d > 50:
             leak_flags.append(f"{pod}/heapUsed +{d:.0f}MB")
 
-    # Map sizes from in-process worker (cluster mode). Iterate workers[].
+    # Map sizes — prefer single-process `process.mapSizes` (k8s b2bua-
+    # worker pods have no cluster workers), fall back to summing the
+    # `workers[]` array for cluster-mode deployments.
     print()
-    print(f"  WORKER POD {pod} — map sizes (entries, summed across cluster workers)")
+    print(f"  WORKER POD {pod} — map sizes (entries)")
     print("  " + "-" * 72)
-    def sum_maps(snap, key):
+    def get_maps(snap, key):
+        # Single-process path
+        proc_maps = snap.get("process", {}).get("mapSizes")
+        if proc_maps and key in proc_maps:
+            return int(proc_maps[key])
+        # Cluster path
         return sum(int(w.get("mapSizes", {}).get(key, 0))
                    for w in snap.get("workers", []) if w.get("status") == "ok")
     for key in ["txnMap", "callsMap", "sipIndex", "semaphores", "fibersMap"]:
-        b = sum_maps(bw, key)
-        s = sum_maps(sw, key)
+        b = get_maps(bw, key)
+        s = get_maps(sw, key)
         d = s - b
         flag = " *** LEAK?" if d > 10 else ""
         print(f"    {key:20s}  baseline={b:8d}  stress={s:8d}  delta={d:+8d}{flag}")
         if d > 10:
             leak_flags.append(f"{pod}/{key} +{d}")
+
+    # CallState diagnostic counters (only present in single-process mode).
+    b_remove = bw.get("process", {}).get("callStateRemoveInvocations")
+    s_remove = sw.get("process", {}).get("callStateRemoveInvocations")
+    b_total = bw.get("process", {}).get("callStateTotal")
+    s_total = sw.get("process", {}).get("callStateTotal")
+    if s_remove is not None or s_total is not None:
+        print()
+        print(f"  WORKER POD {pod} — CallState lifecycle counters")
+        print("  " + "-" * 72)
+        if s_total is not None:
+            print(f"    callsCreated         baseline={b_total or 0:8d}  stress={s_total:8d}  delta={(s_total - (b_total or 0)):+8d}")
+        if s_remove is not None:
+            print(f"    removeInvocations    baseline={b_remove or 0:8d}  stress={s_remove:8d}  delta={(s_remove - (b_remove or 0)):+8d}")
+        # Compare: created vs removed should track 1:1 if no leak
+        if s_total is not None and s_remove is not None:
+            created_delta = s_total - (b_total or 0)
+            removed_delta = s_remove - (b_remove or 0)
+            missing = created_delta - removed_delta
+            if missing > 10:
+                print(f"    *** {missing} calls created but NOT removed — leak path confirmed")
+                leak_flags.append(f"{pod}/missing-removes={missing}")
     print()
 
 # ── Proxies ──────────────────────────────────────────────────────

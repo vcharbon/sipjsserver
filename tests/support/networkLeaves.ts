@@ -84,9 +84,15 @@ export const NoOpTracingLayer = Layer.succeed(TracingService, {
   scrubMessage: (raw: string) => raw,
 })
 
-/** No-op CdrWriter — discards every CDR write. */
+/**
+ * No-op CdrWriter — discards every CDR write. Kept exported for tests that
+ * explicitly do not care about CDR observability; the fake-stack default is
+ * `CdrWriter.testLayer` (in-memory recording) so the harness can assert that
+ * every terminated call produced a CDR record.
+ */
 export const NoOpCdrLayer = Layer.succeed(CdrWriter, {
   write: (_call: any) => Effect.void,
+  readAll: Effect.succeed([] as const),
 })
 
 /** Default test HMAC key — 32-byte 0xab pattern. Stable across tests. */
@@ -118,17 +124,26 @@ export function b2buaWorkerStackLayer(opts: {
    * so each worker shares state with the fabric's peer dispatcher.
    */
   readonly storageLayer?: Layer.Layer<PartitionedRelayStorage>
+  /**
+   * Optional CDR layer override. Defaults to `CdrWriter.testLayer` — a
+   * per-instance in-memory recorder. Multi-worker SUTs pass
+   * `CdrWriter.sharedTestLayer(buffer)` so every worker writes into a
+   * single buffer the harness can read via `yield* CdrWriter`. Tests that
+   * specifically want NoOp behaviour can pass `NoOpCdrLayer`.
+   */
+  readonly cdrLayer?: Layer.Layer<CdrWriter>
 }) {
   const AppConfigLayer = Layer.succeed(AppConfig, opts.config)
   const MetricsLayer = MetricsRegistry.layer
   const StorageLayer = opts.storageLayer ?? PartitionedRelayStorage.memoryLayer
+  const CdrLayer = opts.cdrLayer ?? CdrWriter.testLayer
 
   const Leaves = Layer.mergeAll(
     MetricsLayer,
     StorageLayer,
     MockCallControlLayer,
     NoOpTracingLayer,
-    NoOpCdrLayer,
+    CdrLayer,
   ).pipe(Layer.provideMerge(AppConfigLayer))
 
   const MidServices = Layer.mergeAll(

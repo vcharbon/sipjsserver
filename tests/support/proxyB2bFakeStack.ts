@@ -44,6 +44,7 @@ import {
 import { PeerFabric } from "../../src/cache/PeerFabric.js"
 import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
 import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
+import { CdrWriter, makeCdrRecordsBuffer } from "../../src/cdr/CdrWriter.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
 
 /** Default simulated transit delay — same as `fakeStack`'s. */
@@ -229,17 +230,22 @@ const b2buaInstance = (
   >,
   peerCacheLayer?: Layer.Layer<
     import("../../src/cache/PeerCachePort.js").PeerCachePort
-  >
+  >,
+  cdrLayer?: Layer.Layer<CdrWriter>
 ): Layer.Layer<never, never, SignalingNetwork> => {
   // `Layer.fresh` gives this instance a distinct memo identity so a
   // second composition with the same `config` materialises fresh
   // resources rather than aliasing the first. When a peer-cache layer
   // is supplied, merge it INSIDE the freshness boundary so each
   // worker pulls its own `self`-pinned port (`cachePortLayerOf` is
-  // per-worker).
-  const baseStack = b2buaWorkerStackLayer(
-    storageLayer === undefined ? { config } : { config, storageLayer }
-  )
+  // per-worker). The `cdrLayer` parameter lets the SUT pass a
+  // `CdrWriter.sharedTestLayer(buffer)` so all workers' CDRs land in
+  // a single buffer the harness can read.
+  const baseStack = b2buaWorkerStackLayer({
+    config,
+    ...(storageLayer !== undefined ? { storageLayer } : {}),
+    ...(cdrLayer !== undefined ? { cdrLayer } : {}),
+  })
   const stack = Layer.fresh(
     peerCacheLayer === undefined
       ? baseStack
@@ -285,6 +291,15 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
   const w2Ord = WorkerOrdinal(HA_WORKER_2 as unknown as string)
   const fabricBuilt = PeerFabric.simulatedBuilt([w1Ord, w2Ord])
 
+  // Shared CDR buffer: both workers write into the same in-memory
+  // array so the harness can verify cross-worker behaviour (e.g. that
+  // a BYE handled on the backup after primary takeover still produces
+  // exactly one CDR). The same `sharedCdrLayer` is provided into each
+  // worker AND merged at the outer scope so `yield* CdrWriter` in the
+  // harness reads the aggregated records.
+  const cdrBuffer = makeCdrRecordsBuffer()
+  const sharedCdrLayer = CdrWriter.sharedTestLayer(cdrBuffer)
+
   // Both workers — symmetric. Services hidden, resources scoped to
   // the SUT layer. Each worker's storage points at its fabric peer
   // slot so writes/reads are observable through `snapshotPeer` and
@@ -297,12 +312,14 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
       opts.handlers,
       fabricBuilt.fabric.storageLayerOf(w1Ord),
       fabricBuilt.fabric.cachePortLayerOf(w1Ord),
+      sharedCdrLayer,
     ),
     b2buaInstance(
       haWorkerConfig(opts.config, w2Addr, w2Ord),
       opts.handlers,
       fabricBuilt.fabric.storageLayerOf(w2Ord),
       fabricBuilt.fabric.cachePortLayerOf(w2Ord),
+      sharedCdrLayer,
     ),
   )
 
@@ -341,8 +358,10 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
 
   // Slice 5: re-expose the fabric services outward so scenarios can
   // pull `PeerFabricControl` (kill / partition / snapshot) without
-  // needing to thread it through `setup()`.
-  return Layer.mergeAll(Workers, ProbeAutoStart, fabricBuilt.layer).pipe(
+  // needing to thread it through `setup()`. The shared CDR layer is
+  // merged outward too so the harness's `yield* CdrWriter` returns
+  // the aggregated records from both workers.
+  return Layer.mergeAll(Workers, ProbeAutoStart, fabricBuilt.layer, sharedCdrLayer).pipe(
     Layer.provideMerge(NetworkLayer),
     Layer.provideMerge(PumpableClockLayer),
   )

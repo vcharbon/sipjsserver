@@ -8,6 +8,12 @@ The B2BUA uses an INAP-inspired rule framework where all call processing is expr
 
 Rules never construct SIP messages, never manipulate CSeq, never modify Call state directly. The framework guarantees invariants (limiter cleanup, timer cleanup, CDR) regardless of rule errors.
 
+> **Rule-author contract for BYE-resolution events**: a rule that matches a
+> 200/4xx-6xx response to a BYE on a `bye_sent` leg, or a `terminating_timeout`
+> timer, MUST emit `terminate-leg`. The `bye-disposition invariant` in
+> `RuleExecutor` force-corrects and logs WARN if you forget. See
+> [docs/leg-termination-model.md](leg-termination-model.md).
+
 ## Architecture
 
 ```

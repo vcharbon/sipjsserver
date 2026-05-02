@@ -40,8 +40,12 @@ import { sdpAnswer, sdpOffer } from "../../fullcall/helpers/sdp.js"
 import { CALLID_TO_W1 } from "../../scenarios/ha/two-calls-routed-to-two-workers.js"
 import {
   createSimulatedRunner,
+  expectCdrCount,
   flushIndexReport,
 } from "../../support/harness.js"
+
+// 1 call established on b2b-1 + BYE handled on backup b2b-2 → 1 CDR.
+expectCdrCount("basic-call-primary-killed", 1)
 
 const OUTPUT_DIR = "test-results/failover"
 
@@ -131,6 +135,10 @@ const failoverScenario = scenario("basic-call-primary-killed", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
+  // Drain bob's 200 OK back through the backup so the call reaches
+  // "terminated" and write-cdr fires before scope close. .skipFinalSweep()
+  // below disables the implicit end-of-scenario sweep.
+  s.pause(100)
 
   // Routing-decision proof: the BYE was promoted from `decode_forward`
   // to `decode_forward_backup` (cookie's primary was dead-ROUtable).

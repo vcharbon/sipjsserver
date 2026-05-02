@@ -34,6 +34,7 @@ import {
   type Leg,
 } from "../../src/call/CallModel.js"
 import { testAppConfigDefaults } from "../support/testAppConfigDefaults.js"
+import { NoOpCdrLayer } from "../support/networkLeaves.js"
 
 const A = WorkerOrdinal("A")
 const B = WorkerOrdinal("B")
@@ -195,6 +196,7 @@ describe("ReclaimRunner — hard timeout (D14)", () => {
 
       const callStateLayer = CallState.layer.pipe(
         Layer.provide(StorageLayer),
+        Layer.provide(NoOpCdrLayer),
         Layer.provideMerge(AppConfigLayer)
       )
       const result = yield* Effect.gen(function* () {

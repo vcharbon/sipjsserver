@@ -380,10 +380,9 @@ export const referAllowFullABye = scenario(
     charlieByeTxn.reply(200)
   },
 ).skipFinalSweep()
-// FIXME(refer-cleanup): residual state after full transfer teardown during
-// outstanding re-INVITE — real bug tracked separately. Also the 24h sweep
-// fires retransmits of the outstanding a-realign INVITE that land as
-// unexpected on alice's queue; opting out of the sweep avoids that too.
+// FIXME(test-framework): outstanding a-realign re-INVITE on alice retransmits
+// during the 24h end-of-scenario sweep, generating "unexpected message"
+// failures. The B2BUA correctly tears down bob/charlie via begin-termination.
 
 // ── 5. A does not answer the a-realign re-INVITE → 32s watchdog rollback ─
 
@@ -398,8 +397,8 @@ export const referAllowFullATimeout = scenario(
     // both the watchdog rule and the INVITE Timer B can fire concurrently
     // near 32s — duplicate BYEs may arrive on every leg.
     alice.allowExtra("INVITE")
-    alice.allowExtra("BYE")
     alice.allowExtra("CANCEL")
+    alice.allowExtra("BYE")
     bob.allowExtra("BYE")
     charlie.allowExtra("BYE")
 
@@ -455,13 +454,15 @@ export const referAllowFullATimeout = scenario(
     aliceDialog.expect("INVITE", { skipValidation: ["offerAnswer"] })
     s.pause(33_000)
 
-    // Rollback — at minimum BYEs on bob + charlie (confirmed).
+    // Rollback — begin-termination BYEs all 3 confirmed legs (alice, bob, charlie).
+    const aliceByeTxn = aliceDialog.expect("BYE")
+    aliceByeTxn.reply(200)
     const bobByeTxn = bobDialog.expect("BYE")
     bobByeTxn.reply(200)
     const charlieByeTxn = charlieDialog.expect("BYE")
     charlieByeTxn.reply(200)
-    void aliceDialog
   },
 ).skipFinalSweep()
-// FIXME(refer-cleanup): residual state after a-realign timeout rollback —
-// real bug tracked separately.
+// FIXME(test-framework): outstanding a-realign re-INVITE on alice retransmits
+// during the 24h end-of-scenario sweep, generating "unexpected message"
+// failures. The B2BUA correctly tears down all 3 legs via begin-termination.

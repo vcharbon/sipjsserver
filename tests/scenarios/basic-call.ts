@@ -166,6 +166,13 @@ export function basicCallBody(s: ScenarioContext, opts: BasicCallOpts = {}): voi
     aliceByeTxn.reply(200)
     bobByeTxn.expect(200)
   }
+  // Drain the b-leg's 200 OK so the call reaches "terminated" and
+  // write-cdr fires before scope close. Cheap under TestClock; required
+  // when the enclosing scenario uses `.skipFinalSweep()` (the implicit
+  // 24h end-of-scenario advance is the only thing that drains it
+  // otherwise). 1s covers the cookie-decode path through the proxy that
+  // adds an extra hop on top of direct b-leg replies.
+  s.pause(1_000)
 }
 
 /**

@@ -23,6 +23,7 @@ import {
 } from "../_matrix.js"
 import {
   createSimulatedRunner,
+  expectCdrCount,
   flushIndexReport,
 } from "../../../support/harness.js"
 
@@ -31,6 +32,12 @@ const CASE: MatrixCase = {
   initiator: "alice",
   switchPattern: "double",
 }
+
+// Double-switch: kill primary, BYE on backup, respawn primary, kill backup.
+// The kill-backup step closes the per-worker scope on b2b-2 and the
+// respawned b2b-1 ingests the terminated call's bak: snapshot via
+// ReadyGate reverse-drain, driving the call to terminated → 1 CDR fires.
+expectCdrCount(matrixName(CASE), 1)
 
 const OUTPUT_DIR = `test-results/failover/matrix/${matrixName(CASE)}`
 

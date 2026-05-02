@@ -41,8 +41,12 @@ import { sdpAnswer, sdpOffer } from "../../fullcall/helpers/sdp.js"
 import { CALLID_TO_W1 } from "../../scenarios/ha/two-calls-routed-to-two-workers.js"
 import {
   createSimulatedRunner,
+  expectCdrCount,
   flushIndexReport,
 } from "../../support/harness.js"
+
+// 1 call exercised across kill/respawn cycles → 1 CDR on teardown.
+expectCdrCount("reinvite-big-case", 1)
 
 const OUTPUT_DIR = "test-results/failover/reinvite-big-case"
 
@@ -175,6 +179,10 @@ const reinviteBigCase = scenario("reinvite-big-case", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
+  // Drain bob's 200 OK so the call reaches "terminated" before scope
+  // close; .skipFinalSweep() below disables the implicit end-of-scenario
+  // sweep that would otherwise drive cleanup.
+  s.pause(100)
 
   // Both routing modes were exercised.
   s.cluster.expectRoutedTo(W2, { decision: "decode_forward_backup" })

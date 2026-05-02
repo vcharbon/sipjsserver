@@ -45,11 +45,6 @@ export const referAllowHappy = scenario("refer-allow-happy", (s) => {
   const bob = s.agent("bob", { uri: "sip:bob@test", port: 5666 })
   const charlie = s.agent("charlie", { uri: "sip:charlie@test", port: CHARLIE_PORT })
 
-  // Begin-termination at call end BYEs any still-confirmed leg; tolerate it on
-  // alice/bob/charlie rather than script the full orphan teardown in slice 5.
-  alice.allowExtra("BYE")
-  bob.allowExtra("BYE")
-  charlie.allowExtra("BYE")
   // Slice 6: after C's 200, the B2BUA emits the c-realigning re-INVITE to C.
   // This scenario does not script the re-INVITE exchange — tolerate it here.
   charlie.allowExtra("INVITE")
@@ -120,14 +115,20 @@ export const referAllowHappy = scenario("refer-allow-happy", (s) => {
   })
   notifyTermTxn.reply(200)
 
+  // c-realigning re-INVITE arrives on charlie — receive it (don't reply) so
+  // the dialog CSeq tracker stays in sync for the subsequent BYE.
+  charlieDialog.expect("INVITE", { skipValidation: ["offerAnswer"] })
+
   // A↔B still bridged (no merge happened in slice 5). Tear down via A BYE.
+  // begin-termination BYEs every still-confirmed leg — alice's BYE → bob,
+  // and the still-bridged c-leg gets BYE'd too (post-REFER call has 3 legs).
   const aliceByeTxn = aliceDialog.bye()
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
+  const charlieByeTxn = charlieDialog.expect("BYE")
+  charlieByeTxn.reply(200)
   aliceByeTxn.expect(200)
-  void charlieDialog
-}).skipFinalSweep()
-// FIXME(refer-cleanup): C-leg state survives teardown — real bug tracked separately.
+})
 
 // ── 2. C rejects 486 Busy Here → NOTIFY 486 terminated ────────────────────
 
@@ -329,9 +330,6 @@ export const referAllowCMultiple18x = scenario(
     const bob = s.agent("bob", { uri: "sip:bob@test", port: 5666 })
     const charlie = s.agent("charlie", { uri: "sip:charlie@test", port: CHARLIE_PORT })
 
-    alice.allowExtra("BYE")
-    bob.allowExtra("BYE")
-    charlie.allowExtra("BYE")
     // Slice 6: after C's 200, the B2BUA emits the c-realigning re-INVITE to C.
     charlie.allowExtra("INVITE")
 
@@ -366,7 +364,8 @@ export const referAllowCMultiple18x = scenario(
     })
     notifyTryingTxn.reply(200)
 
-    const { transaction: charlieInviteTxn } = charlie.receiveInitialInvite()
+    const { dialog: charlieDialog, transaction: charlieInviteTxn } =
+      charlie.receiveInitialInvite()
 
     // 180 #1 → NOTIFY 180
     charlieInviteTxn.reply(180)
@@ -414,10 +413,17 @@ export const referAllowCMultiple18x = scenario(
     })
     notifyTermTxn.reply(200)
 
+    // c-realigning re-INVITE arrives on charlie — receive it (don't reply) so
+    // the dialog CSeq tracker stays in sync for the subsequent BYE.
+    charlieDialog.expect("INVITE", { skipValidation: ["offerAnswer"] })
+
+    // begin-termination BYEs every still-confirmed leg — alice's BYE → bob,
+    // and the still-bridged c-leg gets BYE'd too (post-REFER call has 3 legs).
     const aliceByeTxn = aliceDialog.bye()
     const bobByeTxn = bobDialog.expect("BYE")
     bobByeTxn.reply(200)
+    const charlieByeTxn = charlieDialog.expect("BYE")
+    charlieByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
-).skipFinalSweep()
-// FIXME(refer-cleanup): C-leg state survives teardown — real bug tracked separately.
+)

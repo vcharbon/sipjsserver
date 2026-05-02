@@ -824,7 +824,6 @@ export class SipRouter extends ServiceMap.Service<
               event = { type: "timeout", branch: txnEvent.branch, callRef: txnEvent.callRef, legId: txnEvent.legId, method: txnEvent.method }
               break
           }
-
           return withCall(handlers, event).pipe(
             Effect.catchCause((cause) =>
               Effect.logError(`Unhandled error processing event [${describeEvent(event)}]`, cause)

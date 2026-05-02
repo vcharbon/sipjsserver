@@ -17,7 +17,15 @@ import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 // ── resolve-bye-response ──────────────────────────────────
 
 /**
- * Handle any final response (>=200) to a BYE we sent during termination.
+ * Handle any final response (>=200) to a BYE we sent.
+ *
+ * Match is bound to the leg's `byeDisposition === "bye_sent"` rather than
+ * `callState: "terminating"` so this rule wins in active state too — e.g.
+ * after a single-leg `destroy-leg` action, where the call stays active
+ * but a BYE is in flight on the destroyed leg. Without that, the lower-
+ * specificity `absorb-bye-200` would silently consume the 200 OK and the
+ * leg would never reach a terminal disposition.
+ *
  * Behavior is identical regardless of status code (200, 408, 481, 5xx) —
  * the leg is done. Only tracing/CDR records the specific code.
  */
@@ -32,7 +40,7 @@ export const resolveByeResponseRule: RuleDefinition<undefined, undefined> = {
     kind: "response",
     cseqMethod: "BYE",
     statusClass: ["2xx", "3xx", "4xx", "5xx", "6xx"],
-    callState: "terminating",
+    filter: (ctx) => ctx.sourceLeg.byeDisposition === "bye_sent",
   },
 
   init: () => undefined,

@@ -60,8 +60,11 @@ export function terminateCallEffects(call: Call): SideEffect[] {
  * waiting for far-side responses. Call stays in memory and Redis.
  *
  * Cancels all timers (except the terminating_timeout safety net, which
- * the caller schedules separately), writes CDR, and flushes to Redis
- * so the terminating state survives a crash.
+ * the caller schedules separately) and flushes to Redis so the
+ * terminating state survives a crash. CDR is NOT written here — it fires
+ * exactly once when the call transitions to "terminated"
+ * (InvariantEnforcer injects `write-cdr` then). Writing CDR at both
+ * points produced a duplicate record per call.
  *
  * Does NOT remove the call or decrement limiters — those happen in
  * finalCleanupEffects() when all legs are resolved.
@@ -80,7 +83,6 @@ export function beginTerminationEffects(callRef: string, nowMs: number): SideEff
   }
   return [
     { type: "cancel-all-timers" },
-    { type: "write-cdr" },
     { type: "schedule-timer", timer: safetyTimer },
     { type: "flush-redis" },
   ]

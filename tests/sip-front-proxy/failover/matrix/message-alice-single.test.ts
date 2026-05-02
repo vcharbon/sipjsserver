@@ -15,6 +15,7 @@ import {
 } from "../_matrix.js"
 import {
   createSimulatedRunner,
+  expectCdrCount,
   flushIndexReport,
 } from "../../../support/harness.js"
 
@@ -23,6 +24,9 @@ const CASE: MatrixCase = {
   initiator: "alice",
   switchPattern: "single",
 }
+
+// 1 call established + post-kill method + post-respawn teardown → 1 CDR.
+expectCdrCount(matrixName(CASE), 1)
 
 const OUTPUT_DIR = `test-results/failover/matrix/${matrixName(CASE)}`
 

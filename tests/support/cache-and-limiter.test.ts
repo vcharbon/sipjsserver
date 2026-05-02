@@ -14,10 +14,12 @@ import { CallLimiter } from "../../src/call/CallLimiter.js"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { CallState } from "../../src/call/CallState.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
+import { NoOpCdrLayer } from "./networkLeaves.js"
 
 const limiterLayer = CallLimiter.memoryLayer.pipe(Layer.provideMerge(AppConfig.layer))
 const callStateLayer = CallState.layer.pipe(
   Layer.provide(PartitionedRelayStorage.memoryLayer),
+  Layer.provide(NoOpCdrLayer),
   Layer.provideMerge(AppConfig.layer)
 )
 

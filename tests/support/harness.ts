@@ -17,6 +17,8 @@ import { Effect } from "effect"
 import type { Scope } from "effect"
 import * as TestClock from "effect/testing/TestClock"
 import type { AppConfigData } from "../../src/config/AppConfig.js"
+import { CallState } from "../../src/call/CallState.js"
+import { CdrWriter } from "../../src/cdr/CdrWriter.js"
 import type { Scenario, ScenarioResult } from "../fullcall/framework/types.js"
 import { executeScenario } from "../fullcall/framework/interpreter.js"
 import { createSimulatedTransport, type Sut } from "../fullcall/framework/simulated-backend.js"
@@ -32,6 +34,83 @@ import {
 } from "./registrarFrontProxyFakeStack.js"
 
 export type { Sut }
+
+// ---------------------------------------------------------------------------
+// Per-scenario clean-termination assertion
+// ---------------------------------------------------------------------------
+//
+// After every fake-clock scenario, the harness asserts:
+//   1. The number of CDR records written equals the number of calls created
+//      (default: every created call produced exactly one CDR — proof the
+//      rule-engine cleanup path or the framework invariant drove the call
+//      to `terminated` and `write-cdr` fired).
+//   2. The orphan sweep never had to recover anything (counter stays 0).
+//
+// Both are sentinels for the leak class fixed in Slices 1-4: a regression
+// to any of those layers shows up here as a per-scenario failure naming
+// the scenario, instead of being silently masked by sweep recovery.
+//
+// Per-scenario overrides (call before the scenario runs, e.g. at module top
+// level alongside the scenario import):
+//   skipCdrCheck("scenario-name")        // multi-worker SUTs, intentional partial-call tests
+//   expectCdrCount("scenario-name", 2)   // scenarios that legitimately create more than one call
+//   expectNoCdr("scenario-name")         // scenarios that explicitly assert no CDR is written
+
+const cdrCheckSkippedScenarios = new Set<string>()
+const expectedCdrCounts = new Map<string, number>()
+
+/** Opt out of the CDR / orphan-sweep clean-termination assertion. */
+export function skipCdrCheck(scenarioName: string): void {
+  cdrCheckSkippedScenarios.add(scenarioName)
+}
+
+/** Expect a specific CDR record count after the scenario settles. */
+export function expectCdrCount(scenarioName: string, count: number): void {
+  expectedCdrCounts.set(scenarioName, count)
+}
+
+/** Shorthand for `expectCdrCount(scenarioName, 0)`. */
+export function expectNoCdr(scenarioName: string): void {
+  expectedCdrCounts.set(scenarioName, 0)
+}
+
+const assertCleanCallTermination = (scenarioName: string) =>
+  Effect.gen(function* () {
+    if (cdrCheckSkippedScenarios.has(scenarioName)) return
+    const cdr = yield* CdrWriter
+    const records = yield* cdr.readAll
+    const explicitExpected = expectedCdrCounts.get(scenarioName)
+
+    // Multi-worker SUTs don't expose CallState at the harness scope (per-worker
+    // services are hidden inside Layer.effectDiscard wrappers). Try to read it;
+    // if absent, fall back to the explicit `expectCdrCount` only.
+    const callStateOpt = yield* Effect.serviceOption(CallState)
+    const stats = callStateOpt._tag === "Some" ? callStateOpt.value.statsSync() : undefined
+
+    const expected = explicitExpected ?? stats?.total
+    if (expected === undefined) {
+      throw new Error(
+        `[${scenarioName}] CDR completeness check: no CallState in scope and no expectCdrCount set. ` +
+          `Multi-worker SUT scenarios must call expectCdrCount("${scenarioName}", n) to declare ` +
+          `the expected total CDR count across all workers.`
+      )
+    }
+    if (records.length !== expected) {
+      const ctx = stats
+        ? ` (callsCreated=${stats.total}, removeInvocations=${stats.removeInvocations}, concurrent=${stats.concurrent})`
+        : ""
+      throw new Error(
+        `[${scenarioName}] CDR completeness check failed: ` +
+          `expected ${expected} CDR record(s), got ${records.length}${ctx}`
+      )
+    }
+    if (stats !== undefined && stats.orphanSweepRecoveredCount > 0) {
+      throw new Error(
+        `[${scenarioName}] orphan sweep recovered ${stats.orphanSweepRecoveredCount} call(s) — ` +
+          `the rule-engine cleanup path missed them; investigate before merging`
+      )
+    }
+  })
 
 // ---------------------------------------------------------------------------
 // Result collection (per output directory)
@@ -174,6 +253,7 @@ export function createSimulatedRunner(opts?: {
       console.log(formatReport(result))
       recordResult(result, outputDir)
       assertScenarioPassed(result)
+      yield* assertCleanCallTermination(scenario.name)
     })
     const layer = transport.stackLayer
     return runScoped(

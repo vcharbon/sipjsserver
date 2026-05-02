@@ -16,12 +16,13 @@
  */
 
 import { Effect } from "effect"
-import type { Handler, HandlerResult } from "../../../sip/SipRouter.js"
+import type { CallEvent, Handler, HandlerResult } from "../../../sip/SipRouter.js"
 import type { ResolvedContext } from "../../../sip/SipRouter.js"
 import type { RuleRegistry } from "./RuleRegistry.js"
 import type { RuleContext, RuleHandleResult, AnyRuleDefinition } from "./RuleDefinition.js"
 import { executeActions } from "./ActionExecutor.js"
 import { enforceInvariants } from "./InvariantEnforcer.js"
+import { enforceByeDispositionInvariant, type ByeDispositionViolation } from "./ByeDispositionInvariant.js"
 import { handleLimiterRefresh } from "./FrameworkLimiterRefresh.js"
 import { pickRanked } from "./Matcher.js"
 import { getRuleState, setRuleState, isFullyResolved } from "../../../call/CallModel.js"
@@ -97,6 +98,45 @@ function addRuleAttribution(result: HandlerResult, ruleId: string, ruleName: str
       { name: "rule_handled", attributes: { "rule.id": ruleId, "rule.name": ruleName } },
     ],
   }
+}
+
+// ── Termination promotion + bye-disposition invariant ───────────────────
+//
+// Every rule firing funnels through `finalizeTermination`: it runs the
+// bye-disposition invariant (catches rules that absorbed a BYE-resolution
+// event without emitting terminate-leg, force-corrects the disposition),
+// then performs the terminating → terminated promotion. Returns a tuple
+// because the WARN log for any violation has to be emitted by the caller's
+// generator (Effect-aware) rather than by a sync helper.
+function finalizeTermination(
+  callBefore: Call,
+  event: CallEvent,
+  result: HandlerResult,
+): { readonly result: HandlerResult; readonly violations: ReadonlyArray<ByeDispositionViolation> } {
+  const { call, violations } = enforceByeDispositionInvariant(callBefore, event, result.call)
+  let next: HandlerResult = call === result.call ? result : { ...result, call }
+  if (next.call.state === "terminating" && isFullyResolved(next.call)) {
+    next = { ...next, call: { ...next.call, state: "terminated" } }
+  }
+  return { result: next, violations }
+}
+
+function logByeDispositionViolations(
+  violations: ReadonlyArray<ByeDispositionViolation>,
+  ruleId: string,
+  callRef: string,
+  eventType: string,
+): Effect.Effect<void> {
+  if (violations.length === 0) return Effect.void
+  return Effect.forEach(
+    violations,
+    (v) =>
+      Effect.logWarning(
+        `bye-disposition invariant: rule ${ruleId} consumed ${eventType} for call ${callRef} ` +
+          `leg ${v.legId} without terminating it; framework forced ${v.forced}`
+      ),
+    { discard: true }
+  )
 }
 
 // ── Auto-flush ───────────────────────────────────────────────────────────
@@ -231,44 +271,39 @@ export function executeRules(
               const mergedCall = setRuleState(preResult.call, baseStKey, baseOutcome.state)
               const baseResult = executeActions(baseOutcome.actions, { ...ruleCtx, call: mergedCall }, definition.composesWith)
               // Merge: pre-actions first, then base actions
-              let result: HandlerResult = {
-                call: baseResult.call,
-                outbound: [...preResult.outbound, ...baseResult.outbound],
-                effects: [...preResult.effects, ...baseResult.effects],
-                spanEvents: [...(preResult.spanEvents ?? []), ...(baseResult.spanEvents ?? [])],
-              }
-              result = addRuleAttribution(result, id, definition.name)
-              if (result.call.state === "terminating" && isFullyResolved(result.call)) {
-                result = { ...result, call: { ...result.call, state: "terminated" } }
-              }
-              return enforceInvariants(callBefore, appendAutoFlush(callBefore, result))
+              const merged = addRuleAttribution(
+                {
+                  call: baseResult.call,
+                  outbound: [...preResult.outbound, ...baseResult.outbound],
+                  effects: [...preResult.effects, ...baseResult.effects],
+                  spanEvents: [...(preResult.spanEvents ?? []), ...(baseResult.spanEvents ?? [])],
+                },
+                id,
+                definition.name,
+              )
+              const finalized = finalizeTermination(callBefore, ctx.event, merged)
+              yield* logByeDispositionViolations(finalized.violations, id, ctx.callRef, ctx.event.type)
+              return enforceInvariants(callBefore, appendAutoFlush(callBefore, finalized.result))
             }
           }
 
           // Base rule didn't handle or doesn't exist — return just the pre-actions
-          let result = addRuleAttribution(preResult, id, definition.name)
-          if (result.call.state === "terminating" && isFullyResolved(result.call)) {
-            result = { ...result, call: { ...result.call, state: "terminated" } }
-          }
-          return enforceInvariants(callBefore, appendAutoFlush(callBefore, result))
+          const preFinal = finalizeTermination(
+            callBefore,
+            ctx.event,
+            addRuleAttribution(preResult, id, definition.name),
+          )
+          yield* logByeDispositionViolations(preFinal.violations, id, ctx.callRef, ctx.event.type)
+          return enforceInvariants(callBefore, appendAutoFlush(callBefore, preFinal.result))
         }
 
         // ── Non-composed path ──
         const workingCall = setRuleState(ruleCtx.call, stKey, outcome.state)
         const actionCtx: RuleContext = { ...ruleCtx, call: workingCall }
-        let result = executeActions(outcome.actions, actionCtx, id)
-        result = addRuleAttribution(result, id, definition.name)
-
-        // ── Framework lifecycle check: terminating → terminated ──
-        if (result.call.state === "terminating" && isFullyResolved(result.call)) {
-          result = {
-            ...result,
-            call: { ...result.call, state: "terminated" },
-          }
-        }
-
-        // Enforce invariants (limiter, timer, CDR, removal guarantees)
-        return enforceInvariants(callBefore, appendAutoFlush(callBefore, result))
+        const attributed = addRuleAttribution(executeActions(outcome.actions, actionCtx, id), id, definition.name)
+        const finalized = finalizeTermination(callBefore, ctx.event, attributed)
+        yield* logByeDispositionViolations(finalized.violations, id, ctx.callRef, ctx.event.type)
+        return enforceInvariants(callBefore, appendAutoFlush(callBefore, finalized.result))
       }
 
       // ── No rule handled — fall back to default handler ──

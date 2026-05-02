@@ -1684,8 +1684,12 @@ function executeBeginTermination(
   state.call = { ...state.call, timers: [...state.call.timers, safetyTimer] }
   state.effects.push({ type: "schedule-timer", timer: safetyTimer })
 
-  // Write CDR and flush to Redis for crash recovery
-  state.effects.push({ type: "write-cdr" })
+  // Persist mid-teardown state for crash recovery. CDR is written exactly
+  // once when the call transitions to `terminated` — the InvariantEnforcer
+  // injects the `write-cdr` effect there. Emitting it here too produced a
+  // duplicate record per call (one with state="terminating", one with
+  // state="terminated"); the second carries the final state, so the first
+  // is just billing noise.
   state.effects.push({ type: "flush-redis" })
 }
 

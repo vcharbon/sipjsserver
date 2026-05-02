@@ -2,6 +2,12 @@
 
 A SIP call comprises multiple legs, each with its own internal state. At any given time there is always at least one dialog per active leg.
 
+> **Termination paths and responsibility split**: see
+> [docs/leg-termination-model.md](leg-termination-model.md) for the contract
+> between TransactionLayer / Rule / Framework / orphan sweep, the
+> `byeDisposition` state machine, and the framework invariant that prevents
+> calls getting stuck in `terminating`.
+
 The internal representation must model:
 - **Standard call**: one Alice leg + one Bob leg
 - **Call forward**: one Alice leg, a first busy Bob1 leg attempt, then a Bob2 connected leg

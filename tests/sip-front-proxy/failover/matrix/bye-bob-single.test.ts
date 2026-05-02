@@ -16,6 +16,7 @@ import {
 } from "../_matrix.js"
 import {
   createSimulatedRunner,
+  expectCdrCount,
   flushIndexReport,
 } from "../../../support/harness.js"
 
@@ -24,6 +25,9 @@ const CASE: MatrixCase = {
   initiator: "bob",
   switchPattern: "single",
 }
+
+// 1 call established on b2b-1; backup b2b-2 drives the post-takeover BYE round-trip → 1 CDR.
+expectCdrCount(matrixName(CASE), 1)
 
 const OUTPUT_DIR = `test-results/failover/matrix/${matrixName(CASE)}`
 
