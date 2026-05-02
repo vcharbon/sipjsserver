@@ -1253,6 +1253,10 @@ function executeSendRequestToLeg(
     dialog.sip,
     { via, contact, requestUri, ...(body !== undefined ? { body } : {}) },
   )
+  // eslint-disable-next-line no-console
+  console.log(
+    `[diag] send-request-to-leg ${method} leg=${legId} pre.localCSeq=${dialog.sip.localCSeq} post.localCSeq=${newSip.localCSeq}`
+  )
   state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
     ...d,
     sip: newSip,
@@ -1523,7 +1527,22 @@ function executeScheduleTimer(
     fireAt: ctx.nowMs + delaySec * 1000,
     legId,
   }
-  state.call = { ...state.call, timers: [...state.call.timers, timer] }
+  // Dedup by id so the persisted `call.timers` list mirrors the
+  // in-memory `TimerService.fibersMap` semantics (MutableHashMap.set
+  // replaces by id). Without this, every cycle of a recurring timer
+  // (keepalive, limiter_refresh, …) appends a new entry without
+  // removing the stale predecessor; on a worker restart the rehydration
+  // path then respawns ALL of them, including ones whose fireAt has
+  // already elapsed, which fires duplicate handlers and (for keepalive)
+  // re-arms the keepalive_timeout that the in-flight 200 OK already
+  // cancelled, blocking the next keepalive cycle.
+  state.call = {
+    ...state.call,
+    timers: [
+      ...state.call.timers.filter((t) => t.id !== timerId),
+      timer,
+    ],
+  }
   state.effects.push({ type: "schedule-timer", timer })
 }
 

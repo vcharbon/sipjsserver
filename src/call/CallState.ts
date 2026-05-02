@@ -615,13 +615,20 @@ export class CallState extends ServiceMap.Service<
         }
       })
 
-      yield* Effect.forkDetach(
+      // Bind the orphan-sweep daemon to the layer's scope so it dies
+      // together with the worker that built CallState. With
+      // `forkDetach` the daemon kept ticking against a stale closure
+      // after a simulated `kill` in the failover harness, holding open
+      // references to the just-killed worker's CDR/storage services.
+      const layerScope = yield* Effect.scope
+      yield* Effect.forkIn(
         Effect.gen(function* () {
           while (true) {
             yield* Effect.sleep(ORPHAN_SWEEP_INTERVAL_MS)
             yield* sweepOnce
           }
-        })
+        }),
+        layerScope,
       )
 
       return { create, checkout, update, peek, release, flushToRedis, remove, resolveFromSipKey, stats, statsSync, loadOwnedCalls, flushAllCalls }

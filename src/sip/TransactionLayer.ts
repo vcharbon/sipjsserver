@@ -235,6 +235,18 @@ export class TransactionLayer extends ServiceMap.Service<
       const parser = yield* SipParser
       const transport = yield* UdpTransport
       const overload = yield* OverloadController
+      // Capture the layer's scope so every internal background fiber
+      // (sweep, retransmit, Timer B/F/H/J cleanups, ingest stream) is
+      // forked INTO it. With the previous `forkDetach` defaults the
+      // fibers outlived the worker that built the layer, which broke
+      // the simulated-cluster `kill`/respawn cycle: retransmissions
+      // and orphaned cleanups kept hitting the dead worker's stale
+      // closures. Tying every fiber to the layer scope means that the
+      // entire transaction state machine dies cleanly when the worker
+      // scope closes, exactly like a process exit does in production.
+      const layerScope = yield* Effect.scope
+      const forkInScope = <A, E>(eff: Effect.Effect<A, E>) =>
+        Effect.forkIn(eff, layerScope)
 
       const txnMap = MutableHashMap.empty<string, Transaction>()
       const eventQueue = yield* Queue.unbounded<TransactionEvent, Cause.Done>()
@@ -265,7 +277,7 @@ export class TransactionLayer extends ServiceMap.Service<
 
       // ── Cleanup sweep ────────────────────────────────────────────────
 
-      yield* Effect.forkDetach(
+      yield* forkInScope(
         Effect.forever(
           Effect.gen(function* () {
             yield* Effect.sleep(Duration.millis(TXN_SWEEP_INTERVAL))
@@ -317,8 +329,8 @@ export class TransactionLayer extends ServiceMap.Service<
             yield* emit({ type: "timeout", branch, callRef: txn.callRef, legId: txn.legId, method })
           })
 
-          const rFiber = yield* Effect.forkDetach(retransmitEffect)
-          const tFiber = yield* Effect.forkDetach(timeoutEffect)
+          const rFiber = yield* forkInScope(retransmitEffect)
+          const tFiber = yield* forkInScope(timeoutEffect)
 
           yield* Effect.sync(() => {
             const opt = MutableHashMap.get(txnMap, branch)
@@ -443,7 +455,7 @@ export class TransactionLayer extends ServiceMap.Service<
                 })
               })
               // Timer H cleanup — if ACK for 487 never arrives, clean up after 32s
-              yield* Effect.forkDetach(
+              yield* forkInScope(
                 Effect.gen(function* () {
                   yield* Effect.sleep(Duration.millis(TIMER_H))
                   yield* deleteTxn(matchedBranch!)
@@ -621,7 +633,7 @@ export class TransactionLayer extends ServiceMap.Service<
       // Handlers inside are Effect.fnUntraced — the meaningful work is traced once
       // per external event via SipRouter (withProcessingSpan / withRootSpan).
       // Parse errors still get an always-sampled error span (re-enables tracing).
-      yield* Effect.forkDetach(
+      yield* forkInScope(
         Stream.runForEach(transport.messages, (packet) =>
           Effect.gen(function* () {
             yield* Effect.logDebug(`SIP IN <- ${packet.rinfo.address}:${packet.rinfo.port} ${sipSummary(packet.raw)}`)
@@ -705,7 +717,7 @@ export class TransactionLayer extends ServiceMap.Service<
             // ACK arrival (for INVITE) or the sweep (safety net) may clean up earlier.
             if (completedKind !== undefined) {
               const delay = completedKind === "invite" ? TIMER_H : TIMER_J
-              yield* Effect.forkDetach(
+              yield* forkInScope(
                 Effect.gen(function* () {
                   yield* Effect.sleep(Duration.millis(delay))
                   yield* deleteTxn(branch)

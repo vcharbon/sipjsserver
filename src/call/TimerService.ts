@@ -6,7 +6,7 @@
  * runtime fibers are ephemeral and never persisted.
  */
 
-import { Clock, Duration, Effect, Fiber, Layer, MutableHashMap, Option, Scope, ServiceMap } from "effect"
+import { Clock, Duration, Effect, Fiber, Layer, MutableHashMap, Option, ServiceMap } from "effect"
 import type { TimerEntry, TimerType } from "./CallModel.js"
 
 // ---------------------------------------------------------------------------
@@ -75,11 +75,7 @@ export class TimerService extends ServiceMap.Service<
           Effect.catchCause(logTimerFailure(entry.id, entry.type, callRef)),
         )
 
-        const fiber = yield* Effect.provideService(
-          Effect.forkIn(timerEffect, layerScope),
-          Scope.Scope,
-          layerScope,
-        )
+        const fiber = yield* Effect.forkIn(timerEffect, layerScope)
         MutableHashMap.set(fibersMap, entry.id, { fiber, callRef })
 
         return entry.id

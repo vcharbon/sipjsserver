@@ -251,6 +251,11 @@ export class SipRouter extends ServiceMap.Service<
       const tracing = yield* TracingService
       const draining = yield* DrainingState
       const readiness = yield* WorkerReadiness
+      // Bind background forks to the layer's scope so they die when
+      // the worker scope closes. Required for the simulated cluster's
+      // `kill`/respawn cycle in failover tests — `forkDetach` would
+      // leave the fork running against a torn-down worker.
+      const layerScope = yield* Effect.scope
 
       // ── Timer handler that feeds back into withCall ──────────────────
 
@@ -393,7 +398,7 @@ export class SipRouter extends ServiceMap.Service<
                 // the result arrives.
                 const referReq = effect.request
                 const asyncCallRef = effect.callRef
-                yield* Effect.forkDetach(
+                yield* Effect.forkIn(
                   Effect.gen(function* () {
                     const resp = yield* callControl.callRefer(referReq).pipe(
                       Effect.map((r) => ({ ok: true as const, resp: r })),
@@ -411,7 +416,8 @@ export class SipRouter extends ServiceMap.Service<
                       payload,
                     }
                     yield* withCall(handlers, internalEvent)
-                  })
+                  }),
+                  layerScope,
                 )
                 break
               }
@@ -843,11 +849,9 @@ export class SipRouter extends ServiceMap.Service<
         for (const call of calls) {
           const handler = (cr: string, tt: TimerType, lid: string | undefined) =>
             timerHandler(handlers, cr, tt, lid)
-          const timerSummary = call.timers
-            .map((t) => `${t.id}@${t.fireAt}`)
-            .join(",")
-          yield* Effect.logInfo(
-            `SipRouter.rehydrateOwnedCalls: call=${call.callRef} aLeg.localCSeq=${call.aLeg.dialogs[0]?.sip.localCSeq} bLeg[0].localCSeq=${call.bLegs[0]?.dialogs[0]?.sip.localCSeq} timers=[${timerSummary}]`,
+          // eslint-disable-next-line no-console
+          console.log(
+            `[diag] rehydrate ${call.callRef} aLeg.localCSeq=${call.aLeg.dialogs[0]?.sip.localCSeq} bLeg=${call.bLegs[0]?.dialogs[0]?.sip.localCSeq} timers=${call.timers.map((t) => t.id + "@" + t.fireAt).join(",")}`,
           )
           yield* timers.restoreFromEntries(call.callRef, call.timers, handler)
         }
