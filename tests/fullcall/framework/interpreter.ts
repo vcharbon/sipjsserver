@@ -551,7 +551,10 @@ function executeK8s(
         return
       }
       case "respawn": {
-        yield* cluster.respawn(WorkerId(a.workerId))
+        yield* cluster.respawn(
+          WorkerId(a.workerId),
+          a.preserveStorage === true ? { preserveStorage: true } : undefined
+        )
         state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
         return
       }

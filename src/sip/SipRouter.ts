@@ -33,6 +33,7 @@ import { CdrWriter } from "../cdr/CdrWriter.js"
 import { TracingService } from "../tracing/TracingService.js"
 import { DrainingState } from "../b2bua/DrainingState.js"
 import { WorkerReadiness } from "../cache/WorkerReadiness.js"
+import { RedisError } from "../redis/RedisClient.js"
 import {
   type Call,
   type CallTopology,
@@ -217,6 +218,23 @@ export class SipRouter extends ServiceMap.Service<
   SipRouter,
   {
     readonly start: (handlers: HandlerRegistry) => Effect.Effect<never>
+    /**
+     * Rehydrate calls owned by this worker from the local `pri:{self}:`
+     * partition into the in-memory `callsMap` and respawn timer fibers
+     * for every persisted `TimerEntry`.
+     *
+     * Called once at boot, after ReadyGate has drained peers'
+     * reverse-propagate streams. Restored timers reuse the same
+     * `timerHandler` closure SipRouter uses at runtime, so a fired
+     * timer (OPTIONS keepalive, no-answer, limiter-refresh, etc.)
+     * re-enters `withCall` exactly as if it had been scheduled in this
+     * boot. Timers whose `fireAt` is already in the past fire
+     * immediately on respawn (warning logged inside
+     * `TimerService.restoreFromEntries`).
+     */
+    readonly rehydrateOwnedCalls: (
+      handlers: HandlerRegistry
+    ) => Effect.Effect<void, RedisError>
   }
 >()("@sipjsserver/SipRouter") {
   static readonly layer = Layer.effect(
@@ -809,6 +827,35 @@ export class SipRouter extends ServiceMap.Service<
 
       // ── Start: consume TransactionEvent stream ──────────────────────
 
+      // ── Rehydrate owned calls + timer fibers on boot ─────────────────
+      //
+      // After ReadyGate has drained peers' reverse-propagate streams
+      // into local `pri:{self}:`, walk every owned call back into the
+      // in-memory `callsMap` (via `loadOwnedCalls`) and respawn timer
+      // fibers for every persisted `TimerEntry`. This is the only path
+      // that keeps OPTIONS keepalive / limiter-refresh / no-answer
+      // timers ticking across a worker restart — without it, recovered
+      // calls sit silent until the next inbound SIP message wakes them.
+      const rehydrateOwnedCalls = Effect.fnUntraced(function* (
+        handlers: HandlerRegistry
+      ) {
+        const calls = yield* callState.loadOwnedCalls(config.workerIndex)
+        for (const call of calls) {
+          const handler = (cr: string, tt: TimerType, lid: string | undefined) =>
+            timerHandler(handlers, cr, tt, lid)
+          const timerSummary = call.timers
+            .map((t) => `${t.id}@${t.fireAt}`)
+            .join(",")
+          yield* Effect.logInfo(
+            `SipRouter.rehydrateOwnedCalls: call=${call.callRef} aLeg.localCSeq=${call.aLeg.dialogs[0]?.sip.localCSeq} bLeg[0].localCSeq=${call.bLegs[0]?.dialogs[0]?.sip.localCSeq} timers=[${timerSummary}]`,
+          )
+          yield* timers.restoreFromEntries(call.callRef, call.timers, handler)
+        }
+        yield* Effect.logInfo(
+          `SipRouter: rehydrated ${calls.length} owned call(s) and respawned their timer fibers`
+        )
+      })
+
       const start = Effect.fnUntraced(function* (handlers: HandlerRegistry) {
         return yield* Stream.runForEach(txnLayer.events, (txnEvent) => {
           let event: CallEvent
@@ -832,7 +879,7 @@ export class SipRouter extends ServiceMap.Service<
         }) as unknown as Effect.Effect<never>
       })
 
-      return { start }
+      return { start, rehydrateOwnedCalls }
     })
   )
 }

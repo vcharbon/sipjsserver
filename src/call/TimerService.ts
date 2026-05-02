@@ -6,7 +6,7 @@
  * runtime fibers are ephemeral and never persisted.
  */
 
-import { Clock, Duration, Effect, Fiber, Layer, MutableHashMap, Option, ServiceMap } from "effect"
+import { Clock, Duration, Effect, Fiber, Layer, MutableHashMap, Option, Scope, ServiceMap } from "effect"
 import type { TimerEntry, TimerType } from "./CallModel.js"
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,14 @@ export class TimerService extends ServiceMap.Service<
   static readonly layer = Layer.effect(
     TimerService,
     Effect.gen(function* () {
+      // Capture the layer's scope so timer fibers can be forked INTO
+      // it. With `forkDetach` (the previous default) a timer fiber
+      // outlives the worker scope that built the layer — including the
+      // `kill`/respawn cycle in test scenarios — and keeps firing
+      // against the dead worker's stale `callsMap`. Forking against
+      // the layer's scope ties every fiber's lifetime to the worker.
+      const layerScope = yield* Effect.scope
+
       // Map timerId → { fiber, callRef }
       const fibersMap = MutableHashMap.empty<string, { fiber: Fiber.Fiber<void>; callRef: string }>()
 
@@ -67,7 +75,11 @@ export class TimerService extends ServiceMap.Service<
           Effect.catchCause(logTimerFailure(entry.id, entry.type, callRef)),
         )
 
-        const fiber = yield* Effect.forkDetach(timerEffect)
+        const fiber = yield* Effect.provideService(
+          Effect.forkIn(timerEffect, layerScope),
+          Scope.Scope,
+          layerScope,
+        )
         MutableHashMap.set(fibersMap, entry.id, { fiber, callRef })
 
         return entry.id

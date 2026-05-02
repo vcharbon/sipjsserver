@@ -32,6 +32,8 @@ import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { PeerEnumerator } from "../../src/cache/PeerEnumerator.js"
 import { WorkerReadiness } from "../../src/cache/WorkerReadiness.js"
+import { CallState } from "../../src/call/CallState.js"
+import { TimerService } from "../../src/call/TimerService.js"
 import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { SipRouter, type HandlerRegistry } from "../../src/sip/SipRouter.js"
 import {
@@ -327,6 +329,8 @@ function buildClusterWithWorkersLayer(
           network,
         )
         const router = ServiceMap.get(services, SipRouter)
+        const callState = ServiceMap.get(services, CallState)
+        const timers = ServiceMap.get(services, TimerService)
 
         // Per-worker ReplPuller wired to the (current) storage handle.
         const selfOrdStr = w.ordinal as unknown as string
@@ -410,6 +414,22 @@ function buildClusterWithWorkersLayer(
         // (peer-log apply) is what we needed.
         yield* Scope.close(gateScope, Exit.void)
 
+        // Rehydrate owned calls + their persisted timer fibers from
+        // the local `pri:{self}:` partition. On initial boot the
+        // partition is empty so this is a no-op; on respawn (after
+        // ReadyGate drained the peer's reverse-propagate stream into
+        // `pri:{self}:`), this respawns OPTIONS keepalive /
+        // limiter-refresh / no-answer timer fibers so the call keeps
+        // ticking across the restart. Errors are logged and swallowed
+        // — a recovery failure must not keep the worker stuck.
+        yield* router.rehydrateOwnedCalls(handlers).pipe(
+          Effect.catchTag("RedisError", (e) =>
+            Effect.logError(
+              `[${w.id as unknown as string}] rehydrateOwnedCalls failed: ${e.reason}`
+            )
+          )
+        )
+
         // Bind connectivity AFTER the readiness drain so external
         // packets only land once the worker is ready to serve.
         yield* Effect.provideService(
@@ -423,18 +443,32 @@ function buildClusterWithWorkersLayer(
 
         // Fork SipRouter ingest into the worker's scope.
         yield* Effect.forkIn(router.start(handlers), scope)
+
+        return { callState, timers }
       })
 
     // Initial boot: open a child scope per worker and run buildWorker.
     for (const w of clusterWorkers) {
       const scope = yield* Scope.fork(sutScope, "sequential")
-      yield* buildWorker(w, scope)
+      const built = yield* buildWorker(w, scope)
       const idStr = w.id as unknown as string
-      handles.set(idStr, {
+      const handle: WorkerRuntimeHandle = {
         id: w.id,
         scope,
-        rebuild: (newScope) => buildWorker(w, newScope),
-      })
+        // Respawn rebuilds the worker against a fresh scope and writes
+        // the new per-worker `CallState`/`TimerService` instances back
+        // into the handle so cluster-wide sweeps consult the live
+        // services rather than the dead pre-respawn ones.
+        rebuild: (newScope) =>
+          Effect.gen(function* () {
+            const rebuilt = yield* buildWorker(w, newScope)
+            handle.callState = rebuilt.callState
+            handle.timers = rebuilt.timers
+          }),
+        callState: built.callState,
+        timers: built.timers,
+      }
+      handles.set(idStr, handle)
     }
 
     // Lifecycle wiring exposed to the cluster service.

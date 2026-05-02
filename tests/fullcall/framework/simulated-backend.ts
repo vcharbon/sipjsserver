@@ -12,7 +12,7 @@
  * real UDP stack would expose them.
  */
 
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
 import type { AgentInfo, NetworkTag, TestTransport } from "./types.js"
 import { DEFAULT_NETWORK } from "./types.js"
 import { pumpAll } from "../../support/pumpAll.js"
@@ -24,6 +24,7 @@ import { type AppConfigData } from "../../../src/config/AppConfig.js"
 import { testAppConfigDefaults } from "../../support/testAppConfigDefaults.js"
 import { CallState } from "../../../src/call/CallState.js"
 import { TimerService } from "../../../src/call/TimerService.js"
+import { SimulatedK8sCluster } from "../../support/SimulatedK8sCluster.js"
 import { buildHandlers, ruleRegistry } from "../../../src/b2bua/B2buaCore.js"
 import {
   disableRule,
@@ -511,6 +512,18 @@ export function createSimulatedTransport(opts?: {
               `TimerService leak: ${active} timer(s) still active. ` +
               `All timers should be cancelled during call cleanup.`
             )
+          }
+        }
+        // For k8sFailover, the per-worker CallState/TimerService refs
+        // captured above are undefined — those instances live inside
+        // each worker's child scope. Consult the cluster service which
+        // walks every still-live worker handle and reports leaks.
+        if (sut === "k8sFailover") {
+          const clusterOpt = yield* Effect.serviceOption(SimulatedK8sCluster)
+          if (Option.isSome(clusterOpt)) {
+            const clusterErrors =
+              yield* clusterOpt.value.verifyCleanStateOnAllWorkers()
+            for (const err of clusterErrors) errors.push(err)
           }
         }
         for (const [tag, network] of [

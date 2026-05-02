@@ -205,7 +205,17 @@ export type K8sPartitionDirection = "from-to" | "to-from" | "both"
 
 export type K8sStepAction =
   | { readonly kind: "kill"; readonly workerId: string; readonly timing?: K8sKillTiming }
-  | { readonly kind: "respawn"; readonly workerId: string }
+  | {
+      readonly kind: "respawn"
+      readonly workerId: string
+      /**
+       * When true, simulate §11.1 of `docs/replication/call-cache-backup.md`:
+       * the worker process restarts but its sidecar Redis content is
+       * preserved (`pri:{self}:` keys survive). When omitted/false, the
+       * sidecar is wiped (§11.2).
+       */
+      readonly preserveStorage?: boolean
+    }
   | { readonly kind: "disconnect"; readonly workerId: string }
   | { readonly kind: "reconnect"; readonly workerId: string }
   | {

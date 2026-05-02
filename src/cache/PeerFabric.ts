@@ -84,6 +84,13 @@ export interface PeerFabricControlApi {
   readonly sigtermWorker: (peer: WorkerOrdinal) => Effect.Effect<void>
   /** Boot a fresh sidecar store (clears everything) and mark alive. Used by Slice 6's reclaim flow. */
   readonly rebootWorker: (peer: WorkerOrdinal) => Effect.Effect<void>
+  /**
+   * Soft restart: mark alive without clearing the sidecar store. Models
+   * §11.1 of `docs/replication/call-cache-backup.md` (process restart
+   * with sidecar persisting), as opposed to `rebootWorker` which models
+   * §11.2 (full pod replace, sidecar wiped).
+   */
+  readonly softRebootWorker: (peer: WorkerOrdinal) => Effect.Effect<void>
   /** Symmetric partition between two peers. */
   readonly partition: (a: WorkerOrdinal, b: WorkerOrdinal) => Effect.Effect<void>
   readonly heal: (a: WorkerOrdinal, b: WorkerOrdinal) => Effect.Effect<void>
@@ -450,6 +457,16 @@ const makeControlApi = (inner: FabricInner): PeerFabricControlApi => {
       st.errorRate = 0
     })
 
+  const softRebootWorker = (peer: WorkerOrdinal): Effect.Effect<void> =>
+    Effect.sync(() => {
+      const st = peerOrThrow(inner, peer, "PeerFabricControl.softRebootWorker")
+      // Storage retained across the restart — the previously-killed
+      // process is coming back in front of the same sidecar Redis.
+      st.health = "alive"
+      st.latencyMs = 0
+      st.errorRate = 0
+    })
+
   const partition = (
     a: WorkerOrdinal,
     b: WorkerOrdinal
@@ -507,6 +524,7 @@ const makeControlApi = (inner: FabricInner): PeerFabricControlApi => {
     killWorker,
     sigtermWorker,
     rebootWorker,
+    softRebootWorker,
     partition,
     heal,
     setLatency,

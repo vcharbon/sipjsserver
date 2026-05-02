@@ -221,8 +221,15 @@ type InternalExpect = (methodOrStatusCode: string | number, opts?: ExpectOpts) =
 export interface ClusterContext {
   /** Tear down a worker through the multi-phase pipeline. */
   kill(workerId: string, timing?: K8sKillTiming): void
-  /** Bring a worker back. Stub for slice 3b — interpreter records skip. */
-  respawn(workerId: string): void
+  /**
+   * Bring a worker back. Stub for slice 3b — interpreter records skip.
+   *
+   * `preserveStorage: true` models §11.1 of
+   * `docs/replication/call-cache-backup.md` (process restart with
+   * sidecar persisting). Default models §11.2 (full pod replace,
+   * sidecar wiped).
+   */
+  respawn(workerId: string, opts?: { preserveStorage?: boolean }): void
   /** Flip the worker's outbound network gate off (registry untouched). */
   disconnect(workerId: string): void
   /** Restore the worker's outbound network gate. */
@@ -515,8 +522,12 @@ export function record(
           : { kind: "kill", workerId }
       )
     },
-    respawn(workerId) {
-      recordK8s({ kind: "respawn", workerId })
+    respawn(workerId, opts) {
+      recordK8s(
+        opts?.preserveStorage === true
+          ? { kind: "respawn", workerId, preserveStorage: true }
+          : { kind: "respawn", workerId }
+      )
     },
     disconnect(workerId) {
       recordK8s({ kind: "disconnect", workerId })

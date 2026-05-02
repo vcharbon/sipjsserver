@@ -45,6 +45,8 @@ import {
   type PeerSnapshot,
 } from "../../src/cache/PeerFabric.js"
 import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
+import { CallState } from "../../src/call/CallState.js"
+import { TimerService } from "../../src/call/TimerService.js"
 import {
   WorkerId,
   WorkerRegistrySimulatedControl,
@@ -73,6 +75,22 @@ export interface KillTiming {
 }
 
 export type KillPhase = "drain" | "disconnect" | "registry" | "fabric"
+
+/**
+ * Per-call knobs for `cluster.respawn`. Defaults model §11.2 of
+ * `docs/replication/call-cache-backup.md` (full pod replace, sidecar
+ * wiped). Set `preserveStorage: true` to model §11.1 (process restart
+ * with sidecar persisting).
+ */
+export interface RespawnOptions {
+  /**
+   * When true, skip the `PeerFabric.rebootWorker` storage wipe and use
+   * `softRebootWorker` instead — the rebuilt worker comes up in front
+   * of its previous sidecar contents (`pri:{self}:` keys intact). Used
+   * by tests that exercise the timer-rehydration boot path.
+   */
+  readonly preserveStorage?: boolean
+}
 
 export interface KillEvent {
   readonly workerId: WorkerId
@@ -131,7 +149,10 @@ export interface SimulatedK8sClusterApi {
    * Stub when the cluster wasn't built with worker-lifecycle support;
    * see `SimulatedK8sClusterLayerWithLifecycleOpts`.
    */
-  readonly respawn: (id: WorkerId) => Effect.Effect<void>
+  readonly respawn: (
+    id: WorkerId,
+    opts?: RespawnOptions
+  ) => Effect.Effect<void>
   readonly disconnect: (id: WorkerId) => Effect.Effect<void>
   readonly reconnect: (id: WorkerId) => Effect.Effect<void>
   readonly partition: (opts: {
@@ -177,6 +198,17 @@ export interface SimulatedK8sClusterApi {
       readonly present?: boolean
     }
   ) => Effect.Effect<void>
+
+  /**
+   * Iterate every still-live worker (handles whose scope hasn't been
+   * closed by `kill`) and collect leak reports for any worker whose
+   * `CallState`/`TimerService` is not clean. Returns an empty array on
+   * a healthy teardown. Consumed by the harness's `verifyCleanState`
+   * sweep when `sut === "k8sFailover"`.
+   */
+  readonly verifyCleanStateOnAllWorkers: () => Effect.Effect<
+    ReadonlyArray<string>
+  >
 }
 
 export class SimulatedK8sCluster extends ServiceMap.Service<
@@ -210,6 +242,16 @@ export interface WorkerRuntimeHandle {
   scope: Scope.Closeable
   /** Re-runs the `buildWorker` closure against `scope`. */
   readonly rebuild: (scope: Scope.Closeable) => Effect.Effect<void>
+  /**
+   * Per-worker `CallState` instance (mutated on respawn so cluster-wide
+   * sweeps always see the live worker's stats). Exposed so the
+   * end-of-scenario clean-state assertion can iterate every worker
+   * — sipproxyHA / b2bonly only ever expose a single instance, k8sFailover
+   * needs to inspect both workers in the cluster.
+   */
+  callState: CallState["Service"]
+  /** Per-worker `TimerService` instance (mutated on respawn). */
+  timers: TimerService["Service"]
 }
 
 // ---------------------------------------------------------------------------
@@ -333,7 +375,7 @@ export const SimulatedK8sClusterLayer = (
           }
         })
 
-      const respawn: SimulatedK8sClusterApi["respawn"] = (id) =>
+      const respawn: SimulatedK8sClusterApi["respawn"] = (id, opts) =>
         Effect.gen(function* () {
           if (lifecycle === undefined) {
             return yield* Effect.die(
@@ -345,8 +387,15 @@ export const SimulatedK8sClusterLayer = (
             )
           }
           const w = workerOf(id)
-          // 1. Fresh storage handle (mimics ephemeral sidecar Redis).
-          yield* fabric.rebootWorker(w.ordinal)
+          // 1. Bring the sidecar back. Default mimics ephemeral
+          //    sidecar Redis (full wipe — §11.2). With
+          //    preserveStorage:true the previous keys are kept (§11.1
+          //    process restart with sidecar persisting).
+          if (opts?.preserveStorage === true) {
+            yield* fabric.softRebootWorker(w.ordinal)
+          } else {
+            yield* fabric.rebootWorker(w.ordinal)
+          }
           // 2. Network gate flipped back on.
           yield* connectivity.reconnect(id as unknown as string)
           // 3. Registry: re-add (kill set health=dead but kept the
@@ -479,6 +528,31 @@ export const SimulatedK8sClusterLayer = (
           }
         })
 
+      const verifyCleanStateOnAllWorkers: SimulatedK8sClusterApi["verifyCleanStateOnAllWorkers"] =
+        () =>
+          Effect.gen(function* () {
+            const errors: string[] = []
+            if (lifecycle === undefined) return errors
+            for (const [idStr, handle] of lifecycle.handles) {
+              const active = handle.timers.activeCountSync()
+              if (active > 0) {
+                errors.push(
+                  `TimerService leak on worker ${idStr}: ${active} timer(s) still active. ` +
+                    `All timers should be cancelled during call cleanup.`
+                )
+              }
+              const { concurrent, total } = yield* handle.callState.stats()
+              if (concurrent > 0) {
+                errors.push(
+                  `CallState leak on worker ${idStr}: ${concurrent} call(s) still in memory ` +
+                    `(total created: ${total}). All calls should be removed after ` +
+                    `scenario completion — the "terminating" state should have resolved.`
+                )
+              }
+            }
+            return errors
+          })
+
       return {
         workers: opts.workers,
         workerOf,
@@ -493,6 +567,7 @@ export const SimulatedK8sClusterLayer = (
         snapshotRoutingMetrics,
         expectReplicatedTo,
         expectCallStateOn,
+        verifyCleanStateOnAllWorkers,
       }
     })
   )

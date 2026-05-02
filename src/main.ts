@@ -280,7 +280,8 @@ const runReplicationConsumer = (
   self: string,
   namespace: string,
   serviceName: string,
-  adminPort: number
+  adminPort: number,
+  afterGate: Effect.Effect<void>
 ) => {
   // Build layer leaves first — each is a single memoized instance so
   // the gate, the puller, and the steady-state fibers all see the
@@ -333,6 +334,11 @@ const runReplicationConsumer = (
     yield* Effect.logInfo(
       `replication: ReadyGate finished — synced=${result.synced.length} unreconciled=${result.unreconciled.length} durationMs=${result.durationMs}`
     )
+
+    // Post-gate hook (timer rehydration etc.) — runs once on the boot
+    // path after peers have been drained. Errors are logged inside the
+    // hook; we never block the consumer fiber on a recovery failure.
+    yield* afterGate
 
     // Steady-state: one auto-reconnecting fiber per peer. We do an
     // initial enumerator read here; the production
@@ -450,6 +456,17 @@ const standaloneMain = Effect.gen(function* () {
   // dev / non-K8s). The HTTP server above already serves /replog so
   // peers can pull *from* this worker even when this worker isn't
   // pulling from anyone.
+  // Boot-time timer rehydration: walk owned calls back into memory and
+  // respawn their persisted timer fibers (OPTIONS keepalive,
+  // limiter-refresh, no-answer, …) so they survive a worker restart.
+  // Errors are logged and swallowed — a recovery failure should not
+  // hold the worker not-ready forever.
+  const rehydrate = router.rehydrateOwnedCalls(handlers).pipe(
+    Effect.catchTag("RedisError", (e) =>
+      Effect.logError(`rehydrateOwnedCalls failed: ${e.reason}`)
+    )
+  )
+
   if (config.k8sNamespace !== undefined && config.k8sNamespace.length > 0) {
     const self = resolveOrdinal(config)
     yield* Effect.forkDetach(
@@ -457,7 +474,8 @@ const standaloneMain = Effect.gen(function* () {
         self,
         config.k8sNamespace,
         config.workerServiceName,
-        config.httpStatusPort
+        config.httpStatusPort,
+        rehydrate
       )
     )
   } else {
@@ -469,6 +487,7 @@ const standaloneMain = Effect.gen(function* () {
     // there's nothing to drain, so mark ready immediately. The
     // `/ready` route still gates correctly on `DrainingState` for
     // graceful shutdown.
+    yield* rehydrate
     const readiness = yield* WorkerReadiness
     yield* readiness.markReady(true)
   }

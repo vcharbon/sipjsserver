@@ -792,3 +792,15 @@ This is the single accepted loss class in the new design, identical to the prior
 | 6     | Delete legacy push-side; tidy CallState                        | not started |                                  |
 
 This table is the source of truth for slice status. Each slice's PR updates the row and any sections this document needs to reflect implementation reality.
+
+---
+
+## 16. Restriction: backup does not fire timers
+
+The §0 single-owner invariant has a corollary that is invisible at write time but matters every time the primary worker pod restarts:
+
+- **Backup never fires SIP timers.** OPTIONS keepalive, `keepalive_timeout`, `limiter_refresh`, `no-answer`, REFER timers — all of these are scheduled by `TimerService` on the call's primary worker, and only there. `bak:{primary}:call:{ref}` carries the serialized `TimerEntry[]` for crash recovery, but the backup worker does not respawn fibers from it. Doing so would mean two workers concurrently driving the same call's timer-side state machine, breaking single-owner.
+- **Recovery is primary-side only.** When the primary returns, its boot path runs `SipRouter.rehydrateOwnedCalls` (see [src/sip/SipRouter.ts](../../src/sip/SipRouter.ts)), which `loadOwnedCalls` walks the local `pri:{self}:` partition (already merged with the peer's reverse-propagate stream by `ReadyGate`) and `restoreFromEntries` respawns timer fibers for every persisted `TimerEntry`. Timers whose `fireAt` is in the past fire immediately on respawn (warning logged). For SIP messages received during the outage there is no synthetic re-issue — what the backup served via `decode_forward_backup` is what the cluster did, and that's what gets merged back.
+- **Operational consequence: primary restart must complete within `callContextTtlSec`.** Default `callContextTtlSec = keepaliveIntervalSec * 2`. Past that, the `bak:{primary}:` copy TTL-expires on the backup's sidecar and the call is unrecoverable. The K8s `terminationGracePeriodSeconds ≥ 200s` budget (see §1) keeps in-INVITE calls; for established calls, the practical bound is `2 × keepaliveIntervalSec` (15 minutes default).
+- **During the outage window, remote endpoints receive no keepalive pings.** If a remote user agent terminates the dialog locally on keepalive failure, the call may be torn down on that endpoint before the primary returns. There is no way to mask this from the remote side without breaking single-owner.
+- **Future work: REGISTER and similar long-lived flows where tick cadence is shorter than typical restart time will need backup-side timer firing.** That breaks §0 in its current shape and is tracked separately — the design will need an explicit takeover model with epoch-fenced ownership transfer rather than the current "primary always recovers itself" path.
