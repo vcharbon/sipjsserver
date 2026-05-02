@@ -1,8 +1,38 @@
-# SIP TS Server
+# `@vcharbon/sipjs`
 
-This is mostly an attempt to explore how well Claude does in complex subjects. 100% vibe coded, not suitable for human consumption.
+A SIP B2BUA + register-front-proxy + multi-agent SIP test framework
+written in Effect-TS. Originally built as a standalone server; now
+also published as a library for two use cases:
 
-## 
+1. **Test your SIP system** — drive `alice.register()` /
+   `bob.register()` scenarios through an in-process registrar
+   front-proxy that forwards to your real PBX / SBC / b2bua. See
+   [docs/external-usage/test-harness.md](docs/external-usage/test-harness.md).
+2. **Embed the full B2BUA** in your own Effect app with a custom
+   `CallDecisionEngine` (HTTP backend, in-process logic, anything).
+   See [docs/external-usage/b2bua-embedded.md](docs/external-usage/b2bua-embedded.md).
+
+The standalone server mode (`npm run dev`) still works and is the
+production deployment; embedded mode is a slimmer in-memory variant
+suitable for single-node use.
+
+Full subpath map and install instructions:
+[docs/external-usage/README.md](docs/external-usage/README.md).
+
+> **Not on npm yet.** The package is consumed directly from a local
+> git checkout. The simplest workflow is `git clone`, `npm install`,
+> `npm run build` in this repo, then `"@vcharbon/sipjs":
+> "file:/abs/path/to/sipjsserver"` in the consumer's `package.json`.
+> Two more workflows (`npm link` for live editing, `npm pack` for a
+> publish-equivalent tarball) are documented in
+> [docs/external-usage/README.md](docs/external-usage/README.md#install).
+
+> Note: this repo started as an exploration of Claude on a complex
+> subject. The library surface (`/test-harness`, `/b2bua`, `/sip`,
+> `/sip-front-proxy`, `/observability`) has been curated for external
+> consumption; everything else is internal.
+
+## Standalone server mode
 
 npm run dev
 

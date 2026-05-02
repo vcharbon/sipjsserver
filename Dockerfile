@@ -9,7 +9,7 @@ FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY tsconfig.json tsconfig.build.json tsconfig.bin.json ./
+COPY tsconfig.json tsconfig.build.json tsconfig.bin.json tsconfig.test-harness.json ./
 COPY src/ ./src/
 COPY bin/ ./bin/
 RUN npm run build

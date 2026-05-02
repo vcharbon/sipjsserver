@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Effect-TS/language-service/refs/heads/main/schema.json",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "incremental": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "exactOptionalPropertyTypes": false,
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "plugins": [],
+    "paths": {
+      "@vcharbon/sipjs/test-harness": ["./src/test-harness/index.ts"],
+      "@vcharbon/sipjs/b2bua": ["./src/b2bua/index.ts"],
+      "@vcharbon/sipjs/sip-front-proxy": ["./src/sip-front-proxy/index.ts"],
+      "@vcharbon/sipjs/sip": ["./src/sip/index.ts"],
+      "@vcharbon/sipjs/observability": ["./src/observability/index.ts"]
+    }
+  },
+  "include": ["tests/consumer-api/**/*", "examples/**/*", "src/**/*"]
+}

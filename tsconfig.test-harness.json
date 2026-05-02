@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "exactOptionalPropertyTypes": false,
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "incremental": false,
+    "declaration": true,
+    "declarationMap": true,
+    "plugins": []
+  },
+  "include": ["src/test-harness/**/*"],
+  "exclude": []
+}

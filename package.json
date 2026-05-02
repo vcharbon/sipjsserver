@@ -1,13 +1,40 @@
 {
-  "name": "sipjsserver",
+  "name": "@vcharbon/sipjs",
   "version": "0.1.0",
   "type": "module",
+  "exports": {
+    "./test-harness": {
+      "types": "./dist/test-harness/index.d.ts",
+      "import": "./dist/test-harness/index.js"
+    },
+    "./b2bua": {
+      "types": "./dist/b2bua/index.d.ts",
+      "import": "./dist/b2bua/index.js"
+    },
+    "./sip-front-proxy": {
+      "types": "./dist/sip-front-proxy/index.d.ts",
+      "import": "./dist/sip-front-proxy/index.js"
+    },
+    "./sip": {
+      "types": "./dist/sip/index.d.ts",
+      "import": "./dist/sip/index.js"
+    },
+    "./observability": {
+      "types": "./dist/observability/index.d.ts",
+      "import": "./dist/observability/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "dev": "CHOKIDAR_USEPOLLING=true tsx --env-file=.env --watch src/main.ts",
     "proxy:dev": "tsx bin/proxy.ts",
-    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.bin.json",
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.bin.json && tsc -p tsconfig.test-harness.json",
     "start": "node --env-file=.env dist/main.js",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.bin.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.bin.json && tsc --noEmit -p tsconfig.test-harness.json && tsc --noEmit -p tsconfig.consumer-api.json",
     "lint": "eslint",
     "test": "npm run test:fake && npm run test:live:short",
     "test:ci": "npm run test:fake && npm run test:live:medium",
@@ -43,8 +70,7 @@
     "@opentelemetry/sdk-trace-node": "^2.6.1",
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "effect": "^4.0.0-beta.42",
-    "ioredis": "^5.10.1",
-    "jssip": "^3.13.6"
+    "ioredis": "^5.10.1"
   },
   "devDependencies": {
     "@effect/language-service": "latest",
@@ -53,6 +79,7 @@
     "@types/ioredis": "^4.28.10",
     "@types/node": "^22.0.0",
     "eslint": "^10.2.1",
+    "jssip": "^3.13.6",
     "sip-parser": "^1.5.1",
     "tsx": "^4.0.0",
     "typescript": "^5.8.0",

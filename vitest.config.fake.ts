@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config"
+import { sipjsSubpathAliases } from "./vitest.aliases.js"
 
 /**
  * Fake-stack vitest config.
@@ -12,6 +13,7 @@ import { defineConfig } from "vitest/config"
  * excluded — it runs under `vitest.config.live.ts`.
  */
 export default defineConfig({
+  resolve: { alias: sipjsSubpathAliases },
   test: {
     include: ["tests/**/*.test.ts"],
     exclude: [

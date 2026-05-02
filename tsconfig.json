@@ -17,5 +17,6 @@
     "skipLibCheck": true,
     "plugins": [{ "name": "@effect/language-service" }]
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "exclude": ["src/test-harness/**/*"]
 }

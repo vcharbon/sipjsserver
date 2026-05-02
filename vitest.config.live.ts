@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config"
+import { sipjsSubpathAliases } from "./vitest.aliases.js"
 
 /**
  * Live-stack vitest config.
@@ -14,6 +15,7 @@ import { defineConfig } from "vitest/config"
  *   - TEST_TIER=long   → short + medium + long (no cap — nightly only)
  */
 export default defineConfig({
+  resolve: { alias: sipjsSubpathAliases },
   test: {
     include: [
       "tests/fullcall/e2e-real-clock.test.ts",
