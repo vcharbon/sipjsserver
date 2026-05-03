@@ -12,6 +12,8 @@
  * parser: only the fields we need.
  */
 
+import { sdpOriginAddress, sdpSessionId } from "./SdpAnswerFromOffer.js"
+
 /** Codec profile extracted from the first audio m-line of an SDP body. */
 export interface CodecProfile {
   /** Media type from the m-line (e.g. "audio"). */
@@ -117,21 +119,43 @@ export function extractCodecProfile(body: Uint8Array | string): CodecProfile | u
   }
 }
 
+export interface BuildHeldSdpOptions {
+  /**
+   * B2BUA's local SDP-origin address — written into the `o=` and `c=` lines
+   * per RFC 4566 §5.2 / §5.7. When `0.0.0.0` / `::` (bind-all-interfaces)
+   * the helper substitutes `127.0.0.1` so the held SDP is RFC-conformant.
+   */
+  readonly localIp: string
+  /**
+   * Wall-clock millis used to derive the `o=` `sess-id` / `sess-version`.
+   * The helper converts to epoch-seconds for non-zero, RFC 4566 §5.2-style
+   * uniqueness — held SDP is short-lived but still must round-trip through
+   * RFC 3264 §8 SDP-version comparison on the subsequent re-INVITE.
+   */
+  readonly nowMs: number
+}
+
 /**
  * Build a synthetic held SDP offer that carries `profile`'s codec list with
  * the m-line port set to 0 and `a=inactive` — RFC 3264 §5.1. The B2BUA uses
  * this for the initial INVITE to C so C accepts the offer on the codec
  * profile alone. A subsequent re-INVITE (c-realigning) carries A's real SDP.
  *
- * Deterministic: session id / version are constants; caller can override by
- * not using this helper if they need uniqueness.
+ * `options.localIp` and `options.nowMs` populate the origin/connection lines
+ * so the held SDP is RFC 4566 §5.2-conformant (no `0.0.0.0`, non-zero sess-id
+ * / sess-version).
  */
-export function buildHeldSdpFromProfile(profile: CodecProfile): Uint8Array {
+export function buildHeldSdpFromProfile(
+  profile: CodecProfile,
+  options: BuildHeldSdpOptions
+): Uint8Array {
+  const originIp = sdpOriginAddress(options.localIp)
+  const sessId = sdpSessionId(options.nowMs)
   const lines: string[] = [
     "v=0",
-    "o=b2bua 0 0 IN IP4 0.0.0.0",
+    `o=b2bua ${sessId} ${sessId} IN IP4 ${originIp}`,
     "s=-",
-    "c=IN IP4 0.0.0.0",
+    `c=IN IP4 ${originIp}`,
     "t=0 0",
     `m=${profile.media} 0 RTP/AVP ${profile.payloadTypes.join(" ")}`,
   ]

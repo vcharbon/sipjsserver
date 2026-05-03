@@ -33,6 +33,7 @@ export type ValidationCheckName =
   | "rackCorrelation"
   | "tagConsistency"
   | "offerAnswer"
+  | "sdpStandards"
 
 export type ValidationFn = (
   msg: SipMessage,
@@ -58,6 +59,7 @@ export interface ValidationOverrides {
   readonly responseCorrelation?: ValidationFn
   readonly rackCorrelation?: ValidationFn
   readonly tagConsistency?: ValidationFn
+  readonly sdpStandards?: ValidationFn
 }
 
 export interface PendingRequest {
@@ -663,6 +665,98 @@ function validateTagConsistency(
   ]
 }
 
+/**
+ * SDP standards conformance checks (RFC 4566 §5.2 / §5.7).
+ *
+ * Flags constructed-by-B2BUA SDP bodies that violate basic SHOULDs:
+ *   - `o=` sess-id == 0 (RFC 4566 §5.2 RECOMMENDS NTP-format timestamp;
+ *     0 prevents RFC 3264 §8 SDP-version comparison across re-INVITE/UPDATE).
+ *   - `o=` sess-version == 0 (same — must increment on session changes).
+ *   - `o=` unicast-address == 0.0.0.0 / ::  (the unspecified address; some
+ *     interop partners reject it).
+ *   - Redundant connection-data: identical session-level c= AND every
+ *     media-level c= (RFC 4566 §5.7 — cosmetic but flagged).
+ *
+ * Out of scope: a=x-offer-id pairing (proprietary, not RFC).
+ *
+ * Skipped when the message has no body or its Content-Type is non-SDP.
+ */
+function validateSdpStandards(
+  msg: SipMessage,
+  _dialogState: AgentDialogState,
+  _correlatedRequest: SipMessage | undefined
+): string[] {
+  if (msg.body.byteLength === 0) return []
+  const ct = getHeaderValue(msg.headers, "content-type")?.toLowerCase()
+  if (ct !== undefined && !ct.includes("application/sdp")) return []
+
+  const text = new TextDecoder().decode(msg.body)
+  if (!text.startsWith("v=0")) return []
+
+  const errors: string[] = []
+  const lines = text.split(/\r\n|\n/).filter((l) => l.length > 0)
+
+  const oLine = lines.find((l) => l.startsWith("o="))
+  if (oLine !== undefined) {
+    const parts = oLine.slice(2).trim().split(/\s+/)
+    if (parts.length >= 6) {
+      const sessId = parts[1]!
+      const sessVersion = parts[2]!
+      const unicastAddress = parts[5]!
+      if (sessId === "0") {
+        errors.push(
+          `SDP o= sess-id is 0 — RFC 4566 §5.2 RECOMMENDS an NTP-format ` +
+          `timestamp; sess-id 0 breaks RFC 3264 §8 SDP-version comparison ` +
+          `on subsequent re-INVITE/UPDATE`
+        )
+      }
+      if (sessVersion === "0") {
+        errors.push(
+          `SDP o= sess-version is 0 — RFC 4566 §5.2: version must increment ` +
+          `on session changes (RFC 3264 §8)`
+        )
+      }
+      if (unicastAddress === "0.0.0.0" || unicastAddress === "::") {
+        errors.push(
+          `SDP o= unicast-address "${unicastAddress}" is the unspecified ` +
+          `address — RFC 4566 §5.2 expects the originator's address`
+        )
+      }
+    }
+  }
+
+  let sessionConnection: string | undefined
+  const mediaConnections: string[] = []
+  let inMedia = false
+  for (const l of lines) {
+    if (l.startsWith("m=")) {
+      inMedia = true
+      mediaConnections.push("")
+    } else if (l.startsWith("c=")) {
+      if (!inMedia && sessionConnection === undefined) {
+        sessionConnection = l
+      } else if (inMedia) {
+        const idx = mediaConnections.length - 1
+        if (mediaConnections[idx] === "") mediaConnections[idx] = l
+      }
+    }
+  }
+
+  if (
+    sessionConnection !== undefined &&
+    mediaConnections.length > 0 &&
+    mediaConnections.every((c) => c === sessionConnection)
+  ) {
+    errors.push(
+      `SDP redundant c= line: session-level "${sessionConnection}" is ` +
+      `duplicated at media level — RFC 4566 §5.7 (when c= is at session ` +
+      `level, media-level c= is only needed if it differs)`
+    )
+  }
+
+  return errors
+}
+
 // ---------------------------------------------------------------------------
 // Default check registry
 // ---------------------------------------------------------------------------
@@ -688,6 +782,7 @@ const defaultChecks: Record<ValidationCheckName, ValidationFn> = {
   // offerAnswer is enforced by OfferAnswerTracker in the interpreter, not here;
   // the entry exists only so skipValidation: ["offerAnswer"] typechecks.
   offerAnswer: () => [],
+  sdpStandards: validateSdpStandards,
 }
 
 // ---------------------------------------------------------------------------

@@ -315,7 +315,10 @@ const fakePrackHandleUpdateFromB = defineRule({
     }
 
     const aliceBody = ctx.call.aLegInvite.body
-    const result = buildAnswerFromOffer(updateBody, aliceBody)
+    const result = buildAnswerFromOffer(updateBody, aliceBody, {
+      localIp: ctx.config.sipLocalIp,
+      nowMs: ctx.nowMs,
+    })
 
     if (result._tag === "ok") {
       return Effect.succeed({

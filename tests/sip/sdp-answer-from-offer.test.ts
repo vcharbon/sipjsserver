@@ -15,6 +15,8 @@ import { buildAnswerFromOffer } from "../../src/sip/SdpAnswerFromOffer.js"
 
 const sdp = (lines: readonly string[]): string => lines.join("\r\n") + "\r\n"
 
+const buildOpts = { localIp: "192.0.2.10", nowMs: 1_700_000_000_000 } as const
+
 const aliceBasic = sdp([
   "v=0",
   "o=alice 1 1 IN IP4 192.0.2.1",
@@ -44,7 +46,7 @@ describe("buildAnswerFromOffer — happy path", () => {
       "a=rtpmap:96 opus/48000/2",
       "a=sendrecv",
     ])
-    const result = buildAnswerFromOffer(bob, aliceBasic)
+    const result = buildAnswerFromOffer(bob, aliceBasic, buildOpts)
     expect(result._tag).toBe("ok")
     if (result._tag !== "ok") return
     const body = decode(result.body)
@@ -78,7 +80,7 @@ describe("buildAnswerFromOffer — happy path", () => {
       "a=rtpmap:111 opus/48000/2",
       "a=sendrecv",
     ])
-    const result = buildAnswerFromOffer(bob, alice)
+    const result = buildAnswerFromOffer(bob, alice, buildOpts)
     expect(result._tag).toBe("ok")
     if (result._tag !== "ok") return
     const body = decode(result.body)
@@ -107,7 +109,7 @@ describe("buildAnswerFromOffer — happy path", () => {
       "m=audio 7000 RTP/AVP 0 8",
       "a=sendrecv",
     ])
-    const result = buildAnswerFromOffer(bob, alice)
+    const result = buildAnswerFromOffer(bob, alice, buildOpts)
     expect(result._tag).toBe("ok")
     if (result._tag !== "ok") return
     const body = decode(result.body)
@@ -129,7 +131,7 @@ describe("buildAnswerFromOffer — happy path", () => {
       "a=fmtp:101 0-15",
       "a=sendrecv",
     ])
-    const result = buildAnswerFromOffer(bob, aliceBasic)
+    const result = buildAnswerFromOffer(bob, aliceBasic, buildOpts)
     expect(result._tag).toBe("ok")
     if (result._tag !== "ok") return
     const body = decode(result.body)
@@ -147,7 +149,7 @@ describe("buildAnswerFromOffer — happy path", () => {
       "a=rtpmap:8 PCMA/8000",
       "a=sendonly",
     ])
-    const result = buildAnswerFromOffer(bob, aliceBasic)
+    const result = buildAnswerFromOffer(bob, aliceBasic, buildOpts)
     expect(result._tag).toBe("ok")
     if (result._tag !== "ok") return
     expect(decode(result.body)).toContain("a=sendonly")
@@ -174,7 +176,7 @@ describe("buildAnswerFromOffer — happy path", () => {
       "a=rtpmap:8 PCMA/8000",
       "a=sendrecv",
     ])
-    const result = buildAnswerFromOffer(bob, aliceSessionOnly)
+    const result = buildAnswerFromOffer(bob, aliceSessionOnly, buildOpts)
     expect(result._tag).toBe("ok")
     if (result._tag !== "ok") return
     expect(decode(result.body)).toContain("c=IN IP4 192.0.2.99")
@@ -196,7 +198,7 @@ describe("buildAnswerFromOffer — multi-m-line skeleton fit", () => {
       "a=rtpmap:96 H264/90000",
       "a=sendrecv",
     ])
-    const result = buildAnswerFromOffer(bob, aliceBasic)
+    const result = buildAnswerFromOffer(bob, aliceBasic, buildOpts)
     expect(result._tag).toBe("ok")
     if (result._tag !== "ok") return
     const body = decode(result.body)
@@ -221,7 +223,7 @@ describe("buildAnswerFromOffer — failure tags", () => {
       "a=rtpmap:96 opus/48000/2",
       "a=sendrecv",
     ])
-    const result = buildAnswerFromOffer(bob, aliceBasic)
+    const result = buildAnswerFromOffer(bob, aliceBasic, buildOpts)
     expect(result._tag).toBe("no-common-codec")
     if (result._tag !== "no-common-codec") return
     expect(result.mLineIndex).toBe(0)
@@ -254,7 +256,7 @@ describe("buildAnswerFromOffer — failure tags", () => {
       "a=rtpmap:0 PCMU/8000",
       "a=sendrecv",
     ])
-    const result = buildAnswerFromOffer(bob, aliceTwoAudio)
+    const result = buildAnswerFromOffer(bob, aliceTwoAudio, buildOpts)
     expect(result._tag).toBe("no-common-codec")
     if (result._tag !== "no-common-codec") return
     expect(result.mLineIndex).toBe(1)
@@ -271,7 +273,7 @@ describe("buildAnswerFromOffer — failure tags", () => {
       "a=rtpmap:8 PCMA/8000",
       "a=sendrecv",
     ])
-    expect(buildAnswerFromOffer(bob, null)._tag).toBe("no-alice-sdp")
+    expect(buildAnswerFromOffer(bob, null, buildOpts)._tag).toBe("no-alice-sdp")
   })
 
   test("empty Alice body returns no-alice-sdp", () => {
@@ -285,8 +287,8 @@ describe("buildAnswerFromOffer — failure tags", () => {
       "a=rtpmap:8 PCMA/8000",
       "a=sendrecv",
     ])
-    expect(buildAnswerFromOffer(bob, "")._tag).toBe("no-alice-sdp")
-    expect(buildAnswerFromOffer(bob, new Uint8Array(0))._tag).toBe("no-alice-sdp")
+    expect(buildAnswerFromOffer(bob, "", buildOpts)._tag).toBe("no-alice-sdp")
+    expect(buildAnswerFromOffer(bob, new Uint8Array(0), buildOpts)._tag).toBe("no-alice-sdp")
   })
 })
 
@@ -305,7 +307,7 @@ describe("buildAnswerFromOffer — input flexibility", () => {
       ])
     )
     const alice = new TextEncoder().encode(aliceBasic)
-    const result = buildAnswerFromOffer(bob, alice)
+    const result = buildAnswerFromOffer(bob, alice, buildOpts)
     expect(result._tag).toBe("ok")
   })
 
@@ -320,7 +322,7 @@ describe("buildAnswerFromOffer — input flexibility", () => {
       "a=rtpmap:8 PCMA/8000",
       "a=sendrecv",
     ]).replace(/\r\n/g, "\n")
-    const result = buildAnswerFromOffer(bob, aliceBasic.replace(/\r\n/g, "\n"))
+    const result = buildAnswerFromOffer(bob, aliceBasic.replace(/\r\n/g, "\n"), buildOpts)
     expect(result._tag).toBe("ok")
     if (result._tag !== "ok") return
     expect(decode(result.body)).toContain("m=audio 6000 RTP/AVP 8")

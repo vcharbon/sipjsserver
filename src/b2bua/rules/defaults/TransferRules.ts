@@ -394,7 +394,12 @@ export const transferHttpAllowRule = defineRule({
       // the INVITE to C. C will respond 488 and transfer-c-fail-initial fires.
       const profile = extractCodecProfile(snapshot.body)
       const heldSdp = profile !== undefined
-        ? new TextDecoder().decode(buildHeldSdpFromProfile(profile))
+        ? new TextDecoder().decode(
+            buildHeldSdpFromProfile(profile, {
+              localIp: ctx.config.sipLocalIp,
+              nowMs: ctx.nowMs,
+            })
+          )
         : ""
 
       // Refer-To arrives as a name-addr (e.g. "<sip:c@example.com>"); the

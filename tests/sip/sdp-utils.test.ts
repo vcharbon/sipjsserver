@@ -124,6 +124,8 @@ describe("extractCodecProfile", () => {
 })
 
 describe("buildHeldSdpFromProfile", () => {
+  const heldOpts = { localIp: "192.0.2.20", nowMs: 1_700_000_000_000 } as const
+
   test("produces a held SDP with port 0, a=inactive, and the supplied codecs", () => {
     const profile: CodecProfile = {
       media: "audio",
@@ -137,7 +139,7 @@ describe("buildHeldSdpFromProfile", () => {
       ptime: "a=ptime:20",
       maxptime: undefined,
     }
-    const body = new TextDecoder().decode(buildHeldSdpFromProfile(profile))
+    const body = new TextDecoder().decode(buildHeldSdpFromProfile(profile, heldOpts))
     expect(body).toContain("m=audio 0 RTP/AVP 8 18 101")
     expect(body).toContain("a=rtpmap:8 PCMA/8000")
     expect(body).toContain("a=rtpmap:18 G729/8000")
@@ -145,12 +147,30 @@ describe("buildHeldSdpFromProfile", () => {
     expect(body).toContain("a=fmtp:101 0-15")
     expect(body).toContain("a=ptime:20")
     expect(body).toContain("a=inactive")
-    expect(body).toContain("c=IN IP4 0.0.0.0")
+    expect(body).toContain("c=IN IP4 192.0.2.20")
+    expect(body).not.toContain("0.0.0.0")
+    expect(body).not.toMatch(/o=b2bua 0 0 /)
+  })
+
+  test("substitutes 127.0.0.1 when localIp is the bind-all-interfaces placeholder", () => {
+    const profile: CodecProfile = {
+      media: "audio",
+      payloadTypes: [0],
+      rtpmaps: ["a=rtpmap:0 PCMU/8000"],
+      fmtp: [],
+      ptime: undefined,
+      maxptime: undefined,
+    }
+    const body = new TextDecoder().decode(
+      buildHeldSdpFromProfile(profile, { localIp: "0.0.0.0", nowMs: 1_700_000_000_000 })
+    )
+    expect(body).toContain("c=IN IP4 127.0.0.1")
+    expect(body).toContain("o=b2bua 1700000000 1700000000 IN IP4 127.0.0.1")
   })
 
   test("roundtrips through extractCodecProfile (codec set preserved)", () => {
     const original = extractCodecProfile(sampleSdp)!
-    const held = buildHeldSdpFromProfile(original)
+    const held = buildHeldSdpFromProfile(original, heldOpts)
     const extracted = extractCodecProfile(held)!
     expect(extracted.payloadTypes).toEqual(original.payloadTypes)
     expect(extracted.rtpmaps).toEqual(original.rtpmaps)
@@ -167,7 +187,7 @@ describe("buildHeldSdpFromProfile", () => {
       ptime: undefined,
       maxptime: undefined,
     }
-    const body = new TextDecoder().decode(buildHeldSdpFromProfile(profile))
+    const body = new TextDecoder().decode(buildHeldSdpFromProfile(profile, heldOpts))
     expect(body).not.toContain("a=ptime")
     expect(body).not.toContain("a=maxptime")
   })

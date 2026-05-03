@@ -59,6 +59,24 @@ export type SdpBuildResult =
   | { readonly _tag: "no-common-codec"; readonly mLineIndex: number }
   | { readonly _tag: "no-alice-sdp" }
 
+export interface BuildAnswerOptions {
+  /**
+   * B2BUA's local SDP-origin address — written into the `o=` line per
+   * RFC 4566 §5.2. When `0.0.0.0` / `::` (typical bind-all-interfaces
+   * configuration) the helper substitutes `127.0.0.1` so the answer is
+   * RFC-conformant rather than carrying the unspecified address.
+   */
+  readonly localIp: string
+  /**
+   * Wall-clock millis used to derive the `o=` `sess-id` / `sess-version`.
+   * The helper converts to epoch-seconds, satisfying RFC 4566 §5.2's
+   * RECOMMENDED NTP-timestamp uniqueness while staying deterministic for
+   * a given clock reading (callers in tests can pass `Date.now()` or a
+   * fixed value).
+   */
+  readonly nowMs: number
+}
+
 function decodeBody(body: Uint8Array | string): string {
   return typeof body === "string" ? body : new TextDecoder("utf-8").decode(body)
 }
@@ -254,10 +272,15 @@ function extractEchoAttrs(bobOfferText: string): string[] {
  * - Codec intersection per m-line; if any m-line in Bob's offer has an
  *   empty intersection with Alice's same-index m-line, returns
  *   `_tag: "no-common-codec"` with the offending index.
+ *
+ * `options.localIp` and `options.nowMs` populate the `o=` line so the answer
+ * is RFC 4566 §5.2-conformant (no unspecified address, non-zero session id /
+ * version that survives RFC 3264 §8 SDP-version comparison).
  */
 export function buildAnswerFromOffer(
   bobOffer: Uint8Array | string,
-  aliceOffer: Uint8Array | string | null
+  aliceOffer: Uint8Array | string | null,
+  options: BuildAnswerOptions
 ): SdpBuildResult {
   if (aliceOffer === null) return { _tag: "no-alice-sdp" }
   const aliceText = decodeBody(aliceOffer)
@@ -305,14 +328,39 @@ export function buildAnswerFromOffer(
 
   // Synthesise the session header. We do not echo Bob's o= / s= lines
   // because they identify Bob's session; the answer should look like it
-  // comes from us. The session-level c= is set to Alice's so that any
-  // m-line lacking an explicit c= still resolves to her address.
-  const sessionLines: string[] = ["v=0", "o=b2bua 0 0 IN IP4 0.0.0.0", "s=-"]
-  if (alice.sessionConnection !== undefined) {
-    sessionLines.push(alice.sessionConnection)
-  }
-  sessionLines.push("t=0 0")
+  // comes from us. Each m-section already emits its own c= (from Alice's
+  // m-level c= or her session-level c= as fallback), so we omit the
+  // session-level c= to avoid the "c= duplicated at session and media
+  // level" redundancy flagged by RFC 4566 §5.7.
+  const originIp = sdpOriginAddress(options.localIp)
+  const sessId = sdpSessionId(options.nowMs)
+  const sessionLines: string[] = [
+    "v=0",
+    `o=b2bua ${sessId} ${sessId} IN IP4 ${originIp}`,
+    "s=-",
+    "t=0 0",
+  ]
 
   const body = sessionLines.join(CRLF) + CRLF + sections.join(CRLF) + CRLF
   return { _tag: "ok", body: new TextEncoder().encode(body) }
+}
+
+/**
+ * Normalise an SDP-origin address: substitute the bind-all-interfaces
+ * placeholders (`0.0.0.0`, `::`) with `127.0.0.1` so the `o=` line carries
+ * a routable address per RFC 4566 §5.2.
+ */
+export function sdpOriginAddress(localIp: string): string {
+  if (localIp === "0.0.0.0" || localIp === "::") return "127.0.0.1"
+  return localIp
+}
+
+/**
+ * Derive a non-zero `o=` session id from a wall-clock reading. RFC 4566
+ * §5.2 RECOMMENDS an NTP-format timestamp; epoch-seconds satisfies the
+ * uniqueness intent and is what most modern stacks emit.
+ */
+export function sdpSessionId(nowMs: number): number {
+  const sec = Math.floor(nowMs / 1000)
+  return sec > 0 ? sec : 1
 }
