@@ -1,12 +1,21 @@
 /**
  * relayFirst18xTo180 — PolicyModule for hiding forking/failover from the caller.
  *
- * When activated by the HTTP routing response (relay_first_18x_to_180: true),
- * this policy:
+ * When activated by the HTTP routing response (relay_first_18x_to_180: true,
+ * or `"drop-sdp"` / `"keep-sdp"` / `"fake-prack"`), this policy:
  *   1. Transforms the first 18x from any b-leg into a bare 180 (no SDP, no 100rel)
  *   2. Suppresses all subsequent 18x messages across all b-legs
  *   3. On 200 OK, forces the a-facing To-tag to match the one from the first 180
  *      (hiding failover from the caller)
+ *
+ * The `fake-prack` strategy adds:
+ *   4. Cache bob's reliable-1xx SDP per b-leg dialog (gated on `Require: 100rel`).
+ *   5. Locally answer bob's UPDATE with a skeleton-fit SDP derived from alice's
+ *      INVITE offer; reject 488 when no codec intersection exists.
+ *   6. Locally answer alice's early-dialog UPDATE with a 200 OK no body
+ *      (alice has no committed SDP from bob to re-offer).
+ *   7. Substitute the cached b-leg SDP into the 200 OK INVITE relayed to alice
+ *      so she sees a coherent offer/answer at confirmation time.
  *
  * Rules are module-private — only the PolicyModule export is public.
  * Guard is applied by createRuleRegistry at registration time.
@@ -24,6 +33,7 @@ import { getHeader, getHeaders, newTag } from "../../../sip/MessageHelpers.js"
 import { splitTopLevelCommas } from "../../../sip/parsers/custom/structured-headers.js"
 import { H, removeH } from "../framework/actions/factories.js"
 import type { HeaderName, HeaderUpdate } from "../framework/actions/types.js"
+import { buildAnswerFromOffer } from "../../../sip/SdpAnswerFromOffer.js"
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -88,6 +98,7 @@ const suppress18x = defineRule({
     const bTag = resp.parsed.to.tag
     const rseq = reliableRseq(resp)
     const inviteCSeq = resp.parsed.cseq.seq
+    const strategy = ctx.call.features?.relayFirst18xTo180?.strategy
 
     // Reliable 1xx → B2BUA must PRACK the b-leg itself (RFC 3262 §3-4).
     // alice never sees the reliable provisional (downgraded to bare 180 with
@@ -99,10 +110,20 @@ const suppress18x = defineRule({
             rseq, inviteCSeq, bTag }
         : undefined
 
+    // fake-prack only: cache bob's SDP per dialog when 100rel is in play.
+    // Gated on rseq presence per the contract — without 100rel bob will
+    // repeat his SDP in 200 OK so caching adds nothing.
+    const cacheAction: RuleAction | undefined =
+      strategy === "fake-prack" && rseq !== undefined && resp.body.byteLength > 0
+        ? { type: "cache-sdp-on-leg-dialog",
+            legId: ctx.sourceLeg.legId, bTag, body: resp.body }
+        : undefined
+
     if (state.firstRelayed) {
       // Subsequent 18x — suppress relay, still PRACK if reliable
       const actions: RuleAction[] = []
       if (prackAction) actions.push(prackAction)
+      if (cacheAction) actions.push(cacheAction)
       actions.push({
         type: "add-cdr-event" as const, eventType: "provisional" as const,
         legId: ctx.sourceLeg.legId, statusCode: resp.status,
@@ -129,6 +150,10 @@ const suppress18x = defineRule({
         legId: ctx.sourceLeg.legId, statusCode: resp.status },
     ]
     if (prackAction) actions.push(prackAction)
+    // Cache MUST run after relay-to-peer — relayResponseMsg creates the
+    // early dialog from the 1xx; cache-sdp-on-leg-dialog needs that dialog
+    // to exist to find it by bTag.
+    if (cacheAction) actions.push(cacheAction)
 
     return Effect.succeed({
       actions,
@@ -166,19 +191,43 @@ const forceTagConsistency = defineRule({
   init: () => ({ firstRelayed: false }),
 
   handle: (ctx, state) => {
-    if (!state.storedATag) return Effect.void
-
     const resp = ctx.event.message
     const bTag = resp.parsed.to.tag
+    const strategy = ctx.call.features?.relayFirst18xTo180?.strategy
 
-    // Pre-seed tag mapping so confirm-dialog reuses our stored a-facing tag
-    return Effect.succeed({
-      actions: [
-        { type: "add-tag-mapping" as const, aTag: state.storedATag,
-          bLegId: ctx.sourceLeg.legId, bTag },
-      ],
-      state,
-    })
+    const actions: RuleAction[] = []
+
+    // Existing behavior: pre-seed tag mapping so confirm-dialog reuses the
+    // stored a-facing tag (hides forking/failover identity from alice).
+    if (state.storedATag) {
+      actions.push({ type: "add-tag-mapping" as const, aTag: state.storedATag,
+        bLegId: ctx.sourceLeg.legId, bTag })
+    }
+
+    // fake-prack only: stage the winning b-leg dialog's cached SDP into
+    // call.policyUpdateBody so the response relay path substitutes it
+    // into the 200 OK forwarded to alice. Folded into this rule (rather
+    // than a sibling composer of confirm-dialog) because the registry
+    // forbids two policy-module rules with identical match descriptors at
+    // equal specificity composing the same base.
+    if (strategy === "fake-prack") {
+      const dialog = ctx.sourceLeg.dialogs.find((d) => d.sip.remoteTag === bTag)
+        ?? ctx.sourceLeg.dialogs[0]
+      const cached = dialog?.ext.cachedSdp
+      if (cached !== undefined && cached.byteLength > 0) {
+        actions.push({ type: "set-policy-update-body" as const, body: cached })
+      } else if (resp.body.byteLength === 0) {
+        // No cache AND bob's 200 OK has no body — surface a CDR marker so
+        // operators can see why alice's call may break (no SDP at confirm).
+        actions.push({ type: "add-cdr-event" as const, eventType: "provisional" as const,
+          legId: ctx.sourceLeg.legId, statusCode: 200,
+          reason: "fake-prack:200-ok-no-sdp" })
+      }
+      // else: bob repeated SDP in 200 OK → relay it as-is (no substitution).
+    }
+
+    if (actions.length === 0) return Effect.void
+    return Effect.succeed({ actions, state })
   },
 })
 
@@ -218,10 +267,127 @@ const absorbPrack200 = defineRule({
     }),
 })
 
+// ── fake-prack: handle UPDATE from b-leg locally ──────────────────────────
+//
+// Under `fake-prack`, alice never sees bob's SDP until 200 OK. If bob sends
+// UPDATE with a re-offer in the early dialog, we cannot relay it (alice has
+// no committed bob-SDP to negotiate against). The B2BUA answers locally
+// using a skeleton-fit SDP derived from alice's INVITE offer; on no codec
+// intersection we reject 488. Either way, the cached SDP for this dialog
+// is replaced with bob's UPDATE offer so alice's eventual 200 OK reflects
+// bob's latest state.
+//
+// The default `relay-update` rule is overridden when this rule fires —
+// specificity wins (cseqMethod equivalent + direction-from-b + filter).
+
+const fakePrackHandleUpdateFromB = defineRule({
+  id: "fake-prack-handle-update-from-b",
+  name: "Fake-PRACK: locally answer b-leg UPDATE",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: PolicyState,
+  paramsSchema: Schema.Undefined,
+
+  overrides: "relay-update",
+  match: {
+    kind: "request",
+    method: "UPDATE",
+    direction: "from-b",
+    filter: (ctx) =>
+      ctx.call.features?.relayFirst18xTo180?.strategy === "fake-prack",
+  },
+
+  init: () => ({ firstRelayed: false }),
+
+  handle: (ctx, state) => {
+    const req = ctx.event.message
+    const updateBody = req.body
+    const bTag = req.parsed?.from?.tag ?? ""
+
+    // UPDATE with no body: just respond 200 OK locally, nothing to cache.
+    if (updateBody.byteLength === 0) {
+      return Effect.succeed({
+        actions: [
+          { type: "respond" as const, status: 200, reason: "OK" },
+        ],
+        state,
+      })
+    }
+
+    const aliceBody = ctx.call.aLegInvite.body
+    const result = buildAnswerFromOffer(updateBody, aliceBody)
+
+    if (result._tag === "ok") {
+      return Effect.succeed({
+        actions: [
+          { type: "respond" as const, status: 200, reason: "OK",
+            body: result.body, contentType: "application/sdp" },
+          { type: "cache-sdp-on-leg-dialog" as const,
+            legId: ctx.sourceLeg.legId, bTag, body: updateBody },
+        ],
+        state,
+      })
+    }
+
+    // no-common-codec or no-alice-sdp → 488. Cache untouched.
+    return Effect.succeed({
+      actions: [
+        { type: "respond" as const, status: 488, reason: "Not Acceptable Here" },
+      ],
+      state,
+    })
+  },
+})
+
+// ── fake-prack: handle UPDATE from alice locally ──────────────────────────
+//
+// Under `fake-prack`, alice has no committed bob-SDP to base an UPDATE
+// re-offer on. If alice sends UPDATE in the early dialog (rare but
+// possible if her stack tries to refresh session timers / SDP), respond
+// 200 OK with no body locally — do NOT forward to bob.
+//
+// Restricted to early state (call not yet bridged); after merge, normal
+// in-dialog UPDATE relay applies.
+
+const fakePrackHandleUpdateFromA = defineRule({
+  id: "fake-prack-handle-update-from-a",
+  name: "Fake-PRACK: locally answer a-leg early-dialog UPDATE",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: PolicyState,
+  paramsSchema: Schema.Undefined,
+
+  overrides: "relay-update",
+  match: {
+    kind: "request",
+    method: "UPDATE",
+    direction: "from-a",
+    legState: ["trying", "early"],
+    filter: (ctx) =>
+      ctx.call.features?.relayFirst18xTo180?.strategy === "fake-prack",
+  },
+
+  init: () => ({ firstRelayed: false }),
+
+  handle: (_ctx, state) =>
+    Effect.succeed({
+      actions: [
+        { type: "respond" as const, status: 200, reason: "OK" },
+      ],
+      state,
+    }),
+})
+
 // ── Single export: the PolicyModule ───────────────────────────────────────
 
 export const relayFirst18xTo180 = definePolicyModule({
   id: "relayFirst18x_to_180",
   guard: (ctx) => ctx.call.features?.relayFirst18xTo180 !== undefined,
-  rules: [suppress18x, forceTagConsistency, absorbPrack200],
+  rules: [
+    suppress18x,
+    forceTagConsistency,
+    absorbPrack200,
+    fakePrackHandleUpdateFromB,
+    fakePrackHandleUpdateFromA,
+  ],
 })

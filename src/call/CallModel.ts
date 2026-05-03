@@ -152,6 +152,15 @@ export const B2buaDialogExtSchema = Schema.Struct({
    * for ACK-for-2xx CSeq (§13.2.2.4).
    */
   pendingInviteTxn: Schema.optional(InviteTxnHandleSchema),
+  /**
+   * Cached SDP captured from this dialog's reliable 18x (Bob's answer) or
+   * UPDATE (Bob's re-offer) under the `relayFirst18xTo180` `fake-prack`
+   * strategy. The 200 OK INVITE relay path substitutes this body into the
+   * response toward Alice — Alice never sees Bob's SDP until the call
+   * confirms. Per-b-leg-dialog so forking and failover discard losers'
+   * caches naturally with their dialog state.
+   */
+  cachedSdp: Schema.optional(Schema.Uint8ArrayFromBase64),
 })
 
 export type B2buaDialogExt = typeof B2buaDialogExtSchema.Type
@@ -635,6 +644,15 @@ export const Call = Schema.Struct({
    * in ActionExecutor.
    */
   policyUpdateHeaders: Schema.optional(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
+  /**
+   * Body override derived from active features (currently the
+   * `relayFirst18xTo180` `fake-prack` strategy substitutes the cached
+   * b-leg SDP into the 200 OK INVITE relayed to Alice). Applied by the
+   * response relay path immediately before the outbound message is
+   * serialized. Cleared after the 200 OK is sent so subsequent in-dialog
+   * responses are not affected. `null` means "force empty body".
+   */
+  policyUpdateBody: Schema.optional(Schema.NullOr(Schema.Uint8ArrayFromBase64)),
   /**
    * Rules activated on this call by the HTTP API response.
    * Per-call rules run alongside always-active built-in rules.

@@ -275,6 +275,12 @@ function executeAction(
     case "send-prack-to-leg":
       executeSendPrackToLeg(action, ctx, state)
       break
+    case "cache-sdp-on-leg-dialog":
+      executeCacheSdpOnLegDialog(action, state)
+      break
+    case "set-policy-update-body":
+      state.call = { ...state.call, policyUpdateBody: action.body }
+      break
     case "confirm-dialog":
       executeConfirmDialog(action, ctx, state)
       break
@@ -355,7 +361,7 @@ function executeRespond(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const { type, status, reason } = action
+  const { type, status, reason, body, contentType } = action
   void type
 
   if (ctx.event.type !== "sip") return
@@ -366,6 +372,8 @@ function executeRespond(
   const response = generateResponse(msg, status, reason ?? "", {
     toTag: newTag(),
     contact,
+    ...(body !== undefined ? { body } : {}),
+    ...(contentType !== undefined ? { contentType } : {}),
   })
   state.outbound.push({
     message: response,
@@ -786,6 +794,9 @@ function relayResponseMsg(
     const sourceContentType = getHeader(resp.headers, "content-type")
     const defaultCseq = aLegCSeq ?? (getHeader(resp.headers, "cseq") ?? "")
     const toHeader = toWithTag ?? getHeader(resp.headers, "to") ?? ""
+
+    // policyUpdateBody substitution + record-route reflection both depend on
+    // INVITE-response shape. Single source of truth declared below.
     // RFC 3261 §20.10: Contact on 2xx target-refreshes the peer to the B2BUA.
     const { contact: respContact } = legStackIdentity(state.call, targetLeg.legId, ctx.config)
     // RFC 3261 §12.1.1 + §12.1.2: reflect the inbound A-leg INVITE's
@@ -811,15 +822,35 @@ function relayResponseMsg(
     const aLegRecordRoutes = reflectRecordRoute
       ? getHeaders(state.call.aLegInvite.headers, "record-route")
       : undefined
+
+    // ── policyUpdateBody substitution (initial-INVITE 2xx → alice only) ──
+    //
+    // The `relayFirst18xTo180` `fake-prack` strategy stages bob's cached SDP
+    // in `call.policyUpdateBody` so alice receives the negotiated body at
+    // call confirmation. Re-INVITE responses take the `pending` path above
+    // and skip this entirely. `null` means "force empty body".
+    const policyBody =
+      targetLeg.legId === "a" && isDialogCreating2xx
+        ? state.call.policyUpdateBody
+        : undefined
+    let effectiveBody: Uint8Array = resp.body
+    let effectiveContentType: string | undefined = sourceContentType
+    if (policyBody === null) {
+      effectiveBody = new Uint8Array(0)
+      effectiveContentType = undefined
+    } else if (policyBody !== undefined) {
+      effectiveBody = policyBody
+      effectiveContentType = "application/sdp"
+    }
     relayed = generateRelayedResponse(resp.status, resp.reason, {
       vias: viasForRelay,
       from: aLegInviteFrom,
       to: toHeader,
       callId: targetLeg.callId,
       cseq: defaultCseq,
-      body: resp.body,
+      body: effectiveBody,
       transparentHeaders: extractNonStructuralHeaders(resp),
-      ...(sourceContentType !== undefined ? { contentType: sourceContentType } : {}),
+      ...(effectiveContentType !== undefined ? { contentType: effectiveContentType } : {}),
       ...(aLegRecordRoutes !== undefined && aLegRecordRoutes.length > 0
         ? { recordRoutes: aLegRecordRoutes }
         : {}),
@@ -1269,6 +1300,34 @@ function executeSendRequestToLeg(
     label: `${method} to ${legId}`,
     legId,
   })
+}
+
+// ── cache-sdp-on-leg-dialog ───────────────────────────────────────────────
+
+/**
+ * Stash an SDP body on a specific b-leg dialog so the 200 OK INVITE relay
+ * can later substitute it into the response toward alice. Identifies the
+ * dialog by `bTag` to handle forking (multiple early dialogs per leg).
+ *
+ * Drives the `relayFirst18xTo180` `fake-prack` strategy: bob's reliable-1xx
+ * SDP (the answer to alice's offer) and any UPDATE re-offer are captured
+ * here so alice never sees them until the 200 OK substitution.
+ */
+function executeCacheSdpOnLegDialog(
+  action: Extract<RuleAction, { type: "cache-sdp-on-leg-dialog" }>,
+  state: ExecutionState,
+): void {
+  const { type, legId, bTag, body } = action
+  void type
+
+  const leg = findLeg(state.call, legId)
+  if (leg === undefined) return
+  // Match on identity tag (b-leg → remoteTag); fall back to dialogs[0] only
+  // when no specific dialog matches (shouldn't happen with proper bTag).
+  state.call = updateDialog(state.call, legId, bTag, (d) => ({
+    ...d,
+    ext: { ...d.ext, cachedSdp: body },
+  }))
 }
 
 // ── send-prack-to-leg ─────────────────────────────────────────────────────

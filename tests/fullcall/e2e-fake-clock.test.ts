@@ -22,6 +22,16 @@ import { cancelCrossing200Ok } from "../scenarios/cancel-200ok-crossing.js"
 import { callerHangup, calleeHangup } from "../scenarios/bye-directions.js"
 import { aliceReInvite, bobReInvite, crossingReInvite } from "../scenarios/reinvite.js"
 import { suppress18xBasic, suppress18xFailoverNoAnswer, suppress18xFailoverReject, suppress18xDisabled } from "../scenarios/suppress-18x.js"
+import {
+  fakePrackBasic,
+  fakePrackMultiple18x,
+  fakePrackUpdateHappy,
+  fakePrackUpdateCodecMismatch,
+  fakePrackForking,
+  fakePrackFailover,
+  fakePrackDelayedOfferFallback,
+  fakePrackNoPolicyControl,
+} from "../scenarios/fake-prack.js"
 import { unknownDialogReject } from "../scenarios/indialog-unknown-reject.js"
 import { indialogOptions } from "../scenarios/indialog-options.js"
 import { indialogInfo } from "../scenarios/indialog-info.js"
@@ -139,6 +149,30 @@ for (const sut of ALL_SUTS) {
     }
     if (suppress18xDisabled.appliesTo(sut)) {
       it.effect("suppress-18x: disabled (normal 180 relay)", () => run(suppress18xDisabled.toScenario()), { timeout: 30_000 })
+    }
+    if (fakePrackBasic.appliesTo(sut)) {
+      it.effect("fake-prack: basic (originated PRACK + cached SDP at 200)", () => run(fakePrackBasic.toScenario()), { timeout: 30_000 })
+    }
+    if (fakePrackMultiple18x.appliesTo(sut)) {
+      it.effect("fake-prack: multiple reliable 18x (one PRACK each, latest cache wins)", () => run(fakePrackMultiple18x.toScenario()), { timeout: 30_000 })
+    }
+    if (fakePrackUpdateHappy.appliesTo(sut)) {
+      it.effect("fake-prack: UPDATE happy (skeleton-fit answer + cache advances)", () => run(fakePrackUpdateHappy.toScenario()), { timeout: 30_000 })
+    }
+    if (fakePrackUpdateCodecMismatch.appliesTo(sut)) {
+      it.effect("fake-prack: UPDATE codec mismatch (488)", () => run(fakePrackUpdateCodecMismatch.toScenario()), { timeout: 30_000 })
+    }
+    if (fakePrackForking.appliesTo(sut)) {
+      it.effect("fake-prack: forking (independent caches; loser cancelled)", () => run(fakePrackForking.toScenario()), { timeout: 30_000 })
+    }
+    if (fakePrackFailover.appliesTo(sut)) {
+      it.effect("fake-prack: failover (b1 cache discarded)", () => run(fakePrackFailover.toScenario()), { timeout: 30_000 })
+    }
+    if (fakePrackDelayedOfferFallback.appliesTo(sut)) {
+      it.effect("fake-prack: delayed-offer fallback (Supported:100rel stripped)", () => run(fakePrackDelayedOfferFallback.toScenario()), { timeout: 30_000 })
+    }
+    if (fakePrackNoPolicyControl.appliesTo(sut)) {
+      it.effect("fake-prack: no policy control (default end-to-end PRACK)", () => run(fakePrackNoPolicyControl.toScenario()), { timeout: 30_000 })
     }
     if (unknownDialogReject.appliesTo(sut)) {
       it.effect("in-dialog unknown dialog → 481 reject", () => run(unknownDialogReject.toScenario()), { timeout: 30_000 })

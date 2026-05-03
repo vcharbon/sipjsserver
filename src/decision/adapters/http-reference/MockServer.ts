@@ -100,7 +100,9 @@ export function mockCallFailureResponse(body: CallFailureRequestType): CallFailu
         } else {
           failoverResp.callback_context = body.callback_context
         }
-        if (instruction.relay_first_18x_to_180) failoverResp.relay_first_18x_to_180 = true
+        if (instruction.relay_first_18x_to_180 !== undefined) {
+          failoverResp.relay_first_18x_to_180 = instruction.relay_first_18x_to_180
+        }
         return failoverResp as CallFailureResponseType
       }
     } catch {
@@ -146,8 +148,8 @@ function buildApiCallResponse(body: NewCallRequestType, instruction: Record<stri
     response.callback_context = JSON.stringify(instruction.on_failure)
   }
 
-  if (instruction.relay_first_18x_to_180) {
-    response.relay_first_18x_to_180 = true
+  if (instruction.relay_first_18x_to_180 !== undefined) {
+    response.relay_first_18x_to_180 = instruction.relay_first_18x_to_180
   }
 
   return response as NewCallResponseType
@@ -215,7 +217,9 @@ export function mockCallReferBehavior(body: CallReferRequestType): MockReferBeha
       if (instruction.no_answer_timeout_sec !== undefined) response.no_answer_timeout_sec = instruction.no_answer_timeout_sec
       if (instruction.call_limiter !== undefined) response.call_limiter = instruction.call_limiter
       if (instruction.callback_context !== undefined) response.callback_context = instruction.callback_context
-      if (instruction.relay_first_18x_to_180) response.relay_first_18x_to_180 = true
+      if (instruction.relay_first_18x_to_180 !== undefined) {
+        response.relay_first_18x_to_180 = instruction.relay_first_18x_to_180
+      }
       return { type: "respond", body: response as CallReferResponseType }
     }
     default:

@@ -36,9 +36,19 @@ import type {
  * want leg-specific overrides must embed the values in their future
  * richer response shape — the canonical field exists for that purpose.
  */
+type RelayFirst18xWire = boolean | "drop-sdp" | "keep-sdp" | "fake-prack" | undefined
+
+function relayFirst18xStrategy(
+  wire: RelayFirst18xWire,
+): "drop-sdp" | "keep-sdp" | "fake-prack" | undefined {
+  if (typeof wire === "string") return wire
+  if (wire === true) return "drop-sdp"
+  return undefined
+}
+
 function synthesizeFeatures(
   wire: {
-    readonly relay_first_18x_to_180?: boolean | undefined
+    readonly relay_first_18x_to_180?: RelayFirst18xWire
     readonly no_answer_timeout_sec?: number | undefined
     readonly call_limiter?: ReadonlyArray<{ readonly id: string; readonly limit: number }> | undefined
   },
@@ -52,13 +62,15 @@ function synthesizeFeatures(
     Math.ceil(config.keepaliveTimeoutSec / config.keepaliveIntervalSec),
   ) || 1
 
+  const strategy = relayFirst18xStrategy(wire.relay_first_18x_to_180)
+
   return {
     platform: {
       maxDurationSec: config.callMaxDurationSec,
       keepalive: { intervalSec: config.keepaliveIntervalSec, maxMissed },
     },
-    ...(wire.relay_first_18x_to_180
-      ? { relayFirst18xTo180: { strategy: "drop-sdp" as const } }
+    ...(strategy !== undefined
+      ? { relayFirst18xTo180: { strategy } }
       : {}),
     ...(wire.no_answer_timeout_sec !== undefined
       ? { noAnswerTimeoutSec: wire.no_answer_timeout_sec }

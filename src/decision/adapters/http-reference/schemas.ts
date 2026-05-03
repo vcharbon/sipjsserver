@@ -51,7 +51,12 @@ export const WireNewCallRouteResponse = Schema.Struct({
   no_answer_timeout_sec: Schema.optional(Schema.Int),
   call_limiter: Schema.optional(Schema.Array(CallLimiterEntry)),
   callback_context: Schema.optional(Schema.String),
-  relay_first_18x_to_180: Schema.optional(Schema.Boolean),
+  relay_first_18x_to_180: Schema.optional(
+    Schema.Union([
+      Schema.Boolean,
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+    ]),
+  ),
 })
 export type WireNewCallRouteResponse = typeof WireNewCallRouteResponse.Type
 
@@ -77,7 +82,12 @@ export const WireCallFailureFailoverResponse = Schema.Struct({
   no_answer_timeout_sec: Schema.optional(Schema.Int),
   call_limiter: Schema.optional(Schema.Array(CallLimiterEntry)),
   callback_context: Schema.optional(Schema.String),
-  relay_first_18x_to_180: Schema.optional(Schema.Boolean),
+  relay_first_18x_to_180: Schema.optional(
+    Schema.Union([
+      Schema.Boolean,
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+    ]),
+  ),
 })
 export type WireCallFailureFailoverResponse = typeof WireCallFailureFailoverResponse.Type
 
@@ -100,7 +110,12 @@ export const WireCallReferAllowResponse = Schema.Struct({
   no_answer_timeout_sec: Schema.optional(Schema.Int),
   call_limiter: Schema.optional(Schema.Array(CallLimiterEntry)),
   callback_context: Schema.optional(Schema.String),
-  relay_first_18x_to_180: Schema.optional(Schema.Boolean),
+  relay_first_18x_to_180: Schema.optional(
+    Schema.Union([
+      Schema.Boolean,
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+    ]),
+  ),
 })
 export type WireCallReferAllowResponse = typeof WireCallReferAllowResponse.Type
 

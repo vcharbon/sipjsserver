@@ -31,7 +31,12 @@ export const NewCallRouteResponse = Schema.Struct({
   call_limiter: Schema.optional(Schema.Array(CallLimiterEntry)),
   callback_context: Schema.optional(Schema.String),
   /** When true, transform first 18x to bare 180, suppress subsequent, force tag consistency. */
-  relay_first_18x_to_180: Schema.optional(Schema.Boolean),
+  relay_first_18x_to_180: Schema.optional(
+    Schema.Union([
+      Schema.Boolean,
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+    ]),
+  ),
   /** Canonical feature activations. Adapter-synthesized; always present on success. */
   features: Schema.optional(FeatureActivations),
 })
@@ -56,7 +61,12 @@ export const CallFailureFailoverResponse = Schema.Struct({
   call_limiter: Schema.optional(Schema.Array(CallLimiterEntry)),
   callback_context: Schema.optional(Schema.String),
   /** Propagate relay_first_18x_to_180 policy to failover b-legs. */
-  relay_first_18x_to_180: Schema.optional(Schema.Boolean),
+  relay_first_18x_to_180: Schema.optional(
+    Schema.Union([
+      Schema.Boolean,
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+    ]),
+  ),
   /** Canonical feature activations active on the new (failover) leg. */
   features: Schema.optional(FeatureActivations),
 })
@@ -86,7 +96,12 @@ export const CallReferAllowResponse = Schema.Struct({
   call_limiter: Schema.optional(Schema.Array(CallLimiterEntry)),
   callback_context: Schema.optional(Schema.String),
   /** When true, transform first 18x to bare 180, suppress subsequent, force tag consistency. */
-  relay_first_18x_to_180: Schema.optional(Schema.Boolean),
+  relay_first_18x_to_180: Schema.optional(
+    Schema.Union([
+      Schema.Boolean,
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+    ]),
+  ),
   /** Canonical feature activations active on the C-leg. */
   features: Schema.optional(FeatureActivations),
 })

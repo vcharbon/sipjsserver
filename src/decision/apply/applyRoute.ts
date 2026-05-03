@@ -93,18 +93,37 @@ export function applyRoute(
 
     let updated: Call = { ...args.call, features: routing.features }
 
-    // ── 18x-relay → strip 100rel from Supported ────────────────────────────
-    if (routing.relay_first_18x_to_180) {
-      const supported = getHeader(req.headers, "supported")
-      if (supported) {
-        const tokens = splitTopLevelCommas(supported)
-          .filter((t) => t.toLowerCase() !== "100rel")
-        updated = {
-          ...updated,
-          policyUpdateHeaders: {
-            ...(updated.policyUpdateHeaders as Record<string, string | null> ?? {}),
-            Supported: tokens.length > 0 ? tokens.join(", ") : null,
-          },
+    // ── 18x-relay → strategy-aware Supported: 100rel handling ──────────────
+    //
+    // drop-sdp / keep-sdp: strip 100rel from Supported. We don't relay PRACK
+    //   in those strategies and Alice was never told to expect 100rel, so
+    //   forcing Bob off reliable provisional avoids a hung handshake.
+    //
+    // fake-prack with Alice SDP: keep 100rel intact — we want Bob to use
+    //   reliable provisional so we can originate PRACK locally and cache
+    //   Bob's SDP per-dialog.
+    //
+    // fake-prack with no Alice SDP (delayed offer): strip 100rel. The policy
+    //   module self-disables in this case; falling back to standard relay
+    //   without 100rel avoids us silently keeping a half-active state.
+    const strategy = routing.features.relayFirst18xTo180?.strategy
+    if (strategy !== undefined) {
+      const ct = getHeader(req.headers, "content-type") ?? ""
+      const aliceHasSdp =
+        req.body.byteLength > 0 && ct.toLowerCase().includes("application/sdp")
+      const keep100Rel = strategy === "fake-prack" && aliceHasSdp
+      if (!keep100Rel) {
+        const supported = getHeader(req.headers, "supported")
+        if (supported) {
+          const tokens = splitTopLevelCommas(supported)
+            .filter((t) => t.toLowerCase() !== "100rel")
+          updated = {
+            ...updated,
+            policyUpdateHeaders: {
+              ...(updated.policyUpdateHeaders as Record<string, string | null> ?? {}),
+              Supported: tokens.length > 0 ? tokens.join(", ") : null,
+            },
+          }
         }
       }
     }

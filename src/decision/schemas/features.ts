@@ -55,8 +55,12 @@ export const RelayFirst18xTo180Feature = Schema.Struct({
   /**
    * `drop-sdp` (default) — first 18x becomes a bare 180 with no SDP.
    * `keep-sdp` — preserve the SDP body while still masking tags/forks.
+   * `fake-prack` — same Alice-facing shape as `drop-sdp`, plus the B2BUA
+   *   originates PRACK locally toward Bob on every reliable 18x, caches
+   *   Bob's SDP per b-leg dialog, locally answers any UPDATE Bob sends,
+   *   and substitutes the cached SDP into the 200 OK relayed to Alice.
    */
-  strategy: Schema.Literals(["drop-sdp", "keep-sdp"]),
+  strategy: Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
 })
 export type RelayFirst18xTo180Feature = typeof RelayFirst18xTo180Feature.Type
 

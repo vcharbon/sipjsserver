@@ -358,7 +358,11 @@ export type RuleAction =
   // ── Message relay (framework handles CSeq, tags, Via, Contact) ──
   | { readonly type: "relay-to-peer"; readonly transform?: MessageTransform }
   | { readonly type: "relay-to-leg"; readonly legId: string; readonly transform?: MessageTransform }
-  | { readonly type: "respond"; readonly status: number; readonly reason?: string }
+  | { readonly type: "respond"; readonly status: number; readonly reason?: string;
+      /** Optional response body (e.g. SDP answer for a locally-handled UPDATE). */
+      readonly body?: Uint8Array;
+      /** Required when `body` is set. Stamped as `Content-Type`. */
+      readonly contentType?: string }
   | { readonly type: "ack-leg"; readonly legId: string }
 
   // ── Generate new request to a leg (keepalive OPTIONS, INFO, etc.) ──
@@ -370,6 +374,23 @@ export type RuleAction =
   // leg's early dialog (toTag from the reliable 1xx) to build the PRACK. ──
   | { readonly type: "send-prack-to-leg"; readonly legId: string;
       readonly rseq: number; readonly inviteCSeq: number; readonly bTag: string }
+
+  // ── Cache an SDP body on a specific b-leg dialog (identified by bTag) so
+  // that the 200 OK INVITE relay path can substitute it when forwarding to
+  // alice. Used by the `relayFirst18xTo180` `fake-prack` strategy to capture
+  // bob's reliable-1xx SDP answer or UPDATE re-offer per dialog without
+  // exposing it to alice prematurely. ──
+  | { readonly type: "cache-sdp-on-leg-dialog";
+      readonly legId: string;
+      readonly bTag: string;
+      readonly body: Uint8Array }
+
+  // ── Set call.policyUpdateBody — generic body override applied by the
+  // response relay path on the next 200 OK INVITE toward alice. The
+  // `fake-prack` rule writes the cached b-leg SDP here so alice sees the
+  // negotiated answer at confirmation time. `null` means "force empty body". ──
+  | { readonly type: "set-policy-update-body";
+      readonly body: Uint8Array | null }
 
   // ── Dialog lifecycle primitives (Slice B of the rule-framework refactor) ──
   //
