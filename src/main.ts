@@ -36,6 +36,7 @@ import { ReplPuller } from "./replication/ReplPuller.js"
 import { WriteNotifier } from "./replication/WriteNotifier.js"
 import { CdrWriter } from "./cdr/CdrWriter.js"
 import { RedisClient } from "./redis/RedisClient.js"
+import { LimiterRedisClient } from "./redis/LimiterRedisClient.js"
 import { UdpTransport } from "./sip/UdpTransport.js"
 import { SignalingNetwork } from "./sip/SignalingNetwork.js"
 import { StatusServerLayer } from "./http/StatusServer.js"
@@ -68,9 +69,16 @@ const RedisLayer = RedisClient.layer.pipe(
   Layer.provide(AppConfigLayer)
 )
 
+// Limiter binds to a SEPARATE Redis (cluster-shared, not per-pod sidecar) so
+// concurrent-call counts are global across the fleet. See
+// docs/replication/call-cache-backup.md for the sidecar-vs-shared rationale.
+const LimiterRedisLayer = LimiterRedisClient.layer.pipe(
+  Layer.provide(AppConfigLayer)
+)
+
 const CallLimiterLayer = CallLimiter.redisLayer.pipe(
   Layer.provide(AppConfigLayer),
-  Layer.provide(RedisLayer)
+  Layer.provide(LimiterRedisLayer)
 )
 
 // Hoisted at the top of the layer graph so a single memoized hub is

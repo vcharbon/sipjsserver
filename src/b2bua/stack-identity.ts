@@ -9,9 +9,10 @@
  * round-trip safely.
  */
 
+import { Effect, Layer, ServiceMap } from "effect"
 import type { ContactSpec, ViaSpec } from "../sip/generators.js"
 import { newBranch } from "../sip/MessageHelpers.js"
-import type { AppConfigData } from "../config/AppConfig.js"
+import { AppConfig, type AppConfigData } from "../config/AppConfig.js"
 import type { Call } from "../call/CallModel.js"
 
 export interface StackIdentityOpts {
@@ -72,6 +73,58 @@ export function buildCallViaAndContact(opts: StackIdentityOpts): {
     via: buildCallVia(opts),
     contact: buildCallContact(opts),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Public read-side seam — consumer-facing API for the values the B2BUA
+// stamps on outbound Contact / Via.
+// ---------------------------------------------------------------------------
+
+/**
+ * Read-only view of the addresses this B2BUA advertises to its peers
+ * (Issue 8 of the upstream-consumer plan). Consumers running their own
+ * templating layer (e.g. resolving `$(ip.AS)` / `$(port.AS)` placeholders
+ * in their call-control payloads) read these once at startup, then hand
+ * fully-resolved literals to `CallDecisionEngine`.
+ *
+ * sipjsserver does NOT do `$(...)` substitution itself — the contract
+ * boundary requires literals on every value reaching the decision
+ * engine. See [docs/external-usage/decision-engine-contract.md].
+ */
+export interface StackIdentityApi {
+  /**
+   * Host the B2BUA stamps on outbound Contact and Via. Today this maps
+   * to `AppConfig.sipLocalIp`; if a separate "advertised" IP slot is
+   * added in future the field name stays the same.
+   */
+  readonly advertisedHost: Effect.Effect<string>
+  /**
+   * Port the B2BUA stamps on outbound Contact and Via. Today this maps
+   * to `AppConfig.sipLocalPort`.
+   */
+  readonly advertisedPort: Effect.Effect<number>
+}
+
+export class StackIdentity extends ServiceMap.Service<
+  StackIdentity,
+  StackIdentityApi
+>()("@sipjsserver/b2bua/StackIdentity") {
+  /**
+   * Default layer — derives advertised host/port from `AppConfig`. The
+   * embedded layer wires this automatically; consumers composing
+   * `B2buaCoreLayer` directly should provide it themselves.
+   */
+  static readonly Default: Layer.Layer<StackIdentity, never, AppConfig> =
+    Layer.effect(
+      StackIdentity,
+      Effect.gen(function* () {
+        const cfg = yield* AppConfig
+        return {
+          advertisedHost: Effect.succeed(cfg.sipLocalIp),
+          advertisedPort: Effect.succeed(cfg.sipLocalPort),
+        }
+      }),
+    )
 }
 
 /**

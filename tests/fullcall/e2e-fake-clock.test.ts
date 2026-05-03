@@ -15,6 +15,17 @@ import { afterAll } from "vitest"
 import { basicCall } from "../scenarios/basic-call.js"
 import { routeSetPropagation } from "../scenarios/route-set-propagation.js"
 import { callReject } from "../scenarios/call-reject.js"
+import {
+  rejectWithReasonHeader,
+  reject302WithContact,
+  reject403WithContactPassesThrough,
+} from "../scenarios/reject-with-headers.js"
+import {
+  bLegFromOverridePersistsToBye,
+  bLegToOverridePersistsToBye,
+  bLegBothOverridePersistsToBye,
+  bLegFromOverrideTagStripped,
+} from "../scenarios/from-to-override.js"
 import { cancelCall } from "../scenarios/cancel.js"
 import { prackCall } from "../scenarios/prack.js"
 import { prackForkingCall } from "../scenarios/prack-forking.js"
@@ -107,6 +118,27 @@ for (const sut of ALL_SUTS) {
     }
     if (callReject.appliesTo(sut)) {
       it.effect("call rejection (403)", () => run(callReject.toScenario()), { timeout: 30_000 })
+    }
+    if (rejectWithReasonHeader.appliesTo(sut)) {
+      it.effect("reject (403) carries consumer-supplied Reason header (RFC 3326)", () => run(rejectWithReasonHeader.toScenario()), { timeout: 30_000 })
+    }
+    if (reject302WithContact.appliesTo(sut)) {
+      it.effect("reject (302) carries consumer-supplied Contact header (redirect)", () => run(reject302WithContact.toScenario()), { timeout: 30_000 })
+    }
+    if (reject403WithContactPassesThrough.appliesTo(sut)) {
+      it.effect("reject (403) passes consumer Contact through (no family gating)", () => run(reject403WithContactPassesThrough.toScenario()), { timeout: 30_000 })
+    }
+    if (bLegFromOverridePersistsToBye.appliesTo(sut)) {
+      it.effect("b-leg From override persists to BYE (RFC 3261 §12.2.1.1)", () => run(bLegFromOverridePersistsToBye.toScenario()), { timeout: 30_000 })
+    }
+    if (bLegToOverridePersistsToBye.appliesTo(sut)) {
+      it.effect("b-leg To override persists to BYE (RFC 3261 §12.2.1.1)", () => run(bLegToOverridePersistsToBye.toScenario()), { timeout: 30_000 })
+    }
+    if (bLegBothOverridePersistsToBye.appliesTo(sut)) {
+      it.effect("b-leg From AND To override persist to BYE", () => run(bLegBothOverridePersistsToBye.toScenario()), { timeout: 30_000 })
+    }
+    if (bLegFromOverrideTagStripped.appliesTo(sut)) {
+      it.effect("b-leg From override with consumer-supplied tag — tag is stripped", () => run(bLegFromOverrideTagStripped.toScenario()), { timeout: 30_000 })
     }
     if (cancelCall.appliesTo(sut)) {
       it.effect("CANCEL during early dialog", () => run(cancelCall.toScenario()), { timeout: 30_000 })

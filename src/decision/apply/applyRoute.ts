@@ -177,10 +177,17 @@ export function applyRoute(
                 config,
                 nowMs,
               })
+              for (const w of bLegResult.warnings) {
+                yield* Effect.logWarning(`[update_headers/failover ${args.call.callRef}] ${w}`)
+              }
               yield* Effect.logDebug(
                 `Failover after limiter rejection: creating ${bLegResult.call.bLegs[0]?.legId}`,
               )
-              return bLegResult satisfies HandlerResult
+              return {
+                call: bLegResult.call,
+                outbound: bLegResult.outbound,
+                effects: bLegResult.effects,
+              } satisfies HandlerResult
             }
           }
 
@@ -231,6 +238,9 @@ export function applyRoute(
       nowMs,
     })
 
+    for (const w of bLegResult.warnings) {
+      yield* Effect.logWarning(`[update_headers/route ${args.call.callRef}] ${w}`)
+    }
     yield* Effect.logDebug(
       `New call: callRef=${args.call.callRef} a-leg=${args.call.aLeg.callId} -> b-leg=${bLegResult.call.bLegs[0]?.callId}`,
     )

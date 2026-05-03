@@ -132,11 +132,22 @@ export function b2buaWorkerStackLayer(opts: {
    * specifically want NoOp behaviour can pass `NoOpCdrLayer`.
    */
   readonly cdrLayer?: Layer.Layer<CdrWriter>
+  /**
+   * Optional CallLimiter layer override. Defaults to a per-instance
+   * `CallLimiter.memoryLayer` (single-worker tests). Multi-worker SUTs
+   * pass `CallLimiter.sharedMemoryLayer(map)` so every worker increments
+   * the same `MutableHashMap` — mirrors the cluster-shared
+   * `LimiterRedisClient` topology used in production. Without that, each
+   * worker has its own independent counter and cluster-wide rejection
+   * cannot be exercised in fake-clock tests.
+   */
+  readonly limiterLayer?: Layer.Layer<CallLimiter>
 }) {
   const AppConfigLayer = Layer.succeed(AppConfig, opts.config)
   const MetricsLayer = MetricsRegistry.layer
   const StorageLayer = opts.storageLayer ?? PartitionedRelayStorage.memoryLayer
   const CdrLayer = opts.cdrLayer ?? CdrWriter.testLayer
+  const LimiterLayer = opts.limiterLayer ?? CallLimiter.memoryLayer.pipe(Layer.provide(AppConfigLayer))
 
   const Leaves = Layer.mergeAll(
     MetricsLayer,
@@ -149,7 +160,7 @@ export function b2buaWorkerStackLayer(opts: {
   const MidServices = Layer.mergeAll(
     UdpTransport.layer,
     OverloadController.layer,
-    CallLimiter.memoryLayer,
+    LimiterLayer,
   ).pipe(Layer.provideMerge(Leaves))
 
   // Tests don't run `ReadyGate`, so default to `ready=true` — otherwise

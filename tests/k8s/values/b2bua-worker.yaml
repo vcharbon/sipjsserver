@@ -43,12 +43,18 @@ terminationGracePeriodSeconds: 30
 redis:
   enabled: true
 
-# Connect to the colocated sidecar over loopback. The shared
-# `redis` Service / Deployment that used to live in
-# tests/k8s/charts/redis/ is gone with the per-pod sidecar topology.
 extraEnv:
+  # Sidecar Redis (call context only) — RedisClient. Sub-millisecond
+  # writes on the SIP hot path (no cross-pod hop).
   - name: REDIS_URL
     value: "redis://localhost:6379"
+  # Cluster-shared Redis (call limiter only) — LimiterRedisClient.
+  # Installed via tests/k8s/charts/redis/. Concurrent-call counters
+  # are global across the fleet; without this every worker would
+  # increment its own local sidecar counter and limits would not be
+  # enforced cluster-wide.
+  - name: LIMITER_REDIS_URL
+    value: "redis://redis:6379"
   # Worker uses sipLocalIp for both bind AND Contact/Via header
   # construction. Bind to (and advertise) the pod IP so responses are
   # routable. POD_IP is set by the chart from the downward API; K8s

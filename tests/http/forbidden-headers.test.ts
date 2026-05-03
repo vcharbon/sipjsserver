@@ -14,6 +14,7 @@ import {
   classifyHeader,
   isAdapterHeaderName,
   validateUpdateHeaders,
+  validateRejectUpdateHeaders,
   type AdapterHeaderName,
 } from "../../src/decision/validators/forbiddenHeaders.js"
 import { H } from "../../src/b2bua/rules/framework/actions/factories.js"
@@ -134,6 +135,61 @@ describe("isAdapterHeaderName", () => {
     expect(isAdapterHeaderName(H.Contact)).toBe(false)
     expect(isAdapterHeaderName(H.From)).toBe(false)
     expect(isAdapterHeaderName(H.To)).toBe(false)
+  })
+})
+
+describe("validateRejectUpdateHeaders", () => {
+  it("accepts undefined", () => {
+    expect(validateRejectUpdateHeaders("mock", "newCall", undefined)).toBeNull()
+  })
+
+  it("allows Contact unconditionally on reject (3xx redirect path)", () => {
+    const result = validateRejectUpdateHeaders("mock", "newCall", {
+      Contact: "<sip:alt@10.0.0.1>",
+    })
+    expect(result).toBeNull()
+  })
+
+  it("allows Contact even on a non-3xx reject (no family gating)", () => {
+    const result = validateRejectUpdateHeaders("mock", "newCall", {
+      Contact: "<sip:fallback@10.0.0.1>",
+    })
+    expect(result).toBeNull()
+  })
+
+  it("allows Reason / Retry-After / Warning / P-Asserted-Identity / X-* headers", () => {
+    const result = validateRejectUpdateHeaders("mock", "newCall", {
+      Reason: 'SIP ;cause=403;text="forbidden"',
+      "Retry-After": "60",
+      Warning: '399 example.com "demo"',
+      "P-Asserted-Identity": "<sip:a@b>",
+      "X-Trace-Id": "abc123",
+    })
+    expect(result).toBeNull()
+  })
+
+  it.each([
+    ["Via", "via"],
+    ["To", "to"],
+    ["From", "from"],
+    ["Call-ID", "call-id"],
+    ["call-id", "call-id"],
+    ["CSeq", "cseq"],
+  ] as const)("rejects %s as RFC-mandated copy from request", (name) => {
+    const result = validateRejectUpdateHeaders("mock", "newCall", {
+      [name]: "anything",
+    })
+    expect(result?.kind).toBe("semantic-violation")
+    expect(result?.detail).toMatch(/RFC 3261/)
+  })
+
+  it("works with ReadonlyMap input", () => {
+    const map = new Map<string, string | null>([["Reason", 'SIP ;cause=403']])
+    expect(validateRejectUpdateHeaders("mock", "newCall", map)).toBeNull()
+    const bad = new Map<string, string | null>([["Via", "anything"]])
+    expect(validateRejectUpdateHeaders("mock", "newCall", bad)?.kind).toBe(
+      "semantic-violation",
+    )
   })
 })
 

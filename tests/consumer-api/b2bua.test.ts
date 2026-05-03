@@ -19,15 +19,23 @@ import {
   isTransient,
   newCallSipStatus,
   AppConfig,
+  WorkerReadiness,
+  StackIdentity,
 } from "@vcharbon/sipjs/b2bua"
 import type {
   B2buaEmbeddedOptions,
+  B2buaLayer,
   NewCallRequest,
   NewCallResponse,
   CallFailureRequest,
   CallFailureResponse,
   CallReferRequest,
   CallReferResponse,
+  CallState,
+  TimerService,
+  SipParser,
+  TransactionLayer,
+  StackIdentityApi,
 } from "@vcharbon/sipjs/b2bua"
 
 const trivialCallDecision = Layer.succeed(CallDecisionEngine, {
@@ -51,10 +59,32 @@ describe("@vcharbon/sipjs/b2bua public surface", () => {
       callDecision: trivialCallDecision,
       config: { sipLocalPort: 35060 },
     }
-    const layer = b2buaEmbeddedLayer(opts)
-    // The returned layer must be a Layer — we don't launch it here.
+    // The B2buaLayer alias must accept the factory's return value with
+    // R = never (no residual requirements leak to the consumer).
+    const layer: B2buaLayer = b2buaEmbeddedLayer(opts)
     expect(layer).toBeDefined()
     expect(typeof (layer as { pipe?: unknown }).pipe).toBe("function")
+    // Sanity: the type-only re-exports resolve.
+    const _services: ReadonlyArray<string> = (
+      [] as Array<CallState | TimerService | SipParser | TransactionLayer>
+    ).map(() => "")
+    expect(_services).toEqual([])
+  })
+
+  it("re-exports WorkerReadiness so consumers can override the default test layer", () => {
+    expect(WorkerReadiness).toBeDefined()
+    // Both runtime layers are reachable
+    expect(WorkerReadiness.Default).toBeDefined()
+    expect(WorkerReadiness.test(true)).toBeDefined()
+    expect(WorkerReadiness.test(false)).toBeDefined()
+  })
+
+  it("re-exports StackIdentity for consumers building their own templating", () => {
+    expect(StackIdentity).toBeDefined()
+    expect(StackIdentity.Default).toBeDefined()
+    // The `StackIdentityApi` shape resolves as a type
+    const _api: StackIdentityApi | undefined = undefined
+    expect(_api).toBeUndefined()
   })
 
   it("default config is overridable via the config option", () => {

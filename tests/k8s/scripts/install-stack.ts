@@ -1,6 +1,7 @@
 import { Effect, LogLevel, References } from "effect"
 import {
   installProxy,
+  installRedis,
   installSipp,
   installWorker,
 } from "../fixtures/helm.js"
@@ -9,9 +10,15 @@ const ns = process.argv[2] ?? "sip-test"
 
 const program = Effect.gen(function* () {
   yield* Effect.logInfo(`installing stack into namespace=${ns}`)
-  // No standalone Redis install: each b2bua-worker pod ships its own
-  // Redis sidecar (chart `redis.enabled=true`). See
-  // docs/replication/call-cache-backup.md §2.
+  // Two Redis topologies coexist:
+  //   - tests/k8s/charts/redis/  → cluster-shared, used ONLY by the
+  //     CallLimiter (LimiterRedisClient → REDIS://redis:6379). Installed
+  //     here, before the workers.
+  //   - b2bua-worker chart's per-pod sidecar (redis.enabled=true) →
+  //     holds call context (RedisClient → redis://localhost:6379).
+  //     See docs/replication/call-cache-backup.md for the latency
+  //     rationale behind keeping call context off any cross-pod hop.
+  yield* installRedis(ns)
   yield* installSipp(ns)
   yield* installWorker(ns)
   yield* installProxy(ns)

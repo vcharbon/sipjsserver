@@ -15,3 +15,5 @@ data:
 {{ .Files.Get "scenarios/uac-pingpong.xml" | indent 4 }}
   uas-basic.xml: |-
 {{ .Files.Get "scenarios/uas-basic.xml" | indent 4 }}
+  uac-limiter-soak.xml: |-
+{{ .Files.Get "scenarios/uac-limiter-soak.xml" | indent 4 }}

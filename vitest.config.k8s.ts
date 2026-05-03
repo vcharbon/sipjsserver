@@ -22,6 +22,9 @@ import { defineConfig } from "vitest/config"
 export default defineConfig({
   test: {
     include: ["tests/k8s/**/*.test.ts"],
+    // Exclude long-running soak tests from the default suite. They are
+    // tier-gated to nightly via the `test:k8s:soak` npm script.
+    exclude: ["**/proxy-limiter-soak.test.ts", "**/node_modules/**"],
     // Idempotent: ensures the kind cluster exists, all required images
     // are built + side-loaded, and the proxy/worker/sipp charts are
     // installed into the `sip-test` namespace before any test file

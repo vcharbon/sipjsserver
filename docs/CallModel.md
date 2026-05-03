@@ -7,6 +7,12 @@ A SIP call comprises multiple legs, each with its own internal state. At any giv
 > between TransactionLayer / Rule / Framework / orphan sweep, the
 > `byeDisposition` state machine, and the framework invariant that prevents
 > calls getting stuck in `terminating`.
+>
+> **REFER and the always-200-OK rule**: see
+> [docs/external-usage/refer-and-sipfrag.md](external-usage/refer-and-sipfrag.md)
+> for the consumer-facing contract — REFER is always answered with 200
+> OK at the SIP layer, and transfer-failure semantics travel via
+> NOTIFY sipfrag, not as 4xx-on-REFER.
 
 The internal representation must model:
 - **Standard call**: one Alice leg + one Bob leg

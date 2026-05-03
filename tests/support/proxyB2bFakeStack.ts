@@ -31,7 +31,7 @@
 
 import { Effect, Layer, ServiceMap } from "effect"
 import { TestClock } from "effect/testing"
-import type { AppConfigData } from "../../src/config/AppConfig.js"
+import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { SipRouter, type HandlerRegistry } from "../../src/sip/SipRouter.js"
 import {
@@ -45,6 +45,7 @@ import { PeerFabric } from "../../src/cache/PeerFabric.js"
 import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
 import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
 import { CdrWriter, makeCdrRecordsBuffer } from "../../src/cdr/CdrWriter.js"
+import { CallLimiter, type LimiterMemoryStore, makeLimiterMemoryStore } from "../../src/call/CallLimiter.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
 
 /** Default simulated transit delay — same as `fakeStack`'s. */
@@ -185,6 +186,16 @@ export interface SipproxyHAFakeStackOpts {
    * harness layer (`tests/fullcall/framework`).
    */
   readonly handlers: HandlerRegistry
+  /**
+   * Optional shared `CallLimiter` backing store. Both workers' limiter
+   * layers point at this single `MutableHashMap`, mirroring the
+   * cluster-shared `LimiterRedisClient` topology used in production.
+   * Tests that want to assert on counter contents construct one via
+   * `makeLimiterMemoryStore()` and pass it in here. Default: a fresh
+   * private store (sharing is still in place across the two workers, but
+   * the test cannot peek).
+   */
+  readonly limiterStore?: LimiterMemoryStore
 }
 
 /** Build a per-worker `AppConfigData` from the test base config. */
@@ -231,7 +242,8 @@ const b2buaInstance = (
   peerCacheLayer?: Layer.Layer<
     import("../../src/cache/PeerCachePort.js").PeerCachePort
   >,
-  cdrLayer?: Layer.Layer<CdrWriter>
+  cdrLayer?: Layer.Layer<CdrWriter>,
+  limiterLayer?: Layer.Layer<CallLimiter>,
 ): Layer.Layer<never, never, SignalingNetwork> => {
   // `Layer.fresh` gives this instance a distinct memo identity so a
   // second composition with the same `config` materialises fresh
@@ -240,11 +252,15 @@ const b2buaInstance = (
   // worker pulls its own `self`-pinned port (`cachePortLayerOf` is
   // per-worker). The `cdrLayer` parameter lets the SUT pass a
   // `CdrWriter.sharedTestLayer(buffer)` so all workers' CDRs land in
-  // a single buffer the harness can read.
+  // a single buffer the harness can read. `limiterLayer` lets the SUT
+  // pass `CallLimiter.sharedMemoryLayer(store)` so all workers
+  // increment the same counter map (mirrors production's cluster-shared
+  // `LimiterRedisClient`).
   const baseStack = b2buaWorkerStackLayer({
     config,
     ...(storageLayer !== undefined ? { storageLayer } : {}),
     ...(cdrLayer !== undefined ? { cdrLayer } : {}),
+    ...(limiterLayer !== undefined ? { limiterLayer } : {}),
   })
   const stack = Layer.fresh(
     peerCacheLayer === undefined
@@ -300,6 +316,20 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
   const cdrBuffer = makeCdrRecordsBuffer()
   const sharedCdrLayer = CdrWriter.sharedTestLayer(cdrBuffer)
 
+  // Single shared `CallLimiter` backing store across both workers —
+  // mirrors the production cluster-shared Redis. Without this, each
+  // worker's limiter would have its own counter map and cluster-wide
+  // rejection could not be exercised in fake-clock tests. Tests that
+  // need to peek/assert on the store pass their own via
+  // `opts.limiterStore`.
+  const limiterStore = opts.limiterStore ?? makeLimiterMemoryStore()
+  // The limiter only consults windowSec / activeWindows / ttlSec, which
+  // are identical across all workers — provide AppConfig here from the
+  // base config so the shared layer's R becomes never.
+  const sharedLimiterLayer = CallLimiter.sharedMemoryLayer(limiterStore).pipe(
+    Layer.provide(Layer.succeed(AppConfig, opts.config))
+  )
+
   // Both workers — symmetric. Services hidden, resources scoped to
   // the SUT layer. Each worker's storage points at its fabric peer
   // slot so writes/reads are observable through `snapshotPeer` and
@@ -313,6 +343,7 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
       fabricBuilt.fabric.storageLayerOf(w1Ord),
       fabricBuilt.fabric.cachePortLayerOf(w1Ord),
       sharedCdrLayer,
+      sharedLimiterLayer,
     ),
     b2buaInstance(
       haWorkerConfig(opts.config, w2Addr, w2Ord),
@@ -320,6 +351,7 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
       fabricBuilt.fabric.storageLayerOf(w2Ord),
       fabricBuilt.fabric.cachePortLayerOf(w2Ord),
       sharedCdrLayer,
+      sharedLimiterLayer,
     ),
   )
 

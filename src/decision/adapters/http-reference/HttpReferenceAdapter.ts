@@ -43,7 +43,10 @@ import {
   isTransient,
   type CallDecisionMethod,
 } from "../../schemas/errors.js"
-import { validateUpdateHeadersEffect } from "../../validators/forbiddenHeaders.js"
+import {
+  validateUpdateHeadersEffect,
+  validateRejectUpdateHeadersEffect,
+} from "../../validators/forbiddenHeaders.js"
 import {
   WireCallFailureResponse,
   WireCallReferResponse,
@@ -213,7 +216,7 @@ export const HttpReferenceAdapterLayer = Layer.effect(
     ): Effect.Effect<void, CallDecisionError> =>
       resp.action === "route"
         ? validateUpdateHeadersEffect(ADAPTER_NAME, "newCall", resp.update_headers)
-        : Effect.void
+        : validateRejectUpdateHeadersEffect(ADAPTER_NAME, "newCall", resp.update_headers)
 
     const validateCallFailure = (
       resp: CallFailureResponseType,

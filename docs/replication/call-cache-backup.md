@@ -58,6 +58,28 @@ The mechanism described here is **not** a general-purpose distributed database. 
 
 Redis async replication was rejected (memory note `project_ha_backup_design.md`) because its consistency profile cannot be bounded against these timers. The model below is a per-call **dual-write across two Redis sidecars** (one per worker) coordinated by the workers themselves.
 
+### 1.1 Why per-pod sidecar (not a shared Redis) for call context
+
+The call context cache is **deliberately** per-pod sidecar, not a shared cluster Redis. The decision is load-bearing:
+
+- The SIP hot path issues a Redis write on every state-mutating message (every INVITE state machine transition, every reINVITE, every BYE). With Timer T1 = 500 ms, the per-write budget is on the order of one digit of milliseconds. A sub-millisecond hop to `localhost:6379` (sidecar) gives that headroom; a shared Redis Service even *in-cluster* costs at least one extra pod-to-pod hop, often through CNI overlay encapsulation, and competes with every other worker's writes for the shared instance's CPU.
+- Latency is observable elsewhere in this doc: §7.4 and §259 / §401 / §499 cite "sub-millisecond local socket" and "< 10 ms in-cluster steady state replication." Those numbers depend on the writer never having to traverse the cluster network on the SIP critical path.
+- The dual-write + reverse-propagate machinery exists *because* of this choice: it is what gives us cross-pod recoverability without putting a cross-pod hop on the hot path.
+
+The **call limiter** (`CallLimiter` / `LimiterRedisClient`) makes the *opposite* choice and lives on a single cluster-shared Redis. It can, because:
+
+- Limiter writes are off the SIP retransmission path. `checkAndIncrement` runs once at INVITE routing time; `decrement` runs once at terminate. A 5–10 ms cross-pod hop adds nothing perceptible to call setup.
+- The limiter *requires* global counters. Per-pod counters would silently allow `N × limit` concurrent calls fleet-wide. That was a real bug fixed by introducing the separate `LimiterRedisClient` service tag and binding it to `LIMITER_REDIS_URL` (defaults to `REDIS_URL` with a startup warning when both share an endpoint — acceptable for single-Redis dev, broken for sidecar HA).
+
+The two services therefore deploy with two distinct Redis topologies:
+
+| Concern         | Redis              | Endpoint                           | Why this side                            |
+|-----------------|--------------------|------------------------------------|------------------------------------------|
+| Call context    | Per-pod sidecar    | `redis://localhost:6379`           | Sub-ms writes on the SIP hot path        |
+| Call limiter    | Cluster-shared     | `redis://<shared-svc>:6379`        | Global counter, latency-tolerant         |
+
+Code map: [src/redis/RedisClient.ts](../../src/redis/RedisClient.ts), [src/redis/LimiterRedisClient.ts](../../src/redis/LimiterRedisClient.ts), [src/call/CallLimiter.ts](../../src/call/CallLimiter.ts), kind harness chart [tests/k8s/charts/redis/](../../tests/k8s/charts/redis/).
+
 ---
 
 ## 2. Glossary

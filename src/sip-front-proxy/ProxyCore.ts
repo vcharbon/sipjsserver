@@ -154,6 +154,10 @@ export class ProxyCore extends ServiceMap.Service<ProxyCore, ProxyCoreApi>()(
     | WorkerRegistry
     | RegisterStrategy
     | CoreToExtRoutingStrategy
+    // `Layer.suspend` defers `makeProxyCore` resolution past this class
+    // body — the const is declared further down the file (~L215), so an
+    // eager `Layer.effect(ProxyCore, makeProxyCore)` would TDZ at module
+    // init. Keep the suspend wrapper.
   > = Layer.suspend(() =>
     Layer.effect(
       ProxyCore,

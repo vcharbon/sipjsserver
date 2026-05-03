@@ -25,6 +25,13 @@ import { UdpTransport } from "../sip/UdpTransport.js"
 import { SignalingNetwork } from "../sip/SignalingNetwork.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
 import { CallDecisionEngine } from "../decision/CallDecisionEngine.js"
+import { WorkerReadiness } from "../cache/WorkerReadiness.js"
+import { SipRouter } from "../sip/SipRouter.js"
+import { TransactionLayer } from "../sip/TransactionLayer.js"
+import { CallState } from "../call/CallState.js"
+import { TimerService } from "../call/TimerService.js"
+import { SipParser } from "../sip/Parser.js"
+import { StackIdentity } from "./stack-identity.js"
 
 /**
  * Sensible defaults for an embedded B2BUA. Everything Redis-related is
@@ -36,6 +43,7 @@ export const defaultEmbeddedAppConfig: AppConfigData = {
   sipLocalPort: 5060,
   workerServiceName: "embedded-b2bua",
   redisUrl: "redis://unused",
+  limiterRedisUrl: "redis://unused",
   redisKeyPrefix: "embedded",
   limiterWindowSeconds: 300,
   limiterActiveWindows: 3,
@@ -114,6 +122,26 @@ export interface B2buaEmbeddedOptions {
 }
 
 /**
+ * Public type alias for the layer returned by {@link b2buaEmbeddedLayer}.
+ *
+ * Consumers can name this in their own type annotations without relying
+ * on the inferred `ReturnType<typeof b2buaEmbeddedLayer>`. The Out
+ * channel exposes everything `B2buaCoreLayer` exports plus the
+ * test-flavored `DrainingState` and `WorkerReadiness` defaults wired in
+ * by this factory; the In channel is `never` (fully self-contained).
+ */
+export type B2buaLayer = Layer.Layer<
+  | SipRouter
+  | TransactionLayer
+  | CallState
+  | TimerService
+  | SipParser
+  | StackIdentity,
+  never,
+  never
+>
+
+/**
  * Build a runnable B2BUA layer that the consumer can compose with their
  * own SIP loop. After providing this layer, the consumer can `yield*
  * SipRouter` and call `router.start(handlers)` (handlers exported from
@@ -123,7 +151,7 @@ export interface B2buaEmbeddedOptions {
  * (`SipRouter`, `TransactionLayer`, `CallState`, `TimerService`,
  * `SipParser`).
  */
-export const b2buaEmbeddedLayer = (opts: B2buaEmbeddedOptions) => {
+export const b2buaEmbeddedLayer = (opts: B2buaEmbeddedOptions): B2buaLayer => {
   const cfg: AppConfigData = { ...defaultEmbeddedAppConfig, ...(opts.config ?? {}) }
   const AppConfigL = Layer.succeed(AppConfig, cfg)
   const MetricsL = MetricsRegistry.layer
@@ -148,7 +176,14 @@ export const b2buaEmbeddedLayer = (opts: B2buaEmbeddedOptions) => {
     Layer.provide(SignalingNetwork.real),
   )
 
+  // Issue 8 — expose `StackIdentity` to consumers of the embedded
+  // layer so they can read advertisedHost/Port for their own templating.
+  // `provideMerge` keeps it in the Out channel; `Layer.provide(AppConfigL)`
+  // wired further down satisfies StackIdentity.Default's only dep.
+  const StackIdentityL = StackIdentity.Default
+
   return B2buaCoreLayer.pipe(
+    Layer.provideMerge(StackIdentityL),
     Layer.provide(AppConfigL),
     Layer.provide(UdpL),
     Layer.provide(OverloadL),
@@ -158,5 +193,6 @@ export const b2buaEmbeddedLayer = (opts: B2buaEmbeddedOptions) => {
     Layer.provide(TracingL),
     Layer.provide(CdrL),
     Layer.provide(DrainingState.test),
+    Layer.provide(WorkerReadiness.test(true)),
   )
 }

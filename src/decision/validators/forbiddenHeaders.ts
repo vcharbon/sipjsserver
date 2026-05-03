@@ -170,6 +170,74 @@ export function validateUpdateHeadersEffect(
   return violation === null ? Effect.void : Effect.fail(violation)
 }
 
+// ── Reject-path partition ────────────────────────────────────────────────
+//
+// On reject there is no called-side response to merge with — the consumer
+// is just authoring extra headers on the rejection response we emit.
+// Per Issue 9 of the upstream-consumer plan:
+//   - `Via`, `To`, `From`, `Call-ID`, `CSeq` — forbidden (RFC-mandated
+//     copies from the request, must not be rewritten).
+//   - `Contact` — allowed unconditionally. The B2BUA does not police
+//     whether Contact is RFC-meaningful for the chosen status code; that
+//     is the consumer's responsibility (302 in particular needs it).
+//   - everything else (Reason, Retry-After, Warning, P-Asserted-Identity,
+//     custom X-…) — allowed.
+//
+// Note: `Content-Length` is NOT listed here because reject responses
+// typically have no body; if the consumer adds one we re-derive the
+// length when serializing anyway.
+
+const REJECT_FORBIDDEN: ReadonlyArray<string> = [
+  "via",
+  "to",
+  "from",
+  "call-id",
+  "cseq",
+]
+
+const REJECT_FORBIDDEN_LOWER: ReadonlySet<string> = new Set(REJECT_FORBIDDEN)
+
+/**
+ * Validate `update_headers` from a `NewCallRejectResponse`. Returns null
+ * when every key is acceptable, a `CallDecisionError(kind:
+ * "semantic-violation")` on the first violation. See the
+ * "Reject-path partition" comment above for rule rationale.
+ */
+export function validateRejectUpdateHeaders(
+  adapterName: string,
+  method: CallDecisionMethod,
+  updateHeaders: ReadonlyMap<string, unknown> | Readonly<Record<string, unknown>> | undefined,
+): CallDecisionError | null {
+  if (updateHeaders === undefined) return null
+  const entries = updateHeaders instanceof Map
+    ? Array.from(updateHeaders.keys())
+    : Object.keys(updateHeaders)
+  for (const key of entries) {
+    const lower = key.trim().toLowerCase()
+    if (!REJECT_FORBIDDEN_LOWER.has(lower)) continue
+    return new CallDecisionError({
+      kind: "semantic-violation",
+      adapterName,
+      method,
+      detail: `forbidden header "${key}" on reject — copied from the request per RFC 3261 §8.2.6.2`,
+      cause: { header: key, tier: "reject-forbidden" },
+    })
+  }
+  return null
+}
+
+/**
+ * Effect-returning sibling of {@link validateRejectUpdateHeaders}.
+ */
+export function validateRejectUpdateHeadersEffect(
+  adapterName: string,
+  method: CallDecisionMethod,
+  updateHeaders: ReadonlyMap<string, unknown> | Readonly<Record<string, unknown>> | undefined,
+): Effect.Effect<void, CallDecisionError> {
+  const violation = validateRejectUpdateHeaders(adapterName, method, updateHeaders)
+  return violation === null ? Effect.void : Effect.fail(violation)
+}
+
 // ── Narrowing helper (for callers holding a structured HeaderName) ────────
 
 /**

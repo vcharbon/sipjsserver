@@ -1,0 +1,14 @@
+image:
+  repository: redis
+  tag: "7-alpine"
+  pullPolicy: IfNotPresent
+
+# Single replica — limiter counts are windowed and recovered via per-key
+# TTL on crash; no persistence needed. Production sizing should still
+# use a HA Redis (Sentinel / Cluster) for the limiter, but the kind
+# test cluster runs one pod for simplicity.
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

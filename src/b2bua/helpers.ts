@@ -7,7 +7,7 @@ import { addBLeg, addCdrEvent, makeEmptyDialog, randomInitialCSeq } from "../cal
 import type { SideEffect, OutboundEnvelope } from "../sip/SipRouter.js"
 import type { SipRequest } from "../sip/types.js"
 import type { AppConfigData } from "../config/AppConfig.js"
-import { extractNameAddrUri, getHeader, newBranch, newTag, stripTag } from "../sip/MessageHelpers.js"
+import { getHeader, newBranch, newTag, stripTag } from "../sip/MessageHelpers.js"
 import {
   extractNonStructuralHeaders,
   generateOutOfDialogRequest,
@@ -134,20 +134,36 @@ export interface CreateBLegOptions {
 }
 
 /**
+ * Strip a `tag=…` parameter from a header value (Issue 6 of the
+ * upstream-consumer plan). The B2BUA owns the From-tag and the dialog
+ * carries the remote To-tag from the 200 OK; consumer-supplied tags in
+ * `update_headers["From"]`/`["To"]` would corrupt §12.1.1 ownership.
+ *
+ * Returns the cleaned value plus a flag indicating whether a tag was
+ * actually present (so callers can decide whether to log a warning).
+ */
+function stripTagWithFlag(headerValue: string): { value: string; stripped: boolean } {
+  const cleaned = stripTag(headerValue)
+  return { value: cleaned, stripped: cleaned !== headerValue }
+}
+
+/**
  * Create a new b-leg from routing parameters.
  * Returns the updated call, outbound INVITE envelope (if baseInvite provided),
- * and side effects (timer + flush).
+ * side effects (timer + flush), and any consumer-facing warnings the
+ * caller should surface via `Effect.logWarning`.
  *
  * Single source of truth for b-leg creation — used by InitialInviteHandler
  * (first b-leg), limiter failover, and the rule engine's create-leg action.
  */
 export function createBLegFromRoute(
   opts: CreateBLegOptions
-): { call: Call; outbound: OutboundEnvelope[]; effects: SideEffect[] } {
+): { call: Call; outbound: OutboundEnvelope[]; effects: SideEffect[]; warnings: string[] } {
   const { call, baseInvite, route, config, nowMs } = opts
   const legNumber = call.bLegs.length + 1
   const legId = `b-${legNumber}`
   const bLegFromTag = newTag()
+  const warnings: string[] = []
 
   const bLegCallId = config.workerIndex >= 0
     ? generateBLegCallId(legNumber, config.workerIndex, config.clusterWorkers, config.sipLocalIp)
@@ -155,29 +171,18 @@ export function createBLegFromRoute(
 
   const initialCSeq = randomInitialCSeq()
 
-  // RFC 3261 §12.2.1.1: track local/remote URIs for in-dialog header construction
-  // B2BUA is UAC on b-leg: localUri = From URI (Alice's identity), remoteUri = To URI (callee)
+  // RFC 3261 §12.2.1.1: track local/remote URIs for in-dialog header
+  // construction. B2BUA is UAC on b-leg: localUri = From (Alice's
+  // identity, possibly overridden by the consumer), remoteUri = To.
+  // Default seed comes from the A-leg headers; if `baseInvite` is given
+  // and the consumer overrides From / To via `update_headers`, the
+  // post-override values are stamped further down. Issue 6 of the
+  // upstream-consumer plan: ACK / BYE must use the post-override URIs;
+  // pre-override stamping silently reverted them.
   const aLegFrom = getHeader(call.aLegInvite.headers, "from") ?? ""
   const aLegTo = getHeader(call.aLegInvite.headers, "to") ?? ""
-  const localUri = extractNameAddrUri(stripTag(aLegFrom))
-  const remoteUri = extractNameAddrUri(stripTag(aLegTo))
-
-  // RFC 3261 §12.2.1.1: CSeq is dialog-scoped. Seed a placeholder dialog
-  // (remoteTag="") on the b-leg carrying the INVITE's CSeq — used for CANCEL
-  // (RFC 3261 §9.1: CANCEL CSeq must equal the INVITE's) and as the seed
-  // for any forked early dialog spawned later from a 1xx response.
-  const emptyDialog = makeEmptyDialog({
-    callId: bLegCallId,
-    localUri,
-    remoteUri,
-    localTag: bLegFromTag,
-    remoteTag: "",
-  })
-  const placeholderDialog: Dialog = {
-    ...emptyDialog,
-    sip: { ...emptyDialog.sip, localCSeq: initialCSeq },
-    ext: emptyDialog.ext,
-  }
+  let localUri = stripTag(aLegFrom)
+  let remoteUri = stripTag(aLegTo)
 
   const requestUri = route.new_ruri ?? baseInvite?.uri
   const isEmergency = call.emergency === true
@@ -188,11 +193,43 @@ export function createBLegFromRoute(
   if (baseInvite !== undefined) {
     // Merge policy-level header overrides (e.g. strip 100rel from Supported)
     // with route-level overrides. Route headers take precedence.
-    const mergedHeaders: Record<string, string | null> | undefined =
+    let mergedHeaders: Record<string, string | null> | undefined =
       (call.policyUpdateHeaders || route.update_headers)
         ? { ...(call.policyUpdateHeaders as Record<string, string | null> ?? {}),
             ...(route.update_headers as Record<string, string | null> ?? {}) }
         : undefined
+
+    // Issue 6 — strip consumer-supplied From-tag / To-tag.
+    // From-tag is owned by the B2BUA (RFC 3261 §12.1.1 — it IS the
+    // dialog's local tag, generated above as `bLegFromTag`). To-tag on
+    // an initial INVITE has no value (RFC 3261 §8.1.1.2); the dialog's
+    // remoteTag is later carried from the 200 OK. Either way, an
+    // override-supplied tag is invalid.
+    if (mergedHeaders !== undefined) {
+      const tagWarnings: { header: "From" | "To"; original: string; cleaned: string }[] = []
+      const next: Record<string, string | null> = { ...mergedHeaders }
+      for (const key of Object.keys(next)) {
+        const lower = key.toLowerCase()
+        if (lower !== "from" && lower !== "to") continue
+        const value = next[key]
+        if (value === null || value === undefined) continue
+        const { value: cleaned, stripped } = stripTagWithFlag(value)
+        if (stripped) {
+          next[key] = cleaned
+          tagWarnings.push({
+            header: lower === "from" ? "From" : "To",
+            original: value,
+            cleaned,
+          })
+        }
+      }
+      mergedHeaders = next
+      for (const w of tagWarnings) {
+        warnings.push(
+          `update_headers["${w.header}"] contained a tag= param — stripped (B2BUA owns dialog tags). value="${w.original}" → "${w.cleaned}"`,
+        )
+      }
+    }
 
     const baseFromRaw = getHeader(baseInvite.headers, "from") ?? "unknown"
     const baseToRaw = getHeader(baseInvite.headers, "to") ?? baseInvite.uri
@@ -260,6 +297,17 @@ export function createBLegFromRoute(
       bLegInvite = { ...bLegInvite, headers: applied }
     }
 
+    // Issue 6 — stamp the leg/dialog URIs from the POST-override From / To
+    // headers so subsequent ACK and BYE (which read `dialog.localUri` /
+    // `dialog.remoteUri` in `src/sip/generators.ts`) don't silently
+    // revert to the A-leg values. We strip the From-tag we just attached
+    // because `localUri` is consumed by generators that will re-append
+    // `;tag=${dialog.localTag}`.
+    const postFrom = getHeader(bLegInvite.headers, "from")
+    const postTo = getHeader(bLegInvite.headers, "to")
+    if (postFrom !== undefined) localUri = stripTag(postFrom)
+    if (postTo !== undefined) remoteUri = stripTag(postTo)
+
     // ── Outbound proxy support ────────────────────────────────────────
     // When the worker is deployed behind the SIP front proxy
     // (`config.b2bOutboundProxy` set), pre-load a `Route` header pointing
@@ -295,6 +343,26 @@ export function createBLegFromRoute(
       label: `send ${legId} INVITE`,
       legId,
     })
+  }
+
+  // RFC 3261 §12.2.1.1: CSeq is dialog-scoped. Seed a placeholder dialog
+  // (remoteTag="") on the b-leg carrying the INVITE's CSeq — used for CANCEL
+  // (RFC 3261 §9.1: CANCEL CSeq must equal the INVITE's) and as the seed
+  // for any forked early dialog spawned later from a 1xx response.
+  // Built AFTER `localUri`/`remoteUri` are settled (Issue 6) so any
+  // consumer-supplied From/To override is reflected in the dialog from
+  // the start.
+  const emptyDialog = makeEmptyDialog({
+    callId: bLegCallId,
+    localUri,
+    remoteUri,
+    localTag: bLegFromTag,
+    remoteTag: "",
+  })
+  const placeholderDialog: Dialog = {
+    ...emptyDialog,
+    sip: { ...emptyDialog.sip, localCSeq: initialCSeq },
+    ext: emptyDialog.ext,
   }
 
   const bLeg: Leg = {
@@ -334,5 +402,5 @@ export function createBLegFromRoute(
     { type: "flush-redis" }
   ]
 
-  return { call: updated, outbound, effects }
+  return { call: updated, outbound, effects, warnings }
 }

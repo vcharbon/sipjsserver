@@ -15,8 +15,9 @@
     "rootDir": "./src",
     "incremental": true,
     "skipLibCheck": true,
+    "lib": ["ES2023"],
     "plugins": [{ "name": "@effect/language-service" }]
   },
   "include": ["src/**/*"],
-  "exclude": ["src/test-harness/**/*"]
+  "exclude": []
 }

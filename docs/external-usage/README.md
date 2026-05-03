@@ -11,6 +11,20 @@ that matches what you want to do.
 | `@vcharbon/sipjs/sip-front-proxy` | The standalone front proxy primitives (`ProxyCore`, registry layers, routing strategies). Used internally by `/test-harness`; also useful when running your own proxy instance. | (see source) |
 | `@vcharbon/sipjs/observability` | Optional OTLP HTTP tracing layer (`otlpHttpTracingLayer`). Compose with `b2buaEmbeddedLayer` when you want spans exported. | (see source) |
 
+### Cross-cutting design notes
+
+These pages explain *contracts* that span the public surface — read
+them before wiring a `CallDecisionEngine`:
+
+- [decision-engine-contract.md](./decision-engine-contract.md) — the
+  literals-only contract on `CallDecisionEngine` responses, why
+  `Contact` is owned by the B2BUA on routed calls, and the
+  `StackIdentity` read-side seam consumers use to populate their own
+  `$(ip.AS)`/`$(port.AS)`-style templating.
+- [refer-and-sipfrag.md](./refer-and-sipfrag.md) — REFER is always
+  200-OK'd by the SIP layer; transfer-failure semantics travel via
+  NOTIFY sipfrag, not as 4xx-on-REFER.
+
 ## Install
 
 `@vcharbon/sipjs` is **not on npm yet**. Install it directly from a

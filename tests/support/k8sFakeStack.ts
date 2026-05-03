@@ -26,7 +26,8 @@
  */
 
 import { Effect, Exit, Layer, Scope, ServiceMap, Stream } from "effect"
-import type { AppConfigData } from "../../src/config/AppConfig.js"
+import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
+import { CallLimiter, type LimiterMemoryStore, makeLimiterMemoryStore } from "../../src/call/CallLimiter.js"
 import { PeerFabric, type PeerFabricApi } from "../../src/cache/PeerFabric.js"
 import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
@@ -116,6 +117,16 @@ export interface K8sFakeStackOpts {
    * production defaults apply (20s guard, 5s drain grace).
    */
   readonly loadBalancer?: LoadBalancerConfigData
+  /**
+   * Optional shared `CallLimiter` backing store. Every worker's limiter
+   * layer points at this single `MutableHashMap`, mirroring the
+   * cluster-shared `LimiterRedisClient` topology used in production.
+   * Tests that want to assert on counter contents construct one via
+   * `makeLimiterMemoryStore()` and pass it in here. Default: a fresh
+   * private store (sharing is still in place across workers, but the
+   * test cannot peek).
+   */
+  readonly limiterStore?: LimiterMemoryStore
 }
 
 /**
@@ -207,6 +218,17 @@ export function k8sFakeStackLayer(opts: K8sFakeStackOpts) {
   const cdrBuffer = makeCdrRecordsBuffer()
   const sharedCdrLayer = CdrWriter.sharedTestLayer(cdrBuffer)
 
+  // Single shared `CallLimiter` backing store across the whole cluster.
+  // Mirrors production where every worker points at one cluster-shared
+  // Redis (`LimiterRedisClient`). The limiter only consults windowSec /
+  // activeWindows / ttlSec from AppConfig — identical across workers —
+  // so we can provide AppConfig once at SUT scope and the resulting
+  // layer is `R = never` for every worker that consumes it.
+  const limiterStore = opts.limiterStore ?? makeLimiterMemoryStore()
+  const sharedLimiterLayer = CallLimiter.sharedMemoryLayer(limiterStore).pipe(
+    Layer.provide(Layer.succeed(AppConfig, opts.config))
+  )
+
   // The cluster + workers + replication all live in one effect so
   // the per-worker handles, peer logs, and lifecycle wiring share
   // one closure. This replaces the previous eager `Workers` layer
@@ -217,6 +239,7 @@ export function k8sFakeStackLayer(opts: K8sFakeStackOpts) {
     opts.config,
     opts.handlers,
     sharedCdrLayer,
+    sharedLimiterLayer,
   )
 
   return Layer.mergeAll(
@@ -261,6 +284,7 @@ function buildClusterWithWorkersLayer(
   baseConfig: AppConfigData,
   handlers: HandlerRegistry,
   sharedCdrLayer: Layer.Layer<CdrWriter>,
+  sharedLimiterLayer: Layer.Layer<CallLimiter>,
 ): Layer.Layer<
   SimulatedK8sCluster,
   never,
@@ -319,6 +343,7 @@ function buildClusterWithWorkersLayer(
               config: perWorkerConfig(baseConfig, w.address, w.id as unknown as string),
               storageLayer: fabric.storageLayerOf(w.ordinal),
               cdrLayer: sharedCdrLayer,
+              limiterLayer: sharedLimiterLayer,
             }),
             fabric.cachePortLayerOf(w.ordinal),
           )

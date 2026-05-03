@@ -22,7 +22,6 @@ import type {
   LastMessageInfo,
   MessageContext,
   SendStep,
-  StepRef,
 } from "./types.js"
 import type { PendingRequest, SentRequestRecord } from "./validation.js"
 
@@ -273,7 +272,6 @@ function applyOutgoingSdpOriginRewrite(
 // ---------------------------------------------------------------------------
 
 export function buildMessageContext(
-  agentName: string,
   agentInfo: AgentInfo & { tag: string; callId: string },
   target: { ip: string; port: number },
   dialogState: AgentDialogState,

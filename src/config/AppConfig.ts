@@ -12,6 +12,15 @@ export const AppConfigData = Schema.Struct({
   sipLocalIp: Schema.String,
   sipLocalPort: Schema.Int,
   redisUrl: Schema.String,
+  /**
+   * Redis URL for the **call limiter**. In an HA deployment with per-pod
+   * sidecar Redis for call context (`docs/replication/call-cache-backup.md`),
+   * the limiter MUST point at a separate cluster-shared Redis — otherwise
+   * each worker's counter is independent and limits are not enforced
+   * cluster-wide. Sourced from `LIMITER_REDIS_URL`; falls back to
+   * `redisUrl` with a startup warning when unset.
+   */
+  limiterRedisUrl: Schema.String,
   redisKeyPrefix: Schema.String,
   limiterWindowSeconds: Schema.Int,
   limiterActiveWindows: Schema.Int,
@@ -200,6 +209,9 @@ function readConfigFromEnv(): AppConfigData {
     sipLocalIp: envOrDefault("SIP_LOCAL_IP", "127.0.0.1"),
     sipLocalPort: parseInt(envOrDefault("SIP_LOCAL_PORT", "5060"), 10),
     redisUrl: envOrDefault("REDIS_URL", "redis://localhost:6379"),
+    limiterRedisUrl:
+      process.env["LIMITER_REDIS_URL"] ??
+      envOrDefault("REDIS_URL", "redis://localhost:6379"),
     redisKeyPrefix: envOrDefault("REDIS_KEY_PREFIX", "sipas"),
     limiterWindowSeconds: parseInt(envOrDefault("LIMITER_WINDOW_SECONDS", "300"), 10),
     limiterActiveWindows: parseInt(envOrDefault("LIMITER_ACTIVE_WINDOWS", "3"), 10),

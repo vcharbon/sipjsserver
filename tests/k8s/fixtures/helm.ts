@@ -8,6 +8,7 @@ export const REPO_ROOT = resolve(here, "../../..")
 
 export const PROXY_CHART = resolve(REPO_ROOT, "deploy/helm/sip-front-proxy")
 export const WORKER_CHART = resolve(REPO_ROOT, "deploy/helm/b2bua-worker")
+export const REDIS_CHART = resolve(REPO_ROOT, "tests/k8s/charts/redis")
 export const SIPP_CHART = resolve(REPO_ROOT, "tests/k8s/charts/sipp")
 
 export const PROXY_VALUES = resolve(REPO_ROOT, "tests/k8s/values/sip-front-proxy.yaml")
@@ -69,6 +70,14 @@ export const helmStatus = (release: string, namespace: string) =>
       "json",
     ])
     return JSON.parse(stdout) as { name: string; info: { status: string } }
+  })
+
+export const installRedis = (namespace: string) =>
+  helmInstall({
+    release: "redis",
+    chart: REDIS_CHART,
+    namespace,
+    waitTimeoutSec: 60,
   })
 
 export const installWorker = (namespace: string) =>

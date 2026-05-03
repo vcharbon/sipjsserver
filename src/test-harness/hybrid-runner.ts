@@ -30,7 +30,7 @@
  * Reports land under `test-results/real-clock/registrarFrontProxy-kind/`.
  */
 
-import { Effect, Layer } from "effect"
+import { Data, Effect, Layer } from "effect"
 import type { Scope } from "effect"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
@@ -89,6 +89,16 @@ export function flushHybridIndexReport(outputDir: string): void {
 // Host-reachable IP discovery (kind docker bridge gateway)
 // ---------------------------------------------------------------------------
 
+export class HostReachableIpError extends Data.TaggedError("HostReachableIpError")<{
+  readonly message: string
+  readonly cause?: unknown
+}> {}
+
+export class HybridScenarioFailure extends Data.TaggedError("HybridScenarioFailure")<{
+  readonly scenarioName: string
+  readonly report: string
+}> {}
+
 export const discoverHostReachableIp = Effect.tryPromise({
   try: async () => {
     const { stdout } = await execFileAsync("docker", [
@@ -104,16 +114,17 @@ export const discoverHostReachableIp = Effect.tryPromise({
       .filter((s) => s.length > 0)
     const ipv4 = lines.find((l) => !l.includes(":") && l.length > 0)
     if (!ipv4) {
-      throw new Error(
-        `Could not determine kind network gateway (got: ${JSON.stringify(lines)})`,
-      )
+      throw new HostReachableIpError({
+        message: `Could not determine kind network gateway (got: ${JSON.stringify(lines)})`,
+      })
     }
     return ipv4
   },
   catch: (err) =>
-    new Error(
-      `discoverHostReachableIp failed: ${err instanceof Error ? err.message : String(err)}`,
-    ),
+    new HostReachableIpError({
+      message: `discoverHostReachableIp failed: ${err instanceof Error ? err.message : String(err)}`,
+      cause: err,
+    }),
 })
 
 // ---------------------------------------------------------------------------
@@ -127,6 +138,7 @@ function defaultHybridAppConfig(): AppConfigData {
     sipLocalPort: 5060,
     workerServiceName: "b2bua-worker",
     redisUrl: "redis://unused",
+    limiterRedisUrl: "redis://unused",
     redisKeyPrefix: "hybrid",
     limiterWindowSeconds: 300,
     limiterActiveWindows: 3,
@@ -317,9 +329,10 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
       recordResult(result, outputDir)
       if (result.failed > 0) {
         const report = formatReport(result)
-        throw new Error(
-          `Scenario "${result.scenarioName}" failed:\n\n${report}`,
-        )
+        return yield* new HybridScenarioFailure({
+          scenarioName: result.scenarioName,
+          report,
+        })
       }
     })
 

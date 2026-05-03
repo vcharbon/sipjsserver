@@ -44,7 +44,7 @@ export {
   b2buaEmbeddedLayer,
   defaultEmbeddedAppConfig,
 } from "./embedded.js"
-export type { B2buaEmbeddedOptions } from "./embedded.js"
+export type { B2buaEmbeddedOptions, B2buaLayer } from "./embedded.js"
 
 // Core layer + handlers (for advanced consumers wiring their own deps)
 export { B2buaCoreLayer, handlers, ruleRegistry, buildHandlers } from "./B2buaCore.js"
@@ -88,5 +88,20 @@ export { CdrWriter } from "../cdr/CdrWriter.js"
 export { TracingService } from "../tracing/TracingService.js"
 export { OverloadController } from "./OverloadController.js"
 export { DrainingState } from "./DrainingState.js"
+export { WorkerReadiness } from "../cache/WorkerReadiness.js"
 export { UdpTransport } from "../sip/UdpTransport.js"
 export { MetricsRegistry } from "../observability/MetricsRegistry.js"
+
+// Read-side seam exposing the values the B2BUA stamps on outbound
+// Contact / Via — for consumers running their own templating layer
+// (Issue 8). See docs/external-usage/decision-engine-contract.md.
+export { StackIdentity } from "./stack-identity.js"
+export type { StackIdentityApi } from "./stack-identity.js"
+
+// Service tags whose Out shows up in `B2buaLayer` — type-only re-exports
+// so consumers can name them in their own type annotations without a
+// runtime dep cycle.
+export type { CallState } from "../call/CallState.js"
+export type { TimerService } from "../call/TimerService.js"
+export type { SipParser } from "../sip/Parser.js"
+export type { TransactionLayer } from "../sip/TransactionLayer.js"

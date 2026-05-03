@@ -871,7 +871,6 @@ function executeSend(
     const target = { ip: tgt.host, port: tgt.port }
     const currentAgentInfo = { ...agentInfo, callId: dialogState.callId }
     const ctx = buildMessageContext(
-      step.agent,
       currentAgentInfo,
       target,
       dialogState,
@@ -1122,7 +1121,6 @@ function executeExpect(
         const tgt = state.targetFor(step.agent)
         const target = { ip: tgt.host, port: tgt.port }
         const ctx = buildMessageContext(
-          step.agent,
           agentInfo,
           target,
           dialogState,

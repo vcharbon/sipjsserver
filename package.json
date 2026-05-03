@@ -38,7 +38,7 @@
     "lint": "eslint",
     "test": "npm run test:fake && npm run test:live:short",
     "test:ci": "npm run test:fake && npm run test:live:medium",
-    "test:nightly": "npm run test:fake && npm run test:live:long && npm run test:k8s:failover",
+    "test:nightly": "npm run test:fake && npm run test:live:long && npm run test:k8s:failover && npm run test:k8s:soak",
     "test:fake": "vitest run -c vitest.config.fake.ts",
     "test:live:short": "TEST_TIER=short vitest run -c vitest.config.live.ts",
     "test:live:medium": "TEST_TIER=medium vitest run -c vitest.config.live.ts",
@@ -52,14 +52,15 @@
     "test:k8s:proxy-host-mode": "helm upgrade --install sip-front-proxy deploy/helm/sip-front-proxy -n sip-test --create-namespace -f tests/k8s/values/sip-front-proxy.yaml -f tests/k8s/values/sip-front-proxy.host.yaml --wait --timeout 120s",
     "test:k8s:proxy-cluster-mode": "helm upgrade --install sip-front-proxy deploy/helm/sip-front-proxy -n sip-test --create-namespace -f tests/k8s/values/sip-front-proxy.yaml --wait --timeout 120s",
     "test:k8s:failover": "tsx tests/k8s/scripts/up-if-needed.ts && vitest run -c vitest.config.k8s.ts tests/k8s/proxy-drain.test.ts tests/k8s/proxy-failover-*.test.ts",
+    "test:k8s:soak": "tsx tests/k8s/scripts/up-if-needed.ts && vitest run -c vitest.config.k8s.ts tests/k8s/proxy-limiter-soak.test.ts",
     "test:rule-kill": "echo 'test:rule-kill is disabled — too slow pending fake-clock speedup. Run `tsx scripts/rule-kill.ts` manually if needed.' && exit 0",
     "dev:profile": "NODE_OPTIONS='--max-old-space-size=600 --expose-gc' B2BUA_EXPOSE_GC=1 CHOKIDAR_USEPOLLING=true tsx --env-file=.env --watch src/main.ts",
     "start:profile": "NODE_OPTIONS='--max-old-space-size=600 --expose-gc' B2BUA_EXPOSE_GC=1 node --env-file=.env dist/main.js",
     "prepare": "effect-language-service patch"
   },
   "dependencies": {
-    "@effect/opentelemetry": "^4.0.0-beta.42",
-    "@effect/platform-node": "^4.0.0-beta.42",
+    "@effect/opentelemetry": "4.0.0-beta.42",
+    "@effect/platform-node": "4.0.0-beta.43",
     "@kubernetes/client-node": "^1.4.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.208.0",
@@ -69,7 +70,7 @@
     "@opentelemetry/sdk-trace-base": "^2.6.1",
     "@opentelemetry/sdk-trace-node": "^2.6.1",
     "@opentelemetry/semantic-conventions": "^1.40.0",
-    "effect": "^4.0.0-beta.42",
+    "effect": "4.0.0-beta.43",
     "ioredis": "^5.10.1"
   },
   "devDependencies": {

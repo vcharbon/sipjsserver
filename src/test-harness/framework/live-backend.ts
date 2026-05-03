@@ -96,12 +96,12 @@ export function createLiveTransport(opts?: {
             port: config.port ?? 0,
             queueMax: AGENT_QUEUE_MAX,
           }).pipe(
-            Effect.catch((err) =>
-              Effect.fail(new TransportError({
+            Effect.mapError((err) =>
+              new TransportError({
                 message:
                   `Failed to bind agent "${name}" at ${requestedIp}:${config.port ?? 0} on network ${agentNetwork}: ${err.message}`,
                 cause: err,
-              }))
+              })
             )
           )
 
@@ -147,8 +147,8 @@ export function createLiveTransport(opts?: {
           return yield* new TransportError({ message: `Unknown agent "${agentName}"` })
         }
         yield* agent.endpoint.send(buf, port, address).pipe(
-          Effect.catch((err) =>
-            Effect.fail(new TransportError({ message: err.message, cause: err }))
+          Effect.mapError((err) =>
+            new TransportError({ message: err.message, cause: err })
           )
         )
       }),

@@ -25,7 +25,7 @@ import type {
   StepRef,
 } from "./types.js"
 import type { ValidationCheckName, ValidationOverrides } from "./validation.js"
-import { makeStepRef, resetStepRefIds } from "./types.js"
+import { makeStepRef } from "./types.js"
 import { defined } from "./utils.js"
 
 // ---------------------------------------------------------------------------

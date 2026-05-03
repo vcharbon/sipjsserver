@@ -9,7 +9,8 @@
 
 import { Clock, Effect, Layer, MutableHashMap, Option, ServiceMap } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
-import { RedisClient, RedisError } from "../redis/RedisClient.js"
+import { LimiterRedisClient } from "../redis/LimiterRedisClient.js"
+import type { RedisError } from "../redis/RedisClient.js"
 
 // ---------------------------------------------------------------------------
 // Lua scripts
@@ -84,7 +85,7 @@ export class CallLimiter extends ServiceMap.Service<
     CallLimiter,
     Effect.gen(function* () {
       const config = yield* AppConfig
-      const redis = yield* RedisClient
+      const redis = yield* LimiterRedisClient
 
       const windowSec = config.limiterWindowSeconds
       const activeWindows = config.limiterActiveWindows
@@ -166,110 +167,144 @@ export class CallLimiter extends ServiceMap.Service<
     CallLimiter,
     Effect.gen(function* () {
       const config = yield* AppConfig
-      const windowSec = config.limiterWindowSeconds
-      const activeWindows = config.limiterActiveWindows
-      const ttlSec = config.limiterTtlSeconds
-
-      interface Entry {
-        count: number
-        expiresAtMs: number
-      }
-
-      const store = MutableHashMap.empty<string, Entry>()
-
-      const currentEpochSec = Effect.map(Clock.currentTimeMillis, (ms) => Math.floor(ms / 1000))
-
-      const computeWindowFromSec = (sec: number): number => sec - (sec % windowSec)
-
-      /** Sweep entries whose TTL has elapsed. */
-      const sweep = (nowMs: number): void => {
-        const expired: string[] = []
-        for (const [k, v] of store) {
-          if (v.expiresAtMs <= nowMs) expired.push(k)
-        }
-        for (const k of expired) MutableHashMap.remove(store, k)
-      }
-
-      const keyFor = (limiterId: string, window: number) => `limiter:${limiterId}:${window}`
-
-      const checkAndIncrement = Effect.fnUntraced(function* (
-        limiterId: string,
-        limit: number
-      ) {
-        const sec = yield* currentEpochSec
-        const ms = sec * 1000
-        const currentWin = computeWindowFromSec(sec)
-
-        return yield* Effect.sync(() => {
-          sweep(ms)
-
-          let total = 0
-          for (let i = activeWindows - 1; i >= 0; i--) {
-            const w = currentWin - i * windowSec
-            const opt = MutableHashMap.get(store, keyFor(limiterId, w))
-            if (Option.isSome(opt)) total += opt.value.count
-          }
-
-          if (total >= limit) {
-            return { allowed: false, currentWindow: currentWin }
-          }
-
-          const k = keyFor(limiterId, currentWin)
-          const existing = MutableHashMap.get(store, k)
-          const newCount = Option.isSome(existing) ? existing.value.count + 1 : 1
-          MutableHashMap.set(store, k, { count: newCount, expiresAtMs: ms + ttlSec * 1000 })
-          return { allowed: true, currentWindow: currentWin }
-        })
-      })
-
-      const decrement = Effect.fnUntraced(function* (
-        limiterId: string,
-        originWindow: number
-      ) {
-        const ms = yield* Clock.currentTimeMillis
-        yield* Effect.sync(() => {
-          sweep(ms)
-          const k = keyFor(limiterId, originWindow)
-          const opt = MutableHashMap.get(store, k)
-          if (Option.isSome(opt)) {
-            const next = Math.max(0, opt.value.count - 1)
-            MutableHashMap.set(store, k, { count: next, expiresAtMs: opt.value.expiresAtMs })
-          }
-        })
-      })
-
-      const refresh = Effect.fnUntraced(function* (
-        limiterId: string,
-        originWindow: number
-      ) {
-        const sec = yield* currentEpochSec
-        const ms = sec * 1000
-        const currentWin = computeWindowFromSec(sec)
-        if (originWindow === currentWin) return currentWin
-
-        yield* Effect.sync(() => {
-          sweep(ms)
-          const ck = keyFor(limiterId, currentWin)
-          const cExisting = MutableHashMap.get(store, ck)
-          const cNext = Option.isSome(cExisting) ? cExisting.value.count + 1 : 1
-          MutableHashMap.set(store, ck, { count: cNext, expiresAtMs: ms + ttlSec * 1000 })
-
-          const ok = keyFor(limiterId, originWindow)
-          const oExisting = MutableHashMap.get(store, ok)
-          if (Option.isSome(oExisting)) {
-            const next = Math.max(0, oExisting.value.count - 1)
-            MutableHashMap.set(store, ok, { count: next, expiresAtMs: oExisting.value.expiresAtMs })
-          }
-        })
-        return currentWin
-      })
-
-      return {
-        checkAndIncrement,
-        decrement,
-        refresh,
-        currentWindow: Effect.map(currentEpochSec, computeWindowFromSec)
-      }
+      return buildMemoryLimiterImpl(config, MutableHashMap.empty<string, LimiterMemoryEntry>())
     })
   )
+
+  /**
+   * Like `memoryLayer` but the backing `MutableHashMap` is supplied
+   * externally. Used by multi-worker fake-stack SUTs to share **one**
+   * counter map across every simulated worker — mirrors the cluster-shared
+   * Redis topology used by the production `LimiterRedisClient`.
+   *
+   * Tests can also peek/reset the map directly via the handle they passed in.
+   */
+  static readonly sharedMemoryLayer = (
+    store: LimiterMemoryStore
+  ): Layer.Layer<CallLimiter, never, AppConfig> =>
+    Layer.effect(
+      CallLimiter,
+      Effect.gen(function* () {
+        const config = yield* AppConfig
+        return buildMemoryLimiterImpl(config, store)
+      })
+    )
+}
+
+// ---------------------------------------------------------------------------
+// In-memory limiter — shared body for `memoryLayer` and `sharedMemoryLayer`.
+// ---------------------------------------------------------------------------
+
+export interface LimiterMemoryEntry {
+  count: number
+  expiresAtMs: number
+}
+
+export type LimiterMemoryStore = MutableHashMap.MutableHashMap<string, LimiterMemoryEntry>
+
+/** Construct a fresh empty store — convenience for SUT builders. */
+export const makeLimiterMemoryStore = (): LimiterMemoryStore =>
+  MutableHashMap.empty<string, LimiterMemoryEntry>()
+
+const buildMemoryLimiterImpl = (
+  config: { limiterWindowSeconds: number; limiterActiveWindows: number; limiterTtlSeconds: number },
+  store: LimiterMemoryStore
+) => {
+  const windowSec = config.limiterWindowSeconds
+  const activeWindows = config.limiterActiveWindows
+  const ttlSec = config.limiterTtlSeconds
+
+  const currentEpochSec = Effect.map(Clock.currentTimeMillis, (ms) => Math.floor(ms / 1000))
+
+  const computeWindowFromSec = (sec: number): number => sec - (sec % windowSec)
+
+  /** Sweep entries whose TTL has elapsed. */
+  const sweep = (nowMs: number): void => {
+    const expired: string[] = []
+    for (const [k, v] of store) {
+      if (v.expiresAtMs <= nowMs) expired.push(k)
+    }
+    for (const k of expired) MutableHashMap.remove(store, k)
+  }
+
+  const keyFor = (limiterId: string, window: number) => `limiter:${limiterId}:${window}`
+
+  const checkAndIncrement = Effect.fnUntraced(function* (
+    limiterId: string,
+    limit: number
+  ) {
+    const sec = yield* currentEpochSec
+    const ms = sec * 1000
+    const currentWin = computeWindowFromSec(sec)
+
+    return yield* Effect.sync(() => {
+      sweep(ms)
+
+      let total = 0
+      for (let i = activeWindows - 1; i >= 0; i--) {
+        const w = currentWin - i * windowSec
+        const opt = MutableHashMap.get(store, keyFor(limiterId, w))
+        if (Option.isSome(opt)) total += opt.value.count
+      }
+
+      if (total >= limit) {
+        return { allowed: false, currentWindow: currentWin }
+      }
+
+      const k = keyFor(limiterId, currentWin)
+      const existing = MutableHashMap.get(store, k)
+      const newCount = Option.isSome(existing) ? existing.value.count + 1 : 1
+      MutableHashMap.set(store, k, { count: newCount, expiresAtMs: ms + ttlSec * 1000 })
+      return { allowed: true, currentWindow: currentWin }
+    })
+  })
+
+  const decrement = Effect.fnUntraced(function* (
+    limiterId: string,
+    originWindow: number
+  ) {
+    const ms = yield* Clock.currentTimeMillis
+    yield* Effect.sync(() => {
+      sweep(ms)
+      const k = keyFor(limiterId, originWindow)
+      const opt = MutableHashMap.get(store, k)
+      if (Option.isSome(opt)) {
+        const next = Math.max(0, opt.value.count - 1)
+        MutableHashMap.set(store, k, { count: next, expiresAtMs: opt.value.expiresAtMs })
+      }
+    })
+  })
+
+  const refresh = Effect.fnUntraced(function* (
+    limiterId: string,
+    originWindow: number
+  ) {
+    const sec = yield* currentEpochSec
+    const ms = sec * 1000
+    const currentWin = computeWindowFromSec(sec)
+    if (originWindow === currentWin) return currentWin
+
+    yield* Effect.sync(() => {
+      sweep(ms)
+      const ck = keyFor(limiterId, currentWin)
+      const cExisting = MutableHashMap.get(store, ck)
+      const cNext = Option.isSome(cExisting) ? cExisting.value.count + 1 : 1
+      MutableHashMap.set(store, ck, { count: cNext, expiresAtMs: ms + ttlSec * 1000 })
+
+      const ok = keyFor(limiterId, originWindow)
+      const oExisting = MutableHashMap.get(store, ok)
+      if (Option.isSome(oExisting)) {
+        const next = Math.max(0, oExisting.value.count - 1)
+        MutableHashMap.set(store, ok, { count: next, expiresAtMs: oExisting.value.expiresAtMs })
+      }
+    })
+    return currentWin
+  })
+
+  return {
+    checkAndIncrement,
+    decrement,
+    refresh,
+    currentWindow: Effect.map(currentEpochSec, computeWindowFromSec)
+  }
 }

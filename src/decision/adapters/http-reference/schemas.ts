@@ -64,6 +64,8 @@ export const WireNewCallRejectResponse = Schema.Struct({
   action: Schema.Literal("reject"),
   reject_code: Schema.Int,
   reject_reason: Schema.optional(Schema.String),
+  /** Mirrors the canonical `NewCallRejectResponse.update_headers` slot. */
+  update_headers: Schema.optional(SipHeaderUpdates),
 })
 export type WireNewCallRejectResponse = typeof WireNewCallRejectResponse.Type
 

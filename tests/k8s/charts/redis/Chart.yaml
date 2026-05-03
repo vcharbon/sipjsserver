@@ -1,0 +1,9 @@
+apiVersion: v2
+name: redis
+description: Cluster-shared Redis for the call limiter (LimiterRedisClient). The
+  per-pod sidecar Redis on each b2bua-worker holds the call-context cache and is
+  separately defined; this single-instance Redis exists so concurrent-call
+  counters are global across the fleet.
+type: application
+version: 0.2.0
+appVersion: "7.4"

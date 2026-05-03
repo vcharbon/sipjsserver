@@ -24,6 +24,10 @@ export function testAppConfigDefaults(overrides?: Partial<AppConfigData>): AppCo
     sipLocalPort: 15060,
     workerServiceName: "b2bua-worker",
     redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
+    limiterRedisUrl:
+      process.env.LIMITER_REDIS_URL ??
+      process.env.REDIS_URL ??
+      "redis://localhost:6379",
     redisKeyPrefix: `test-${Date.now()}`,
     limiterWindowSeconds: 300,
     limiterActiveWindows: 3,

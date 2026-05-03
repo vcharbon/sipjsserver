@@ -6,7 +6,7 @@
  */
 
 import { Effect } from "effect"
-import type { SipRequest } from "../sip/types.js"
+import type { SipHeader, SipRequest } from "../sip/types.js"
 import type { HandlerResult, OutboundEnvelope, Handler } from "../sip/SipRouter.js"
 import {
   getHeader,
@@ -18,6 +18,25 @@ import { addCdrEvent } from "../call/CallModel.js"
 import { terminateCallEffects } from "./helpers.js"
 import { buildCallContact } from "./stack-identity.js"
 import { applyRoute } from "../decision/apply/applyRoute.js"
+
+/**
+ * Translate a `NewCallRejectResponse.update_headers` map into a flat
+ * `SipHeader[]` for {@link generateResponse}'s `extraHeaders` slot. On
+ * the reject path there is no called-side response to merge with, so
+ * `null`-valued entries are no-ops (nothing to delete) — silently
+ * dropped, matching the plan's stated semantic for Issue 9.
+ */
+function rejectExtraHeaders(
+  updates: Record<string, string | null> | undefined,
+): SipHeader[] {
+  if (updates === undefined) return []
+  const out: SipHeader[] = []
+  for (const [name, value] of Object.entries(updates)) {
+    if (value === null) continue
+    out.push({ name, value })
+  }
+  return out
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -103,10 +122,17 @@ export const handleInitialInvite: Handler = (ctx) =>
       const code = routing.reject_code
       const reason = routing.reject_reason ?? "Rejected"
       yield* Effect.logDebug(`Call ${callRef} rejected by call control: ${code} ${reason}`)
-      const rejectResp = generateResponse(req, code, reason, {
-        toTag: newTag(),
-        contact: aLegContact,
-      })
+      const extraHeaders = rejectExtraHeaders(
+        routing.update_headers as Record<string, string | null> | undefined,
+      )
+      // Consumer-supplied Contact (e.g. on a 302 redirect) should
+      // override the B2BUA's a-leg contact — pass `contact: undefined`
+      // when the consumer authored their own.
+      const consumerContact = extraHeaders.some((h) => h.name.toLowerCase() === "contact")
+      const responseOpts: Parameters<typeof generateResponse>[3] = consumerContact
+        ? { toTag: newTag(), extraHeaders }
+        : { toTag: newTag(), contact: aLegContact, extraHeaders }
+      const rejectResp = generateResponse(req, code, reason, responseOpts)
       const outbound: OutboundEnvelope[] = [{
         message: rejectResp,
         destination: { host: rinfo.address, port: rinfo.port },

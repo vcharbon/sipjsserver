@@ -19,6 +19,35 @@ suitable for single-node use.
 Full subpath map and install instructions:
 [docs/external-usage/README.md](docs/external-usage/README.md).
 
+## Compatibility
+
+| Component | Version |
+|-----------|---------|
+| Node      | >=20.0.0 (matches `effect`'s baseline) |
+| `effect`  | `4.0.0-beta.43` (pinned exactly — see below) |
+| `@effect/platform-node` | `4.0.0-beta.43` |
+| `@effect/opentelemetry` | `4.0.0-beta.42` |
+
+**Why an exact pin (no `^`)?** The Effect 4 beta line ships occasional
+API removals between betas. We pin to the exact version this repo is
+built and tested against to keep consumer installs deterministic. If
+the consumer's `node_modules/` resolves a *different* Effect (because a
+sibling dependency hoisted one), runtime checks like
+`typeof Layer.suspend === "function"` may unexpectedly return `false`.
+
+**Quick consumer sanity check:**
+
+```sh
+node -e "import('effect').then((L) => console.log('Layer.suspend =', typeof L.Layer.suspend))"
+```
+
+Expected: `Layer.suspend = function`. If it prints `undefined`, the
+consumer's app has resolved a different Effect than ours — usually a
+lockfile drift or a transitive dep pulling an older `effect`. Fix at
+the lockfile level (`npm dedupe` or pin the same exact version on the
+consumer side); a future migration to `peerDependencies` + pnpm will
+make this category of bug impossible.
+
 > **Not on npm yet.** The package is consumed directly from a local
 > git checkout. The simplest workflow is `git clone`, `npm install`,
 > `npm run build` in this repo, then `"@vcharbon/sipjs":

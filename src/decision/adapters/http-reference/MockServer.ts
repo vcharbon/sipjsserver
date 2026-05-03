@@ -117,11 +117,15 @@ function buildApiCallResponse(body: NewCallRequestType, instruction: Record<stri
   const user = userMatch?.[1] ?? ""
 
   if (instruction.action === "reject") {
-    return {
+    const reject: Record<string, unknown> = {
       action: "reject" as const,
       reject_code: (instruction.reject_code as number) ?? 403,
-      reject_reason: (instruction.reject_reason as string) ?? "Rejected"
+      reject_reason: (instruction.reject_reason as string) ?? "Rejected",
     }
+    if (instruction.update_headers !== undefined) {
+      reject.update_headers = instruction.update_headers
+    }
+    return reject as NewCallResponseType
   }
 
   // Default: action === "route"
