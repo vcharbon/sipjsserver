@@ -17,3 +17,9 @@ data:
 {{ .Files.Get "scenarios/uas-basic.xml" | indent 4 }}
   uac-limiter-soak.xml: |-
 {{ .Files.Get "scenarios/uac-limiter-soak.xml" | indent 4 }}
+  uac-long-options.xml: |-
+{{ .Files.Get "scenarios/uac-long-options.xml" | indent 4 }}
+  uac-endurance-short.xml: |-
+{{ .Files.Get "scenarios/uac-endurance-short.xml" | indent 4 }}
+  uac-endurance-limiter.xml: |-
+{{ .Files.Get "scenarios/uac-endurance-limiter.xml" | indent 4 }}

@@ -50,7 +50,38 @@
     ]]>
   </send>
   <recv request="ACK" rtd="true" crlf="true"/>
+
+  <!-- Tolerant of in-dialog OPTIONS sent by the B2BUA's keepalive rule
+       (TimerRules.keepaliveRule, default 900s interval). Short calls
+       complete well before the keepalive timer fires so the optional
+       recv is simply skipped; long endurance calls (20-min holds) see
+       at least one OPTIONS and answer with 200 OK before looping back
+       to wait for either another OPTIONS or the eventual BYE. -->
+  <label id="wait_terminator"/>
+  <recv request="OPTIONS" optional="true" crlf="true" next="answer_options"/>
   <recv request="BYE" crlf="true"/>
+  <nop next="answer_bye"/>
+
+  <label id="answer_options"/>
+  <!-- 200 OK to in-dialog OPTIONS echoes [last_Record-Route:] (same as
+       the BYE 200 OK below) so the reply traces back through the proxy
+       with the proxy's stickiness cookie intact. -->
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="wait_terminator"/>
+
+  <label id="answer_bye"/>
   <send>
     <![CDATA[
       SIP/2.0 200 OK
