@@ -290,10 +290,35 @@ export const optionsKeepaliveLayer = (
             if (msg.type !== "response") return
             const callId = msg.parsed.callId
             if (typeof callId !== "string" || callId.length === 0) return
+
+            // ── Identify the worker this reply is for ──────────────────
+            // Fast path: the response's Call-ID is still in
+            // `pendingByCallId` (i.e. its matching `reapTimeouts` has
+            // not yet fired). Use that mapping and remove it so a
+            // duplicate reply does not double-credit the same probe.
+            //
+            // Fallback path: under sustained load, `reapTimeouts` may
+            // fire before this handler for a packet that arrived
+            // before the reap deadline (Node event-loop ordering); the
+            // pending entry is then gone but the reply is still valid.
+            // Recover the WorkerId from the Call-ID prefix WE minted
+            // (`probe-<id>-<nowMs>-<tag>@<probeAddr>`) so the late
+            // reply still resets the miss counter and re-marks the
+            // worker `alive`. This MUST NOT trust packets we did not
+            // mint, so we require both the `probe-` prefix AND a
+            // currently-registered WorkerId.
             const idOpt = MutableHashMap.get(pendingByCallId, callId)
-            if (Option.isNone(idOpt)) return
-            const id = idOpt.value
-            MutableHashMap.remove(pendingByCallId, callId)
+            let id: WorkerId
+            if (Option.isSome(idOpt)) {
+              id = idOpt.value
+              MutableHashMap.remove(pendingByCallId, callId)
+            } else {
+              const fallback = parseProbeCallId(callId)
+              if (fallback === undefined) return
+              const reg = yield* registry.resolve(fallback)
+              if (Option.isNone(reg)) return
+              id = fallback
+            }
 
             // Reset miss counter on any response, then translate the
             // status into a health value. 200 → alive; 503 → draining
@@ -407,6 +432,27 @@ const classify503 = (reasonHeader: string | undefined): WorkerHealth => {
   return reasonHeader.toLowerCase().includes("not-ready")
     ? "not-ready"
     : "draining"
+}
+
+/**
+ * Recover the `WorkerId` from a Call-ID we minted in `fanOutOptions`
+ * (`probe-<workerId>-<nowMs>-<tag>@<probeAddr>`). Returns `undefined`
+ * for any string that is not in our minted shape — callers MUST treat
+ * undefined as "do not trust this packet".
+ *
+ * The regex anchors on the trailing `-<nowMs>-<tag>@…` so it parses
+ * unambiguously even for K8s StatefulSet pod names ending in a digit
+ * (e.g. `b2bua-worker-0`): greedy `(.+)` claims "b2bua-worker-0",
+ * `\d+` claims the millisecond timestamp, `[^-@]+` claims the base36
+ * `newTag()` (which only emits `[0-9a-z]`, no dashes), and `@` pins
+ * the boundary to the start of the probe address.
+ */
+const PROBE_CID_RE = /^probe-(.+)-\d+-[^-@]+@/
+const parseProbeCallId = (callId: string): WorkerId | undefined => {
+  const m = PROBE_CID_RE.exec(callId)
+  const captured = m?.[1]
+  if (captured === undefined) return undefined
+  return captured as WorkerId
 }
 
 /**
