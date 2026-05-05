@@ -14,7 +14,7 @@ For the full design rationale see
 npm run test:k8s:endurance:smoke -- --caps 20
 
 # Real run — defaults to 6h SOAK at 45 CAPS, ~6h 38min wall time
-npm run test:k8s:endurance -- --caps 20
+npm run test:k8s:endurance -- --caps 20 --duration 1h
 
 # 24h pre-release run with explicit seed for reproducibility
 npm run test:k8s:endurance -- --duration 24h --seed 12345

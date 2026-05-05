@@ -82,6 +82,13 @@ interface MetadataFile {
     tCooldownEnd: string
     tDrainEnd: string
   }
+  /** Optional sippStats summary if present (newer runs include this). */
+  sippStats?: ReadonlyArray<{
+    name: string
+    created: number
+    successful: number
+    failed: number
+  }>
   chaosEventsScheduled: number
   chaosEventsExecuted: number
   chaosEventsSkipped: number
@@ -121,6 +128,7 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
     tWarmupStart: parseDateOr(meta?.phase.tWarmupStart, new Date(0)),
     tSoakStart: parseDateOr(meta?.phase.tSoakStart, new Date(0)),
     tSoakEnd: parseDateOr(meta?.phase.tSoakEnd, new Date(8.64e15)),
+    tCooldownEnd: parseDateOr(meta?.phase.tCooldownEnd, new Date(0)),
     tDrainEnd: parseDateOr(meta?.phase.tDrainEnd, new Date(8.64e15)),
   }
 

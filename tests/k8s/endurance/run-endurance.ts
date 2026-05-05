@@ -47,6 +47,15 @@ import { parseSippStat } from "../fixtures/sippOutcomes.js"
 const NAMESPACE = "sip-test"
 const LIMITER_PROBE_ID = "endurance-probe"
 
+// K8s Job names must be RFC 1123 subdomain compliant: lowercase
+// alphanumerics + '-' + '.', start/end alphanumeric, ≤63 chars.
+const k8sJobName = (s: string): string =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9.-]/g, "-")
+    .slice(0, 50)
+    .replace(/^[-.]+|[-.]+$/g, "")
+
 class EnduranceAbort extends Data.TaggedError("EnduranceAbort")<{
   readonly phase: string
   readonly reason: string
@@ -142,7 +151,10 @@ const parseArgs = (argv: ReadonlyArray<string>): CliArgs => {
     seed: parseInt(get("seed", String(Date.now())), 10),
     reuseCluster: flags.has("reuse-cluster"),
     smoke,
-    runId: get("run-id", `endurance-${new Date().toISOString().replace(/[:.]/g, "-")}`),
+    runId: get(
+      "run-id",
+      `endurance-${new Date().toISOString().replace(/[:.]/g, "-").toLowerCase()}`,
+    ),
     noAnalyze: flags.has("no-analyze"),
   }
 }
@@ -252,7 +264,7 @@ const main = (argv: ReadonlyArray<string>) =>
 
       const shortHoldHandle = yield* startSippDaemon({
         namespace: NAMESPACE,
-        name: `endurance-short-${args.runId}`.slice(0, 50),
+        name: k8sJobName(`endurance-short-${args.runId}`),
         scenario: "uac-endurance-short.xml",
         cps: Math.max(1, Math.floor(args.caps * 0.88)),
         // Hold is hardcoded to 30000ms in the scenario — sipp's
@@ -265,7 +277,7 @@ const main = (argv: ReadonlyArray<string>) =>
       const longPeriodMs = Math.max(1000, Math.floor(1000 / longCps))
       const longHandle = yield* startSippDaemon({
         namespace: NAMESPACE,
-        name: `endurance-long-${args.runId}`.slice(0, 50),
+        name: k8sJobName(`endurance-long-${args.runId}`),
         scenario: "uac-long-options.xml",
         callsPerPeriodMs: { count: 1, periodMs: longPeriodMs },
         // Hold is hardcoded to 1200000ms (20 min) in the scenario.
@@ -281,7 +293,7 @@ const main = (argv: ReadonlyArray<string>) =>
       const xapiJson = `{"action":"route","call_limiter":[{"id":"${LIMITER_PROBE_ID}","limit":${args.limiterCap}}]}`
       const limiterHandle = yield* startSippDaemon({
         namespace: NAMESPACE,
-        name: `endurance-limiter-${args.runId}`.slice(0, 50),
+        name: k8sJobName(`endurance-limiter-${args.runId}`),
         scenario: "uac-endurance-limiter.xml",
         cps: limiterCps,
         keyVars: [["xapi", xapiJson]],

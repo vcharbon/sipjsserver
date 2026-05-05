@@ -39,6 +39,13 @@ export interface PhaseBounds {
   readonly tWarmupStart: Date
   readonly tSoakStart: Date
   readonly tSoakEnd: Date
+  /**
+   * End of COOLDOWN — i.e. the moment sipp is sent SIGTERM at the
+   * start of DRAIN. Calls whose tFirstInvite is past this boundary are
+   * POST_DRAIN; calls before it are still steady-state candidates
+   * (sipp is generating, no chaos active during COOLDOWN).
+   */
+  readonly tCooldownEnd: Date
   readonly tDrainEnd: Date
 }
 
@@ -111,7 +118,16 @@ const categorizeOne = (
   if (tInvite !== undefined && tInvite < opts.phase.tSoakStart.getTime()) {
     return { callId, category: "PRE_WARMUP", outcome, success }
   }
-  if (tInvite !== undefined && tInvite > opts.phase.tSoakEnd.getTime()) {
+  // Sipp keeps generating until DRAIN starts (= tCooldownEnd). Calls
+  // launched during COOLDOWN are still legitimate steady-state /
+  // chaos candidates; only calls after sipp is being drained are
+  // POST_DRAIN. (Falls back to tSoakEnd for backward-compat with
+  // older artifacts that don't have tCooldownEnd.)
+  const tDrainBoundary =
+    opts.phase.tCooldownEnd.getTime() > 0
+      ? opts.phase.tCooldownEnd.getTime()
+      : opts.phase.tSoakEnd.getTime()
+  if (tInvite !== undefined && tInvite > tDrainBoundary) {
     return { callId, category: "POST_DRAIN", outcome, success }
   }
 

@@ -24,6 +24,7 @@ import * as path from "node:path"
 import { exec } from "../fixtures/exec.js"
 import { execInPod, kubectlCp } from "../fixtures/kubectl.js"
 import { parseSippStats, type SippStats } from "../fixtures/sippJob.js"
+import { parseSippStat } from "../fixtures/sippOutcomes.js"
 
 export class SippDaemonError extends Data.TaggedError("SippDaemonError")<{
   readonly job: string
@@ -215,13 +216,37 @@ export const startSippDaemon = (
           errLocal,
         ).pipe(Effect.match({ onSuccess: () => true, onFailure: () => false }))
         if (okErr) errLog = errLocal
+        // Sipp's `-trace_screen` output is only flushed on Q-key /
+        // clean exit, NOT on SIGTERM. Copy stat.csv too so we still
+        // get cumulative totals when SIGTERM is the stop mechanism.
+        const statLocal = path.join(sippDir, "stat.csv")
+        const okStat = yield* kubectlCp(
+          opts.namespace,
+          pod,
+          "/out/stat.csv",
+          statLocal,
+        ).pipe(Effect.match({ onSuccess: () => true, onFailure: () => false }))
 
-        // 6. Parse stats from screen log.
+        // 6. Parse stats: prefer screen.log (richer); fall back to
+        //    stat.csv when screen.log is empty (the SIGTERM case).
         if (screenLog !== undefined) {
           const text = yield* Effect.tryPromise(() =>
             fs.readFile(screenLog!, "utf8"),
           ).pipe(Effect.orElseSucceed(() => ""))
           stats = parseSippStats(text)
+        }
+        if (stats === null && okStat) {
+          const csv = yield* Effect.tryPromise(() =>
+            fs.readFile(statLocal, "utf8"),
+          ).pipe(Effect.orElseSucceed(() => ""))
+          const totals = parseSippStat(csv)
+          if (totals !== undefined) {
+            stats = {
+              successful: totals.successful,
+              failed: totals.failed,
+              created: totals.totalCalls,
+            }
+          }
         }
         // 7. Delete the pod to free its emptyDir.
         yield* exec(
