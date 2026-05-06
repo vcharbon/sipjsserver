@@ -30,6 +30,7 @@ import type { PropagateDirection } from "../replication/AtomicWriter.js"
 import { AppConfig } from "../config/AppConfig.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
 import { RedisError } from "../redis/RedisClient.js"
+import { CallLimiter } from "./CallLimiter.js"
 import type { Call } from "./CallModel.js"
 import { Call as CallSchema, callIndexKeys, isFullyResolved, parseCallRef, setByeDisposition } from "./CallModel.js"
 
@@ -86,6 +87,7 @@ export class CallState extends ServiceMap.Service<
       const storage = yield* PartitionedRelayStorage
       const config = yield* AppConfig
       const cdr = yield* CdrWriter
+      const limiter = yield* CallLimiter
       const ttl = config.callContextTtlSec
       // Slice 4/5: this worker's ordinal, used to compute
       // `(role, primary)` from a callRef. Prefers the explicit
@@ -562,7 +564,8 @@ export class CallState extends ServiceMap.Service<
           // internally consistent. Mirrors what `terminating-safety-timeout`
           // would have produced if the rule path had completed.
           let promoted = original
-          if (promoted.state === "terminating") {
+          const wasTerminating = promoted.state === "terminating"
+          if (wasTerminating) {
             for (const leg of [promoted.aLeg, ...promoted.bLegs]) {
               const bd = leg.byeDisposition
               if (bd === undefined || bd === "bye_sent") {
@@ -585,6 +588,29 @@ export class CallState extends ServiceMap.Service<
             )
           )
 
+          const { role, primary } = partitionOf(callRef)
+
+          // The rule-path InvariantEnforcer issues `decrement-limiter` for
+          // every entry in `call.limiterEntries` on the terminating→terminated
+          // promotion. The sweep takes a different code path and previously
+          // skipped this, leaking one INCR per orphan into the limiter window
+          // keys until TTL (1200s default). Only the call's natural primary
+          // ever calls the limiter — backups must not, or we'd double-decrement
+          // on takeover races. role==="pri" here is exactly the original
+          // primary acting on its own call.
+          if (wasTerminating && role === "pri") {
+            for (const entry of promoted.limiterEntries) {
+              yield* limiter.decrement(entry.limiterId, entry.originWindow).pipe(
+                Effect.catchTag("RedisError", (e) =>
+                  Effect.logError(
+                    `Orphan sweep limiter decrement failed for ${callRef} ` +
+                      `(limiter=${entry.limiterId}): ${e.reason}`
+                  )
+                )
+              )
+            }
+          }
+
           // Mirror remove(): drop in-memory state, then atomic Redis delete +
           // tombstone propagation. Ignore RedisError so one failing peer
           // doesn't stop the rest of the sweep.
@@ -599,7 +625,6 @@ export class CallState extends ServiceMap.Service<
               if (bTag) MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bTag}`)
             }
           }
-          const { role, primary } = partitionOf(callRef)
           const indexes = callIndexKeys(promoted)
           const peerOpt = propagatePeerFor(role, primary, promoted._topology)
           const direction = directionFor(role)

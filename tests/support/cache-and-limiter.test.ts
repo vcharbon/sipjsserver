@@ -17,10 +17,12 @@ import type { Call, Leg } from "../../src/call/CallModel.js"
 import { NoOpCdrLayer } from "./networkLeaves.js"
 
 const limiterLayer = CallLimiter.memoryLayer.pipe(Layer.provideMerge(AppConfig.layer))
+// CallState's orphan-sweep decrement path needs the SAME CallLimiter instance
+// the test asserts against, so expose it upstream via `provideMerge`.
 const callStateLayer = CallState.layer.pipe(
   Layer.provide(PartitionedRelayStorage.memoryLayer),
   Layer.provide(NoOpCdrLayer),
-  Layer.provideMerge(AppConfig.layer)
+  Layer.provideMerge(limiterLayer)
 )
 
 const makeLeg = (callId: string, fromTag: string): Leg => ({
@@ -129,6 +131,51 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
       // Call is gone from both memory and cache — checkout returns undefined
       const reloaded = yield* state.checkout(call.callRef)
       expect(reloaded).toBeUndefined()
+    }).pipe(Effect.provide(callStateLayer))
+  )
+
+  it.effect("orphan sweep decrements limiterEntries for stuck terminating calls", () =>
+    // Regression: production endurance run 2026-05-05 leaked one limiter
+    // INCR per orphan-swept call. The rule path's `InvariantEnforcer`
+    // emits `decrement-limiter` on the terminating→terminated promotion,
+    // but the CallState orphan sweep took a different code path (CDR +
+    // delete only) and skipped the decrement. With ~10 orphans every
+    // 15 min, the probe `inflight` ratcheted up to 2× cap.
+    Effect.gen(function* () {
+      const lim = yield* CallLimiter
+      const state = yield* CallState
+
+      // 1. Admit a call against a fresh limiter id — count = 1, limit = 1.
+      const admitted = yield* lim.checkAndIncrement("orphan-sweep-leak", 1)
+      expect(admitted.allowed).toBe(true)
+
+      // 2. Confirm the limiter is saturated (no further admissions).
+      const denied = yield* lim.checkAndIncrement("orphan-sweep-leak", 1)
+      expect(denied.allowed).toBe(false)
+
+      // 3. Build a `terminating` call that holds the limiter slot —
+      //    mirrors the on-the-wire state between BYE-arrival and the
+      //    BYE-200-OK that never comes back.
+      const base = makeCall("call-leak", "tagL")
+      const stuck: Call = {
+        ...base,
+        state: "terminating",
+        aLeg: { ...base.aLeg, byeDisposition: "bye_sent" },
+        limiterEntries: [{
+          limiterId: "orphan-sweep-leak",
+          limit: 1,
+          originWindow: admitted.currentWindow,
+        }],
+      }
+      yield* state.create(stuck)
+
+      // 4. Drive the orphan sweep daemon (60s interval). +1s margin so
+      //    the next loop tick fully completes its sweep body.
+      yield* TestClock.adjust("61 seconds")
+
+      // 5. Limiter slot must be released — a fresh admission proves it.
+      const after = yield* lim.checkAndIncrement("orphan-sweep-leak", 1)
+      expect(after.allowed).toBe(true)
     }).pipe(Effect.provide(callStateLayer))
   )
 })

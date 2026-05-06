@@ -25,6 +25,7 @@ import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
 import { PeerEnumerator } from "../../src/cache/PeerEnumerator.js"
 import { WorkerReadiness } from "../../src/cache/WorkerReadiness.js"
 import { ReclaimRunner } from "../../src/cache/ReclaimRunner.js"
+import { CallLimiter } from "../../src/call/CallLimiter.js"
 import { CallState } from "../../src/call/CallState.js"
 import {
   Call as CallSchema,
@@ -197,6 +198,7 @@ describe("ReclaimRunner — hard timeout (D14)", () => {
       const callStateLayer = CallState.layer.pipe(
         Layer.provide(StorageLayer),
         Layer.provide(NoOpCdrLayer),
+        Layer.provide(CallLimiter.memoryLayer),
         Layer.provideMerge(AppConfigLayer)
       )
       const result = yield* Effect.gen(function* () {
