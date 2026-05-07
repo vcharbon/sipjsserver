@@ -1,6 +1,8 @@
 {
   "name": "@vcharbon/sipjs",
   "version": "0.1.0",
+  "license": "MIT",
+  "author": "Vincent Charbonneau",
   "type": "module",
   "exports": {
     "./test-harness": {
