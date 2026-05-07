@@ -32,6 +32,7 @@ import { PeerFabric, type PeerFabricApi } from "../../src/cache/PeerFabric.js"
 import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { PeerEnumerator } from "../../src/cache/PeerEnumerator.js"
+import { ReclaimRunner } from "../../src/cache/ReclaimRunner.js"
 import { WorkerReadiness } from "../../src/cache/WorkerReadiness.js"
 import { CallState } from "../../src/call/CallState.js"
 import { TimerService } from "../../src/call/TimerService.js"
@@ -419,24 +420,75 @@ function buildClusterWithWorkersLayer(
               .pipe(Stream.catchCause(() => Stream.empty))
           },
         }))
-        const ReadyGateL = ReadyGate.layer({ maxDuration: "30 seconds" }).pipe(
+        // ReadyGate runs with `flipReadyAtEnd: false` so its terminal
+        // markReady is owned by the ReclaimRunner that runs next.
+        // ReclaimRunner enumerates the peer fabric for every entry in
+        // `bak:{self}:call:*` and copies it back into local
+        // `pri:{self}:`. On initial boot every peer storage is empty
+        // so the scan finishes instantly; on respawn this is the path
+        // that rebuilds quiet calls (peers never wrote on this worker's
+        // behalf during the outage so the propagate-stream drain
+        // catches nothing for them).
+        const recoveryReadinessL = WorkerReadiness.test(false)
+        const cachePortL = fabric.cachePortLayerOf(w.ordinal)
+        const storageL = fabric.storageLayerOf(w.ordinal)
+        const appConfigL = Layer.succeed(
+          AppConfig,
+          perWorkerConfig(baseConfig, w.address, w.id as unknown as string),
+        )
+        const recoverySharedL = Layer.mergeAll(
+          PeerEnumeratorL,
+          recoveryReadinessL,
+          cachePortL,
+          storageL,
+          appConfigL,
+        )
+        const ReadyGateL = ReadyGate.layer({
+          maxDuration: "30 seconds",
+          flipReadyAtEnd: false,
+        }).pipe(
           Layer.provide(
             Layer.mergeAll(
-              PeerEnumeratorL,
               ReplogClientL,
               Layer.sync(ReplPuller, () => puller),
-              WorkerReadiness.test(false),
+              recoverySharedL,
             ),
           ),
+        )
+        // `scanPacingMs: 0` is critical for the fake stack: the default
+        // 50 ms inter-entry sleep is virtual under TestClock and would
+        // not advance until the *next* scenario step — but `respawn`
+        // runs `buildWorker` synchronously, so the scenario can't reach
+        // its next `s.pause(...)` until `reclaim.run` returns. Setting
+        // the pacing to 0 keeps the runner CPU-bound (still yields
+        // between entries via `Effect.yieldNow`) so the boot path
+        // never blocks the scenario clock.
+        const ReclaimRunnerL = ReclaimRunner.layer({ scanPacingMs: 0 }).pipe(
+          Layer.provide(recoverySharedL),
         )
         const gateScope = yield* Scope.fork(scope, "sequential")
         const gateServices = yield* Layer.buildWithScope(ReadyGateL, gateScope)
         const gate = ServiceMap.get(gateServices, ReadyGate)
         yield* gate.run.pipe(Effect.catchCause(() => Effect.void))
-        // ReadyGate marked WorkerReadiness(false) → true; the b2bua
-        // stack here uses WorkerReadiness.test(true) anyway, so the
-        // local readiness flag was always true. The drain side-effect
-        // (peer-log apply) is what we needed.
+
+        // Reclaim safety net: fires after the propagate-stream drain.
+        // Failures inside the runner are absorbed (per-peer warning +
+        // peersFailed counter) so a stalled peer doesn't deadlock the
+        // worker boot. We close the scope right after so the layer's
+        // resources don't outlive their use.
+        const reclaimScope = yield* Scope.fork(scope, "sequential")
+        const reclaimServices = yield* Layer.buildWithScope(
+          ReclaimRunnerL,
+          reclaimScope,
+        )
+        const reclaim = ServiceMap.get(reclaimServices, ReclaimRunner)
+        yield* reclaim.run.pipe(Effect.catchCause(() => Effect.void))
+        yield* Scope.close(reclaimScope, Exit.void)
+        // ReadyGate's drain side-effect (peer-log apply) and
+        // ReclaimRunner's scan side-effect (peer `bak:{self}:` copy)
+        // are what we needed; both used `WorkerReadiness.test(false)`
+        // and the b2bua stack uses `WorkerReadiness.test(true)`, so
+        // the local readiness flag was always true.
         yield* Scope.close(gateScope, Exit.void)
 
         // Rehydrate owned calls + their persisted timer fibers from

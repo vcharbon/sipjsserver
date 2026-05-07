@@ -174,15 +174,11 @@ describe("sip-front-proxy/failover — replication-gap-mini", () => {
     outputDir: OUTPUT_DIR,
     sut: "k8sFailover",
   })
-  // SLICE B′ DIAGNOSTIC — `it.effect.fails` is intentional. The plan's
-  // strict acceptance is "zero 481 on BYE for any call established
-  // before the kill", and at the time of writing this test reproduces
-  // the post-respawn 481 shape (every phase-7 BYE returns 481). This
-  // is the diagnostic signal the slice exists to surface; Slice D
-  // owns the fix. Removing `.fails` once the fix lands flips this
-  // back into a regression gate. Don't relax the assertions to make
-  // it pass — the failures here are meaningful.
-  it.effect.fails(
+  // Strict acceptance gate: "zero 481 on BYE for any call established
+  // before the kill". Phase 7's quiet-call recovery flows through the
+  // ReclaimRunner safety net wired in on respawn — without it those
+  // 20 BYEs would all return 481 (the bug Slice B′ originally surfaced).
+  it.effect(
     "40 calls × kill + respawn — zero 481 on BYE, lag_seq=0 at settle",
     () => run(replicationGapMini.toScenario()),
     { timeout: 300_000 },

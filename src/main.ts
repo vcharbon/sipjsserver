@@ -21,9 +21,11 @@ import { SipRouter } from "./sip/SipRouter.js"
 import { AppConfig, type AppConfigData } from "./config/AppConfig.js"
 import { CallState } from "./call/CallState.js"
 import { PartitionedRelayStorage } from "./cache/PartitionedRelayStorage.js"
+import { PeerCacheClientLayer } from "./cache/PeerCacheClient.js"
 import { WorkerOrdinal } from "./cache/PeerCachePort.js"
 import { PeerEndpointResolver } from "./cache/PeerEndpointResolver.js"
 import { PeerEnumerator } from "./cache/PeerEnumerator.js"
+import { ReclaimRunner } from "./cache/ReclaimRunner.js"
 import { WorkerReadiness } from "./cache/WorkerReadiness.js"
 import { CallLimiter } from "./call/CallLimiter.js"
 import { AtomicWriter } from "./replication/AtomicWriter.js"
@@ -315,21 +317,47 @@ const runReplicationConsumer = (
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(PeerEndpointResolverLayer)
   )
+  // PeerCachePort is the HTTP-backed cross-pod cache I/O port that
+  // ReclaimRunner uses to scan each peer's `bak:{self}:` partition.
+  // Resolves WorkerOrdinal → URL via the same headless StatefulSet
+  // resolver the ReplogClient uses.
+  const PeerCachePortLayer = PeerCacheClientLayer.pipe(
+    Layer.provide(FetchHttpClient.layer),
+    Layer.provide(PeerEndpointResolverLayer)
+  )
   // Bundle the leaves so they're memoized as one composite layer —
   // services exported by ALL of them are visible to consumers.
   // WorkerReadiness is NOT provided here: it's hoisted to the outer
   // `standaloneMain` composition so HttpLayer's `/ready` handler and
   // ReadyGate's `markReady` flip share the same MutableRef.
+  //
+  // CallStateCacheLayer is included so ReclaimRunner can issue local
+  // `pri:{self}:` writes — same pattern ReplPullerLayer uses for its
+  // own AtomicWriter chain (the two storage instances point at the
+  // same Redis backend; gen-compare in AtomicWriter keeps writes
+  // correct under the duplication, see line 87-99 above).
+  // AppConfigLayer is provided here too since CallStateCacheLayer's
+  // RedisClient transitively requires it.
   const PullSideLeaves = Layer.mergeAll(
     PeerEnumeratorLayer,
     ReplPullerLayer,
     ReplogClientLayer,
-  )
-  // ReadyGate sits on top, satisfied by the leaves; the merge ensures
-  // BOTH ReadyGate AND the leaves are exported from ReplicationLayer.
-  const ReplicationLayer = ReadyGate.layer().pipe(
-    Layer.provideMerge(PullSideLeaves)
-  )
+    PeerCachePortLayer,
+    CallStateCacheLayer,
+  ).pipe(Layer.provide(AppConfigLayer))
+  // ReadyGate runs first (sub-second propagate-stream drain), then
+  // ReclaimRunner runs as a safety net (scans every alive peer's
+  // `bak:{self}:` partition for entries that fell out of the propagate
+  // window — quiet calls peers never wrote on this worker's behalf).
+  // ReadyGate is built with `flipReadyAtEnd: false` so the terminal
+  // markReady(true) is owned by ReclaimRunner — without that, ready
+  // would flicker `false → true → false → true` between the two
+  // recovery steps.
+  const ReclaimRunnerLayer = ReclaimRunner.layer()
+  const ReplicationLayer = Layer.mergeAll(
+    ReadyGate.layer({ flipReadyAtEnd: false }),
+    ReclaimRunnerLayer,
+  ).pipe(Layer.provideMerge(PullSideLeaves))
 
   return Effect.gen(function* () {
     yield* Effect.logInfo(
@@ -337,8 +365,10 @@ const runReplicationConsumer = (
     )
 
     // Run the ReadyGate. The gate is a finite-time effect (max 30s per
-    // spec §8.3); regardless of outcome it flips WorkerReadiness ready
-    // and returns the {synced, unreconciled} summary.
+    // spec §8.3) and only handles the propagate-stream drain — its
+    // terminal markReady(true) is suppressed (`flipReadyAtEnd: false`)
+    // because ReclaimRunner takes ownership of the readiness flip after
+    // both recovery steps complete.
     const gate = yield* ReadyGate
     const result = yield* gate.run
 
@@ -346,9 +376,29 @@ const runReplicationConsumer = (
       `replication: ReadyGate finished — synced=${result.synced.length} unreconciled=${result.unreconciled.length} durationMs=${result.durationMs}`
     )
 
+    // Reclaim safety net: scan every alive peer's `bak:{self}:`
+    // partition and copy any entries the propagate-stream drain didn't
+    // catch back into local `pri:{self}:`. Quiet calls (peers never
+    // wrote on this worker's behalf during the outage) generate no
+    // propagate-stream entries — without this scan their first
+    // post-respawn in-dialog request returns 481.
+    //
+    // ReclaimRunner owns the readiness flip: it sets ready=false at
+    // start (so the proxy keeps routing via the cookie's `w_bak` while
+    // we recover), runs the scan, then sets ready=true exactly once at
+    // completion or maxDuration. Errors are absorbed inside the runner;
+    // a per-peer failure is logged and the run continues with the
+    // remaining peers.
+    const reclaim = yield* ReclaimRunner
+    const reclaimResult = yield* reclaim.run
+    yield* Effect.logInfo(
+      `replication: ReclaimRunner finished — recovered=${reclaimResult.recoveredCalls} skipped=${reclaimResult.skippedByGen} peersScanned=${reclaimResult.peersScanned} peersFailed=${reclaimResult.peersFailed} timedOut=${reclaimResult.timedOut} durationMs=${reclaimResult.durationMs}`
+    )
+
     // Post-gate hook (timer rehydration etc.) — runs once on the boot
-    // path after peers have been drained. Errors are logged inside the
-    // hook; we never block the consumer fiber on a recovery failure.
+    // path after peers have been drained AND reclaim has rebuilt the
+    // `pri:{self}:` partition. Errors are logged inside the hook; we
+    // never block the consumer fiber on a recovery failure.
     yield* afterGate
 
     // Steady-state: one auto-reconnecting fiber per peer. We do an

@@ -210,6 +210,18 @@ export interface ReadyGateResult {
 export interface ReadyGateConfig {
   /** Hard ceiling on the boot handshake. Default 30s (spec §8.3). */
   readonly maxDuration?: Duration.Input
+  /**
+   * Whether `run` should call `WorkerReadiness.markReady(true)` after
+   * the drain completes. Default `true`.
+   *
+   * Set to `false` when chaining a follow-up recovery step
+   * (e.g. `ReclaimRunner`) that owns the readiness flip — running both
+   * with `flipReadyAtEnd=true` would cause the readiness flag to
+   * flicker `false → true → false → true`, momentarily declaring the
+   * pod K8s-Ready before reclaim takes it back. With `false` here, the
+   * caller is responsible for the terminal flip.
+   */
+  readonly flipReadyAtEnd?: boolean
 }
 
 export interface ReadyGateApi {
@@ -250,6 +262,7 @@ export class ReadyGate extends ServiceMap.Service<ReadyGate, ReadyGateApi>()(
         const maxDuration = Duration.fromInputUnsafe(
           config?.maxDuration ?? "30 seconds"
         )
+        const flipReadyAtEnd = config?.flipReadyAtEnd ?? true
 
         const drainOnePeer = (
           peer: string
@@ -324,9 +337,11 @@ export class ReadyGate extends ServiceMap.Service<ReadyGate, ReadyGateApi>()(
               .map((o) => o.peer)
             const durationMs = Date.now() - startNs
 
-            yield* readiness.markReady(true)
+            if (flipReadyAtEnd) {
+              yield* readiness.markReady(true)
+            }
             yield* Effect.logInfo(
-              `ReadyGate: ready (synced=${synced.length} unreconciled=${unreconciled.length} durationMs=${durationMs})`
+              `ReadyGate: drain finished (synced=${synced.length} unreconciled=${unreconciled.length} durationMs=${durationMs} flipReady=${flipReadyAtEnd})`
             )
 
             return { synced, unreconciled, durationMs }
