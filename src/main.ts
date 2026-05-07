@@ -211,7 +211,8 @@ const ReplLogLayer = ReplLog.layer.pipe(
 
 const ReplMetricsLayer = ReplMetrics.layer.pipe(
   Layer.provide(EpochCounterLayer),
-  Layer.provide(WriteNotifierLayer)
+  Layer.provide(WriteNotifierLayer),
+  Layer.provide(AtomicWriterLayer)
 )
 
 // WorkerReadiness + DrainingState are kept as requirements (not
@@ -246,7 +247,8 @@ const HttpLayer = StatusServerLayer.pipe(
 const ReplPullerLayer = ReplPuller.redisLayer.pipe(
   Layer.provide(RedisLayer),
   Layer.provide(AtomicWriterLayer),
-  Layer.provide(AppConfigLayer)
+  Layer.provide(AppConfigLayer),
+  Layer.provide(ReplMetricsLayer)
 )
 
 /**

@@ -31,9 +31,9 @@ bind:
 healthProbe:
   bindHost: "0.0.0.0"
   bindPort: 5061
-  intervalMs: 2000
+  intervalMs: 1000
   timeoutMs: 1500
-  threshold: 3
+  threshold: 2
 
 # HMAC key for the routing-cookie signature. Operator provides one of:
 #   --set hmacKey=<base64-bytes>            (will be base64-decoded by Helm)

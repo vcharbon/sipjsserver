@@ -10,6 +10,10 @@
  * 2 cps); see `sippOutcomes.test.ts` for the regression check.
  */
 
+import * as fs from "node:fs"
+import * as readline from "node:readline"
+import { createGunzip } from "node:zlib"
+
 export type SippOutcome =
   | "clean"
   | "retransmitted"
@@ -277,6 +281,59 @@ export const parseSippMessageTrace = (messageLog: string): Map<string, CallOutco
     if (r) records.push(r)
   }
   const tracks = groupByCall(records)
+  const out = new Map<string, CallOutcome>()
+  for (const [callId, track] of tracks) {
+    out.set(callId, classifyCall(track))
+  }
+  return out
+}
+
+/**
+ * Streaming variant of {@link parseSippMessageTrace} that reads a
+ * gzipped sipp message-log file line by line and folds messages into a
+ * per-Call-ID map as it goes. Required for runs whose decompressed
+ * `msg.log` exceeds Node's max string length (~512 MB on x64) — long
+ * endurance soaks at 20 cps short calls easily produce 600 MB+ of
+ * decompressed trace.
+ *
+ * Memory grows with the number of distinct Call-IDs and messages, not
+ * with file size, so heap pressure is the same as it would be for
+ * `parseSippMessageTrace` on the same data minus the intermediate
+ * monolithic string.
+ */
+export const parseSippMessageTraceFromGzFile = async (
+  filePath: string,
+): Promise<Map<string, CallOutcome>> => {
+  const fileStream = fs.createReadStream(filePath)
+  const decoded = fileStream.pipe(createGunzip())
+  const rl = readline.createInterface({ input: decoded, crlfDelay: Infinity })
+  const tracks = new Map<string, CallTrack>()
+  let current: { t: Date; lines: Array<string> } | undefined
+  const flushBlock = (): void => {
+    if (!current) return
+    const r = parseBlock(current.t, current.lines)
+    if (r) {
+      let track = tracks.get(r.callId)
+      if (!track) {
+        track = { callId: r.callId, records: [] }
+        tracks.set(r.callId, track)
+      }
+      track.records.push(r)
+    }
+    current = undefined
+  }
+  for await (const rawLine of rl) {
+    const line = rawLine.replace(/\r$/, "")
+    const sep = SEPARATOR_RE.exec(line)
+    if (sep) {
+      flushBlock()
+      const t = new Date(`${sep[1]}T${sep[2]}Z`)
+      current = { t, lines: [] }
+      continue
+    }
+    if (current) current.lines.push(line)
+  }
+  flushBlock()
   const out = new Map<string, CallOutcome>()
   for (const [callId, track] of tracks) {
     out.set(callId, classifyCall(track))

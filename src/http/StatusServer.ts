@@ -116,7 +116,11 @@ function renderPrometheus(
   }
 
   /** Emit # HELP and # TYPE header for a metric family. */
-  const header = (name: string, type: "counter" | "gauge", help: string) => {
+  const header = (
+    name: string,
+    type: "counter" | "gauge" | "histogram",
+    help: string
+  ) => {
     lines.push(`# HELP ${name} ${help}`)
     lines.push(`# TYPE ${name} ${type}`)
   }
@@ -291,9 +295,27 @@ function renderPrometheus(
     if (repl.perPeer.length > 0) {
       header("b2bua_repl_writes_total", "counter", "Peer-bearing writes published locally since process start, by destination peer.")
       header("b2bua_repl_writes_seq_max", "gauge", "Highest local propagate seq observed for this peer.")
+      header("b2bua_repl_lag_seq", "gauge", "Replication lag in seq units (latestSeenSeq - lastAppliedSeq) reported by the consumer-side ReplPuller.")
+      header("b2bua_repl_queue_depth", "gauge", "Cardinality of propagate:{peer} on this writer's sidecar (entries awaiting drain to the peer).")
+      header("b2bua_repl_frame_lag_ms", "histogram", "End-to-end replication frame lag in milliseconds (writer wall-clock to reader wall-clock).")
       for (const [peer, state] of repl.perPeer) {
         m("b2bua_repl_writes_total", state.writesTotal, { peer })
         m("b2bua_repl_writes_seq_max", state.seqMax, { peer })
+        m("b2bua_repl_lag_seq", state.lagSeq, { peer })
+        m("b2bua_repl_queue_depth", state.queueDepth, { peer })
+        const hist = state.frameLag
+        let cumCount = 0
+        for (let i = 0; i < hist.buckets.length; i++) {
+          cumCount += hist.counts[i] ?? 0
+          m("b2bua_repl_frame_lag_ms_bucket", cumCount, {
+            peer,
+            le: String(hist.buckets[i]),
+          })
+        }
+        cumCount += hist.counts[hist.buckets.length] ?? 0
+        m("b2bua_repl_frame_lag_ms_bucket", cumCount, { peer, le: "+Inf" })
+        m("b2bua_repl_frame_lag_ms_sum", hist.sum, { peer })
+        m("b2bua_repl_frame_lag_ms_count", hist.count, { peer })
       }
     }
   }

@@ -65,9 +65,9 @@ first transitioned to `draining`. The proxy reads this from
 |--------------------------------------------|----------------------|-----------------------------------------------|-----------------------------------------------------------------------------------------------|
 | K8s `terminationGracePeriodSeconds`        | ≥ 200 s (180 + 20 safety) | Helm chart (PR5)                          | RFC 3261 Timer C: max INVITE establishment is 180 s. CANCELs to in-flight INVITEs must reach the original worker for the entire window. |
 | Proxy `drainGraceMs`                       | 5 000 ms (default)   | `LoadBalancerConfig.drainGracePolicyMs`      | Bound for in-dialog re-INVITE / UPDATE / INFO / REFER fallback. ACK/CANCEL exempt.            |
-| `HealthProbe.optionsKeepalive` interval    | 2 000 ms             | `OptionsKeepaliveOpts.intervalMs`             | Cheap enough at `O(N) workers` — N≤32 in normal deployments.                                 |
+| `HealthProbe.optionsKeepalive` interval    | 1 000 ms             | `OptionsKeepaliveOpts.intervalMs`             | Cheap enough at `O(N) workers` — N≤32 in normal deployments.                                 |
 | `HealthProbe.optionsKeepalive` timeout     | 1 500 ms             | `OptionsKeepaliveOpts.timeoutMs`              | Wide enough to absorb 99p UDP RTT inside a K8s cluster (typ. <50 ms) plus worker scheduling. |
-| `HealthProbe.optionsKeepalive` threshold   | 3 misses             | `OptionsKeepaliveOpts.threshold`              | 3 × 2 s = **6 s worst-case detection lag** for hard-crash without K8s signal.                |
+| `HealthProbe.optionsKeepalive` threshold   | 2 misses             | `OptionsKeepaliveOpts.threshold`              | 2 × 1 s = **2 s worst-case detection lag** for hard-crash without K8s signal.                |
 | HMAC key overlap window                    | 1 h (NFR-8)          | `HmacKeyProvider.staticOpts`                  | Lets the proxy fleet roll a new key without rejecting in-flight cookies signed by the previous one. |
 | Stateless 503 `Retry-After`                | 5 s base + jitter    | `AppConfig.retryAfterBaseSec` / `…JitterSec`  | Used by Tier-3 overflow rejects (separate from drain).                                       |
 
@@ -92,7 +92,7 @@ plan around them without expecting silent recovery.
    rotations are observed, no deletion-timestamp accelerant. The
    `HealthProbe.optionsKeepalive` continues to demote silent workers,
    so the snapshot self-heals to the operative subset on a
-   threshold-cycle delay (~6 s).
+   threshold-cycle delay (~2 s).
 3. **Multi-pod CANCEL LRU split.** Each proxy pod holds its own
    `CancelBranchLru`. A CANCEL that hashes to a different proxy pod
    than the one that admitted the INVITE will not find an LRU entry

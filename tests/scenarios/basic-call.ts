@@ -14,7 +14,7 @@
  *     `two-calls-routed-to-two-workers` scenario.
  */
 import { scenario } from "../../src/test-harness/framework/dsl.js"
-import type { ScenarioContext } from "../../src/test-harness/framework/recorder.js"
+import type { DialogRef, ScenarioContext } from "../../src/test-harness/framework/recorder.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipHeader } from "../../src/sip/types.js"
 
@@ -182,3 +182,122 @@ export function basicCallBody(s: ScenarioContext, opts: BasicCallOpts = {}): voi
 export const basicCall = scenario("basic-call", (s) => {
   basicCallBody(s)
 })
+
+// ---------------------------------------------------------------------------
+// Split form — establish-only / bye-only halves
+// ---------------------------------------------------------------------------
+//
+// Slice B′ — replication-gap diagnostic test composes 40 calls in two
+// phases: establish all of them, settle replication, kill a worker,
+// then run BYE on subsets at different times. `basicCallBody` is
+// monolithic (INVITE → … → BYE inline). The two helpers below split
+// that body so a scenario can drive the lifecycle phases independently.
+// Both helpers accept the same `BasicCallOpts` shape; the establish
+// side returns dialog handles the BYE side consumes.
+
+export interface EstablishedCall {
+  readonly aliceDialog: DialogRef
+  readonly bobDialog: DialogRef
+}
+
+/**
+ * Drive INVITE → 100 → 180 → 200 → ACK without sending BYE. Returns
+ * the alice/bob dialog handles so a later `byeCallBody` call can tear
+ * the call down. No post-establish pause — the caller drives settle
+ * timing.
+ */
+export function establishCallBody(
+  s: ScenarioContext,
+  opts: BasicCallOpts = {}
+): EstablishedCall {
+  const aliceName = opts.aliceName ?? DEFAULTS.aliceName
+  const bobName = opts.bobName ?? DEFAULTS.bobName
+  const aliceHost = opts.aliceHost ?? DEFAULTS.aliceHost
+  const bobHost = opts.bobHost ?? DEFAULTS.bobHost
+  const bobPort = opts.bobPort ?? DEFAULTS.bobPort
+  const proxyHost = opts.proxyHost ?? DEFAULTS.proxyHost
+  const proxyPort = opts.proxyPort ?? DEFAULTS.proxyPort
+
+  const aliceCfg: Parameters<ScenarioContext["agent"]>[1] = {
+    uri: `sip:${aliceName}@test`,
+    ...(aliceHost !== "127.0.0.1" ? { ip: aliceHost } : {}),
+    ...(opts.callId !== undefined ? { callId: opts.callId } : {}),
+  }
+  const bobCfg: Parameters<ScenarioContext["agent"]>[1] = {
+    uri: `sip:${bobName}@test`,
+    port: bobPort,
+    ...(bobHost !== "127.0.0.1" ? { ip: bobHost } : {}),
+  }
+
+  const alice = s.agent(aliceName, aliceCfg)
+  const bob = s.agent(bobName, bobCfg)
+  // Tolerate keepalive OPTIONS the b2bua may inject while the call is
+  // in the established window. The split form's primary use is
+  // multi-call diagnostic scenarios with long settle phases between
+  // establish and BYE; without these, keepalive OPTIONS arriving at
+  // alice/bob mid-pause would surface as "unexpected" failures.
+  alice.allowExtra("OPTIONS")
+  bob.allowExtra("OPTIONS")
+
+  const inviteHeaders =
+    bobHost === DEFAULTS.bobHost && bobPort === DEFAULTS.bobPort
+      ? undefined
+      : {
+          "X-Api-Call": JSON.stringify({
+            action: "route",
+            destination: { host: bobHost, port: bobPort },
+            new_ruri: `sip:${bobName}@${bobHost}:${bobPort}`,
+          }),
+        }
+
+  const inviteOpts: Parameters<typeof alice.invite>[1] = {
+    body: sdpOffer(),
+    ...(inviteHeaders !== undefined ? { headers: inviteHeaders } : {}),
+  }
+
+  const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite(
+    `sip:+1234@${proxyHost}:${proxyPort}`,
+    inviteOpts,
+  )
+
+  aliceInviteTxn.expect(100)
+  const { dialog: bobDialog, transaction: bobInviteTxn } =
+    bob.receiveInitialInvite({
+      predicate: (msg) => {
+        const mf = getHeaderValue(msg.headers, "max-forwards")
+        const n = mf !== undefined ? Number.parseInt(mf, 10) : NaN
+        return Number.isFinite(n) && n < 70
+      },
+    })
+  bobInviteTxn.reply(180)
+  aliceInviteTxn.expect(180)
+  bobInviteTxn.reply(200, { body: sdpAnswer() })
+  aliceInviteTxn.expect(200)
+  aliceDialog.ack()
+  bobDialog.expect("ACK")
+
+  return { aliceDialog, bobDialog }
+}
+
+/**
+ * Tear down a previously-established call with a BYE round-trip from
+ * the configured side. Mirrors `basicCallBody`'s BYE branch but works
+ * on dialog handles a prior `establishCallBody` returned.
+ */
+export function byeCallBody(
+  call: EstablishedCall,
+  opts: { byeFrom?: "alice" | "bob" } = {}
+): void {
+  const byeFrom = opts.byeFrom ?? "alice"
+  if (byeFrom === "alice") {
+    const aliceByeTxn = call.aliceDialog.bye()
+    const bobByeTxn = call.bobDialog.expect("BYE")
+    bobByeTxn.reply(200)
+    aliceByeTxn.expect(200)
+  } else {
+    const bobByeTxn = call.bobDialog.bye()
+    const aliceByeTxn = call.aliceDialog.expect("BYE")
+    aliceByeTxn.reply(200)
+    bobByeTxn.expect(200)
+  }
+}

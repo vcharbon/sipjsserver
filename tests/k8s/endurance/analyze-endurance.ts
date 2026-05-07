@@ -21,9 +21,10 @@
 
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import { gunzip as gunzipCb } from "node:zlib"
-import { promisify } from "node:util"
-import { parseSippMessageTrace, type CallOutcome } from "../fixtures/sippOutcomes.js"
+import {
+  parseSippMessageTraceFromGzFile,
+  type CallOutcome,
+} from "../fixtures/sippOutcomes.js"
 import {
   buildPerEventBreakdown,
   categorizeCalls,
@@ -32,8 +33,6 @@ import {
   type ChaosImpactWindow,
   type PhaseBounds,
 } from "./categorize.js"
-
-const gunzip = promisify(gunzipCb)
 
 const FORENSIC_SAMPLE_CAP_PER_CATEGORY = 100
 
@@ -114,9 +113,7 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
     const exists = await fs.stat(gz).catch(() => undefined)
     if (exists === undefined) continue
     try {
-      const raw = await fs.readFile(gz)
-      const text = (await gunzip(raw)).toString("utf8")
-      const m = parseSippMessageTrace(text)
+      const m = await parseSippMessageTraceFromGzFile(gz)
       for (const [k, v] of m) outcomes.set(k, v)
     } catch (e) {
       console.warn(`analyze: skipped ${gz}: ${String(e)}`)
@@ -460,9 +457,7 @@ const subCmdForensic = async (
       const gz = path.join(sippDir, sd, "msg.log.gz")
       const exists = await fs.stat(gz).catch(() => undefined)
       if (exists === undefined) continue
-      const raw = await fs.readFile(gz)
-      const text = (await gunzip(raw)).toString("utf8")
-      const m = parseSippMessageTrace(text)
+      const m = await parseSippMessageTraceFromGzFile(gz)
       const o = m.get(callId)
       if (o !== undefined) {
         const lines: Array<string> = []

@@ -22,6 +22,27 @@ import {
 } from "../internal/SimulatedK8sCluster.js"
 
 /**
+ * Parse the `lastSeq` field out of a JSON-encoded `replpos:{peer}`
+ * value. Returns 0 on missing/malformed input — a parser failure
+ * surfaces as a non-zero lag through the consumer's perspective,
+ * which is exactly what the diagnostic wants to flag.
+ *
+ * Pure helper (lifted out of the `expectLagSeqZero` step) so the
+ * try/catch + JSON.parse stays out of any `Effect.gen` body.
+ */
+function parseReplposLastSeq(raw: string): number {
+  try {
+    const parsed = JSON.parse(raw) as { lastSeq?: unknown }
+    if (parsed && typeof parsed === "object" && typeof parsed.lastSeq === "number") {
+      return parsed.lastSeq
+    }
+    return 0
+  } catch {
+    return 0
+  }
+}
+
+/**
  * Build a synthetic placeholder request for trace entries that record an
  * absent message (e.g. an offer/answer that never arrived). Carries the
  * minimum mandatory header set so it satisfies the SipMessage type
@@ -717,6 +738,54 @@ function executeK8s(
             step,
             status: "fail",
             error: `expectKillPhase: phase "${a.phase}" fired at t=${match.atMs} but expected ≤ ${a.maxAtMs}`,
+          }))
+          return
+        }
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "expectLagSeqZero": {
+        const peers = a.peers
+        const snapshots = new Map<
+          string,
+          { entries: ReadonlyArray<{ key: string; value: string }> }
+        >()
+        for (const peerStr of peers) {
+          const snap = yield* cluster.snapshotPeer(WorkerId(peerStr))
+          snapshots.set(peerStr, { entries: snap.entries })
+        }
+        const lookup = (
+          peerStr: string,
+          key: string
+        ): string | undefined =>
+          snapshots
+            .get(peerStr)
+            ?.entries.find((e) => e.key === key)?.value
+        const violations: string[] = []
+        for (const producer of peers) {
+          for (const consumer of peers) {
+            if (producer === consumer) continue
+            const seqStr = lookup(producer, `propagate_seq:${consumer}`)
+            const headSeq =
+              seqStr === undefined ? 0 : Number.parseInt(seqStr, 10)
+            const posStr = lookup(consumer, `replpos:${producer}`)
+            const lastSeq =
+              posStr === undefined ? 0 : parseReplposLastSeq(posStr)
+            const lag = Math.max(0, headSeq - lastSeq)
+            if (lag > 0) {
+              violations.push(
+                `producer=${producer} consumer=${consumer} ` +
+                  `head_seq=${headSeq} last_seq=${lastSeq} lag=${lag}`
+              )
+            }
+          }
+        }
+        if (violations.length > 0) {
+          state.results.push(makeStepResult({
+            stepIndex: index,
+            step,
+            status: "fail",
+            error: `expectLagSeqZero: ${violations.join("; ")}`,
           }))
           return
         }

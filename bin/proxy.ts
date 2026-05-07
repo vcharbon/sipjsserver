@@ -256,13 +256,13 @@ const buildKubernetesLayer = () => {
     bindHost: probeBindHost,
     bindPort: probeBindPort,
     ...(probeIntervalMs !== undefined && {
-      intervalMs: parsePort(probeIntervalMs, 2000),
+      intervalMs: parsePort(probeIntervalMs, 1000),
     }),
     ...(probeTimeoutMs !== undefined && {
       timeoutMs: parsePort(probeTimeoutMs, 1500),
     }),
     ...(probeThreshold !== undefined && {
-      threshold: Number.parseInt(probeThreshold, 10) || 3,
+      threshold: Number.parseInt(probeThreshold, 10) || 2,
     }),
   })
 

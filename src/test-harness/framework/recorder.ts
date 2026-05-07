@@ -277,6 +277,14 @@ export interface ClusterContext {
     workerId: string,
     opts: { decision: K8sRoutingDecisionKind; minCount?: number }
   ): void
+  /**
+   * Slice B′ — assert the replication apply path is fully drained for
+   * every ordered pair (producer, consumer) over `peers`. Backed by
+   * direct snapshots of each peer's storage (`replpos:*` on the
+   * consumer side, `propagate_seq:*` on the producer side); fails when
+   * any consumer is behind any producer's head seq.
+   */
+  expectLagSeqZero(peers: ReadonlyArray<string>): void
 }
 
 export interface ScenarioContext {
@@ -577,6 +585,9 @@ export function record(
         ...(opts.minCount !== undefined ? { minCount: opts.minCount } : {}),
       }
       recordK8s(action)
+    },
+    expectLagSeqZero(peers) {
+      recordK8s({ kind: "expectLagSeqZero", peers })
     },
   }
 

@@ -29,6 +29,7 @@
  */
 
 import {
+  Clock,
   Duration,
   Effect,
   Layer,
@@ -73,6 +74,13 @@ export type ReplLogFrame =
        * any drained-but-not-yet-rewritten producer state.
        */
       readonly direction: PropagateDirection
+      /**
+       * Wall-clock millis at the moment the server emitted this frame
+       * (Slice A — replication observability). Optional on the wire so a
+       * peer running an older build silently ignores the field; the
+       * receiver records `now() - tx_ms` into a histogram only when set.
+       */
+      readonly tx_ms?: number
     }
   | { readonly type: "caught_up"; readonly at_seq: number }
   | { readonly type: "heartbeat"; readonly seq: number }
@@ -207,6 +215,10 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
         const helloAndBacklog: Stream.Stream<ReplLogFrame, ReplLogStreamError> =
           Stream.unwrap(
             Effect.gen(function* () {
+              yield* Effect.logDebug("repl: server-open", {
+                caller,
+                since_seq: sinceSeq,
+              })
               const epoch = yield* counter.current.pipe(
                 Effect.mapError((e) => new ReplLogStreamError(e.reason))
               )
@@ -222,28 +234,41 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
                 epoch,
                 head_at_open: head,
               }
+              yield* Effect.logInfo("repl: server-hello", {
+                caller,
+                epoch,
+                head_at_open: head,
+                since_seq: sinceSeq,
+              })
               const entryFrames = Stream.fromIterable(backlog).pipe(
                 Stream.mapEffect((e) =>
-                  fetchState(e.callRef, e.direction).pipe(
-                    Effect.map(
-                      (state): ReplLogFrame => ({
-                        type: "entry",
-                        seq: e.seq,
-                        callRef: e.callRef,
-                        state,
-                        direction: e.direction,
-                      })
-                    )
-                  )
+                  Effect.gen(function* () {
+                    const state = yield* fetchState(e.callRef, e.direction)
+                    const txMs = yield* Clock.currentTimeMillis
+                    return {
+                      type: "entry",
+                      seq: e.seq,
+                      callRef: e.callRef,
+                      state,
+                      direction: e.direction,
+                      tx_ms: txMs,
+                    } satisfies ReplLogFrame
+                  })
                 )
               )
               const caughtUp: ReplLogFrame = {
                 type: "caught_up",
                 at_seq: head,
               }
+              const caughtUpTap = Stream.fromEffect(
+                Effect.logInfo("repl: server-caught-up", {
+                  caller,
+                  at_seq: head,
+                }).pipe(Effect.as(caughtUp))
+              )
               return Stream.concat(
                 Stream.make(helloFrame),
-                Stream.concat(entryFrames, Stream.make(caughtUp))
+                Stream.concat(entryFrames, caughtUpTap)
               )
             })
           )
@@ -254,17 +279,18 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
           notifier.subscribe.pipe(
             Stream.filter((n) => n.peer === caller),
             Stream.mapEffect((n) =>
-              fetchState(n.callRef, n.direction).pipe(
-                Effect.map(
-                  (state): ReplLogFrame => ({
-                    type: "entry",
-                    seq: n.seq,
-                    callRef: n.callRef,
-                    state,
-                    direction: n.direction,
-                  })
-                )
-              )
+              Effect.gen(function* () {
+                const state = yield* fetchState(n.callRef, n.direction)
+                const txMs = yield* Clock.currentTimeMillis
+                return {
+                  type: "entry",
+                  seq: n.seq,
+                  callRef: n.callRef,
+                  state,
+                  direction: n.direction,
+                  tx_ms: txMs,
+                } satisfies ReplLogFrame
+              })
             )
           )
 
@@ -281,6 +307,17 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
         const longPoll: Stream.Stream<ReplLogFrame, ReplLogStreamError> =
           Stream.merge(notifications, heartbeats)
 
+        const closedLog =
+          config?.drainOnly === true
+            ? Effect.logDebug("repl: server-close", {
+                caller,
+                reason: "drain_complete",
+              })
+            : Effect.logInfo("repl: server-close", {
+                caller,
+                reason: "max_open_or_disconnect",
+              })
+
         const framed: Stream.Stream<ReplLogFrame, ReplLogStreamError> =
           config?.drainOnly === true
             ? helloAndBacklog
@@ -293,6 +330,7 @@ export class ReplLog extends ServiceMap.Service<ReplLog, ReplLogApi>()(
               )
 
         return framed.pipe(
+          Stream.ensuring(closedLog),
           Stream.map(encodeFrame),
           Stream.encodeText
         )

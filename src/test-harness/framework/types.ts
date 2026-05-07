@@ -262,6 +262,23 @@ export type K8sStepAction =
       readonly decision: K8sRoutingDecisionKind
       readonly minCount?: number
     }
+  | {
+      /**
+       * Slice B′ — replication-gap diagnostic. For every ordered pair
+       * (producer, consumer) where producer != consumer, assert
+       * consumer-side `replpos:{producer}.lastSeq` ≥ producer-side
+       * `propagate_seq:{consumer}` head. Equivalent to "lag_seq == 0
+       * on every directed edge of the worker graph". Inspects
+       * `PeerFabricControl.snapshotPeer` directly so the assertion
+       * doesn't require a wired `ReplMetrics` service in the fake
+       * stack.
+       *
+       * `peers` lists every workerId participating in the assertion.
+       * The interpreter expands this into N×(N-1) directed pairs.
+       */
+      readonly kind: "expectLagSeqZero"
+      readonly peers: ReadonlyArray<string>
+    }
 
 /**
  * Routing-decision kinds the failover matrix asserts on. Mirrors the

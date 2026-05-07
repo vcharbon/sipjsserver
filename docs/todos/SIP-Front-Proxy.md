@@ -167,7 +167,7 @@ K8s Secret mounted as file. `HmacKeyProvider.kubernetesSecret` uses **fs-watch o
    |---|---|---|
    | K8s `terminationGracePeriodSeconds` | ≥ 200s (180s + safety) | RFC 3261 Timer C: max INVITE establishment is 3 min. CANCELs to in-flight INVITEs must reach the original worker for the entire window. |
    | `drainGraceMs` (proxy) | 5s default | Bound for in-dialog re-INVITE/UPDATE/INFO/REFER fallback. ACK/CANCEL exempt. |
-   | `HealthProbe` interval × threshold | 2s × 3 = 6s | Worst-case detection lag for hard crash without K8s signal. |
+   | `HealthProbe` interval × threshold | 1s × 2 = 2s | Worst-case detection lag for hard crash without K8s signal. |
    | HMAC overlap window | 1h (NFR-8) | Key rotation across proxy fleet. |
 
 3. **Failure modes NOT mitigated:** UDP loss in proxy→worker hop, K8s watch outage (graceful degradation only), multi-pod CANCEL LRU split (relies on upstream LB src-IP affinity).

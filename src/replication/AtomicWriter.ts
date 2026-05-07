@@ -160,6 +160,16 @@ export interface AtomicWriterApi {
     indexes: ReadonlyArray<string>,
     opts?: PeerWriteOptions
   ) => Effect.Effect<AtomicWriteResult | null, AtomicWriterError>
+
+  /**
+   * Slice A — replication observability. Returns the current cardinality
+   * of `propagate:{peer}` (ZCARD on Redis, MutableHashMap entry count in
+   * memory). Used by the ReplMetrics sampler fiber for the per-peer
+   * queue-depth gauge. Returns 0 when the propagate set is absent or
+   * expired. Errors are absorbed (logged + 0) at the call site so a
+   * sampling failure never crashes the metrics fiber.
+   */
+  readonly queueDepth: (peer: string) => Effect.Effect<number, AtomicWriterError>
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +227,13 @@ export class AtomicWriter extends ServiceMap.Service<
 
   /** `epoch:{owner}` worker incarnation counter. */
   static readonly epochKey = (owner: string): string => `epoch:${owner}`
+
+  /**
+   * Slice A — replication observability. ZCARD on `propagate:{peer}`
+   * routed through the same `eval` surface (and therefore the same key
+   * prefix) as the write-side scripts.
+   */
+  static readonly QUEUE_DEPTH_LUA = `return redis.call("ZCARD", KEYS[1])`
 
   // ---------------- No-peer Lua scripts (Slice 1 unchanged) ----------------
 
@@ -500,7 +517,20 @@ return { seq, tonumber(epoch) }
           )
       }
 
-      return { put, refresh, delete: del }
+      const queueDepth = (
+        peer: string
+      ): Effect.Effect<number, AtomicWriterError> =>
+        redis
+          .eval(AtomicWriter.QUEUE_DEPTH_LUA, [AtomicWriter.propagateSetKey(peer)], [])
+          .pipe(
+            Effect.mapError(wrapWriterErr),
+            Effect.map((raw) => {
+              const n = Number(raw)
+              return Number.isFinite(n) && n >= 0 ? n : 0
+            })
+          )
+
+      return { put, refresh, delete: del, queueDepth }
     })
   )
 
@@ -867,5 +897,11 @@ const makeMemoryUnsafe = (
       })
     )
 
-  return { put, refresh, delete: del }
+  const queueDepth = (peer: string): Effect.Effect<number, AtomicWriterError> =>
+    Effect.gen(function* () {
+      const ms = yield* nowMs
+      return Object.keys(readPropagateSet(store, peer, ms).entries).length
+    })
+
+  return { put, refresh, delete: del, queueDepth }
 }

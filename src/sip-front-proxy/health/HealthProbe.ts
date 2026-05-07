@@ -104,14 +104,14 @@ export interface OptionsKeepaliveOpts {
   /** Local UDP bind for outgoing probes. */
   readonly bindHost: string
   readonly bindPort: number
-  /** Probe interval (ms). Default: 2_000. */
+  /** Probe interval (ms). Default: 1_000. */
   readonly intervalMs?: number
   /** Per-target response timeout (ms). Default: 1_500. */
   readonly timeoutMs?: number
   /**
    * Consecutive missed responses before marking a worker `dead`.
-   * Default: 3. With the 2 s default interval, total detection lag is
-   * ≤ 6 s (matches the resilience-model timing table).
+   * Default: 2. With the 1 s default interval, total detection lag is
+   * ≤ 2 s.
    */
   readonly threshold?: number
   /**
@@ -121,9 +121,9 @@ export interface OptionsKeepaliveOpts {
   readonly queueMax?: number
 }
 
-const DEFAULT_INTERVAL_MS = 2_000
+const DEFAULT_INTERVAL_MS = 1_000
 const DEFAULT_TIMEOUT_MS = 1_500
-const DEFAULT_THRESHOLD = 3
+const DEFAULT_THRESHOLD = 2
 const DEFAULT_QUEUE_MAX = 256
 
 // ---------------------------------------------------------------------------

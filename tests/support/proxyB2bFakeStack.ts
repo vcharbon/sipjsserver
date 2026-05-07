@@ -375,6 +375,8 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
   const Probe = healthProbeOptionsKeepaliveLayer({
     bindHost: HA_PROBE_BIND.ip,
     bindPort: HA_PROBE_BIND.port,
+    intervalMs: 2_000,
+    threshold: 3,
   }).pipe(Layer.provideMerge(ControlAdapter))
 
   // Auto-start the probe at layer-materialization time. Its tick

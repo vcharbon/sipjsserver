@@ -43,6 +43,7 @@
  */
 
 import {
+  Clock,
   Data,
   Effect,
   Layer,
@@ -62,6 +63,7 @@ import {
   type MemoryStore,
   type PropagateDirection,
 } from "./AtomicWriter.js"
+import { ReplMetrics, type ReplMetricsApi } from "./ReplMetrics.js"
 
 // ---------------------------------------------------------------------------
 // Frame parsing
@@ -84,6 +86,13 @@ interface EntryFrame {
    * pre-rework behaviour.
    */
   readonly direction?: PropagateDirection | undefined
+  /**
+   * Slice A — replication observability. Wall-clock millis stamped at
+   * server emit time. Optional on the wire so a peer running an older
+   * build silently omits the field; the receiver records
+   * `now() - tx_ms` into a frame-lag histogram only when present.
+   */
+  readonly tx_ms?: number | undefined
 }
 interface CaughtUpFrame {
   readonly type: "caught_up"
@@ -151,13 +160,18 @@ export class ReplPuller extends ServiceMap.Service<ReplPuller, ReplPullerApi>()(
    * reverse entries apply to `pri:{selfOrdinal}:` so a returning
    * primary recovers its own state from a peer that was acting as
    * backup-on-its-behalf.
+   *
+   * Slice A — `metrics` is optional for the existing in-memory tests
+   * that pre-date the observability surface; pass undefined to skip
+   * lag/seen/frame-lag recording.
    */
   static readonly makeMemoryUnsafe = (
     store: MemoryStore,
     writer: AtomicWriterApi,
-    selfOrdinal: string
+    selfOrdinal: string,
+    metrics?: ReplMetricsApi
   ): ReplPullerApi =>
-    makeFromStores(memoryPosStore(store), writer, selfOrdinal)
+    makeFromStores(memoryPosStore(store), writer, selfOrdinal, metrics ?? noopMetrics)
 
   /**
    * Production: backed by RedisClient (for `replpos:{peer}` bookkeeping),
@@ -174,13 +188,14 @@ export class ReplPuller extends ServiceMap.Service<ReplPuller, ReplPullerApi>()(
   static readonly redisLayer: Layer.Layer<
     ReplPuller,
     never,
-    RedisClient | AtomicWriter | AppConfig
+    RedisClient | AtomicWriter | AppConfig | ReplMetrics
   > = Layer.effect(
     ReplPuller,
     Effect.gen(function* () {
       const redis = yield* RedisClient
       const writer = yield* AtomicWriter
       const config = yield* AppConfig
+      const metrics = yield* ReplMetrics
       // Slice 2.5: same selfOrdinal resolution rule as CallState so
       // the reverse-direction apply path lands in the correct
       // `pri:{selfOrdinal}:` partition on this worker's sidecar.
@@ -224,9 +239,16 @@ export class ReplPuller extends ServiceMap.Service<ReplPuller, ReplPullerApi>()(
           }),
       }
 
-      return makeFromStores(posStore, writer, selfOrdinal)
+      return makeFromStores(posStore, writer, selfOrdinal, metrics)
     })
   )
+}
+
+const noopMetrics: ReplMetricsApi = {
+  snapshot: Effect.succeed({ owner: "noop", writerEpoch: 0, perPeer: [] }),
+  recordSeen: () => Effect.void,
+  recordApplied: () => Effect.void,
+  recordFrameLag: () => Effect.void,
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +356,8 @@ const memoryPosStore = (store: MemoryStore): ReplPosStore => ({
 const makeFromStores = (
   posStore: ReplPosStore,
   writer: AtomicWriterApi,
-  selfOrdinal: string
+  selfOrdinal: string,
+  metrics: ReplMetricsApi
 ): ReplPullerApi => {
   const readPos = (peer: string): Effect.Effect<ReplPos> => posStore.read(peer)
 
@@ -373,12 +396,25 @@ const makeFromStores = (
       let framesApplied = 0
       let caughtUpAtSeq: number | null = null
 
-      yield* decodeNdjson(upstream).pipe(
+      yield* Effect.logInfo("repl: client-open", {
+        peer,
+        since_seq: initial.lastSeq,
+        epoch: initial.epoch,
+      })
+
+      const consume = decodeNdjson(upstream).pipe(
         Stream.runForEach((frame) =>
           Effect.gen(function* () {
             switch (frame.type) {
               case "hello": {
-                if (frame.epoch !== currentPos.epoch) {
+                const epochAdvanced = frame.epoch !== currentPos.epoch
+                yield* Effect.logInfo("repl: client-hello", {
+                  peer,
+                  epoch: frame.epoch,
+                  head_at_open: frame.head_at_open,
+                  epoch_advanced: epochAdvanced,
+                })
+                if (epochAdvanced) {
                   // Epoch advance ⇒ full resync. Reset lastSeq=0 and
                   // commit the new epoch immediately.
                   currentPos = { epoch: frame.epoch, lastSeq: 0 }
@@ -387,6 +423,11 @@ const makeFromStores = (
                 return
               }
               case "entry": {
+                // Slice A — record latestSeenSeq BEFORE the idempotent
+                // skip so the lag-seq gauge reflects "frames witnessed
+                // but not yet applied" rather than only "frames newly
+                // applied".
+                yield* metrics.recordSeen(peer, frame.seq)
                 // Idempotent: skip already-applied entries.
                 if (frame.seq <= currentPos.lastSeq) return
                 // Slice 2.5 direction-aware apply target. Forward
@@ -437,14 +478,51 @@ const makeFromStores = (
                 framesApplied++
                 currentPos = { ...currentPos, lastSeq: frame.seq }
                 yield* posStore.write(peer, currentPos)
+                yield* metrics.recordApplied(peer, frame.seq)
+                if (
+                  typeof frame.tx_ms === "number" &&
+                  Number.isFinite(frame.tx_ms)
+                ) {
+                  const nowMs = yield* Clock.currentTimeMillis
+                  const delta = nowMs - frame.tx_ms
+                  if (delta >= 0) {
+                    yield* metrics.recordFrameLag(peer, delta)
+                  }
+                }
                 return
               }
               case "caught_up":
                 caughtUpAtSeq = frame.at_seq
+                yield* Effect.logInfo("repl: client-caught-up", {
+                  peer,
+                  at_seq: frame.at_seq,
+                })
                 return
               case "heartbeat":
                 return
             }
+          })
+        )
+      )
+
+      yield* consume.pipe(
+        Effect.tapCause((cause) =>
+          Effect.logInfo("repl: client-close", {
+            peer,
+            frames_applied: framesApplied,
+            caught_up_at_seq: caughtUpAtSeq,
+            last_seq: currentPos.lastSeq,
+            error: true,
+            cause: String(cause),
+          })
+        ),
+        Effect.tap(() =>
+          Effect.logInfo("repl: client-close", {
+            peer,
+            frames_applied: framesApplied,
+            caught_up_at_seq: caughtUpAtSeq,
+            last_seq: currentPos.lastSeq,
+            error: false,
           })
         )
       )
