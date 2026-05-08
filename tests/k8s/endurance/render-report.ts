@@ -97,6 +97,20 @@ interface WarningSeries {
   readonly ratePerSec: ReadonlyArray<number>
 }
 
+/**
+ * Replication queue depth, sampled from worker logs at the
+ * `repl: sampler-window` cadence (~1 sample/sec). One series per
+ * (source-worker → peer) pair, bucketed to the chart period using the
+ * mean of the period's `queue_depth_mean` readings. Rising queue depth
+ * is the leading indicator that replication is falling behind, which
+ * the 1h chaos run revealed runs in lockstep with the proxy's stuck
+ * "no alive workers" state.
+ */
+interface QueueDepthSeries {
+  readonly t: ReadonlyArray<number>
+  readonly perPair: Readonly<Record<string, ReadonlyArray<number>>>
+}
+
 interface ReportData {
   readonly runId: string
   readonly tStart: number
@@ -122,6 +136,7 @@ interface ReportData {
   readonly perProxy: PerProxySeries
   readonly streams: ReadonlyArray<SippStream>
   readonly proxyWarnings: WarningSeries
+  readonly queueDepth: QueueDepthSeries
 }
 
 /* -------------------------------------------------------------------- */
@@ -216,6 +231,9 @@ const PROXY_LINE_RE =
 const ROUTED_RE =
   /^routed\s+(INVITE|BYE)\s+(\S+)\s+→\s+(\d+\.\d+\.\d+\.\d+):\d+\s+\(.*?result=forwarded/
 const NO_ALIVE_RE = /no alive workers among/
+const REPL_SAMPLER_OPEN_RE = /repl: sampler-window\s*\{/
+const REPL_PEER_RE = /peer:\s*'([^']+)'/
+const REPL_QDEPTH_MEAN_RE = /queue_depth_mean:\s*([0-9.]+)/
 
 interface RoutedEvent {
   readonly t: number
@@ -228,6 +246,13 @@ interface RoutedEvent {
 interface ProxyLogResult {
   readonly events: ReadonlyArray<RoutedEvent>
   readonly warnTimestamps: ReadonlyArray<number>
+}
+
+interface QueueDepthSample {
+  readonly t: number
+  readonly source: string
+  readonly peer: string
+  readonly queueDepthMean: number
 }
 
 const parseProxyLog = async (
@@ -280,6 +305,118 @@ const parseProxyLog = async (
     })
   }
   return { events, warnTimestamps }
+}
+
+/**
+ * Parse `repl: sampler-window` blocks out of a worker pod log. The
+ * block opens with `... INFO (#NN): repl: sampler-window {` and spans
+ * subsequent lines until a closing `}`. We pick out the timestamp on
+ * the open line plus `peer:` and `queue_depth_mean:` from inside the
+ * block. Other body lines (lag, n) are ignored.
+ *
+ * One sample per block; ~1/sec at runtime so the volume is bounded.
+ */
+const parseWorkerLogQueueDepth = async (
+  filePath: string,
+  source: string,
+  baseDayMs: number,
+): Promise<ReadonlyArray<QueueDepthSample>> => {
+  const out: Array<QueueDepthSample> = []
+  const stream = fs.createReadStream(filePath)
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
+  let prevSec = -1
+  let dayOffsetMs = 0
+  let inBlock = false
+  let blockTSec = 0
+  let blockPeer = ""
+  let blockQDepthMean: number | undefined
+  for await (const rawLine of rl) {
+    const line = rawLine.replace(/\r$/, "")
+    if (!inBlock) {
+      const m = PROXY_LINE_RE.exec(line)
+      if (!m) continue
+      const rest = m[6] ?? ""
+      if (!REPL_SAMPLER_OPEN_RE.test(rest)) continue
+      const hh = parseInt(m[1] ?? "", 10)
+      const mm = parseInt(m[2] ?? "", 10)
+      const ss = parseInt(m[3] ?? "", 10)
+      const ms = parseInt(m[4] ?? "", 10)
+      const dailySec = hh * 3600 + mm * 60 + ss
+      const HALF_DAY_SEC = 12 * 3600
+      if (prevSec >= 0 && dailySec + HALF_DAY_SEC < prevSec) {
+        dayOffsetMs += 86_400_000
+      }
+      prevSec = dailySec
+      blockTSec = (baseDayMs + dayOffsetMs + dailySec * 1000 + ms) / 1000
+      blockPeer = ""
+      blockQDepthMean = undefined
+      inBlock = true
+      continue
+    }
+    // Inside a sampler block — accumulate fields, close on '}' line.
+    const peerMatch = REPL_PEER_RE.exec(line)
+    if (peerMatch !== null) blockPeer = peerMatch[1] ?? ""
+    const qMatch = REPL_QDEPTH_MEAN_RE.exec(line)
+    if (qMatch !== null) {
+      const v = parseFloat(qMatch[1] ?? "")
+      if (Number.isFinite(v)) blockQDepthMean = v
+    }
+    if (line.trim() === "}") {
+      if (blockPeer !== "" && blockQDepthMean !== undefined) {
+        out.push({
+          t: blockTSec,
+          source,
+          peer: blockPeer,
+          queueDepthMean: blockQDepthMean,
+        })
+      }
+      inBlock = false
+    }
+  }
+  return out
+}
+
+/**
+ * Bucket replication-queue-depth samples into per-(source→peer) series.
+ * Each bucket holds the mean of the samples falling inside it (so a
+ * 5 s bucket smooths out the ~5 per-second sampler readings without
+ * distorting the trend).
+ */
+const bucketQueueDepth = (
+  samples: ReadonlyArray<QueueDepthSample>,
+  tStart: number,
+  tEnd: number,
+  periodSec: number,
+): QueueDepthSeries => {
+  const pairsSet = new Set<string>()
+  for (const s of samples) pairsSet.add(`${s.source}→${s.peer}`)
+  const pairs = Array.from(pairsSet).sort()
+  const buckets = Math.max(1, Math.ceil((tEnd - tStart) / periodSec))
+  const t: Array<number> = new Array(buckets)
+  for (let i = 0; i < buckets; i++) t[i] = tStart + i * periodSec
+  const sumByPair: Record<string, Array<number>> = {}
+  const cntByPair: Record<string, Array<number>> = {}
+  for (const p of pairs) {
+    sumByPair[p] = new Array(buckets).fill(0)
+    cntByPair[p] = new Array(buckets).fill(0)
+  }
+  for (const s of samples) {
+    if (s.t < tStart || s.t > tEnd) continue
+    const idx = Math.min(buckets - 1, Math.floor((s.t - tStart) / periodSec))
+    const key = `${s.source}→${s.peer}`
+    sumByPair[key]![idx] = (sumByPair[key]![idx] ?? 0) + s.queueDepthMean
+    cntByPair[key]![idx] = (cntByPair[key]![idx] ?? 0) + 1
+  }
+  const perPair: Record<string, Array<number>> = {}
+  for (const p of pairs) {
+    const out: Array<number> = new Array(buckets).fill(0)
+    for (let i = 0; i < buckets; i++) {
+      const c = cntByPair[p]![i] ?? 0
+      out[i] = c === 0 ? 0 : (sumByPair[p]![i] ?? 0) / c
+    }
+    perPair[p] = out
+  }
+  return { t, perPair }
 }
 
 /**
@@ -422,6 +559,20 @@ const buildReportData = async (artifactDir: string): Promise<ReportData> => {
   const concurrency = replayInviteRate(allEvents, tStart, tEnd, SAMPLE_PERIOD_SEC)
   const warnRate = bucketRate(allWarnTs, tStart, tEnd, SAMPLE_PERIOD_SEC)
 
+  const workerLogs = podLogFiles.filter((f) => f.startsWith("b2bua-worker"))
+  const allSamples: Array<QueueDepthSample> = []
+  for (const f of workerLogs) {
+    const podName = f.replace(/\.log$/, "")
+    const samples = await parseWorkerLogQueueDepth(
+      path.join(podLogsDir, f),
+      podName,
+      baseDayMs,
+    )
+    for (const s of samples) allSamples.push(s)
+  }
+  allSamples.sort((a, b) => a.t - b.t)
+  const queueDepth = bucketQueueDepth(allSamples, tStart, tEnd, SAMPLE_PERIOD_SEC)
+
   return {
     runId: meta.runId,
     tStart,
@@ -439,6 +590,7 @@ const buildReportData = async (artifactDir: string): Promise<ReportData> => {
     perProxy: concurrency.perProxy,
     streams,
     proxyWarnings: { t: warnRate.t, ratePerSec: warnRate.rate },
+    queueDepth,
   }
 }
 
@@ -778,6 +930,21 @@ const emitHtml = (data: ReportData): string => {
           DATA.proxyWarnings.t,
           [{ label: 'warn/sec', values: DATA.proxyWarnings.ratePerSec, color: '#d62728' }],
           '/sec');
+      }
+
+      // 8. Replication queue depth per (source → peer) pair
+      {
+        const xs = DATA.queueDepth.t;
+        const pairs = Object.keys(DATA.queueDepth.perPair).sort();
+        const seriesData = pairs.map(function (p, i) {
+          return {
+            label: p.replace(/b2bua-worker-/g, 'w'),
+            values: DATA.queueDepth.perPair[p],
+            color: SERIES_COLORS[i % SERIES_COLORS.length],
+          };
+        });
+        makeChart('Replication queue depth (worker → peer, mean over 5s buckets)',
+          charts, xs, seriesData, 'events');
       }
 
       // Force a resize after construction so the drawing buffer matches
