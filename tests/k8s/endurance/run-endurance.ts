@@ -79,6 +79,7 @@ interface CliArgs {
   readonly smoke: boolean
   readonly runId: string
   readonly noAnalyze: boolean
+  readonly proxyChaosDisabled: boolean
 }
 
 const DEFAULTS = {
@@ -156,6 +157,7 @@ const parseArgs = (argv: ReadonlyArray<string>): CliArgs => {
       `endurance-${new Date().toISOString().replace(/[:.]/g, "-").toLowerCase()}`,
     ),
     noAnalyze: flags.has("no-analyze"),
+    proxyChaosDisabled: flags.has("proxy-chaos-disabled"),
   }
 }
 
@@ -333,6 +335,9 @@ const main = (argv: ReadonlyArray<string>) =>
             chaosMinIntervalSec: args.chaosMinIntervalSec,
             chaosMaxIntervalSec: args.chaosMaxIntervalSec,
             soakDurationSec: args.durationSec,
+            ...(args.proxyChaosDisabled && {
+              weights: { "proxy-pod-graceful": 0, "proxy-pod-kill9": 0 },
+            }),
           })
       ;(meta as { chaosEventsScheduled: number }).chaosEventsScheduled =
         schedule.length

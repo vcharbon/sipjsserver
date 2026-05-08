@@ -35,6 +35,7 @@ import { ReadyGate, ReplogClient } from "./replication/ReadyGate.js"
 import { ReplLog } from "./replication/ReplLog.js"
 import { ReplMetrics } from "./replication/ReplMetrics.js"
 import { ReplPuller } from "./replication/ReplPuller.js"
+import { supervisePullLoops } from "./replication/PullLoopSupervisor.js"
 import { WriteNotifier } from "./replication/WriteNotifier.js"
 import { CdrWriter } from "./cdr/CdrWriter.js"
 import { RedisClient } from "./redis/RedisClient.js"
@@ -227,7 +228,8 @@ const HttpLayer = StatusServerLayer.pipe(
   Layer.provide(AppConfigLayer),
   Layer.provide(MetricsRegistryLayer),
   Layer.provide(ReplLogLayer),
-  Layer.provide(ReplMetricsLayer)
+  Layer.provide(ReplMetricsLayer),
+  Layer.provide(CallStateCacheLayer)
 )
 
 // ---------------------------------------------------------------------------
@@ -401,19 +403,20 @@ const runReplicationConsumer = (
     // never block the consumer fiber on a recovery failure.
     yield* afterGate
 
-    // Steady-state: one auto-reconnecting fiber per peer. We do an
-    // initial enumerator read here; the production
-    // PeerEnumerator.headlessStatefulSet keeps refreshing in the
-    // background and would let us re-fork on membership change, but
-    // for Phase 0b we settle for "fork once per peer at ready".
-    // Phase 1+ can layer in a watcher loop if peer churn becomes a
-    // tight enough constraint.
+    // Steady-state: one auto-reconnecting fiber per peer. The fork
+    // loop runs reactively — the supervisor re-reads
+    // `enumerator.currentPeers` every `watchIntervalMs` and forks a
+    // fiber for any peer it hasn't seen yet. This handles the K8s
+    // StatefulSet bootstrap race where worker-0 reads SRV records
+    // before worker-1 is in the headless service roster (a one-shot
+    // read at boot would forever miss worker-1, leaving worker-0's
+    // `bak:b2bua-worker-1:` empty and ReclaimRunner with nothing to
+    // recover when worker-1 respawns).
     const enumerator = yield* PeerEnumerator
-    const peers = yield* enumerator.currentPeers
     const puller = yield* ReplPuller
     const client = yield* ReplogClient
 
-    for (const peer of peers) {
+    const buildPullLoop = (peer: WorkerOrdinal) => {
       // WorkerOrdinal is a branded string; downstream APIs (ReplPuller,
       // ReplogClient) take plain `string`. The brand is structural-only,
       // so the assignment is safe — the cast just satisfies the
@@ -460,13 +463,12 @@ const runReplicationConsumer = (
         // reconnect immediately after natural close is fine.
         yield* Effect.sleep("250 millis")
       })
-      // `forkDetach`: the loop must outlive the body of
-      // `runReplicationConsumer` (which returns once the boot
-      // handshake is done and all fibers are forked). `forkChild`
-      // would tie the loop's lifetime to this enclosing effect,
-      // causing it to be interrupted as soon as the for-loop body
+      // `forkDetach`: the loop must outlive the supervisor's
+      // reconcile body (which returns each iteration). `forkChild`
+      // would tie the loop's lifetime to that enclosing effect,
+      // causing it to be interrupted as soon as the reconcile body
       // returns — that's the bug we hit on first deployment.
-      yield* Effect.forkDetach(
+      return Effect.forkDetach(
         Effect.forever(pullLoop).pipe(
           Effect.tap(() =>
             Effect.logInfo(
@@ -477,23 +479,19 @@ const runReplicationConsumer = (
       )
     }
 
-    if (peers.length === 0) {
-      yield* Effect.logInfo(
-        "replication: no peers enumerated (single-replica StatefulSet?), no steady-state pull fibers forked"
-      )
-    } else {
-      yield* Effect.logInfo(
-        `replication: forked ${peers.length} steady-state pull fibers (peers=${peers.join(",")})`
-      )
-    }
-
-    // Keep the consumer fiber alive forever — the per-peer pull loops
-    // were forked with `forkDetach` and are independent daemons, but
-    // returning here would tear down the surrounding `Effect.provide`
-    // scope (and with it the HttpClient and PeerEnumerator background
-    // fibers the daemons rely on). Blocking here keeps the
-    // ReplicationLayer alive for the lifetime of the worker process.
-    return yield* Effect.never
+    // 2s watch interval: keeps fork-on-appear latency well below the
+    // typical K8s StatefulSet pod-startup delay (a few seconds), so a
+    // peer that joins after this worker booted is picked up before
+    // its first in-dialog request can race the empty `bak` partition.
+    return yield* supervisePullLoops({
+      enumerator,
+      forkPullLoop: buildPullLoop,
+      watchIntervalMs: 2_000,
+      onFork: (peer) =>
+        Effect.logInfo(
+          `replication: forked steady-state pull fiber for peer ${peer}`
+        ),
+    })
   }).pipe(Effect.provide(ReplicationLayer))
 }
 

@@ -226,7 +226,9 @@ When worker A is killed and respawned without any of A's calls being touched on 
 ### Files touched in B′
 
 - New: [tests/sip-front-proxy/failover/replication-gap-mini.test.ts](tests/sip-front-proxy/failover/replication-gap-mini.test.ts).
-- Modified (test-harness only — no production-code changes): `src/test-harness/framework/{types,recorder,interpreter}.ts`, `tests/scenarios/basic-call.ts` (added split-form `establishCallBody` / `byeCallBody` / `EstablishedCall` plus `allowExtra("OPTIONS")` for keepalive tolerance).
+- Test-harness: `src/test-harness/framework/{types,recorder,interpreter}.ts`, `tests/scenarios/basic-call.ts` (added split-form `establishCallBody` / `byeCallBody` / `EstablishedCall` plus `allowExtra("OPTIONS")` for keepalive tolerance).
+- Production wiring (the fix for the rebuild gap): [src/replication/ReadyGate.ts](src/replication/ReadyGate.ts) added `flipReadyAtEnd?: boolean` (default `true`); [src/main.ts:356-396](src/main.ts) composes `ReadyGate({flipReadyAtEnd: false})` then `ReclaimRunner.run` then `markReady(true)`. Fake stack mirrors the same two-step boot in [tests/support/k8sFakeStack.ts:466-492](tests/support/k8sFakeStack.ts).
+- After this fix landed, the diagnostic test is `it.effect` (no `.fails`) and passes — zero 481s across all 40 BYEs.
 
 ### Note on assertion mechanics
 

@@ -12,6 +12,8 @@ import { CallState } from "../call/CallState.js"
 import { WorkerReadiness } from "../cache/WorkerReadiness.js"
 import { DrainingState } from "../b2bua/DrainingState.js"
 import { AppConfig } from "../config/AppConfig.js"
+import { addPeerRelayRoutes } from "../cache/PeerRelay.js"
+import { PartitionedRelayStorage } from "../cache/PartitionedRelayStorage.js"
 import { addCallControlRoutes } from "../decision/adapters/http-reference/MockServer.js"
 import { MetricsRegistry, type MetricsRegistryState } from "../observability/MetricsRegistry.js"
 import { addReplLogRoutes, ReplLog } from "../replication/ReplLog.js"
@@ -326,7 +328,7 @@ function renderPrometheus(
 export const StatusServerLayer: Layer.Layer<
   never,
   never,
-  CallState | AppConfig | MetricsRegistry | ReplLog | ReplMetrics | WorkerReadiness | DrainingState
+  CallState | AppConfig | MetricsRegistry | ReplLog | ReplMetrics | WorkerReadiness | DrainingState | PartitionedRelayStorage
 > = Layer.unwrap(
   Effect.gen(function* () {
     const callState = yield* CallState
@@ -507,6 +509,7 @@ export const StatusServerLayer: Layer.Layer<
 
         yield* addCallControlRoutes(router)
         yield* addReplLogRoutes(router)
+        yield* addPeerRelayRoutes(router)
       })
     )
 

@@ -1,6 +1,16 @@
 # Wire ReclaimRunner into worker boot — fix post-respawn pri-partition rebuild gap
 
-## Status: PROPOSAL — awaiting user direction on design choice
+## Status: DONE — landed during Slice B′ implementation
+
+The fix landed **inside Slice B′** (the subagent wired both the test harness AND production along the way) before this plan document was opened. Verification:
+
+- [src/main.ts:356-396](../../src/main.ts#L356-L396) — production wiring: `Layer.mergeAll(ReadyGate.layer({ flipReadyAtEnd: false }), ReclaimRunner.layer())`. `gate.run` runs first, then `reclaim.run`, then `markReady(true)` is owned by the reclaim path.
+- [src/replication/ReadyGate.ts:219-265](../../src/replication/ReadyGate.ts#L219-L265) — new `flipReadyAtEnd?: boolean` config (default `true`) so the gate can be composed with a downstream readiness owner.
+- [tests/support/k8sFakeStack.ts:466-492](../../tests/support/k8sFakeStack.ts#L466-L492) — fake-stack respawn path mirrors the same two-step boot.
+- The diagnostic test [tests/sip-front-proxy/failover/replication-gap-mini.test.ts](../../tests/sip-front-proxy/failover/replication-gap-mini.test.ts) is `it.effect` (no `.fails`) and passes (1/1, 2.67 s test time).
+- Full suite: `npm run test:fake` 1005 passed / 4 skipped, zero failures.
+
+This matches the plan's recommendations: **(b) sequential ReadyGate then ReclaimRunner**, **(α) orchestrated in `main.ts`**, **single-node mode skip retained**.
 
 ## Context
 
