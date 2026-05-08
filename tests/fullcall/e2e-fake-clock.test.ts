@@ -50,6 +50,10 @@ import { delayedOfferFailure } from "../scenarios/delayed-offer-failure.js"
 import { retransmit200 } from "../scenarios/retransmit-200.js"
 import { keepaliveHappy } from "../scenarios/keepalive-happy.js"
 import { keepalive481 } from "../scenarios/keepalive-481.js"
+import {
+  keepaliveViaProxy,
+  keepaliveMissingOutboundProxyRegressionGuard,
+} from "../scenarios/keepalive-via-proxy.js"
 import { twoCallsRoutedToTwoWorkers } from "../scenarios/ha/two-calls-routed-to-two-workers.js"
 import { registerHappyPath } from "../scenarios/registrar/register-happy-path.js"
 import { deregisterViaExpiresZero } from "../scenarios/registrar/deregister-via-expires-zero.js"
@@ -223,6 +227,25 @@ for (const sut of ALL_SUTS) {
     }
     if (keepalive481.appliesTo(sut)) {
       it.effect("keepalive + 481: bob rejects OPTIONS → begin-termination BYEs alice", () => run(keepalive481.toScenario()), { timeout: 30_000 })
+    }
+    if (keepaliveViaProxy.appliesTo(sut)) {
+      it.effect(
+        "keepalive: in-dialog OPTIONS travels via proxy on both legs (regression for k8s endurance)",
+        () => run(keepaliveViaProxy.toScenario()),
+        { timeout: 30_000 },
+      )
+    }
+    if (keepaliveMissingOutboundProxyRegressionGuard.appliesTo(sut)) {
+      const runMissing = createSimulatedRunner({
+        outputDir: OUTPUT_DIR,
+        sut,
+        simulateMissingOutboundProxy: true,
+      })
+      it.effect(
+        "keepalive: missing B2B_OUTBOUND_PROXY → b-leg OPTIONS goes worker-direct (bug-presence guard)",
+        () => runMissing(keepaliveMissingOutboundProxyRegressionGuard.toScenario()),
+        { timeout: 30_000 },
+      )
     }
     if (twoCallsRoutedToTwoWorkers.appliesTo(sut)) {
       // sipproxyHA-only: two alice→bob calls with pre-computed Call-IDs

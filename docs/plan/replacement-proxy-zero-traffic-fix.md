@@ -1,5 +1,13 @@
 # Replacement-proxy receives zero traffic — investigation + fix plan
 
+> **Superseded by [cuddly-skipping-wigderson.md](./cuddly-skipping-wigderson.md).**
+> The remediation choice in Slice 2 (Option B graceful drain + Option C
+> endurance-test mitigation) was implemented and **did not fix the
+> problem** — sipp's still-alive UDP flow keeps refreshing conntrack
+> indefinitely. The new plan replaces it with a shared-VIP architecture
+> via keepalived, see also [docs/lb-proxy-ha.md](../lb-proxy-ha.md).
+> The diagnosis below remains authoritative.
+
 ## TL;DR
 
 After a chaos event kills a `sip-front-proxy` pod, the kubelet

@@ -1,6 +1,7 @@
 import { describe, expect } from "vitest"
 import { it } from "@effect/vitest"
 import { Effect } from "effect"
+import { FRONT_PROXY_VIP_TARGET } from "./fixtures/frontProxyTarget.js"
 import { deleteSippJob, runSippJob } from "./fixtures/sippJob.js"
 import {
   aggregatePerCall,
@@ -46,7 +47,7 @@ describe("k8s/proxy-scale — INV-4: pool growth doesn't disrupt", () => {
             namespace: NAMESPACE,
             name: beforeJob,
             scenario: "uac-basic.xml",
-            target: "sip-front-proxy:5060",
+            target: FRONT_PROXY_VIP_TARGET,
             service: "test",
             calls: N_BEFORE,
             callsPerSecond: 12,
@@ -78,7 +79,7 @@ describe("k8s/proxy-scale — INV-4: pool growth doesn't disrupt", () => {
             namespace: NAMESPACE,
             name: afterJob,
             scenario: "uac-basic.xml",
-            target: "sip-front-proxy:5060",
+            target: FRONT_PROXY_VIP_TARGET,
             service: "test",
             calls: N_AFTER,
             callsPerSecond: 15,

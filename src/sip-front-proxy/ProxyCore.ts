@@ -45,6 +45,7 @@ import {
 } from "../sip/MessageHelpers.js"
 import { generateResponse } from "../sip/generators.js"
 import { SipParser } from "../sip/Parser.js"
+import { splitTopLevelCommas } from "../sip/parsers/custom/structured-headers.js"
 import { serialize } from "../sip/Serializer.js"
 import { SignalingNetwork, type UdpEndpoint } from "../sip/SignalingNetwork.js"
 import type { SipHeader, SipMessage, SipRequest } from "../sip/types.js"
@@ -77,6 +78,7 @@ import {
 } from "./RoutingStrategy.js"
 import {
   WorkerRegistry,
+  type WorkerEntry,
   type WorkerRegistryApi,
 } from "./registry/WorkerRegistry.js"
 
@@ -197,6 +199,14 @@ interface ProxyCounters {
   /** Worker-outbound (`;outbound`) request rejected because the R-URI is
    *  unparseable; the worker is the bug source — we 400 it back. */
   malformedRouteParam: number
+  /** Packet arrived with our own Record-Route on top (carrying stickiness)
+   *  AND the source ip:port is not in the worker registry. The next branch
+   *  decodes the cookie and routes by it — if the originator was actually
+   *  a worker (registry stale, IP rotated, port mismatch) the request loops
+   *  back. Spike in this counter means in-dialog routing is misclassifying
+   *  worker-outbound as bob-inbound. See E.1 in
+   *  docs/plan/structured-imagining-dewdrop.md. */
+  workerOutboundClassificationMiss?: number
 }
 
 const newCounters = (): ProxyCounters => ({
@@ -212,6 +222,7 @@ const newCounters = (): ProxyCounters => ({
   responseDroppedNoVia: 0,
   sendErrors: 0,
   malformedRouteParam: 0,
+  workerOutboundClassificationMiss: 0,
 })
 
 // ---------------------------------------------------------------------------
@@ -647,6 +658,42 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         if (Option.isSome(sourceWorker)) {
           isWorkerOutbound = true
           strippedRouteParams = undefined
+        } else if (strippedRouteParams !== undefined) {
+          // E.1 diagnostic: this is the exact precondition for the
+          // loopback bug observed in the k8s endurance run. The packet
+          // arrived with our own Record-Route on top (so it traversed
+          // us before — `strippedRouteParams` carries the stickiness
+          // cookie we inserted) AND the source IP:port is NOT one of
+          // the registered workers. The next branch will decode the
+          // stickiness cookie and forward to whichever worker the
+          // cookie names — if the originator was actually a worker
+          // (just unregistered / IP rotated post-restart), the packet
+          // loops back to it as Unroutable. Surface the misclassification
+          // so the operator can see registry staleness or port mismatch.
+          const snapshot = yield* registry.snapshot.pipe(
+            Effect.catchCause(() => Effect.succeed([] as ReadonlyArray<WorkerEntry>)),
+          )
+          const knownAddresses = snapshot
+            .map((w) => `${w.address.host}:${w.address.port}`)
+            .join(",")
+          // Format cookie params as `key=value,key=value` rather than
+          // serialising via JSON — keeps the Effect Schema lint happy
+          // and the log line easier to grep.
+          const cookieParamsStr = Object.entries(strippedRouteParams)
+            .map(([k, v]) => `${k}=${v}`)
+            .join(",")
+          yield* Effect.logWarning(
+            `[ProxyCore] worker-outbound classification miss: ` +
+              `method=${method} callId=${req.parsed.callId} ` +
+              `src=${src.address}:${src.port} registrySize=${snapshot.length} ` +
+              `knownWorkers=[${knownAddresses}] ` +
+              `cookieParams={${cookieParamsStr}}. ` +
+              `Will decode stickiness cookie — may loop back if the ` +
+              `originator was actually a worker (IP rotated post-restart, ` +
+              `or source-port mismatch).`,
+          )
+          counters.workerOutboundClassificationMiss =
+            (counters.workerOutboundClassificationMiss ?? 0) + 1
         }
       }
 
@@ -972,7 +1019,12 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
     const egressEp =
       egressNet === "core" && coreEndpoint !== undefined ? coreEndpoint : extEndpoint
 
-    const headers = removeFirstHeader(msg.headers, "via")
+    // Use the entry-aware helper: a peer may have combined our top stamp
+    // and the next-hop Via on a single comma-separated line per RFC 3261
+    // §7.3.1 (sipp-uas's `[last_Via:]` echo does this). `removeFirstHeader`
+    // would drop both entries; `removeFirstHeaderEntry` only drops the
+    // top one and keeps the remainder.
+    const headers = removeFirstHeaderEntry(msg.headers, "via")
     const outBuf = serialize({ ...msg, headers })
     counters.routedResponses++
     yield* sendOn(egressEp, outBuf, { host, port })
@@ -1204,6 +1256,43 @@ const removeFirstHeader = (
   for (const h of headers) {
     if (!removed && h.name.toLowerCase() === lower) {
       removed = true
+      continue
+    }
+    out.push(h)
+  }
+  return out
+}
+
+/**
+ * Remove the topmost entry of a list-style header (Via, Route, Record-Route).
+ *
+ * RFC 3261 §7.3.1 lets a peer combine multiple values of the same header into
+ * one comma-separated line OR keep them on separate lines. Both encodings are
+ * semantically identical. `removeFirstHeader` deletes the entire line, which
+ * is correct only when the line carries a single entry; for a multi-entry
+ * line it would silently drop every entry but the first — losing all
+ * downstream Vias on a response, breaking response forwarding.
+ *
+ * This helper splits the first matching header at top-level commas (quote-
+ * and angle-bracket-aware via `splitTopLevelCommas`), drops the first entry,
+ * and either updates the line with the remaining entries or removes it
+ * entirely if none remain.
+ */
+const removeFirstHeaderEntry = (
+  headers: ReadonlyArray<SipHeader>,
+  name: string
+): SipHeader[] => {
+  const lower = name.toLowerCase()
+  const out: SipHeader[] = []
+  let removed = false
+  for (const h of headers) {
+    if (!removed && h.name.toLowerCase() === lower) {
+      removed = true
+      const entries = splitTopLevelCommas(h.value)
+      if (entries.length > 1) {
+        out.push({ name: h.name, value: entries.slice(1).join(",") })
+      }
+      // entries.length <= 1 → drop the whole line.
       continue
     }
     out.push(h)

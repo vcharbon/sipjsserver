@@ -25,6 +25,7 @@ import { buildAndLoad } from "../fixtures/images.js"
 import {
   killPodEvent,
   nodeShutdownEvent,
+  proxyCutoffEvent,
   type ChaosEventType,
   type ChaosOutcome,
 } from "./chaosOps.js"
@@ -80,6 +81,20 @@ interface CliArgs {
   readonly runId: string
   readonly noAnalyze: boolean
   readonly proxyChaosDisabled: boolean
+  /**
+   * Optional chaos-event weight overrides parsed from `--chaos-weights
+   * type1=N1,type2=N2`. Missing types fall through to the scheduler's
+   * defaults; an explicit `=0` zeroes the type out.
+   */
+  readonly chaosWeights?: Partial<Record<ChaosEventType, number>>
+  /**
+   * Override the target SIP URI host[:port] sipp sends to. Default is
+   * `FRONT_PROXY_VIP_TARGET` (`172.20.255.250:5060`, the front-proxy
+   * VIP). With `sip-front-proxy.vip.enabled` (the test default), the
+   * proxy listener binds the VIP only and the Service DNS doesn't
+   * work — see docs/lb-proxy-ha.md.
+   */
+  readonly proxyTarget?: string
 }
 
 const DEFAULTS = {
@@ -158,7 +173,48 @@ const parseArgs = (argv: ReadonlyArray<string>): CliArgs => {
     ),
     noAnalyze: flags.has("no-analyze"),
     proxyChaosDisabled: flags.has("proxy-chaos-disabled"),
+    ...(args.has("chaos-weights")
+      ? { chaosWeights: parseChaosWeights(args.get("chaos-weights")!) }
+      : {}),
+    ...(args.has("proxy-target") ? { proxyTarget: args.get("proxy-target")! } : {}),
   }
+}
+
+const VALID_CHAOS_TYPES: ReadonlySet<string> = new Set<ChaosEventType>([
+  "worker-pod-graceful",
+  "worker-pod-kill9",
+  "proxy-pod-graceful",
+  "proxy-pod-kill9",
+  "limiter-redis-graceful",
+  "limiter-redis-kill9",
+  "node-shutdown-app",
+  "node-shutdown-edge",
+  "proxy-cutoff-vrrp",
+])
+
+const parseChaosWeights = (raw: string): Partial<Record<ChaosEventType, number>> => {
+  const out: Partial<Record<ChaosEventType, number>> = {}
+  for (const pair of raw.split(",")) {
+    const trimmed = pair.trim()
+    if (trimmed === "") continue
+    const eq = trimmed.indexOf("=")
+    if (eq <= 0) {
+      throw new Error(`bad --chaos-weights entry: '${trimmed}' (expected key=N)`)
+    }
+    const key = trimmed.slice(0, eq)
+    const val = trimmed.slice(eq + 1)
+    if (!VALID_CHAOS_TYPES.has(key)) {
+      throw new Error(
+        `unknown chaos type '${key}' in --chaos-weights; valid: ${[...VALID_CHAOS_TYPES].join(",")}`,
+      )
+    }
+    const n = parseFloat(val)
+    if (!Number.isFinite(n) || n < 0) {
+      throw new Error(`bad --chaos-weights value for '${key}': '${val}'`)
+    }
+    out[key as ChaosEventType] = n
+  }
+  return out
 }
 
 const parseDuration = (raw: string): number => {
@@ -272,6 +328,7 @@ const main = (argv: ReadonlyArray<string>) =>
         // Hold is hardcoded to 30000ms in the scenario — sipp's
         // [$var] macro doesn't expand inside <pause milliseconds>.
         artifactDir,
+        ...(args.proxyTarget !== undefined && { target: args.proxyTarget }),
       })
       streams.push(shortHoldHandle)
 
@@ -284,6 +341,7 @@ const main = (argv: ReadonlyArray<string>) =>
         callsPerPeriodMs: { count: 1, periodMs: longPeriodMs },
         // Hold is hardcoded to 1200000ms (20 min) in the scenario.
         artifactDir,
+        ...(args.proxyTarget !== undefined && { target: args.proxyTarget }),
       })
       streams.push(longHandle)
 
@@ -300,6 +358,7 @@ const main = (argv: ReadonlyArray<string>) =>
         cps: limiterCps,
         keyVars: [["xapi", xapiJson]],
         artifactDir,
+        ...(args.proxyTarget !== undefined && { target: args.proxyTarget }),
       })
       streams.push(limiterHandle)
 
@@ -328,6 +387,38 @@ const main = (argv: ReadonlyArray<string>) =>
       yield* writeMeta()
 
       /* ----- SOAK ------------------------------------------------- */
+      // --chaos-weights is an exclusive allow-list: unlisted event types
+      // get weight 0. --proxy-chaos-disabled stays a coarse one-shot
+      // toggle that zeroes proxy-side events on top of the defaults.
+      const allChaosTypes: ReadonlyArray<ChaosEventType> = [
+        "worker-pod-graceful",
+        "worker-pod-kill9",
+        "proxy-pod-graceful",
+        "proxy-pod-kill9",
+        "limiter-redis-graceful",
+        "limiter-redis-kill9",
+        "node-shutdown-app",
+        "node-shutdown-edge",
+        "proxy-cutoff-vrrp",
+      ]
+      const buildExplicitWeights = (
+        explicit: Partial<Record<ChaosEventType, number>>,
+      ): Record<ChaosEventType, number> => {
+        const out = {} as Record<ChaosEventType, number>
+        for (const t of allChaosTypes) out[t] = explicit[t] ?? 0
+        return out
+      }
+      const explicitWeights: Partial<Record<ChaosEventType, number>> | undefined =
+        args.chaosWeights !== undefined
+          ? buildExplicitWeights(args.chaosWeights)
+          : args.proxyChaosDisabled
+            ? {
+                "proxy-pod-graceful": 0,
+                "proxy-pod-kill9": 0,
+                "proxy-cutoff-vrrp": 0,
+                "node-shutdown-edge": 0,
+              }
+            : undefined
       const schedule = args.smoke
         ? buildSmokeSchedule()
         : buildSchedule({
@@ -335,9 +426,7 @@ const main = (argv: ReadonlyArray<string>) =>
             chaosMinIntervalSec: args.chaosMinIntervalSec,
             chaosMaxIntervalSec: args.chaosMaxIntervalSec,
             soakDurationSec: args.durationSec,
-            ...(args.proxyChaosDisabled && {
-              weights: { "proxy-pod-graceful": 0, "proxy-pod-kill9": 0 },
-            }),
+            ...(explicitWeights !== undefined && { weights: explicitWeights }),
           })
       ;(meta as { chaosEventsScheduled: number }).chaosEventsScheduled =
         schedule.length
@@ -577,6 +666,8 @@ const dispatchChaos = (
       return nodeShutdownEvent({ namespace: NAMESPACE, tier: "app" }, rand)
     case "node-shutdown-edge":
       return nodeShutdownEvent({ namespace: NAMESPACE, tier: "edge" }, rand)
+    case "proxy-cutoff-vrrp":
+      return proxyCutoffEvent({ namespace: NAMESPACE, kind: "vrrp" }, rand)
     default:
       return killPodEvent({ namespace: NAMESPACE, type }, rand)
   }

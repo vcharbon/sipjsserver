@@ -19,11 +19,17 @@ worker:
   labelSelector: ""          # Optional override; defaults to
                              # `app.kubernetes.io/name=<statefulSetName>`.
 
-# UDP bind for the proxy itself.
+# UDP bind for the proxy itself. When vip.enabled, the chart overrides
+# bind.host with vip.address so the listener binds to the VIP — making
+# outbound forwarded SIP automatically source-IP'd as the VIP (kernel
+# uses bound IP as source). Worker replies land on whoever currently
+# owns the VIP, which is the live master post-failover. See
+# docs/lb-proxy-ha.md "Source-IP discipline".
 bind:
   host: "0.0.0.0"
   port: 5060
-  advertisedHost: ""         # Defaults to the Service ClusterIP.
+  advertisedHost: ""         # Defaults to vip.address when vip.enabled,
+                             # else to the Service ClusterIP.
   advertisedPort: 0          # 0 → use bind.port.
 
 # OPTIONS keepalive probe — auxiliary UDP socket the proxy uses to ping
@@ -47,6 +53,29 @@ service:
   type: ClusterIP
   # Annotations for upstream LBs / IPVS / consistent-hash topologies (D6).
   annotations: {}
+
+# Shared VIP managed by a keepalived sidecar — see docs/lb-proxy-ha.md.
+# When enabled, both proxy pods participate in a VRRP instance, the
+# active pod answers ARP for vip.address, and clients reach the LB at
+# that single stable IP. Required: hostNetwork pod, NET_ADMIN/NET_RAW
+# caps on the sidecar, anti-affinity to keep the two pods on separate
+# nodes. Cloud deployments skip this block and substitute a cloud LB
+# without changing the proxy code.
+vip:
+  enabled: false
+  address: ""               # Required when enabled. Static IP in the
+                            # node subnet, kept off any DHCP pool.
+  interface: ""             # VRRP interface; auto-detect when empty.
+  routerId: 51              # virtual_router_id, must be unique on the
+                            # L2 segment across all VRRP groups.
+  advertIntSec: "0.5"       # 500 ms VRRP advertisement interval.
+                            # Hold-down = 3 × advertIntSec.
+  unicastPeers: []          # When the L2 segment drops VRRP multicast,
+                            # list peer IPs here for unicast VRRP.
+  keepalivedImage:
+    repository: osixia/keepalived
+    tag: "2.0.20"
+    pullPolicy: IfNotPresent
 
 resources: {}
 

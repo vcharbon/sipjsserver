@@ -1,6 +1,7 @@
 import { describe, expect } from "vitest"
 import { it } from "@effect/vitest"
 import { Effect } from "effect"
+import { FRONT_PROXY_VIP_TARGET } from "./fixtures/frontProxyTarget.js"
 import { deleteSippJob, runSippJob } from "./fixtures/sippJob.js"
 
 const NAMESPACE = process.env.K8S_TEST_NAMESPACE ?? "sip-test"
@@ -16,7 +17,7 @@ describe("k8s/smoke", () => {
             namespace: NAMESPACE,
             name: jobName,
             scenario: "uac-basic.xml",
-            target: "sip-front-proxy:5060",
+            target: FRONT_PROXY_VIP_TARGET,
             service: "test",
             calls: 5,
             callsPerSecond: 5,

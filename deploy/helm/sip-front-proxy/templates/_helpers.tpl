@@ -48,3 +48,30 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "sip-front-proxy.workerNamespace" -}}
 {{- default .Release.Namespace .Values.worker.namespace -}}
 {{- end -}}
+
+{{/*
+Effective Via "sent-by" host the proxy stamps. Explicit override wins,
+otherwise falls back to vip.address when VIP is enabled, otherwise empty
+(proxy reverts to its default discovery path). See docs/lb-proxy-ha.md.
+*/}}
+{{- define "sip-front-proxy.advertisedHost" -}}
+{{- if .Values.bind.advertisedHost -}}
+{{- .Values.bind.advertisedHost -}}
+{{- else if and .Values.vip.enabled .Values.vip.address -}}
+{{- .Values.vip.address -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Effective bind.host. When VIP is enabled the listener must bind directly
+to vip.address — that makes outbound forwarded SIP source-IP'd as the
+VIP automatically (kernel uses bound IP as source). When VIP is disabled
+we keep the explicit bind.host (default 0.0.0.0).
+*/}}
+{{- define "sip-front-proxy.bindHost" -}}
+{{- if and .Values.vip.enabled .Values.vip.address -}}
+{{- .Values.vip.address -}}
+{{- else -}}
+{{- .Values.bind.host -}}
+{{- end -}}
+{{- end -}}

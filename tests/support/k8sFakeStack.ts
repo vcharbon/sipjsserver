@@ -128,6 +128,12 @@ export interface K8sFakeStackOpts {
    * test cannot peek).
    */
   readonly limiterStore?: LimiterMemoryStore
+  /**
+   * When true, no worker config receives `b2bOutboundProxy`. Mirrors the
+   * k8s production-deployment shape that omitted `B2B_OUTBOUND_PROXY`
+   * and tore down every long-hold call via `keepaliveTimeoutRule`.
+   */
+  readonly simulateMissingOutboundProxy?: boolean
 }
 
 /**
@@ -138,12 +144,15 @@ export interface K8sFakeStackOpts {
 const perWorkerConfig = (
   base: AppConfigData,
   addr: SocketAddr,
-  ordinalLabel: string
+  ordinalLabel: string,
+  simulateMissingOutboundProxy: boolean = false,
 ): AppConfigData => ({
   ...base,
   sipLocalIp: addr.host,
   sipLocalPort: addr.port,
-  b2bOutboundProxy: { host: K8S_PROXY_ADDR.host, port: K8S_PROXY_ADDR.port },
+  ...(simulateMissingOutboundProxy
+    ? {}
+    : { b2bOutboundProxy: { host: K8S_PROXY_ADDR.host, port: K8S_PROXY_ADDR.port } }),
   workerOrdinalLabel: ordinalLabel,
 })
 
@@ -241,6 +250,7 @@ export function k8sFakeStackLayer(opts: K8sFakeStackOpts) {
     opts.handlers,
     sharedCdrLayer,
     sharedLimiterLayer,
+    opts.simulateMissingOutboundProxy === true,
   )
 
   return Layer.mergeAll(
@@ -286,6 +296,7 @@ function buildClusterWithWorkersLayer(
   handlers: HandlerRegistry,
   sharedCdrLayer: Layer.Layer<CdrWriter>,
   sharedLimiterLayer: Layer.Layer<CallLimiter>,
+  simulateMissingOutboundProxy: boolean = false,
 ): Layer.Layer<
   SimulatedK8sCluster,
   never,
@@ -341,7 +352,7 @@ function buildClusterWithWorkersLayer(
         const stack = Layer.fresh(
           Layer.provideMerge(
             b2buaWorkerStackLayer({
-              config: perWorkerConfig(baseConfig, w.address, w.id as unknown as string),
+              config: perWorkerConfig(baseConfig, w.address, w.id as unknown as string, simulateMissingOutboundProxy),
               storageLayer: fabric.storageLayerOf(w.ordinal),
               cdrLayer: sharedCdrLayer,
               limiterLayer: sharedLimiterLayer,
@@ -434,7 +445,7 @@ function buildClusterWithWorkersLayer(
         const storageL = fabric.storageLayerOf(w.ordinal)
         const appConfigL = Layer.succeed(
           AppConfig,
-          perWorkerConfig(baseConfig, w.address, w.id as unknown as string),
+          perWorkerConfig(baseConfig, w.address, w.id as unknown as string, simulateMissingOutboundProxy),
         )
         const recoverySharedL = Layer.mergeAll(
           PeerEnumeratorL,

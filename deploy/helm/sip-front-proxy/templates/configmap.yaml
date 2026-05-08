@@ -6,10 +6,10 @@ metadata:
     {{- include "sip-front-proxy.labels" . | nindent 4 }}
 data:
   PROXY_REGISTRY_MODE: "kubernetes"
-  PROXY_BIND_HOST: {{ .Values.bind.host | quote }}
+  PROXY_BIND_HOST: {{ include "sip-front-proxy.bindHost" . | quote }}
   PROXY_BIND_PORT: {{ .Values.bind.port | quote }}
-  {{- if .Values.bind.advertisedHost }}
-  PROXY_ADVERTISED_HOST: {{ .Values.bind.advertisedHost | quote }}
+  {{- if include "sip-front-proxy.advertisedHost" . }}
+  PROXY_ADVERTISED_HOST: {{ include "sip-front-proxy.advertisedHost" . | quote }}
   {{- end }}
   {{- if and .Values.bind.advertisedPort (gt (int .Values.bind.advertisedPort) 0) }}
   PROXY_ADVERTISED_PORT: {{ .Values.bind.advertisedPort | quote }}

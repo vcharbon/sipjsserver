@@ -5,7 +5,13 @@ metadata:
   labels:
     app.kubernetes.io/name: sipp-uas
 spec:
-  type: ClusterIP
+  # Headless: DNS returns the pod IP directly. With a ClusterIP, kube-proxy
+  # would DNAT and SNAT-mark traffic from a non-pod-CIDR source (e.g. the
+  # sip-front-proxy hostNetwork pod sending b-leg INVITE from the VIP),
+  # which masquerades the source to node-IP:ephemeral and breaks the
+  # response path back to the VIP listener. See docs/lb-proxy-ha.md
+  # "Source-IP discipline".
+  clusterIP: None
   selector:
     app.kubernetes.io/name: sipp-uas
   ports:

@@ -1,6 +1,7 @@
 import { describe, expect } from "vitest"
 import { it } from "@effect/vitest"
 import { Effect } from "effect"
+import { FRONT_PROXY_VIP_TARGET } from "./fixtures/frontProxyTarget.js"
 import { deleteSippJob, runSippJob } from "./fixtures/sippJob.js"
 import {
   aggregatePerCall,
@@ -33,7 +34,7 @@ describe("k8s/proxy-routing — INV-1: sticky in-dialog routing", () => {
             namespace: NAMESPACE,
             name: jobName,
             scenario: "uac-basic.xml",
-            target: "sip-front-proxy:5060",
+            target: FRONT_PROXY_VIP_TARGET,
             service: "test",
             calls: N,
             callsPerSecond: 10,
@@ -113,7 +114,7 @@ describe("k8s/proxy-routing — INV-2: HRW determinism under stable pool", () =>
             namespace: NAMESPACE,
             name: `inv2-${stamp}-a`,
             scenario: "uac-basic.xml",
-            target: "sip-front-proxy:5060",
+            target: FRONT_PROXY_VIP_TARGET,
             service: "test",
             calls: N,
             callsPerSecond: 10,
@@ -142,7 +143,7 @@ describe("k8s/proxy-routing — INV-2: HRW determinism under stable pool", () =>
             namespace: NAMESPACE,
             name: `inv2-${stamp}-b`,
             scenario: "uac-basic.xml",
-            target: "sip-front-proxy:5060",
+            target: FRONT_PROXY_VIP_TARGET,
             service: "test",
             calls: N,
             callsPerSecond: 10,

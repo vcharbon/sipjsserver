@@ -169,20 +169,29 @@ export function createSimulatedTransport(opts?: {
    * scenario body is unchanged; only the topology around it differs.
    */
   sut?: Sut
+  /**
+   * When true, the SUT's worker config(s) do NOT receive
+   * `b2bOutboundProxy`. Reproduces the k8s production-deployment shape
+   * that omitted `B2B_OUTBOUND_PROXY`. Only meaningful for SUTs that
+   * include a proxy (`proxy+b2b`, `sipproxyHA`, `k8sFailover`). See
+   * `keepalive-via-proxy.ts` for the regression-guard scenario.
+   */
+  simulateMissingOutboundProxy?: boolean
 }): TestTransport {
   const sipPort = opts?.sipPort ?? 15060
   const httpPort = opts?.httpPort ?? 13002
   const clockSleep = opts?.clockSleep ?? ((ms: number) => Effect.sleep(`${ms} millis`))
   const sut: Sut = opts?.sut ?? "b2bonly"
+  const simulateMissingOutboundProxy = opts?.simulateMissingOutboundProxy === true
 
   const config = testAppConfig(sipPort, httpPort, opts?.configOverrides)
   const StackLayer =
     sut === "sipproxyHA"
-      ? sipproxyHAFakeStackLayer({ config, handlers: buildTestHandlers() })
+      ? sipproxyHAFakeStackLayer({ config, handlers: buildTestHandlers(), simulateMissingOutboundProxy })
       : sut === "k8sFailover"
-        ? k8sFakeStackLayer({ config, handlers: buildTestHandlers() })
+        ? k8sFakeStackLayer({ config, handlers: buildTestHandlers(), simulateMissingOutboundProxy })
         : sut === "proxy+b2b"
-          ? proxyB2bFakeStackLayer({ config })
+          ? proxyB2bFakeStackLayer({ config, simulateMissingOutboundProxy })
           : sut === "registrarFrontProxy"
             ? registrarFrontProxyFakeStackLayer({ config })
             : fakeStackLayer({ config })

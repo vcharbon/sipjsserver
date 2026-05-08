@@ -130,7 +130,17 @@ function extractUriFromRoute(headerValue: string): string {
  * first route is a loose router (`;lr` parameter), rewrites the destination
  * to that URI while keeping the Request-URI at the remote target.
  *
- * When `dialog.routeSet` is empty the request and destination are returned
+ * When `dialog.routeSet` is empty and `outboundProxyFallback` is provided,
+ * insert a Route header pointing at the configured outbound proxy and use
+ * it as the wire destination — the b-leg invariant: every B2BUA→Bob
+ * message must traverse the front proxy when one is configured. The empty
+ * routeSet case indicates the upstream proxy did not Record-Route the
+ * b-leg INVITE (proxy bug, deployment misconfig, or a peer that doesn't
+ * Record-Route); the fallback prevents the in-dialog request from going
+ * pod-direct and ALSO surfaces the misconfiguration in logs. See
+ * docs/plan/structured-imagining-dewdrop.md (pillar F).
+ *
+ * When neither path applies the request and destination are returned
  * unchanged. Strict routing (first route without `;lr`) is not implemented —
  * we fall through to the unchanged request in that case.
  */
@@ -138,25 +148,115 @@ function applyRouteSet(
   msg: SipRequest,
   dialog: Dialog | undefined,
   target: { host: string; port: number },
-): { msg: SipRequest; target: { host: string; port: number } } {
-  if (dialog === undefined || dialog.sip.routeSet.length === 0) return { msg, target }
+  outboundProxyFallback?: { host: string; port: number } | undefined,
+): { msg: SipRequest; target: { host: string; port: number }; fallbackToOutboundProxy: boolean } {
+  if (dialog === undefined || dialog.sip.routeSet.length === 0) {
+    if (outboundProxyFallback === undefined) {
+      return { msg, target, fallbackToOutboundProxy: false }
+    }
+    const proxy = outboundProxyFallback
+    // `;outbound` is required: it's the proxy's primary signal for
+    // "worker-outbound" classification (see ProxyCore §16.4 Route
+    // preprocessing). Without it the proxy falls back to source-IP
+    // lookup which is not reliable across pod restarts; the request
+    // would loop back to a worker as Unroutable. Mirror what
+    // helpers.ts does for the initial b-leg INVITE preload.
+    const routeUri = `<sip:${proxy.host}:${proxy.port};lr;outbound>`
+    const routeHeader: SipHeader = { name: "Route", value: routeUri }
+    const without = msg.headers.filter((h) => h.name.toLowerCase() !== "route")
+    const insertIdx = without.findIndex((h) => h.name.toLowerCase() === "content-length")
+    const newHeaders = insertIdx >= 0
+      ? [...without.slice(0, insertIdx), routeHeader, ...without.slice(insertIdx)]
+      : [...without, routeHeader]
+    return {
+      msg: { ...msg, headers: newHeaders },
+      target: { host: proxy.host, port: proxy.port },
+      fallbackToOutboundProxy: true,
+    }
+  }
 
   const firstRoute = dialog.sip.routeSet[0]!
   const firstUri = extractUriFromRoute(firstRoute)
   const isLoose = parseSipUriString(firstUri)?.params["lr"] !== undefined
-  if (!isLoose) return { msg, target }
+  if (!isLoose) return { msg, target, fallbackToOutboundProxy: false }
 
-  const routeHeaders: SipHeader[] = dialog.sip.routeSet.map((uri: string) => ({ name: "Route", value: uri }))
+  const hp = extractHostPort(firstUri)
+  const newTarget = hp ?? target
+
+  // E.2: b-leg outbound-proxy classification hardening.
+  //
+  // When the wire destination resolves to the configured
+  // `b2bOutboundProxy`, append `;outbound` to the topmost Route URI on
+  // egress so the proxy's `;outbound` classifier (ProxyCore §16.4
+  // line 631) deterministically identifies the request as worker-
+  // outbound. Without this, the proxy falls back to source-IP lookup;
+  // if the worker isn't in the registry under that exact host:port
+  // (post-restart IP rotation, ephemeral source-port mismatch, NAT
+  // hop), the proxy decodes the stickiness cookie and routes the
+  // request back to a worker — the loopback we observe as
+  // "Unroutable OPTIONS" in worker logs.
+  //
+  // The mutation only affects the wire-side packet (a fresh URI on the
+  // outgoing Route header); `dialog.routeSet` itself is unchanged, so
+  // bob's in-dialog requests still carry the original RR URI without
+  // `;outbound` and remain classifiable as bob-inbound.
+  const routeUris = [...dialog.sip.routeSet]
+  if (
+    outboundProxyFallback !== undefined &&
+    newTarget.host === outboundProxyFallback.host &&
+    newTarget.port === outboundProxyFallback.port &&
+    !/;outbound(?:[;>]|$)/.test(routeUris[0]!)
+  ) {
+    // Append `;outbound` inside the angle brackets (or before the bare
+    // URI's end) so the param is part of the URI itself, not a header
+    // param.
+    const uri0 = routeUris[0]!
+    routeUris[0] = uri0.includes(">")
+      ? uri0.replace(/;?(>)/, ";outbound>")
+      : `${uri0};outbound`
+  }
+  const routeHeaders: SipHeader[] = routeUris.map((uri: string) => ({ name: "Route", value: uri }))
   const without = msg.headers.filter((h) => h.name.toLowerCase() !== "route")
   const insertIdx = without.findIndex((h) => h.name.toLowerCase() === "content-length")
   const newHeaders = insertIdx >= 0
     ? [...without.slice(0, insertIdx), ...routeHeaders, ...without.slice(insertIdx)]
     : [...without, ...routeHeaders]
 
-  const hp = extractHostPort(firstUri)
-  const newTarget = hp ?? target
+  return { msg: { ...msg, headers: newHeaders }, target: newTarget, fallbackToOutboundProxy: false }
+}
 
-  return { msg: { ...msg, headers: newHeaders }, target: newTarget }
+/**
+ * Apply route-set egress + the b-leg outbound-proxy invariant. Wraps
+ * `applyRouteSet` so the b-leg policy ("every B2BUA→Bob in-dialog
+ * request must traverse the configured front proxy") lives in one place.
+ *
+ * On b-leg, passes `ctx.config.b2bOutboundProxy` as the fallback. When
+ * the dialog routeSet is empty (Record-Route lost / never inserted /
+ * deployment misconfig), the request is forced through the configured
+ * proxy and an error is logged so the misconfiguration surfaces. On
+ * a-leg, the fallback is omitted — `b2bOutboundProxy` is a b-leg
+ * concept; the a-leg's natural routeSet (extracted from the inbound
+ * INVITE's Record-Route) carries the correct routing.
+ */
+function applyEgressRouting(
+  msg: SipRequest,
+  dialog: Dialog | undefined,
+  target: { host: string; port: number },
+  legId: string,
+  ctx: RuleContext,
+): { msg: SipRequest; target: { host: string; port: number } } {
+  const proxy = legId !== "a" ? ctx.config.b2bOutboundProxy : undefined
+  const result = applyRouteSet(msg, dialog, target, proxy)
+  if (result.fallbackToOutboundProxy && proxy !== undefined) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[b2bua] b-leg in-dialog ${msg.method} routeSet empty — ` +
+        `forcing through b2bOutboundProxy ${proxy.host}:${proxy.port} ` +
+        `(callId=${dialog?.sip.callId ?? "?"}, legId=${legId}). ` +
+        `Indicates the upstream proxy did not Record-Route this dialog.`,
+    )
+  }
+  return { msg: result.msg, target: result.target }
 }
 
 /** Resolve a leg by ID (a-leg or b-leg). */
@@ -686,9 +786,12 @@ function relayRequest(
     // - B-leg (worker→bob via proxy when `b2bOutboundProxy` is set)
     // - A-leg (worker→alice via proxy in `proxy+b2b` SUT, where the A-leg
     //   dialog routeSet was seeded from the original INVITE's R-R)
-    // `applyRouteSet` is a no-op when `dialog.sip.routeSet` is empty, so
-    // b2bonly's A-leg (no R-R from alice) keeps its direct path.
-    const routed = applyRouteSet(relayed, targetDialog, target)
+    // `applyRouteSet` is a no-op when `dialog.sip.routeSet` is empty.
+    // For the b-leg, `applyEgressRouting` falls back to
+    // `b2bOutboundProxy` if configured (logs an error) — the b-leg
+    // outbound-proxy invariant. For the a-leg, b2bonly (no R-R from
+    // alice) keeps its direct path.
+    const routed = applyEgressRouting(relayed, targetDialog, target, targetLeg.legId, ctx)
     relayed = routed.msg
     finalTarget = routed.target
   }
@@ -1240,7 +1343,7 @@ function executeAckLeg(
       ext: { ...d.ext, ackBranch: branch },
     }))
   }
-  const routed = applyRouteSet(ackMsg, dialog, target)
+  const routed = applyEgressRouting(ackMsg, dialog, target, legId, ctx)
 
   state.outbound.push({
     message: routed.msg,
@@ -1293,7 +1396,7 @@ function executeSendRequestToLeg(
     sip: newSip,
   }))
 
-  const routed = applyRouteSet(request, dialog, target)
+  const routed = applyEgressRouting(request, dialog, target, legId, ctx)
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
@@ -1371,7 +1474,7 @@ function executeSendPrackToLeg(
     sip: newSip,
   }))
 
-  const routed = applyRouteSet(request, dialog, target)
+  const routed = applyEgressRouting(request, dialog, target, legId, ctx)
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
@@ -1502,7 +1605,7 @@ function executeDestroyLeg(
         ...d,
         sip: newSip,
       }))
-      const routed = applyRouteSet(request, dialog, target)
+      const routed = applyEgressRouting(request, dialog, target, legId, ctx)
       state.outbound.push({
         message: routed.msg,
         destination: routed.target,
@@ -1643,7 +1746,7 @@ function executeTerminateCall(
           ...d,
           sip: newSip,
         }))
-        const routed = applyRouteSet(request, dialog, target)
+        const routed = applyEgressRouting(request, dialog, target, leg.legId, ctx)
         state.outbound.push({
           message: routed.msg,
           destination: routed.target,
@@ -1723,7 +1826,7 @@ function executeBeginTermination(
           ...d,
           sip: newSip,
         }))
-        const routed = applyRouteSet(request, dialog, target)
+        const routed = applyEgressRouting(request, dialog, target, leg.legId, ctx)
         state.outbound.push({
           message: routed.msg,
           destination: routed.target,
@@ -1811,7 +1914,7 @@ function executeSendNotify(
     sip: newSip,
   }))
 
-  const routed = applyRouteSet(request, dialog, target)
+  const routed = applyEgressRouting(request, dialog, target, legId, ctx)
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,
@@ -1891,7 +1994,7 @@ function executeSendReinvite(
     ext: { ...d.ext, pendingInviteTxn: reInviteHandle },
   }))
 
-  const routed = applyRouteSet(reinvite, dialog, target)
+  const routed = applyEgressRouting(reinvite, dialog, target, legId, ctx)
   state.outbound.push({
     message: routed.msg,
     destination: routed.target,

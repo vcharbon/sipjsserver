@@ -1,6 +1,7 @@
 import { Effect, Fiber } from "effect"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
+import { FRONT_PROXY_VIP_TARGET } from "./frontProxyTarget.js"
 import { deleteSippJob, runSippJob, type SippRunResult } from "./sippJob.js"
 import {
   fetchRoutingDecisions,
@@ -142,7 +143,7 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
           namespace: opts.namespace,
           name: loadJobName,
           scenario: opts.scenario,
-          target: "sip-front-proxy:5060",
+          target: FRONT_PROXY_VIP_TARGET,
           service: "test",
           calls: totalCalls,
           callsPerSecond: opts.cps,
@@ -263,7 +264,7 @@ export const runWorkerFailoverScenario = (opts: WorkerFailoverHarnessOpts) =>
         namespace: opts.namespace,
         name: smokeJobName,
         scenario: "uac-basic.xml",
-        target: "sip-front-proxy:5060",
+        target: FRONT_PROXY_VIP_TARGET,
         service: "test",
         calls: 5,
         callsPerSecond: 5,

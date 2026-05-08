@@ -3,6 +3,7 @@ import { it } from "@effect/vitest"
 import { Effect, Fiber } from "effect"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
+import { FRONT_PROXY_VIP_TARGET } from "./fixtures/frontProxyTarget.js"
 import { deleteSippJob, runSippJob } from "./fixtures/sippJob.js"
 import {
   aggregatePerCall,
@@ -63,7 +64,7 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
               namespace: NAMESPACE,
               name: holdJobName,
               scenario: "uac-hold-failover.xml",
-              target: "sip-front-proxy:5060",
+              target: FRONT_PROXY_VIP_TARGET,
               service: "test",
               calls: N_HOLD,
               callsPerSecond: 20,
@@ -172,7 +173,7 @@ describe("k8s/proxy-drain — INV-3: drain preserves in-flight calls", () => {
             namespace: NAMESPACE,
             name: freshJobName,
             scenario: "uac-basic.xml",
-            target: "sip-front-proxy:5060",
+            target: FRONT_PROXY_VIP_TARGET,
             service: "test",
             calls: N_FRESH,
             callsPerSecond: 6,

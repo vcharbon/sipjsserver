@@ -22,6 +22,7 @@ import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
 import { exec } from "../fixtures/exec.js"
+import { FRONT_PROXY_VIP_TARGET } from "../fixtures/frontProxyTarget.js"
 import { execInPod, kubectlCp } from "../fixtures/kubectl.js"
 import { parseSippStats, type SippStats } from "../fixtures/sippJob.js"
 import { parseSippStat } from "../fixtures/sippOutcomes.js"
@@ -41,7 +42,16 @@ export interface SippDaemonOpts {
   readonly name: string
   /** Scenario file in the sipp-scenarios ConfigMap (e.g. "uac-endurance-short.xml"). */
   readonly scenario: string
-  /** SIP target URI host[:port]. Default: sip-front-proxy:5060. */
+  /**
+   * SIP target URI host[:port]. Default: the shared
+   * `FRONT_PROXY_VIP_TARGET` constant
+   * (`tests/k8s/fixtures/frontProxyTarget.ts`). With
+   * `sip-front-proxy.vip.enabled` (the test default), the proxy
+   * listener binds to the VIP only — the Service DNS
+   * `sip-front-proxy:5060` DNATs to pod/node IPs where nothing is
+   * listening, so sipp UDP retrans-times out. Targeting the VIP
+   * directly avoids that.
+   */
   readonly target?: string
   /** R-URI service user. Default: "test". */
   readonly service?: string
@@ -92,7 +102,7 @@ export const startSippDaemon = (
   opts: SippDaemonOpts,
 ): Effect.Effect<SippDaemonHandle, SippDaemonError> =>
   Effect.gen(function* () {
-    const target = opts.target ?? "sip-front-proxy:5060"
+    const target = opts.target ?? FRONT_PROXY_VIP_TARGET
     const service = opts.service ?? "test"
     const args: Array<string> = [target, "-s", service]
     args.push("-sf", `/scenarios/${opts.scenario}`)

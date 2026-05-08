@@ -110,13 +110,42 @@ Default event-type weights:
 
 | Event | Weight |
 |-------|-------:|
-| Worker pod kill graceful | 15% |
-| Worker pod kill -9 | 15% |
-| Proxy pod kill graceful | 15% |
-| Proxy pod kill -9 | 15% |
+| Worker pod kill graceful | 13% |
+| Worker pod kill -9 | 13% |
+| Proxy pod kill graceful | 10% |
+| Proxy pod kill -9 | 10% |
+| Proxy cutoff VRRP (iptables INPUT drop -p vrrp) | 5% |
 | Shared limiter Redis kill (50/50 g/a) | 5% |
-| Kind node shutdown — app tier | ~17.5% |
-| Kind node shutdown — edge tier | ~17.5% |
+| Kind node shutdown — app tier | ~17% |
+| Kind node shutdown — edge tier | ~17% |
+
+LB-proxy event semantics — see [lb-proxy-ha.md](lb-proxy-ha.md) for
+the architecture each one targets:
+
+| Event | Mechanism | Failover path tested |
+|-------|-----------|----------------------|
+| `proxy-pod-graceful` | `kubectl delete --grace-period=200` | SIGTERM self-cede + drain |
+| `proxy-pod-kill9` | `kubectl delete --grace-period=0 --force` | VRRP peer-silence detection |
+| `proxy-cutoff-vrrp` | `docker exec <node> iptables -A INPUT -p vrrp -j DROP` | Split-brain handling (`nopreempt` + ARP last-writer-wins, designed to be invisible to clients) |
+
+**Catalog rule** — only events whose proper handling has zero or
+near-zero traffic impact are admitted. Two earlier candidates were
+rejected:
+
+- `proxy-cutoff-ingress` (drop UDP/5060 on the active node) — no
+  realistic prod analog and no clean handling path. The active proxy
+  has no signal that it's been blackholed; VRRP keeps flowing,
+  workers stay reachable.
+- `proxy-cutoff-workers` (drop egress to the cluster pod CIDR) —
+  has a real-world analog (flaky proxy-node→worker network) and a
+  clean handling design (proxy detects via OPTIONS-probe failures,
+  cedes VIP, peer takes over), but depends on a working `vrrp_script`
+  self-health gate. Re-introduce when that's wired and proven to
+  cede sub-second.
+
+Cutoff events restore on `tRecovered` by deleting the matching
+iptables rule. Recovery target: ≤ 60 s after `tFire` for cutoffs;
+≤ 30 s for pod kills (kubelet reschedule + Ready).
 
 Constraints (scheduler-enforced):
 
@@ -183,6 +212,9 @@ npm run test:k8s:endurance:analyze -- metric process_resident_memory_bytes test-
 
 # List the worst chaos events by per-window failures
 npm run test:k8s:endurance:analyze -- top-failures test-results/k8s-endurance/<runId>
+
+# html report
+npm run test:k8s:endurance:render -- test-results/k8s-endurance/enduranc
 ```
 
 ## Reproducibility
@@ -228,3 +260,33 @@ differ by seconds; the schedule itself is exact.
    be wired in `bin/proxy.ts` yet (see `proxyMetrics.ts` note). The
    limiter probe + chaos timeline + per-call data are all
    independent of `/metrics` so the verdict is still meaningful.
+
+5. **`ABORT_PRE_SOAK_SANITY: stream 'endurance-limiter-…' has no
+   live or completed calls`** after a `--reuse-cluster` retry that
+   followed an interrupted run: the previous run's sipp Job pods
+   keep firing INVITEs after the orchestrator exits, and rejected
+   limiter calls leak in-flight credit into the limiter Redis.
+   Within seconds the limiter pins above its cap and rejects
+   *every* new call from the new run's probe stream — the sanity
+   gate samples `successful=0` and `currentCall=0` and aborts.
+   Same shape can hit the short stream when the leftover load
+   saturates the workers.
+
+   Cleanup before retrying:
+
+   ```bash
+   # 1. Drop every leftover sipp Job (and its pod). Job-name prefix
+   #    is the runId; deleting the Job cascade-deletes the pod.
+   kubectl -n sip-test get jobs -o name \
+     | grep '^job\.batch/endurance-' \
+     | xargs -r kubectl -n sip-test delete
+
+   # 2. Clear the shared-limiter Redis. Default key prefix is
+   #    `sipas:limiter:` (see src/config/AppConfig.ts).
+   kubectl -n sip-test exec deploy/redis -- sh -c \
+     "redis-cli --scan --pattern 'sipas:limiter:*' | xargs -r redis-cli del"
+   ```
+
+   Alternative: run without `--reuse-cluster` so BRINGUP recreates
+   the kind cluster from scratch. Costs ~2–3 min more per attempt
+   but guarantees clean state.

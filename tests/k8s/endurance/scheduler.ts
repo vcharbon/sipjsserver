@@ -50,14 +50,15 @@ export interface SchedulerOpts {
 }
 
 const DEFAULT_WEIGHTS: Record<ChaosEventType, number> = {
-  "worker-pod-graceful": 15,
-  "worker-pod-kill9": 15,
-  "proxy-pod-graceful": 15,
-  "proxy-pod-kill9": 15,
+  "worker-pod-graceful": 13,
+  "worker-pod-kill9": 13,
+  "proxy-pod-graceful": 10,
+  "proxy-pod-kill9": 10,
+  "proxy-cutoff-vrrp": 5,
   "limiter-redis-graceful": 2.5,
   "limiter-redis-kill9": 2.5,
-  "node-shutdown-app": 17.5,
-  "node-shutdown-edge": 17.5,
+  "node-shutdown-app": 17,
+  "node-shutdown-edge": 17,
 }
 
 /**

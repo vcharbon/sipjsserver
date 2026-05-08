@@ -172,6 +172,13 @@ export function createSimulatedRunner(opts?: {
    * `<outputDir>/<sut>/` so the two runs don't overwrite each other.
    */
   sut?: Sut
+  /**
+   * When true, the SUT's worker config(s) do NOT receive
+   * `b2bOutboundProxy`. Used by the bug-presence regression scenario
+   * `keepaliveMissingOutboundProxyRegressionGuard` to reproduce the
+   * k8s production-deployment shape under TestClock.
+   */
+  simulateMissingOutboundProxy?: boolean
 }) {
   const sipPort = opts?.sipPort ?? 15060
   const httpPort = opts?.httpPort ?? 13002
@@ -203,10 +210,11 @@ export function createSimulatedRunner(opts?: {
         })
 
   const realClock = opts?.realClock === true
+  const simulateMissingOutboundProxy = opts?.simulateMissingOutboundProxy === true
   const transportOpts: Parameters<typeof createSimulatedTransport>[0] =
     opts?.configOverrides !== undefined
-      ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep, realClock, sut }
-      : { sipPort, httpPort, clockSleep, realClock, sut }
+      ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep, realClock, sut, simulateMissingOutboundProxy }
+      : { sipPort, httpPort, clockSleep, realClock, sut, simulateMissingOutboundProxy }
   const transport = createSimulatedTransport(transportOpts)
   // SUT ingress address — used by scenario steps that send their
   // initial INVITE without specifying a destination explicitly. The

@@ -93,5 +93,6 @@ Load these only when the task touches the area:
 | Rule coverage and mutation testing | [docs/rule-coverage-and-killing.md](docs/rule-coverage-and-killing.md) |
 | Tracing / OpenTelemetry rules | [docs/tracing-design.md](docs/tracing-design.md) |
 | Overload protection | [docs/overload-protection.md](docs/overload-protection.md) |
+| LB-proxy HA / shared VIP / keepalived / VRRP | [docs/lb-proxy-ha.md](docs/lb-proxy-ha.md) |
 | Authoring multi-agent SIP scenarios (hybrid kind harness) | [docs/test-api-external.md](docs/test-api-external.md) |
 | Replication / call cache backup mechanism |        [docs/replication/call-cache-backup.md](../replication/call-cache-backup.md) |

@@ -25,6 +25,7 @@ import {
   parseContact,
   parseCSeq,
   parseSipUriString,
+  splitTopLevelCommas,
 } from "./custom/structured-headers.js"
 
 function getHeaderValue(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {
@@ -71,7 +72,17 @@ export function extractCommonFields(
   if (viaValues.length === 0) {
     return Result.fail(new SipParseError({ reason: "Missing mandatory Via header" }))
   }
-  const viasParsed = viaValues.map(parseVia)
+  // RFC 3261 §7.3.1 allows the same header field name to appear once per
+  // message with values comma-separated, OR multiple times with one value
+  // per line. Both encodings are equivalent. Sipp echoing `[last_Via:]`
+  // emits the multi-Via case as a single comma-list line, which is the
+  // canonical case for a UAS responding through a proxy that prepended a
+  // Via on the request. Split each header value at top-level commas before
+  // parsing so the response-relay path sees `vias[0]` = our top stamp and
+  // `vias[1]` = the next hop, regardless of which encoding the peer used.
+  const viasParsed = viaValues.flatMap((v) =>
+    splitTopLevelCommas(v).map(parseVia),
+  )
   const topVia = viasParsed[0]!
 
   const contactVal = getHeaderValue(headers, "Contact")

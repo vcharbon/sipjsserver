@@ -24,9 +24,60 @@ spec:
       # / drains for the entire grace window. See
       # docs/sip-front-proxy/resilience-model.md timing table.
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.vip.enabled }}
+      # VIP requires hostNetwork so keepalived can answer ARP on the
+      # node's interface. Both proxies must land on different nodes —
+      # see anti-affinity below. Pods share PID namespace so the
+      # keepalived sidecar's vrrp_script can pgrep the proxy process.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      shareProcessNamespace: true
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.vip.enabled }}
+      # Pre-bind the VIP on lo so the proxy container's bind(VIP:5060)
+      # succeeds at startup. Keepalived's notify scripts also do this,
+      # but they only fire after keepalived is up — concurrent with
+      # proxy container start (EADDRNOTAVAIL race). The init container
+      # guarantees lo has the VIP before either main container starts.
+      initContainers:
+        - name: vip-loopback
+          image: "{{ .Values.vip.keepalivedImage.repository }}:{{ .Values.vip.keepalivedImage.tag }}"
+          imagePullPolicy: {{ .Values.vip.keepalivedImage.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              # 1) Pin the VIP on lo so the proxy's bind(VIP:5060) succeeds
+              #    at startup AND so the standby can use VIP as outbound
+              #    source for forwarded SIP — see docs/lb-proxy-ha.md
+              #    "Source-IP discipline".
+              ip addr add {{ .Values.vip.address }}/32 dev lo 2>/dev/null || \
+                ip addr show dev lo | grep -q "{{ .Values.vip.address }}/32"
+              # 2) Strict-ARP sysctls — the classic LVS / DSR fix. Default
+              #    Linux makes ANY interface reply to ARP for ANY local IP
+              #    (arp_ignore=0). With VIP bound on lo on BOTH proxy
+              #    nodes, both eth0s answer ARP for the VIP and last-
+              #    writer-wins flapping splits client traffic. Strict mode
+              #    makes only the interface that owns the IP reply.
+              sysctl -w net.ipv4.conf.all.arp_ignore=1
+              sysctl -w net.ipv4.conf.all.arp_announce=2
+              sysctl -w net.ipv4.conf.lo.arp_ignore=1
+              sysctl -w net.ipv4.conf.lo.arp_announce=2
+              echo "vip-loopback: {{ .Values.vip.address }}/32 + strict-ARP ready"
+          securityContext:
+            # /proc/sys is mounted read-only for non-privileged
+            # containers; privileged is required to write the strict-ARP
+            # sysctls on the host netns. The init container exits before
+            # the proxy starts; no persistent privileged process. In
+            # production these sysctls would be set once per node via a
+            # privileged DaemonSet or kind/cluster bootstrap config.
+            privileged: true
+            capabilities:
+              add: ["NET_ADMIN"]
       {{- end }}
       containers:
         - name: proxy
@@ -65,11 +116,42 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-      {{- if or .Values.hmacKey .Values.previousHmacKey }}
+        {{- if .Values.vip.enabled }}
+        # VRRP sidecar — owns the shared VIP (docs/lb-proxy-ha.md).
+        # preStop drops the VIP immediately so the standby promotes
+        # before SIGTERM hits the proxy container.
+        - name: keepalived
+          image: "{{ .Values.vip.keepalivedImage.repository }}:{{ .Values.vip.keepalivedImage.tag }}"
+          imagePullPolicy: {{ .Values.vip.keepalivedImage.pullPolicy }}
+          # osixia/keepalived ships the binary at /usr/local/sbin (not
+          # the distro default /usr/sbin); bypass the image's s6
+          # supervisor so K8s can supervise directly.
+          command: ["/usr/local/sbin/keepalived"]
+          args: ["--dont-fork", "--log-console", "--log-detail", "--use-file=/etc/keepalived/keepalived.conf"]
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN", "NET_BROADCAST", "NET_RAW"]
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "pkill keepalived; sleep 1"]
+          volumeMounts:
+            - name: keepalived-conf
+              mountPath: /etc/keepalived
+              readOnly: true
+        {{- end }}
+      {{- if or .Values.hmacKey .Values.previousHmacKey .Values.vip.enabled }}
       volumes:
+        {{- if or .Values.hmacKey .Values.previousHmacKey }}
         - name: hmac
           secret:
             secretName: {{ include "sip-front-proxy.fullname" . }}-hmac
+        {{- end }}
+        {{- if .Values.vip.enabled }}
+        - name: keepalived-conf
+          configMap:
+            name: {{ include "sip-front-proxy.fullname" . }}-keepalived
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -79,7 +161,23 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.vip.enabled }}
+      # VIP requires the two proxy pods on different nodes — keepalived
+      # sidecars must claim the VIP from distinct L2 endpoints. Hard
+      # constraint, not a preference.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "sip-front-proxy.selectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+        {{- with .Values.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- else }}
       {{- with .Values.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}

@@ -44,6 +44,19 @@ export type ChaosEventType =
   | "limiter-redis-kill9"
   | "node-shutdown-app"
   | "node-shutdown-edge"
+  | "proxy-cutoff-vrrp"
+
+// Chaos catalog rule: only events whose proper handling has zero or
+// near-zero traffic impact. `proxy-cutoff-vrrp` qualifies — with
+// nopreempt + strict-ARP the original master keeps the VIP, peer just
+// sees a silent partner. `proxy-cutoff-ingress` (blackhole UDP/5060 on
+// the active node) and `proxy-cutoff-workers` (blackhole egress to the
+// pod CIDR) were considered but rejected: ingress has no realistic prod
+// analog and no clean handling path; workers depends on a working
+// chk_proxy script to cede the VIP, which the current keepalived
+// sidecar doesn't run cleanly. Re-introduce only when both have a
+// detection path with sub-second failover.
+export type ProxyCutoffKind = "vrrp"
 
 export interface ChaosOutcome {
   readonly type: ChaosEventType
@@ -73,6 +86,9 @@ const RECOVERY_TIMEOUT_SEC = 120
 
 /** Bounded outage duration for node shutdowns. */
 const NODE_OUTAGE_SEC = 60
+
+/** Bounded outage duration for proxy network cutoffs. */
+const PROXY_CUTOFF_SEC = 30
 
 export interface KillPodEventOpts {
   readonly namespace: string
@@ -277,6 +293,106 @@ export const nodeShutdownEvent = (
       readyAfter: witness.expected,
     }
   })
+
+/**
+ * Pick a random ready proxy pod, identify its kind node container,
+ * install an iptables rule that drops VRRP advertisements (proto 112)
+ * for `PROXY_CUTOFF_SEC`, then remove it. Tests split-brain handling:
+ * with `nopreempt` set, the original master keeps the VIP and peer just
+ * sees a silent partner — no client-side impact. See docs/lb-proxy-ha.md.
+ */
+export const proxyCutoffEvent = (
+  opts: {
+    readonly namespace: string
+    readonly kind: ProxyCutoffKind
+  },
+  rand: () => number,
+): Effect.Effect<ChaosOutcome, ChaosOpsError> =>
+  Effect.gen(function* () {
+    const type: ChaosEventType = "proxy-cutoff-vrrp"
+    void opts.kind
+
+    const pods = yield* listPods(opts.namespace, PROXY_LABEL)
+    const ready = pods.filter((p) => p.ready)
+    if (ready.length < 2) {
+      return yield* new ChaosOpsError({
+        op: type,
+        target: PROXY_LABEL,
+        reason: `only ${ready.length} ready proxy pod(s); need ≥2 to safely cutoff one`,
+      })
+    }
+    const idx = Math.floor(rand() * ready.length)
+    const target = ready[idx]
+    if (target === undefined) {
+      return yield* new ChaosOpsError({
+        op: type,
+        target: PROXY_LABEL,
+        reason: `random pick failed (idx=${idx}, len=${ready.length})`,
+      })
+    }
+    if (target.node === "") {
+      return yield* new ChaosOpsError({
+        op: type,
+        target: target.name,
+        reason: `pod has no .spec.nodeName — cannot resolve kind container`,
+      })
+    }
+    const node = target.node
+    const rule = iptablesRuleFor(opts.kind)
+
+    const tFire = new Date()
+    yield* Effect.logInfo(
+      `chaos[${type}] iptables -A ${rule} on kind node ${node} (proxy ${target.name}) for ${PROXY_CUTOFF_SEC}s`,
+    )
+    yield* exec("docker", ["exec", node, "iptables", "-A", ...rule.split(" ")], {
+      timeoutMs: 10_000,
+    }).pipe(
+      Effect.mapError(
+        (e) =>
+          new ChaosOpsError({
+            op: type,
+            target: node,
+            reason: `iptables -A failed: ${e.stderr.trim() || e.stdout.trim()}`,
+          }),
+      ),
+    )
+
+    yield* Effect.sleep(`${PROXY_CUTOFF_SEC} seconds`)
+
+    yield* Effect.logInfo(`chaos[${type}] iptables -D ${rule} on ${node}`)
+    // Best-effort restore; if the rule was already removed (e.g., kind
+    // container restart) we still want the run to continue.
+    yield* exec("docker", ["exec", node, "iptables", "-D", ...rule.split(" ")], {
+      timeoutMs: 10_000,
+    }).pipe(
+      Effect.matchEffect({
+        onSuccess: () => Effect.void,
+        onFailure: (e) =>
+          Effect.logWarning(
+            `chaos[${type}] iptables -D non-fatal failure on ${node}: ${e.stderr.trim() || e.stdout.trim()}`,
+          ),
+      }),
+    )
+
+    // Recovery is "rule removed"; we don't wait for application-level
+    // re-convergence (the analyzer measures that from sipp results).
+    const tRecovered = new Date()
+    return {
+      type,
+      target: target.name,
+      tFire,
+      tRecovered,
+      readyBefore: ready.length,
+      readyAfter: ready.length,
+    }
+  })
+
+const iptablesRuleFor = (_kind: ProxyCutoffKind): string => {
+  // Drop INPUT for IP proto 112 (VRRP). The peer's advertisements stop
+  // arriving on this node; with nopreempt set in keepalived.conf the
+  // peer keeps mastering and this node sees a silent partner.
+  return `INPUT -p 112 -j DROP`
+}
 
 interface PodEventDecoded {
   readonly label: string

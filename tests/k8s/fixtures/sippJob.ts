@@ -47,7 +47,14 @@ export interface SippRunOpts {
   readonly name: string
   /** SIPp scenario file mounted from the `sipp-scenarios` ConfigMap. */
   readonly scenario: string
-  /** Target SIP URI host (and optional :port). E.g. `sip-front-proxy:5060`. */
+  /**
+   * Target SIP URI host (and optional :port). Use the
+   * `FRONT_PROXY_VIP_TARGET` constant from
+   * `tests/k8s/fixtures/frontProxyTarget.ts` to reach the front-proxy
+   * — with `sip-front-proxy.vip.enabled` (the test default), the
+   * Service DNS does not work because the proxy listener binds the
+   * VIP only.
+   */
   readonly target: string
   /** R-URI service name (`sip:[service]@target`). */
   readonly service?: string

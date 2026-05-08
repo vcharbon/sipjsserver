@@ -64,3 +64,18 @@ extraEnv:
   # Mock backend installed by tests/k8s/charts/sipp/ (call-control:8080).
   - name: CALL_CONTROL_URL
     value: "http://call-control:8080"
+  # B-leg outbound proxy. With this set, helpers.ts preloads
+  # `Route: <sip:sip-front-proxy:5060;lr;outbound>` on the b-leg INVITE
+  # so the proxy Record-Routes the b-leg; the response carries
+  # Record-Route; confirm-dialog populates the b-leg routeSet; and
+  # subsequent in-dialog requests (keepalive OPTIONS, relay re-INVITE,
+  # INFO, BYE) flow back through the proxy. Without this, the b-leg
+  # routeSet stays empty and the 15-min keepaliveRule tears down every
+  # long-hold call. See docs/plan/structured-imagining-dewdrop.md.
+  - name: B2B_OUTBOUND_PROXY
+    # Must be reachable by the worker AND actually answered by a
+    # listener. With sip-front-proxy.vip.enabled, the proxy binds the
+    # VIP only — the Service DNS (sip-front-proxy:5060) DNATs to
+    # pod/node IPs where nothing is listening. Point at the VIP
+    # directly. See docs/lb-proxy-ha.md.
+    value: "172.20.255.250:5060"

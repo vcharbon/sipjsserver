@@ -70,6 +70,15 @@ export const WORKER_ID = WorkerId("test-worker-1")
 export interface ProxyB2bFakeStackOpts {
   readonly config: AppConfigData
   readonly transitDelayMs?: number
+  /**
+   * When true, the worker config does NOT receive `b2bOutboundProxy`,
+   * mirroring the k8s production-deployment shape that left
+   * `B2B_OUTBOUND_PROXY` unset and caused every long-hold call to be
+   * torn down by the worker's own keepaliveTimeoutRule. Used by the
+   * `keepaliveMissingOutboundProxyRegressionGuard` scenario to keep
+   * that failure mode visible in code.
+   */
+  readonly simulateMissingOutboundProxy?: boolean
 }
 
 /**
@@ -93,7 +102,9 @@ export function proxyB2bFakeStackLayer(opts: ProxyB2bFakeStackOpts) {
     ...opts.config,
     sipLocalIp: WORKER_ADDR.host,
     sipLocalPort: WORKER_ADDR.port,
-    b2bOutboundProxy: { host: INGRESS_ADDR.host, port: INGRESS_ADDR.port },
+    ...(opts.simulateMissingOutboundProxy === true
+      ? {}
+      : { b2bOutboundProxy: { host: INGRESS_ADDR.host, port: INGRESS_ADDR.port } }),
   }
 
   const NetworkLayer = SignalingNetwork.simulated({
@@ -196,18 +207,26 @@ export interface SipproxyHAFakeStackOpts {
    * the test cannot peek).
    */
   readonly limiterStore?: LimiterMemoryStore
+  /**
+   * When true, neither worker config receives `b2bOutboundProxy`. Same
+   * semantics as the proxyB2b flag — see `ProxyB2bFakeStackOpts`.
+   */
+  readonly simulateMissingOutboundProxy?: boolean
 }
 
 /** Build a per-worker `AppConfigData` from the test base config. */
 const haWorkerConfig = (
   base: AppConfigData,
   addr: SocketAddr,
-  ordinalLabel: string
+  ordinalLabel: string,
+  simulateMissingOutboundProxy: boolean = false,
 ): AppConfigData => ({
   ...base,
   sipLocalIp: addr.host,
   sipLocalPort: addr.port,
-  b2bOutboundProxy: { host: HA_PROXY_ADDR.host, port: HA_PROXY_ADDR.port },
+  ...(simulateMissingOutboundProxy
+    ? {}
+    : { b2bOutboundProxy: { host: HA_PROXY_ADDR.host, port: HA_PROXY_ADDR.port } }),
   // Slice 5: name the worker with the same string the proxy uses in
   // the stickiness cookie (`w_pri`/`w_bak`). CallState reads this for
   // its `partitionOf` decision so cookies and storage paths align.
@@ -336,9 +355,10 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
   // `PeerCachePort` round-trips between them. The per-worker peer
   // cache port is pinned to its `self` ordinal so partition checks
   // applied to outbound RPCs land on the right (self, peer) pair.
+  const skipOutboundProxy = opts.simulateMissingOutboundProxy === true
   const Workers = Layer.mergeAll(
     b2buaInstance(
-      haWorkerConfig(opts.config, w1Addr, w1Ord),
+      haWorkerConfig(opts.config, w1Addr, w1Ord, skipOutboundProxy),
       opts.handlers,
       fabricBuilt.fabric.storageLayerOf(w1Ord),
       fabricBuilt.fabric.cachePortLayerOf(w1Ord),
@@ -346,7 +366,7 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
       sharedLimiterLayer,
     ),
     b2buaInstance(
-      haWorkerConfig(opts.config, w2Addr, w2Ord),
+      haWorkerConfig(opts.config, w2Addr, w2Ord, skipOutboundProxy),
       opts.handlers,
       fabricBuilt.fabric.storageLayerOf(w2Ord),
       fabricBuilt.fabric.cachePortLayerOf(w2Ord),

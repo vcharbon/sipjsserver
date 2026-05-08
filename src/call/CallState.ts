@@ -219,15 +219,42 @@ export class CallState extends ServiceMap.Service<
 
       /** Index all SIP keys for a call into the local map. */
       const indexCall = (call: Call): Effect.Effect<void> =>
-        Effect.sync(() => {
-          MutableHashMap.set(sipIndex, `${call.aLeg.callId}|${call.aLeg.fromTag}`, call.callRef)
+        Effect.gen(function* () {
+          // Defensive setter: surface any cross-call key collision as a
+          // structured warning instead of silently overwriting. Catches
+          // logic bugs where two distinct calls produce the same
+          // `callId|tag` pair.
+          const safeSet = (key: string): Effect.Effect<void> =>
+            Effect.gen(function* () {
+              const existing = Option.getOrUndefined(MutableHashMap.get(sipIndex, key))
+              if (existing !== undefined && existing !== call.callRef) {
+                yield* Effect.logWarning(
+                  `[CallState] sipIndex key '${key}' overwritten: ${existing} → ${call.callRef}`,
+                )
+              }
+              yield* Effect.sync(() => MutableHashMap.set(sipIndex, key, call.callRef))
+            })
+
+          yield* safeSet(`${call.aLeg.callId}|${call.aLeg.fromTag}`)
+          // Mirror the b-leg pattern below: also index by the b2bua's
+          // own a-leg tag (= dialog.localTag, which a peer puts in the
+          // toTag of in-dialog responses and the fromTag of any b2bua-
+          // originated request that loops back through a misbehaving
+          // proxy). Without this, a loopbacked request resolves to
+          // `null` and gets 481'd. See docs/plan/structured-imagining-dewdrop.md.
+          for (const dialog of call.aLeg.dialogs) {
+            const aLocalTag = dialog.sip.localTag
+            if (aLocalTag && aLocalTag !== call.aLeg.fromTag) {
+              yield* safeSet(`${call.aLeg.callId}|${aLocalTag}`)
+            }
+          }
           for (const bLeg of call.bLegs) {
-            MutableHashMap.set(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`, call.callRef)
-            MutableHashMap.set(sipIndex, bLeg.callId, call.callRef)
+            yield* safeSet(`${bLeg.callId}|${bLeg.fromTag}`)
+            yield* safeSet(bLeg.callId)
             for (const dialog of bLeg.dialogs) {
               const bTag = dialog.sip.remoteTag
               if (bTag) {
-                MutableHashMap.set(sipIndex, `${bLeg.callId}|${bTag}`, call.callRef)
+                yield* safeSet(`${bLeg.callId}|${bTag}`)
               }
             }
           }
@@ -390,6 +417,12 @@ export class CallState extends ServiceMap.Service<
 
           if (call !== undefined) {
             MutableHashMap.remove(sipIndex, `${call.aLeg.callId}|${call.aLeg.fromTag}`)
+            for (const dialog of call.aLeg.dialogs) {
+              const aLocalTag = dialog.sip.localTag
+              if (aLocalTag && aLocalTag !== call.aLeg.fromTag) {
+                MutableHashMap.remove(sipIndex, `${call.aLeg.callId}|${aLocalTag}`)
+              }
+            }
             for (const bLeg of call.bLegs) {
               MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`)
               MutableHashMap.remove(sipIndex, bLeg.callId)
@@ -617,6 +650,12 @@ export class CallState extends ServiceMap.Service<
           MutableHashMap.remove(callsMap, callRef)
           MutableHashMap.remove(semaphores, callRef)
           MutableHashMap.remove(sipIndex, `${promoted.aLeg.callId}|${promoted.aLeg.fromTag}`)
+          for (const dialog of promoted.aLeg.dialogs) {
+            const aLocalTag = dialog.sip.localTag
+            if (aLocalTag && aLocalTag !== promoted.aLeg.fromTag) {
+              MutableHashMap.remove(sipIndex, `${promoted.aLeg.callId}|${aLocalTag}`)
+            }
+          }
           for (const bLeg of promoted.bLegs) {
             MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`)
             MutableHashMap.remove(sipIndex, bLeg.callId)

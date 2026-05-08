@@ -1,6 +1,7 @@
 import { describe, expect } from "vitest"
 import { it } from "@effect/vitest"
 import { Effect } from "effect"
+import { FRONT_PROXY_VIP_TARGET } from "./fixtures/frontProxyTarget.js"
 import { runSippJob } from "./fixtures/sippJob.js"
 
 const NAMESPACE = process.env.K8S_TEST_NAMESPACE ?? "sip-test"
@@ -61,7 +62,7 @@ describe("k8s/proxy-limiter-soak — cluster-shared CallLimiter under sustained 
           namespace: NAMESPACE,
           name: jobName,
           scenario: "uac-limiter-soak.xml",
-          target: "sip-front-proxy:5060",
+          target: FRONT_PROXY_VIP_TARGET,
           service: "test",
           calls: TOTAL_CALLS,
           callsPerSecond: CPS,
