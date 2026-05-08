@@ -212,6 +212,12 @@ export const simulatedLayer = (
             const nowMs = yield* Clock.currentTimeMillis
             const next = transitionHealth(current.value, health, nowMs)
             yield* Ref.set(stateRef, HashMap.set(map, id, next))
+            // Track A.A1: parity with the kubernetes adapter — every
+            // resolved health flip is logged at WARN so fake-stack tests
+            // see the same diagnostic line shape as production.
+            yield* Effect.logWarning(
+              `HealthChange worker=${id} from=${from} to=${health} source=probe reason=simulated`
+            )
             yield* PubSub.publish(events, {
               _tag: "health_changed",
               id,

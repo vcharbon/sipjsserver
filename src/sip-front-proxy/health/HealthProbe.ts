@@ -224,6 +224,13 @@ export const optionsKeepaliveLayer = (
           const buf = serialize(req)
           MutableHashMap.set(pendingByCallId, callId, w.id)
           issued.push({ id: w.id, callId })
+          // Diagnostic instrumentation (Track A.A1, plan
+          // pure-enchanting-forest.md): every OPTIONS send is logged at
+          // WARN so the next chaos rerun can disambiguate between
+          // "probe stops sending" and "sends but no replies arrive".
+          yield* Effect.logWarning(
+            `probe-send worker=${w.id} addr=${w.address.host}:${w.address.port} callId=${callId}`
+          )
           yield* endpoint
             .send(buf, w.address.port, w.address.host)
             .pipe(
@@ -252,6 +259,13 @@ export const optionsKeepaliveLayer = (
             const next = existing ?? newPerWorker()
             next.consecutiveMisses += 1
             MutableHashMap.set(perWorker, id, next)
+            // Track A.A1: miss-counter visibility. Promote every miss
+            // increment past 1 to WARN so the cliff-precursor pattern
+            // (1 miss → 2 misses → dead) is visible in the proxy log.
+            const pendingCount = MutableHashMap.size(pendingByCallId)
+            yield* Effect.logWarning(
+              `probe-miss worker=${id} consecutive=${next.consecutiveMisses}/${threshold} callIdsPending=${pendingCount}`
+            )
             if (next.consecutiveMisses >= threshold) {
               yield* control
                 .setHealth(id, "dead")
@@ -263,10 +277,6 @@ export const optionsKeepaliveLayer = (
                     )
                   )
                 )
-            } else {
-              yield* Effect.logDebug(
-                `HealthProbe: ${id} missed ${next.consecutiveMisses}/${threshold} OPTIONS replies`
-              )
             }
           }
         })
@@ -320,6 +330,14 @@ export const optionsKeepaliveLayer = (
               id = fallback
             }
 
+            // Track A.A1: every accepted OPTIONS reply is logged at
+            // WARN with the status + Reason header so we can confirm
+            // replies are arriving and being correctly classified.
+            const reasonHeader = getHeader(msg.headers, "reason")
+            yield* Effect.logWarning(
+              `probe-recv worker=${id} status=${msg.status} reasonHeader=${reasonHeader ?? ""}`
+            )
+
             // Reset miss counter on any response, then translate the
             // status into a health value. 200 → alive; 503 → draining
             // OR not-ready, distinguished by the worker's `Reason`
@@ -327,7 +345,13 @@ export const optionsKeepaliveLayer = (
             // alive — the worker answered, so it's not dead, and we
             // don't know it's draining.
             const ent = MutableHashMap.get(perWorker, id)
-            if (Option.isSome(ent)) {
+            if (Option.isSome(ent) && ent.value.consecutiveMisses > 0) {
+              // Track A.A1: log the actual reset transition so a
+              // recovering worker is visible at INFO without grep'ing
+              // for a state-change diff.
+              yield* Effect.logInfo(
+                `probe-miss-reset worker=${id} from=${ent.value.consecutiveMisses}`
+              )
               ent.value.consecutiveMisses = 0
             }
             let next: WorkerHealth
@@ -370,8 +394,31 @@ export const optionsKeepaliveLayer = (
         })
       )
 
-      yield* Effect.forkScoped(inboundDrain)
-      yield* Effect.forkScoped(tickLoop)
+      // Track A.A1: fiber-supervision visibility. Both fibers are
+      // expected to live for the whole layer scope (i.e. the whole
+      // process lifetime). A `probe-fiber-exit` log line firing IS a
+      // root cause for "stuck dead" symptoms — the cause field carries
+      // the exit reason (success/failure/interrupt).
+      const supervised = (
+        name: "tickLoop" | "inboundDrain",
+        body: Effect.Effect<void>
+      ): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          yield* Effect.logInfo(`probe-fiber-start name=${name}`)
+          yield* body
+        }).pipe(
+          Effect.onExit((exit) =>
+            exit._tag === "Failure"
+              ? Effect.logWarning(
+                  `probe-fiber-exit name=${name} exit=Failure`,
+                  exit.cause
+                )
+              : Effect.logWarning(`probe-fiber-exit name=${name} exit=Success`)
+          )
+        )
+
+      yield* Effect.forkScoped(supervised("inboundDrain", inboundDrain))
+      yield* Effect.forkScoped(supervised("tickLoop", tickLoop))
 
       // ── start ───────────────────────────────────────────────────────
       // Idempotent: flip the gate once. The fibers above are already

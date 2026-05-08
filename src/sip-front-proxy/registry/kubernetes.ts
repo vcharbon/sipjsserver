@@ -410,6 +410,11 @@ export const kubernetesStatefulSetLayer = (
                   : {}),
               }
             }
+            // Track A.A1: every resolved health flip driven by the K8s
+            // pod-watch observable in the proxy log.
+            yield* Effect.logWarning(
+              `HealthChange worker=${id} from=${resolvedOld} to=${resolvedNew} source=k8s reason=k8sHealth=${k8sHealth} probe=${probeSide}`
+            )
             yield* PubSub.publish(events, {
               _tag: "health_changed",
               id,
@@ -616,6 +621,11 @@ export const kubernetesStatefulSetLayer = (
                     : {}),
                 }
           yield* Ref.set(stateRef, HashMap.set(map, id, nextEntry))
+          // Track A.A1: every resolved health flip driven by a probe
+          // setHealth call observable in the proxy log.
+          yield* Effect.logWarning(
+            `HealthChange worker=${id} from=${resolvedOld} to=${resolvedNew} source=probe reason=probeSet=${probeHealth} k8s=${k8sHealth}`
+          )
           yield* PubSub.publish(events, {
             _tag: "health_changed",
             id,

@@ -468,15 +468,27 @@ const runReplicationConsumer = (
       // would tie the loop's lifetime to that enclosing effect,
       // causing it to be interrupted as soon as the reconcile body
       // returns — that's the bug we hit on first deployment.
-      return Effect.forkDetach(
-        Effect.forever(pullLoop).pipe(
-          Effect.tap(() =>
-            Effect.logInfo(
-              `replication: peer ${peerStr} pull loop exited unexpectedly`
-            )
-          )
+      //
+      // Track A.A1 (plan pure-enchanting-forest.md): wrap the forever
+      // loop with start/exit logs so a silently-dying pull fiber is
+      // visible in the worker log alongside the proxy-side
+      // `probe-fiber-exit` lines.
+      const supervised = Effect.gen(function* () {
+        yield* Effect.logInfo(`repl-fiber-start name=pull-loop peer=${peerStr}`)
+        return yield* Effect.forever(pullLoop)
+      }).pipe(
+        Effect.onExit((exit) =>
+          exit._tag === "Failure"
+            ? Effect.logWarning(
+                `repl-fiber-exit name=pull-loop peer=${peerStr} exit=Failure`,
+                exit.cause
+              )
+            : Effect.logWarning(
+                `repl-fiber-exit name=pull-loop peer=${peerStr} exit=Success`
+              )
         )
       )
+      return Effect.forkDetach(supervised)
     }
 
     // 2s watch interval: keeps fork-on-appear latency well below the

@@ -13,6 +13,98 @@ helm install b2bua deploy/helm/b2bua-worker \
   --set replicaCount=3
 ```
 
+## REQUIRED when paired with `sip-front-proxy`: `B2B_OUTBOUND_PROXY`
+
+When this chart is co-deployed with the `sip-front-proxy` chart in the
+same namespace, the worker MUST be told the proxy's address via the
+`B2B_OUTBOUND_PROXY` env var. Set it through `extraEnv` in your values
+file:
+
+```yaml
+extraEnv:
+  - name: B2B_OUTBOUND_PROXY
+    # Use the front-proxy VIP when sip-front-proxy.vip.enabled (the
+    # default for HA topologies — see the sip-front-proxy README).
+    # Otherwise use the Service DNS `sip-front-proxy:5060`.
+    value: "172.20.255.250:5060"
+```
+
+### Why this is required
+
+The B2BUA originates several **B2BUA→Bob in-dialog requests** that have
+nothing to do with messages it received from the proxy:
+
+- **15-min keepalive OPTIONS** (`keepaliveRule`) — without `B2B_OUTBOUND_PROXY`
+  the b-leg INVITE bypasses the proxy, so the response carries no
+  Record-Route, the b-leg dialog's `routeSet` stays empty, and 15 min
+  later the keepalive OPTIONS is sent worker-direct to bob's pod IP.
+  In a typical k8s deployment that pod IP is unreachable across NAT /
+  network-policy boundaries; the OPTIONS times out and
+  `keepaliveTimeoutRule` tears the call down. **Every long-hold call
+  (>15 min) gets ripped out** until this is set.
+- **Relay re-INVITE / INFO / UPDATE / MESSAGE** — same egress path. A
+  UAC-initiated mid-dialog request gets relayed by the worker through
+  the same code; without the outbound-proxy invariant it bypasses the
+  proxy and may not reach bob.
+- **Worker-originated BYE / CANCEL / NOTIFY / re-INVITE** — same.
+
+### What the worker does with the value
+
+When set, `helpers.ts` preloads `Route: <sip:<value>;lr;outbound>` on
+every b-leg-initiating INVITE. The proxy strips the Route, classifies
+the request as worker-outbound via the `;outbound` param, and forwards
+to the R-URI (bob). The proxy Record-Routes its own address back into
+the response, populating the worker's b-leg routeSet so subsequent
+in-dialog requests transit the proxy automatically.
+
+Even when the b-leg routeSet ends up empty for some reason (proxy
+didn't Record-Route, dialog state lost), the worker now falls back to
+`B2B_OUTBOUND_PROXY` for in-dialog egress and logs an error so the
+misconfiguration surfaces. If the value is unset and the proxy is
+required, every b-leg in-dialog request goes pod-direct silently.
+
+### Schema — b-leg (private) call flow
+
+The b-leg is the dialog the worker **originates** toward bob (callee).
+It is *not* a pass-through of alice's a-leg dialog: the worker mints
+a new Call-ID, new From-tag, new Via, new transactions, and acts as a
+UAC. Every b-leg wire packet must traverse the front proxy.
+
+```
+        b2bua-worker                  sip-front-proxy                bob
+        pod 10.244.4.2                bind = VIP                  10.244.5.5
+            :5060                     e.g. 172.20.255.250:5060      :5060
+
+   B-leg INVITE (initial)
+   ──────────────────────────────►
+   src=10.244.4.2 dst=VIP            classify by `;outbound`,
+   Route: <sip:VIP;lr;outbound>      strip Route, insert R-Route,
+   ↑ preloaded from                  forward to R-URI:
+     B2B_OUTBOUND_PROXY              ─────────────────────────────►
+   Via: worker                       src=VIP  dst=10.244.5.5
+   R-URI: sip:bob@10.244.5.5         R-Route: <sip:VIP;lr;sticky=w>
+
+   200 OK comes back through proxy → worker stores
+     bLeg.routeSet = [<sip:VIP;lr;sticky=w>]
+
+   In-dialog egress (keepalive OPTIONS, relay re-INVITE, INFO, BYE…)
+   ──────────────────────────────►
+   src=10.244.4.2 dst=VIP            classify by `;outbound`,
+   Route: <sip:VIP;lr;sticky=w;      forward to R-URI = bob:
+           outbound>                 ─────────────────────────────►
+   ↑ `;outbound` appended on         src=VIP  dst=10.244.5.5
+     egress (E.2 invariant)
+```
+
+If `B2B_OUTBOUND_PROXY` is unset: the initial INVITE is sent direct
+to bob's pod IP, the response carries no Record-Route, the b-leg
+`routeSet` stays empty, and **every subsequent worker-originated b-leg
+request goes pod-direct**. The 15-min keepalive then tears down every
+long-hold call. See the sip-front-proxy chart README for the full
+two-leg topology.
+
+
+
 ## Why a StatefulSet (D3)
 
 - Pod names are stable and ordered (`b2bua-worker-0`, `-1`, ...).
