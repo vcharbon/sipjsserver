@@ -43,7 +43,14 @@ export type Op = "create" | "update" | "delete"
 
 export interface DataFrame {
   readonly _tag: "Data"
+  /**
+   * The entry's stored `entryGen` (per Story 7d). `0` for mirror
+   * entries written by a puller's apply path; the writer's
+   * incarnation gen for originating writes. Lex-ordered with
+   * `counter` for the puller's apply gate; cycle-break is structural.
+   */
   readonly gen: number
+  /** Per-bucket monotonic counter at write time. */
   readonly counter: number
   readonly op: Op
   readonly partition: Partition
@@ -56,6 +63,15 @@ export interface DataFrame {
    * an implicit DEL in either case.
    */
   readonly body: unknown | null
+  /**
+   * Time-remaining for the body, computed at server emission time
+   * (PTTL on Redis; `expiresAtMs - nowMs` on memory). Receivers pass
+   * this to their local `bodySet` so the local copy expires at the
+   * same wall-clock as the source's — recovery via cold-pull doesn't
+   * extend the source's intended expiry. `0` means already-expired
+   * (treated as implicit DEL upstream by the puller).
+   */
+  readonly body_ttl_remaining_sec: number
   readonly latency_ms: number
 }
 
@@ -116,6 +132,7 @@ export const encodeFrame = (frame: PullFrame): string => {
       partition: frame.partition,
       callRef: frame.callRef,
       body: frame.body,
+      body_ttl_remaining_sec: frame.body_ttl_remaining_sec,
       latency_ms: frame.latency_ms,
     })}\n`
   }
@@ -163,6 +180,8 @@ export const decodeFrame = (line: string): PullFrame | null => {
         raw: line,
       })
     }
+    const body_ttl_remaining_sec =
+      toFiniteNumber(obj["body_ttl_remaining_sec"]) ?? 0
     return {
       _tag: "Data",
       gen,
@@ -171,6 +190,7 @@ export const decodeFrame = (line: string): PullFrame | null => {
       partition,
       callRef,
       body: "body" in obj ? obj["body"] : null,
+      body_ttl_remaining_sec,
       latency_ms,
     }
   }
@@ -234,17 +254,21 @@ export const parseMember = (member: string): MemberParts | null => {
 }
 
 /**
- * Build a `DataFrame` from a `KvBackend.PulledEntry` and the source's
- * `gen`. The body string from storage is decoded as JSON (or kept as
- * `null` when the body has TTL'd / been DEL'd).
+ * Build a `DataFrame` from a `KvBackend.PulledEntry`. Per Story 7d
+ * the entry carries its own `entryGen` (the bucket it was written
+ * under — `0` for mirrors, writer's incarnation gen for originating
+ * writes), which becomes the frame's `gen`. The body string from
+ * storage is decoded as JSON (or kept as `null` when the body has
+ * TTL'd / been DEL'd). `body_ttl_remaining_sec` comes straight from
+ * the entry — server stamps the source's intended remaining TTL,
+ * receiver uses it as the local body's TTL.
  *
- * `latency_ms` is set from the body's `written_at_ms` field if present
- * (a future enhancement once writes stamp it); otherwise `0`. The wire
- * field is always present so receivers can rely on its shape.
+ * `latency_ms` is set from the body's `written_at_ms` field if
+ * present; otherwise `0`. The wire field is always present so
+ * receivers can rely on its shape.
  */
 export const buildDataFrame = (
   entry: PulledEntry,
-  gen: number,
   nowMs: number
 ): DataFrame | null => {
   const parts = parseMember(entry.member)
@@ -254,12 +278,13 @@ export const buildDataFrame = (
   const latency_ms = writtenAtMs !== null ? Math.max(0, nowMs - writtenAtMs) : 0
   return {
     _tag: "Data",
-    gen,
+    gen: entry.entryGen,
     counter: entry.score,
     op: parts.op,
     partition: parts.partition,
     callRef: parts.callRef,
     body,
+    body_ttl_remaining_sec: entry.body_ttl_remaining_sec,
     latency_ms,
   }
 }

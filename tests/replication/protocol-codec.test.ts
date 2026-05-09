@@ -31,7 +31,8 @@ describe("encodeFrame / decodeFrame round-trip — Data", () => {
     op: "update",
     partition: "pri",
     callRef: "abc",
-    body: { gen: 42, state: "active" },
+    body: { _topology: { gen: 42 }, state: "active" },
+    body_ttl_remaining_sec: 540,
     latency_ms: 12,
   }
 
@@ -45,7 +46,8 @@ describe("encodeFrame / decodeFrame round-trip — Data", () => {
     expect(obj["op"]).toBe("update")
     expect(obj["partition"]).toBe("pri")
     expect(obj["callRef"]).toBe("abc")
-    expect(obj["body"]).toEqual({ gen: 42, state: "active" })
+    expect(obj["body"]).toEqual({ _topology: { gen: 42 }, state: "active" })
+    expect(obj["body_ttl_remaining_sec"]).toBe(540)
     expect(obj["latency_ms"]).toBe(12)
   })
 
@@ -113,12 +115,14 @@ describe("decodeFrame — error and edge cases", () => {
       partition: "pri",
       callRef: "x",
       body: null,
+      body_ttl_remaining_sec: 0,
       latency_ms: 0,
     })
     const decoded = decodeFrame(line) as DataFrame
     expect(decoded._tag).toBe("Data")
     expect(decoded.op).toBe("delete")
     expect(decoded.body).toBeNull()
+    expect(decoded.body_ttl_remaining_sec).toBe(0)
   })
 })
 
@@ -157,14 +161,15 @@ describe("parseMember", () => {
 })
 
 describe("buildDataFrame", () => {
-  it("derives op/partition/callRef from the member and stamps gen+counter", () => {
+  it("derives op/partition/callRef from the member; gen comes from entry.entryGen; ttl_remaining passes through", () => {
     const frame = buildDataFrame(
       {
         member: "U:pri:worker-A:call:abc",
+        entryGen: 42,
         score: 105,
-        body: '{"gen":42,"state":"active"}',
+        body: '{"_topology":{"gen":42},"state":"active"}',
+        body_ttl_remaining_sec: 600,
       },
-      42,
       1_000
     )
     expect(frame).not.toBeNull()
@@ -173,17 +178,34 @@ describe("buildDataFrame", () => {
     expect(frame!.op).toBe("update")
     expect(frame!.partition).toBe("pri")
     expect(frame!.callRef).toBe("abc")
-    expect(frame!.body).toEqual({ gen: 42, state: "active" })
+    expect(frame!.body).toEqual({ _topology: { gen: 42 }, state: "active" })
+    expect(frame!.body_ttl_remaining_sec).toBe(600)
+  })
+
+  it("mirror entries (entryGen=0) produce frames with gen=0 — the cycle-break sentinel", () => {
+    const frame = buildDataFrame(
+      {
+        member: "U:bak:worker-A:call:abc",
+        entryGen: 0,
+        score: 7,
+        body: '{"_topology":{"gen":1}}',
+        body_ttl_remaining_sec: 60,
+      },
+      0
+    )
+    expect(frame!.gen).toBe(0)
+    expect(frame!.counter).toBe(7)
   })
 
   it("computes latency_ms from body.written_at_ms when present", () => {
     const frame = buildDataFrame(
       {
         member: "U:pri:worker-A:call:abc",
+        entryGen: 1,
         score: 1,
         body: '{"written_at_ms":900}',
+        body_ttl_remaining_sec: 60,
       },
-      1,
       1_000
     )
     expect(frame!.latency_ms).toBe(100)
@@ -193,10 +215,11 @@ describe("buildDataFrame", () => {
     const frame = buildDataFrame(
       {
         member: "U:pri:worker-A:call:abc",
+        entryGen: 1,
         score: 1,
         body: '{"x":1}',
+        body_ttl_remaining_sec: 60,
       },
-      1,
       1_000
     )
     expect(frame!.latency_ms).toBe(0)
@@ -206,20 +229,21 @@ describe("buildDataFrame", () => {
     const frame = buildDataFrame(
       {
         member: "D:pri:worker-A:call:abc",
+        entryGen: 1,
         score: 5,
         body: null,
+        body_ttl_remaining_sec: 0,
       },
-      1,
       1_000
     )
     expect(frame!.body).toBeNull()
     expect(frame!.op).toBe("delete")
+    expect(frame!.body_ttl_remaining_sec).toBe(0)
   })
 
   it("returns null for a malformed member (programming bug upstream)", () => {
     const frame = buildDataFrame(
-      { member: "garbage", score: 1, body: "{}" },
-      1,
+      { member: "garbage", entryGen: 1, score: 1, body: "{}", body_ttl_remaining_sec: 60 },
       0
     )
     expect(frame).toBeNull()

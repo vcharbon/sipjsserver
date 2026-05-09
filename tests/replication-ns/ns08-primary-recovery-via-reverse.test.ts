@@ -30,7 +30,7 @@ import {
   Stream,
 } from "effect"
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
-import { makeEchoApply } from "../../src/replication/EchoApply.js"
+import { makeReplicationApply } from "../../src/replication/EchoApply.js"
 import {
   initialPeerView,
   PullerTransportError,
@@ -71,6 +71,7 @@ describe("NS8 — primary recovery via reverse", () => {
         // B writes bak:{A}:call:X to its storage AND echoes to its
         // channelBtoA.
         yield* channelA0toB.write({
+          entryGen: channelA0toB.gen,
           partition: "pri",
           callRef: "X",
           bodyValue: '{"gen":1,"v":"original"}',
@@ -79,8 +80,11 @@ describe("NS8 — primary recovery via reverse", () => {
         })
 
         const bView = MutableRef.make(initialPeerView("worker-A"))
-        const bApply = makeEchoApply({
+        const bApply = makeReplicationApply({
+          self: "worker-B",
+          source: "worker-A",
           outgoingChannel: channelBtoA,
+          localKv: kvB,
           bodyTtlSec: 60,
         })
         const openFromA0 = (args: {
@@ -90,8 +94,8 @@ describe("NS8 — primary recovery via reverse", () => {
         }): Stream.Stream<Uint8Array, PullerTransportError> =>
           buildPullStream({
             channel: channelA0toB,
-            gen: A_GEN_INITIAL,
-            initialSince: args.sinceCounter,
+            serverGen: A_GEN_INITIAL,
+            initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
             chunkSize: args.chunkSize,
             noopIntervalMs: 5,
           })
@@ -114,7 +118,7 @@ describe("NS8 — primary recovery via reverse", () => {
         // Sanity: B has the original X via the bak partition; channelBtoA
         // has the echoed update at counter 1.
         expect(yield* kvB.bodyGet("bak:worker-A:call:X")).not.toBeNull()
-        const beforeBye = yield* channelBtoA.pullBatch(0, 100)
+        const beforeBye = yield* channelBtoA.pullBatch({ gen: 0, counter: 0 }, 100)
         expect(beforeBye.entries.length).toBe(1)
 
         yield* Fiber.interrupt(bFiber)
@@ -131,6 +135,7 @@ describe("NS8 — primary recovery via reverse", () => {
         // behalf). The new entry overrides the prior one in
         // channelBtoA (sorted-set: same member, newer score).
         yield* channelBtoA.write({
+          entryGen: channelBtoA.gen,
           partition: "bak",
           callRef: "X",
           bodyValue: '{"gen":2,"v":"updated-by-backup"}',
@@ -147,8 +152,11 @@ describe("NS8 — primary recovery via reverse", () => {
         )
 
         const aView = MutableRef.make(initialPeerView("worker-B"))
-        const aApply = makeEchoApply({
+        const aApply = makeReplicationApply({
+          self: "worker-A",
+          source: "worker-B",
           outgoingChannel: channelA1toB,
+          localKv: kvA1,
           bodyTtlSec: 60,
         })
         const openFromB = (args: {
@@ -158,8 +166,8 @@ describe("NS8 — primary recovery via reverse", () => {
         }): Stream.Stream<Uint8Array, PullerTransportError> =>
           buildPullStream({
             channel: channelBtoA,
-            gen: B_GEN,
-            initialSince: args.sinceCounter,
+            serverGen: B_GEN,
+            initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
             chunkSize: args.chunkSize,
             noopIntervalMs: 5,
           })

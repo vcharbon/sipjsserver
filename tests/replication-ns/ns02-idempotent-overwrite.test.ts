@@ -36,6 +36,7 @@ describe("NS2 — idempotent overwrite", () => {
 
       for (const v of ["v1", "v2", "v3"] as const) {
         yield* A.outgoing.write({
+          entryGen: A.outgoing.gen,
           partition: "pri",
           callRef: "X",
           bodyValue: JSON.stringify({ ver: v, gen: A_GEN }),
@@ -45,7 +46,7 @@ describe("NS2 — idempotent overwrite", () => {
       }
 
       // Source-side: the channel collapses to ONE member at score 3.
-      const sourceBatch = yield* A.outgoing.pullBatch(0, 100)
+      const sourceBatch = yield* A.outgoing.pullBatch({ gen: 0, counter: 0 }, 100)
       expect(sourceBatch.entries.length).toBe(1)
       expect(sourceBatch.entries[0]!.score).toBe(3)
 

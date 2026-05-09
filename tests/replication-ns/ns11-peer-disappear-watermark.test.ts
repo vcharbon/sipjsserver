@@ -79,8 +79,8 @@ describe("NS11 — peer disappear preserves watermark across reappear", () => {
           }
           return buildPullStream({
             channel: channelAtoB,
-            gen: A_GEN,
-            initialSince: args.sinceCounter,
+            serverGen: A_GEN,
+            initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
             chunkSize: args.chunkSize,
             noopIntervalMs: 5,
           })
@@ -88,6 +88,7 @@ describe("NS11 — peer disappear preserves watermark across reappear", () => {
 
         // ---- Step 1: write X on A BEFORE B starts pulling.
         yield* channelAtoB.write({
+          entryGen: channelAtoB.gen,
           partition: "pri",
           callRef: "X",
           bodyValue: '{"gen":42,"name":"X"}',
@@ -134,6 +135,7 @@ describe("NS11 — peer disappear preserves watermark across reappear", () => {
 
         // ---- Step 4: write Y on A while B is "gone".
         yield* channelAtoB.write({
+          entryGen: channelAtoB.gen,
           partition: "pri",
           callRef: "Y",
           bodyValue: '{"gen":42,"name":"Y"}',

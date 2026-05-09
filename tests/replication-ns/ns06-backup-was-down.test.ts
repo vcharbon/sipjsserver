@@ -38,6 +38,7 @@ describe("NS6 — backup was down", () => {
 
       // Step 1: A writes X; B's puller drains.
       yield* A.outgoing.write({
+        entryGen: A.outgoing.gen,
         partition: "pri",
         callRef: "X",
         bodyValue: '{"name":"X"}',
@@ -65,6 +66,7 @@ describe("NS6 — backup was down", () => {
       // Step 3: A writes Y, Z, W while B is "down".
       for (const ref of ["Y", "Z", "W"]) {
         yield* A.outgoing.write({
+          entryGen: A.outgoing.gen,
           partition: "pri",
           callRef: ref,
           bodyValue: JSON.stringify({ name: ref }),
@@ -75,7 +77,7 @@ describe("NS6 — backup was down", () => {
 
       // INV1: A's outgoing-to-B channel holds 4 entries (X + Y + Z + W),
       // bounded by the active-call count, NOT growing unbounded.
-      const aBatch = yield* A.outgoing.pullBatch(0, 100)
+      const aBatch = yield* A.outgoing.pullBatch({ gen: 0, counter: 0 }, 100)
       expect(aBatch.entries.length).toBe(4)
 
       // Step 4: B comes back. Re-fork the puller with the preserved

@@ -37,6 +37,7 @@ describe("T6 — reverse propagation under brief primary unavailability", () => 
 
         // Steady state: A is primary for X. B's puller drains.
         yield* A.outgoing.write({
+          entryGen: A.outgoing.gen,
           partition: "pri",
           callRef: "X",
           bodyValue: '{"ver":"v0","gen":81}',
@@ -60,6 +61,7 @@ describe("T6 — reverse propagation under brief primary unavailability", () => 
         // A's behalf and writes to its bak:{A}:call:X. This is the G7
         // reverse path that the LB-proxy enables.
         yield* B.outgoing.write({
+          entryGen: B.outgoing.gen,
           partition: "bak",
           callRef: "X",
           bodyValue: '{"ver":"v1-by-backup","gen":82}',

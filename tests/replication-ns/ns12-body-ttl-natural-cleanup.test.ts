@@ -33,6 +33,7 @@ describe("NS12 — body-ttl-natural-cleanup", () => {
       )
 
       yield* chan.write({
+        entryGen: chan.gen,
         partition: "pri",
         callRef: "X",
         bodyValue: '{"gen":1,"state":"active"}',
@@ -56,7 +57,7 @@ describe("NS12 — body-ttl-natural-cleanup", () => {
       // Channel index entry remains as orphan U-member with null body.
       // Pull-batch must still return it (with body=null) so the puller
       // can observe the inconsistency for diagnostics.
-      const pulled = yield* chan.pullBatch(0, 10)
+      const pulled = yield* chan.pullBatch({ gen: 0, counter: 0 }, 10)
       expect(pulled.entries.length).toBe(1)
       expect(pulled.entries[0]?.member).toBe("U:pri:worker-A:call:X")
       expect(pulled.entries[0]?.body).toBeNull()

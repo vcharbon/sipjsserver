@@ -25,15 +25,11 @@
  * external agents (alice / bob) on `10.30.0.x` / `10.40.0.x`.
  */
 
-import { Effect, Exit, Layer, Scope, ServiceMap, Stream } from "effect"
+import { Effect, Layer, MutableRef, Scope, ServiceMap, Stream } from "effect"
 import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { CallLimiter, type LimiterMemoryStore, makeLimiterMemoryStore } from "../../src/call/CallLimiter.js"
 import { PeerFabric, type PeerFabricApi } from "../../src/cache/PeerFabric.js"
 import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
-import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
-import { PeerEnumerator } from "../../src/cache/PeerEnumerator.js"
-import { ReclaimRunner } from "../../src/cache/ReclaimRunner.js"
-import { WorkerReadiness } from "../../src/cache/WorkerReadiness.js"
 import { CallState } from "../../src/call/CallState.js"
 import { TimerService } from "../../src/call/TimerService.js"
 import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
@@ -47,13 +43,15 @@ import {
   WorkerRegistrySimulatedControl,
   type LoadBalancerConfigData,
 } from "../../src/sip-front-proxy/index.js"
-import { AtomicWriter } from "../../src/replication/AtomicWriter.js"
-import { EpochCounter } from "../../src/replication/EpochCounter.js"
-import { PropagateStream } from "../../src/replication/PropagateStream.js"
-import { ReplLog, type ReplLogApi } from "../../src/replication/ReplLog.js"
-import { ReplPuller } from "../../src/replication/ReplPuller.js"
-import { ReplogClient, ReadyGate } from "../../src/replication/ReadyGate.js"
-import { WriteNotifier } from "../../src/replication/WriteNotifier.js"
+import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
+import { makeReplicationApply } from "../../src/replication/EchoApply.js"
+import {
+  initialPeerView,
+  PullerTransportError,
+  runPullerFiber,
+} from "../../src/replication/PullerFiber.js"
+import { buildPullStream } from "../../src/replication/ReplLogServer.js"
+import type { KvBackendApi } from "../../src/storage/KvBackend.js"
 import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
 import { CdrWriter, makeCdrRecordsBuffer } from "../../src/cdr/CdrWriter.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
@@ -89,7 +87,6 @@ export const k8sWorkerId = (n: number): WorkerId => WorkerId(`b2b-${n}`)
 export const DEFAULT_TRANSIT_DELAY_MS = 15
 
 /** Tunables for the per-pull-cycle latency. Public so tests can override. */
-const REPL_PULL_MAX_OPEN_MS = 200
 const REPL_PULL_RECONNECT_GAP_MS = 50
 
 // ---------------------------------------------------------------------------
@@ -313,33 +310,26 @@ function buildClusterWithWorkersLayer(
     const connectivity = yield* WorkerConnectivity
     const registry = yield* WorkerRegistrySimulatedControl
 
-    // Per-peer ReplLog stack. Map entries are mutable so respawn can
-    // swap a peer's log when its backing store gets rebuilt.
-    const peerLogs = new Map<string, ReplLogApi>()
-    const peerLogScopes = new Map<string, Scope.Closeable>()
+    // Per-peer KvBackend handle — used by pullers to construct
+    // `ChannelIndex(self=peer, peer=caller)` bindings via
+    // `buildPullStream`. The Map is mutable so `respawn` can swap a
+    // peer's KvBackend when its backing store gets rebuilt by
+    // `PeerFabricControl.rebootWorker`.
+    const peerKvs = new Map<string, KvBackendApi>()
+    const peerGens = new Map<string, number>()
 
-    const buildPeerLog = (ord: WorkerOrdinal) =>
-      Effect.gen(function* () {
-        const handle = fabric.storageOf(ord)
-        const store = handle.store
-        const ordStr = ord as unknown as string
-        const StorageL = Layer.sync(PartitionedRelayStorage, () => handle.api)
-        const Reads = Layer.mergeAll(
-          WriteNotifier.noopLayer,
-          StorageL,
-          PropagateStream.memoryLayerFromStore(store),
-          EpochCounter.memoryLayerFromStore(store, ordStr),
-        )
-        const Stack = Layer.fresh(ReplLog.layer.pipe(Layer.provideMerge(Reads)))
-        const peerScope = yield* Scope.fork(sutScope, "sequential")
-        const services = yield* Layer.buildWithScope(Stack, peerScope)
-        const log = ServiceMap.get(services, ReplLog)
-        peerLogs.set(ordStr, log)
-        peerLogScopes.set(ordStr, peerScope)
-      })
+    const refreshPeerKv = (ord: WorkerOrdinal) => {
+      const handle = fabric.storageOf(ord)
+      const ordStr = ord as unknown as string
+      peerKvs.set(ordStr, handle.kv)
+      // Slice 7c: PeerFabric.makeMemoryApiFor uses `gen=1` by default
+      // (see PartitionedRelayStorage.makeMemoryApiFor). Tests that
+      // need a fresh gen on respawn should override this map.
+      peerGens.set(ordStr, 1)
+    }
 
     for (const w of clusterWorkers) {
-      yield* buildPeerLog(w.ordinal)
+      refreshPeerKv(w.ordinal)
     }
 
     // Per-worker handles (mutated in place: scope + rebuild closure).
@@ -369,138 +359,93 @@ function buildClusterWithWorkersLayer(
         const callState = ServiceMap.get(services, CallState)
         const timers = ServiceMap.get(services, TimerService)
 
-        // Per-worker ReplPuller wired to the (current) storage handle.
+        // Slice 7c: per-worker pullers using the new model. One
+        // PullerFiber per peer, reading from peer.kv via
+        // ChannelIndex(self=peer, peer=us, gen=peer.gen). Apply is
+        // cycle-safe `makeDirectApply` (no echo): the puller writes
+        // received frames to the LOCAL KvBackend's body store
+        // directly without bumping the local outgoing channel —
+        // recovery for the OTHER side is already covered because
+        // PRS-driven writes echo at write-time.
         const selfOrdStr = w.ordinal as unknown as string
-        const localStore = fabric.storageOf(w.ordinal).store
-        const localWriter = AtomicWriter.makeMemoryUnsafe(localStore)
-        const puller = ReplPuller.makeMemoryUnsafe(
-          localStore,
-          localWriter,
-          selfOrdStr,
-        )
+        const localKv = fabric.storageOf(w.ordinal).kv
 
-        // Forked pull loops — one per peer != self. The closure reads
-        // peerLogs each cycle so a respawned peer's swapped-in log is
-        // picked up automatically.
         for (const peer of clusterWorkers) {
           if (peer.ordinal === w.ordinal) continue
           const peerOrdStr = peer.ordinal as unknown as string
-          const pullCycle = Effect.gen(function* () {
-            const pos = yield* puller.readPos(peerOrdStr)
-            const peerLog = peerLogs.get(peerOrdStr)
-            if (peerLog === undefined) {
-              yield* Effect.sleep(`${REPL_PULL_RECONNECT_GAP_MS} millis`)
-              return
+          const viewRef = MutableRef.make(initialPeerView(peerOrdStr))
+
+          // Re-resolve peer.kv per-cycle so respawn (which swaps the
+          // peer's KvBackend) picks up the fresh instance on the next
+          // reconnect.
+          const openStream = (
+            args: { sinceGen: number; sinceCounter: number; chunkSize: number }
+          ): Stream.Stream<Uint8Array, PullerTransportError> => {
+            const peerKv = peerKvs.get(peerOrdStr)
+            const peerGen = peerGens.get(peerOrdStr) ?? 1
+            if (peerKv === undefined) {
+              return Stream.fail(
+                new PullerTransportError({ reason: `no peerKv for ${peerOrdStr}` })
+              )
             }
-            const upstream = peerLog
-              .stream(selfOrdStr, pos.lastSeq, {
-                drainOnly: true,
-                maxOpenDuration: `${REPL_PULL_MAX_OPEN_MS} millis`,
-              })
-              .pipe(Stream.catchCause(() => Stream.empty))
-            yield* puller
-              .applyStream(peerOrdStr, upstream)
-              .pipe(Effect.catchCause(() => Effect.void))
-            yield* Effect.sleep(`${REPL_PULL_RECONNECT_GAP_MS} millis`)
+            const peerOutgoingToSelf = ChannelIndex.make(
+              { self: peerOrdStr, peer: selfOrdStr, gen: peerGen },
+              peerKv
+            )
+            return buildPullStream({
+              channel: peerOutgoingToSelf,
+              serverGen: peerGen,
+              initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
+              chunkSize: args.chunkSize,
+              noopIntervalMs: REPL_PULL_RECONNECT_GAP_MS,
+            })
+          }
+
+          // Replication-driven apply via the design's "echo everything"
+          // path. ⚠️ The cycle-break per design §D3 (body-gen
+          // comparison) is NOT IMPLEMENTED — see Story 7d in the
+          // plan-of-record. Tests with concurrent bidirectional
+          // pullers (e.g. `replication-gap-mini.test.ts`) WILL
+          // currently time out under this configuration. Revert
+          // intentional: keeping the architecturally clean shape so
+          // the gap is visible at the right layer.
+          const localOutgoingToPeer = ChannelIndex.make(
+            { self: selfOrdStr, peer: peerOrdStr, gen: 1 },
+            localKv
+          )
+          const apply = makeReplicationApply({
+            outgoingChannel: localOutgoingToPeer,
+            localKv,
+            self: selfOrdStr,
+            source: peerOrdStr,
+            bodyTtlSec: 600,
           })
-          yield* Effect.forkIn(Effect.forever(pullCycle), scope)
+          const pullerEffect = runPullerFiber({
+            peer: peerOrdStr,
+            viewRef,
+            openStream,
+            applyFrame: (frame) => apply(frame).pipe(Effect.orDie),
+            chunkSize: 1000,
+            initialBackoffMs: REPL_PULL_RECONNECT_GAP_MS,
+          })
+          yield* Effect.forkIn(pullerEffect, scope)
         }
 
-        // Run ReadyGate to drain peer propagate streams BEFORE
-        // forking SipRouter ingest. On initial boot every peer log is
-        // empty so the drain finishes instantly under TestClock; on
-        // respawn this picks up reverse-direction entries (peer was
-        // serving as backup for this worker while it was down).
-        const peerOrdinals = clusterWorkers
-          .filter((p) => p.ordinal !== w.ordinal)
-          .map((p) => p.ordinal as unknown as string)
-        const PeerEnumeratorL = Layer.sync(PeerEnumerator, () => ({
-          currentPeers: Effect.succeed(
-            peerOrdinals.map((s) => WorkerOrdinal(s)),
-          ),
-        }))
-        const ReplogClientL = Layer.sync(ReplogClient, () => ({
-          streamFromPeer: (peer, sinceSeq, o) => {
-            const log = peerLogs.get(peer)
-            if (log === undefined) return Stream.empty
-            return log
-              .stream(selfOrdStr, sinceSeq, {
-                drainOnly: o?.drainOnly ?? true,
-                maxOpenDuration: `${REPL_PULL_MAX_OPEN_MS} millis`,
-              })
-              .pipe(Stream.catchCause(() => Stream.empty))
-          },
-        }))
-        // ReadyGate runs with `flipReadyAtEnd: false` so its terminal
-        // markReady is owned by the ReclaimRunner that runs next.
-        // ReclaimRunner enumerates the peer fabric for every entry in
-        // `bak:{self}:call:*` and copies it back into local
-        // `pri:{self}:`. On initial boot every peer storage is empty
-        // so the scan finishes instantly; on respawn this is the path
-        // that rebuilds quiet calls (peers never wrote on this worker's
-        // behalf during the outage so the propagate-stream drain
-        // catches nothing for them).
-        const recoveryReadinessL = WorkerReadiness.test(false)
-        const cachePortL = fabric.cachePortLayerOf(w.ordinal)
-        const storageL = fabric.storageLayerOf(w.ordinal)
-        const appConfigL = Layer.succeed(
-          AppConfig,
-          perWorkerConfig(baseConfig, w.address, w.id as unknown as string, simulateMissingOutboundProxy),
-        )
-        const recoverySharedL = Layer.mergeAll(
-          PeerEnumeratorL,
-          recoveryReadinessL,
-          cachePortL,
-          storageL,
-          appConfigL,
-        )
-        const ReadyGateL = ReadyGate.layer({
-          maxDuration: "30 seconds",
-          flipReadyAtEnd: false,
-        }).pipe(
-          Layer.provide(
-            Layer.mergeAll(
-              ReplogClientL,
-              Layer.sync(ReplPuller, () => puller),
-              recoverySharedL,
-            ),
-          ),
-        )
-        // `scanPacingMs: 0` is critical for the fake stack: the default
-        // 50 ms inter-entry sleep is virtual under TestClock and would
-        // not advance until the *next* scenario step — but `respawn`
-        // runs `buildWorker` synchronously, so the scenario can't reach
-        // its next `s.pause(...)` until `reclaim.run` returns. Setting
-        // the pacing to 0 keeps the runner CPU-bound (still yields
-        // between entries via `Effect.yieldNow`) so the boot path
-        // never blocks the scenario clock.
-        const ReclaimRunnerL = ReclaimRunner.layer({ scanPacingMs: 0 }).pipe(
-          Layer.provide(recoverySharedL),
-        )
-        const gateScope = yield* Scope.fork(scope, "sequential")
-        const gateServices = yield* Layer.buildWithScope(ReadyGateL, gateScope)
-        const gate = ServiceMap.get(gateServices, ReadyGate)
-        yield* gate.run.pipe(Effect.catchCause(() => Effect.void))
-
-        // Reclaim safety net: fires after the propagate-stream drain.
-        // Failures inside the runner are absorbed (per-peer warning +
-        // peersFailed counter) so a stalled peer doesn't deadlock the
-        // worker boot. We close the scope right after so the layer's
-        // resources don't outlive their use.
-        const reclaimScope = yield* Scope.fork(scope, "sequential")
-        const reclaimServices = yield* Layer.buildWithScope(
-          ReclaimRunnerL,
-          reclaimScope,
-        )
-        const reclaim = ServiceMap.get(reclaimServices, ReclaimRunner)
-        yield* reclaim.run.pipe(Effect.catchCause(() => Effect.void))
-        yield* Scope.close(reclaimScope, Exit.void)
-        // ReadyGate's drain side-effect (peer-log apply) and
-        // ReclaimRunner's scan side-effect (peer `bak:{self}:` copy)
-        // are what we needed; both used `WorkerReadiness.test(false)`
-        // and the b2bua stack uses `WorkerReadiness.test(true)`, so
-        // the local readiness flag was always true.
-        yield* Scope.close(gateScope, Exit.void)
+        // Slice 7c removes ReadyGate / ReclaimRunner. The new model
+        // relies on `runPullerFiber` (above) to deliver any
+        // outstanding frames since the peer's outgoing channel head;
+        // since=0 cold-start delivers everything the peer holds.
+        // Recovery for the LOCAL worker (after respawn) happens via
+        // the same puller — it receives reverse-tagged frames from
+        // peers and writes them to local pri:{self}:. The rehydrate
+        // step below pulls those bodies back into CallState.
+        //
+        // For the inner-loop fake-stack tests, we don't need a
+        // synchronous "wait until caught up" gate — the SIP path
+        // can call into PRS immediately, and replication catches up
+        // asynchronously. Tests that need stronger ordering use
+        // `s.pause(...)` to advance TestClock past the puller's
+        // reconnect interval.
 
         // Rehydrate owned calls + their persisted timer fibers from
         // the local `pri:{self}:` partition. On initial boot the
@@ -586,16 +531,13 @@ function buildClusterWithWorkersLayer(
               `onRebootSideEffects: unknown worker "${id as unknown as string}"`,
             )
           }
-          // Rebuild the rebooted peer's ReplLog so other workers'
-          // pull loops resume against the fresh storage handle.
-          const ordStr = w.ordinal as unknown as string
-          const oldScope = peerLogScopes.get(ordStr)
-          if (oldScope !== undefined) {
-            yield* Scope.close(oldScope, Exit.void)
-          }
-          peerLogs.delete(ordStr)
-          peerLogScopes.delete(ordStr)
-          yield* buildPeerLog(w.ordinal)
+          // Slice 7c: refresh the per-peer KvBackend pointer so
+          // other workers' PullerFibers reconnect against the fresh
+          // storage handle on next cycle. The old KvBackend is
+          // garbage-collected when its store and references go out
+          // of scope (PeerFabric.rebootWorker swapped the handle).
+          refreshPeerKv(w.ordinal)
+          yield* Effect.void
         }),
     }
 

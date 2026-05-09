@@ -21,7 +21,7 @@ import {
   Stream,
 } from "effect"
 import { ChannelIndex, type ChannelIndexApi } from "../../src/replication/ChannelIndex.js"
-import { makeEchoApply } from "../../src/replication/EchoApply.js"
+import { makeReplicationApply } from "../../src/replication/EchoApply.js"
 import {
   initialPeerView,
   PullerTransportError,
@@ -83,8 +83,8 @@ export const openStreamOf = (
   return (args) =>
     buildPullStream({
       channel: source.outgoing,
-      gen: source.gen,
-      initialSince: args.sinceCounter,
+      serverGen: source.gen,
+      initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
       chunkSize: args.chunkSize,
       noopIntervalMs,
     })
@@ -114,9 +114,12 @@ export const forkPuller = (args: {
   Effect.gen(function* () {
     const viewRef = MutableRef.make(initialPeerView(args.source.self))
     const captureBuf: Array<DataFrame> = []
-    const echo = makeEchoApply({
+    const echo = makeReplicationApply({
       outgoingChannel: args.consumer.outgoing,
       bodyTtlSec: args.bodyTtlSec ?? 60,
+      localKv: args.consumer.kv,
+      self: args.consumer.self,
+      source: args.source.self,
     })
     const fiber = yield* Effect.forkChild(
       runPullerFiber({

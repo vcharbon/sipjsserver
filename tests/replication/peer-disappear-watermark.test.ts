@@ -55,6 +55,7 @@ const dataFrame = (
   partition: "pri",
   callRef,
   body,
+  body_ttl_remaining_sec: 60,
   latency_ms: 0,
 })
 

@@ -16,8 +16,7 @@ import { addPeerRelayRoutes } from "../cache/PeerRelay.js"
 import { PartitionedRelayStorage } from "../cache/PartitionedRelayStorage.js"
 import { addCallControlRoutes } from "../decision/adapters/http-reference/MockServer.js"
 import { MetricsRegistry, type MetricsRegistryState } from "../observability/MetricsRegistry.js"
-import { addReplLogRoutes, ReplLog } from "../replication/ReplLog.js"
-import { ReplMetrics, type ReplMetricsSnapshot } from "../replication/ReplMetrics.js"
+import { addReplLogRoutes, ReplLogServer } from "../replication/ReplLogServer.js"
 import { getByeDispositionInvariantViolationCount } from "../b2bua/rules/framework/ByeDispositionInvariant.js"
 
 
@@ -104,9 +103,13 @@ function buildStatusBlocks(registry: MetricsRegistryState) {
 }
 
 function renderPrometheus(
-  reg: MetricsRegistryState,
-  repl: ReplMetricsSnapshot | null
+  reg: MetricsRegistryState
 ): string {
+  // Slice 7c: legacy ReplMetrics removed; the new ReplicationMetrics
+  // module (Slice 8) will reintroduce per-peer counters / gauges /
+  // histograms via the redesigned protocol. The Prometheus output
+  // currently drops the `b2bua_repl_*` family — operator dashboards
+  // referencing those names need to be updated when Slice 8 lands.
   const lines: string[] = []
 
   /** Emit a single metric line with optional labels. */
@@ -285,42 +288,9 @@ function renderPrometheus(
   }
 
   // ── Replication metrics ────────────────────────────────────────────
-  // Server-side signals only (writer epoch, peer-bearing publish
-  // counters). Boot-side pull/drain metrics (replpos lag, ReadyGate
-  // unreconciled count, frames-applied total) are deferred until
-  // ReplPuller/ReadyGate are wired in production — see
-  // docs/todos/DATA-REPLICATION-LAYER-REFACTOR-SURPRISES.md P1.
-  if (repl !== null) {
-    header("b2bua_repl_writer_epoch", "gauge", "Local writer epoch this worker boot landed on (incarnation counter).")
-    m("b2bua_repl_writer_epoch", repl.writerEpoch, { owner: repl.owner })
-
-    if (repl.perPeer.length > 0) {
-      header("b2bua_repl_writes_total", "counter", "Peer-bearing writes published locally since process start, by destination peer.")
-      header("b2bua_repl_writes_seq_max", "gauge", "Highest local propagate seq observed for this peer.")
-      header("b2bua_repl_lag_seq", "gauge", "Replication lag in seq units (latestSeenSeq - lastAppliedSeq) reported by the consumer-side ReplPuller.")
-      header("b2bua_repl_queue_depth", "gauge", "Cardinality of propagate:{peer} on this writer's sidecar (entries awaiting drain to the peer).")
-      header("b2bua_repl_frame_lag_ms", "histogram", "End-to-end replication frame lag in milliseconds (writer wall-clock to reader wall-clock).")
-      for (const [peer, state] of repl.perPeer) {
-        m("b2bua_repl_writes_total", state.writesTotal, { peer })
-        m("b2bua_repl_writes_seq_max", state.seqMax, { peer })
-        m("b2bua_repl_lag_seq", state.lagSeq, { peer })
-        m("b2bua_repl_queue_depth", state.queueDepth, { peer })
-        const hist = state.frameLag
-        let cumCount = 0
-        for (let i = 0; i < hist.buckets.length; i++) {
-          cumCount += hist.counts[i] ?? 0
-          m("b2bua_repl_frame_lag_ms_bucket", cumCount, {
-            peer,
-            le: String(hist.buckets[i]),
-          })
-        }
-        cumCount += hist.counts[hist.buckets.length] ?? 0
-        m("b2bua_repl_frame_lag_ms_bucket", cumCount, { peer, le: "+Inf" })
-        m("b2bua_repl_frame_lag_ms_sum", hist.sum, { peer })
-        m("b2bua_repl_frame_lag_ms_count", hist.count, { peer })
-      }
-    }
-  }
+  // Slice 7c: the legacy ReplMetrics module is gone; new metrics
+  // (Slice 8 ReplicationMetrics) will land in a follow-up. The
+  // `b2bua_repl_*` family is currently absent from /metrics.
 
   return lines.join("\n") + "\n"
 }
@@ -328,13 +298,12 @@ function renderPrometheus(
 export const StatusServerLayer: Layer.Layer<
   never,
   never,
-  CallState | AppConfig | MetricsRegistry | ReplLog | ReplMetrics | WorkerReadiness | DrainingState | PartitionedRelayStorage
+  CallState | AppConfig | MetricsRegistry | ReplLogServer | WorkerReadiness | DrainingState | PartitionedRelayStorage
 > = Layer.unwrap(
   Effect.gen(function* () {
     const callState = yield* CallState
     const config = yield* AppConfig
     const registry = yield* MetricsRegistry
-    const replMetrics = yield* ReplMetrics
     const readiness = yield* WorkerReadiness
     const draining = yield* DrainingState
     const startedAt = yield* Clock.currentTimeMillis
@@ -362,12 +331,11 @@ export const StatusServerLayer: Layer.Layer<
         yield* router.add(
           "GET",
           "/metrics",
-          Effect.gen(function* () {
-            const replSnap = yield* replMetrics.snapshot
-            return HttpServerResponse.text(renderPrometheus(registry, replSnap), {
+          Effect.sync(() =>
+            HttpServerResponse.text(renderPrometheus(registry), {
               headers: { "content-type": "text/plain; version=0.0.4" },
             })
-          })
+          )
         )
 
         // Slice D9 — Kubernetes readiness gate.

@@ -36,6 +36,7 @@ describe("NS3 — delete-and-tombstone-ttl", () => {
 
       // Step 1: write the call body + two indexes.
       yield* chan.write({
+        entryGen: chan.gen,
         partition: "pri",
         callRef: "X",
         bodyValue: '{"gen":1,"state":"active"}',
@@ -55,6 +56,8 @@ describe("NS3 — delete-and-tombstone-ttl", () => {
 
       // Step 2: tombstone with the indexes named for removal.
       yield* chan.tombstone({
+        entryGen: chan.gen,
+        callGen: 1,
         partition: "pri",
         callRef: "X",
         indexesToRemove: ["idx:leg:CID-100", "idx:leg:CID-101"],
@@ -63,12 +66,12 @@ describe("NS3 — delete-and-tombstone-ttl", () => {
       // Step 3: body is now the tombstone marker; indexes gone; channel
       // has both U and D members.
       expect(yield* kv.bodyGet("pri:worker-A:call:X")).toBe(
-        '{"tombstone":true,"gen":1}'
+        '{"tombstone":true,"callGen":1}'
       )
       expect(yield* kv.bodyGet("idx:leg:CID-100")).toBeNull()
       expect(yield* kv.bodyGet("idx:leg:CID-101")).toBeNull()
 
-      const afterTombstone = yield* chan.pullBatch(0, 10)
+      const afterTombstone = yield* chan.pullBatch({ gen: 0, counter: 0 }, 10)
       expect(afterTombstone.entries.length).toBe(2)
       expect(afterTombstone.entries[0]?.member).toBe("U:pri:worker-A:call:X")
       expect(afterTombstone.entries[1]?.member).toBe("D:pri:worker-A:call:X")
@@ -78,7 +81,7 @@ describe("NS3 — delete-and-tombstone-ttl", () => {
 
       // Step 5: body has TTL'd → null. D-member is still in the channel
       // (orphan-D entries are accepted; cleanup is "next-write sweeps").
-      const afterTtl = yield* chan.pullBatch(0, 10)
+      const afterTtl = yield* chan.pullBatch({ gen: 0, counter: 0 }, 10)
       expect(afterTtl.entries.length).toBe(2)
       // Both U-member and D-member are still indexed but the body is
       // gone — the puller treats null-body-on-D as "DEL anyway".

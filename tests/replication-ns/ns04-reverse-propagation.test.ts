@@ -38,6 +38,7 @@ describe("NS4 — reverse propagation (G7 path)", () => {
 
       // Step 1: forward (A writes X, B receives).
       yield* A.outgoing.write({
+        entryGen: A.outgoing.gen,
         partition: "pri",
         callRef: "X",
         bodyValue: '{"ver":"original","gen":31}',
@@ -56,6 +57,7 @@ describe("NS4 — reverse propagation (G7 path)", () => {
       // directly to its bak partition, which BUMPS its outgoing
       // channel-to-A (the source of truth A pulls from on recovery).
       yield* B.outgoing.write({
+        entryGen: B.outgoing.gen,
         partition: "bak",
         callRef: "X",
         bodyValue: '{"ver":"updated-by-backup","gen":32}',
@@ -68,7 +70,7 @@ describe("NS4 — reverse propagation (G7 path)", () => {
       // bak entry's member is `U:bak:worker-A:call:X` because the
       // ChannelIndex.bodyKey for partition=bak with self=B,peer=A
       // resolves to bak:{A}:call:X (peer is the owner for bak).
-      const bBatch = yield* B.outgoing.pullBatch(0, 100)
+      const bBatch = yield* B.outgoing.pullBatch({ gen: 0, counter: 0 }, 100)
       expect(bBatch.entries.length).toBeGreaterThanOrEqual(1)
 
       // Step 3: A's puller drains. The frame's partition tag is "bak"

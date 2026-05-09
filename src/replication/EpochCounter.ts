@@ -30,12 +30,7 @@
  * Reference: [docs/plan/grill-me-on-the-spicy-lark.md](../../docs/plan/grill-me-on-the-spicy-lark.md) §D4.
  */
 
-import { Clock, Data, Effect, Layer, MutableHashMap, Option, ServiceMap } from "effect"
-import { RedisClient } from "../redis/RedisClient.js"
-import {
-  AtomicWriter,
-  type MemoryStore,
-} from "./AtomicWriter.js"
+import { Clock, Data, Effect, Layer, ServiceMap } from "effect"
 
 // ---------------------------------------------------------------------------
 // Service
@@ -145,62 +140,6 @@ export class EpochCounter extends ServiceMap.Service<
   EpochCounterApi
 >()("@sipjsserver/replication/EpochCounter") {
   /**
-   * Legacy production: INCRs `epoch:{owner}` once on layer creation.
-   * Caches the result; subsequent `current` reads are pure. To be
-   * deleted in Slice 7 cutover; new wiring uses
-   * `fromKubernetesDownwardAPI` which survives sidecar Redis wipes.
-   */
-  static readonly redisLayer = (
-    owner: string
-  ): Layer.Layer<EpochCounter, EpochCounterError, RedisClient> =>
-    Layer.effect(
-      EpochCounter,
-      Effect.gen(function* () {
-        const redis = yield* RedisClient
-        const newEpoch = yield* redis.incr(AtomicWriter.epochKey(owner)).pipe(
-          Effect.mapError(
-            (e) => new EpochCounterError({ reason: e.reason })
-          )
-        )
-        yield* Effect.logInfo(
-          `EpochCounter: bumped epoch:${owner} → ${newEpoch}`
-        )
-        return {
-          current: Effect.succeed(newEpoch),
-          gen: newEpoch,
-          owner,
-        }
-      })
-    )
-
-  /**
-   * Legacy tests: bumps the in-memory `epoch:{owner}` entry stored in
-   * the supplied MemoryStore. Each layer build = one simulated worker
-   * boot. Used by `epoch-monotonic.test.ts` and AtomicWriter tests
-   * pre-cutover.
-   */
-  static readonly memoryLayerFromStore = (
-    store: MemoryStore,
-    owner: string
-  ): Layer.Layer<EpochCounter> =>
-    Layer.effect(
-      EpochCounter,
-      Effect.gen(function* () {
-        const ms = yield* Clock.currentTimeMillis
-        const newEpoch = yield* Effect.sync(() => bumpMemoryEpoch(store, owner, ms))
-        return {
-          current: Effect.succeed(newEpoch),
-          gen: newEpoch,
-          owner,
-        }
-      })
-    )
-
-  // -----------------------------------------------------------------------
-  // Slice 6 — redesigned gen mechanism. Survives sidecar Redis wipes.
-  // -----------------------------------------------------------------------
-
-  /**
    * Production for the redesign: reads `restartCount` from the env var
    * `RESTART_COUNT` (populated by the Helm chart's init step that
    * queries the K8s API) and packs it with `Date.now()` at boot time.
@@ -285,22 +224,3 @@ export class EpochCounter extends ServiceMap.Service<
     })
 }
 
-// ---------------------------------------------------------------------------
-// Memory helpers
-// ---------------------------------------------------------------------------
-
-const bumpMemoryEpoch = (
-  store: MemoryStore,
-  owner: string,
-  _nowMs: number
-): number => {
-  const key = AtomicWriter.epochKey(owner)
-  const opt = MutableHashMap.get(store, key)
-  const prev = Option.isSome(opt) ? Number(opt.value.value) : 0
-  const next = Number.isFinite(prev) && prev > 0 ? prev + 1 : 1
-  MutableHashMap.set(store, key, {
-    value: String(next),
-    expiresAtMs: Number.MAX_SAFE_INTEGER,
-  })
-  return next
-}

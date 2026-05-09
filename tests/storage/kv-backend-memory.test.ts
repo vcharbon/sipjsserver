@@ -1,20 +1,28 @@
 /**
- * KvBackend (memory backend) — Slice 1 contract tests.
+ * KvBackend (memory backend) — Slice 1 contract tests, updated for
+ * Story 7d's per-`(channel, entryGen)` bucket layout.
  *
- * Asserts the storage primitive port behaves as the design doc requires:
+ * Asserts the storage primitive port behaves as the architecture
+ * requires:
  *   - body get / del / mget round-trip and respect TTL.
- *   - channelWriteUpdate is atomic (counter monotonic, body+indexes+ZADD
- *     together, member re-write updates score).
+ *   - channelWriteUpdate is atomic (per-bucket counter monotonic;
+ *     body+indexes+ZADD together; member re-write within the SAME
+ *     bucket updates score).
  *   - channelWriteTombstone follows the same atomicity contract and
  *     correctly removes named secondary indexes.
- *   - channelPullBatch returns entries with score > sinceScore in
- *     ascending order, capped at limit, with body resolved via the
- *     "U:" / "D:" prefix convention (or null for missing/TTL'd bodies).
- *   - counters never expire.
- *   - concurrent writers see monotonic counter assignment.
+ *   - channelPullBatch lex-orders across buckets by `(entryGen,
+ *     counter)`, returns entries with strict `(gen, counter) > since`,
+ *     capped at limit, with body resolved via the "U:" / "D:" prefix
+ *     convention (or null for missing/TTL'd bodies). Each entry
+ *     carries its bucket's `entryGen` and the body's
+ *     `body_ttl_remaining_sec`.
+ *   - per-bucket counters never expire.
+ *   - concurrent writers see monotonic counter assignment within a
+ *     bucket.
  *
- * These tests are the first parity gate: every assertion here must hold
- * identically against the Redis backend (Slice 2's `port-parity` suite).
+ * These tests are the first parity gate: every assertion here must
+ * hold identically against the Redis backend (Slice 2's `port-parity`
+ * suite).
  */
 
 import { describe, expect, it } from "@effect/vitest"
@@ -39,6 +47,16 @@ const setup = (): {
 const CHANNEL = "propagate:self->peerA"
 const COUNTER = "seq:self->peerA"
 
+// Default originating bucket gen used by these tests (simulates a
+// worker's incarnation gen). Mirror writes (entryGen=0) are exercised
+// in the dedicated bucket-walk test below.
+const GEN = 1
+// Storage-level bucket counter key — derived in the same way the
+// production primitive derives it (`${counterKey}:gen:${entryGen}`).
+const BUCKET_COUNTER = `${COUNTER}:gen:${GEN}`
+const SINCE_COLD = { gen: 0, counter: 0 } as const
+const sinceWarm = (counter: number) => ({ gen: GEN, counter }) as const
+
 const memberOf = KvBackend.memberOf
 
 const bodyKey = (callRef: string): string => `pri:self:call:${callRef}`
@@ -58,6 +76,7 @@ describe("KvBackend.memory — body store", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: '{"x":1}',
@@ -75,6 +94,7 @@ describe("KvBackend.memory — body store", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "{}",
@@ -93,6 +113,7 @@ describe("KvBackend.memory — body store", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "A",
@@ -102,6 +123,7 @@ describe("KvBackend.memory — body store", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("c")),
         bodyKey: bodyKey("c"),
         bodyValue: "C",
@@ -119,6 +141,7 @@ describe("KvBackend.memory — body store", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "x",
@@ -132,21 +155,22 @@ describe("KvBackend.memory — body store", () => {
   )
 })
 
-describe("KvBackend.memory — counter", () => {
-  it.effect("counterRead returns 0 for an unseen counter key", () =>
+describe("KvBackend.memory — counter (per-bucket)", () => {
+  it.effect("counterRead returns 0 for an unseen bucket counter key", () =>
     Effect.gen(function* () {
       const { kv } = setup()
-      const n = yield* kv.counterRead(COUNTER)
+      const n = yield* kv.counterRead(BUCKET_COUNTER)
       expect(n).toBe(0)
     })
   )
 
-  it.effect("counter increments monotonically across writes", () =>
+  it.effect("bucket counter increments monotonically across writes in same bucket", () =>
     Effect.gen(function* () {
       const { kv } = setup()
       const r1 = yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "{}",
@@ -156,6 +180,7 @@ describe("KvBackend.memory — counter", () => {
       const r2 = yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("b")),
         bodyKey: bodyKey("b"),
         bodyValue: "{}",
@@ -165,6 +190,7 @@ describe("KvBackend.memory — counter", () => {
       const r3 = yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("c")),
         bodyKey: bodyKey("c"),
         bodyValue: "{}",
@@ -172,7 +198,7 @@ describe("KvBackend.memory — counter", () => {
         indexes: [],
       })
       expect([r1.counter, r2.counter, r3.counter]).toEqual([1, 2, 3])
-      const head = yield* kv.counterRead(COUNTER)
+      const head = yield* kv.counterRead(BUCKET_COUNTER)
       expect(head).toBe(3)
     })
   )
@@ -183,6 +209,7 @@ describe("KvBackend.memory — counter", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "{}",
@@ -191,8 +218,38 @@ describe("KvBackend.memory — counter", () => {
       })
       // Advance well past every reasonable TTL window.
       yield* TestClock.adjust("2 hours")
-      const head = yield* kv.counterRead(COUNTER)
+      const head = yield* kv.counterRead(BUCKET_COUNTER)
       expect(head).toBe(1)
+    })
+  )
+
+  it.effect("per-bucket counters are independent (gen=0 mirror vs gen=GEN originating)", () =>
+    Effect.gen(function* () {
+      const { kv } = setup()
+      // Originating write: entryGen=GEN, counter=1 in that bucket.
+      yield* kv.channelWriteUpdate({
+        channel: CHANNEL,
+        counterKey: COUNTER,
+        entryGen: GEN,
+        member: memberOf("U", bodyKey("o1")),
+        bodyKey: bodyKey("o1"),
+        bodyValue: "O",
+        bodyTtlSec: 60,
+        indexes: [],
+      })
+      // Mirror write: entryGen=0, counter=1 in ITS bucket — independent.
+      yield* kv.channelWriteUpdate({
+        channel: CHANNEL,
+        counterKey: COUNTER,
+        entryGen: 0,
+        member: memberOf("U", "bak:peerA:call:m1"),
+        bodyKey: "bak:peerA:call:m1",
+        bodyValue: "M",
+        bodyTtlSec: 60,
+        indexes: [],
+      })
+      expect(yield* kv.counterRead(BUCKET_COUNTER)).toBe(1)
+      expect(yield* kv.counterRead(`${COUNTER}:gen:0`)).toBe(1)
     })
   )
 })
@@ -204,6 +261,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
       const result = yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "BODY",
@@ -220,22 +278,25 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
-        sinceScore: 0,
+        since: SINCE_COLD,
         limit: 10,
       })
       expect(pulled.entries.length).toBe(1)
       expect(pulled.entries[0]?.member).toBe(memberOf("U", bodyKey("a")))
+      expect(pulled.entries[0]?.entryGen).toBe(GEN)
       expect(pulled.entries[0]?.score).toBe(1)
-      expect(pulled.headCounter).toBe(1)
+      expect(pulled.entries[0]?.body_ttl_remaining_sec).toBe(60)
+      expect(pulled.head).toEqual({ gen: GEN, counter: 1 })
     })
   )
 
-  it.effect("re-writing the same member bumps its score (sorted-set semantics)", () =>
+  it.effect("re-writing the same member within a bucket bumps its score (sorted-set semantics)", () =>
     Effect.gen(function* () {
       const { kv } = setup()
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "v1",
@@ -245,6 +306,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("b")),
         bodyKey: bodyKey("b"),
         bodyValue: "B",
@@ -254,6 +316,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "v2",
@@ -263,7 +326,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
-        sinceScore: 0,
+        since: SINCE_COLD,
         limit: 10,
       })
       // Two distinct members ("a" and "b"). "a" has score 3 (the latest
@@ -274,7 +337,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
       expect(pulled.entries[1]?.member).toBe(memberOf("U", bodyKey("a")))
       expect(pulled.entries[1]?.score).toBe(3)
       expect(pulled.entries[1]?.body).toBe("v2")
-      expect(pulled.headCounter).toBe(3)
+      expect(pulled.head).toEqual({ gen: GEN, counter: 3 })
     })
   )
 })
@@ -287,6 +350,7 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "BODY",
@@ -300,15 +364,16 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
       const result = yield* kv.channelWriteTombstone({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("D", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        tombstoneValue: '{"tombstone":true,"gen":7}',
+        tombstoneValue: '{"tombstone":true,"callGen":7}',
         tombstoneTtlSec: 180,
         indexesToRemove: ["idx:leg:CID-1", "idx:leg:CID-2"],
       })
       expect(result.counter).toBe(2)
       // Body is now the tombstone marker.
-      expect(yield* kv.bodyGet(bodyKey("a"))).toBe('{"tombstone":true,"gen":7}')
+      expect(yield* kv.bodyGet(bodyKey("a"))).toBe('{"tombstone":true,"callGen":7}')
       // Secondary indexes are gone.
       expect(yield* kv.bodyGet("idx:leg:CID-1")).toBeNull()
       expect(yield* kv.bodyGet("idx:leg:CID-2")).toBeNull()
@@ -316,7 +381,7 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
-        sinceScore: 0,
+        since: SINCE_COLD,
         limit: 10,
       })
       expect(pulled.entries.length).toBe(2)
@@ -325,7 +390,7 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
       // Both entries resolve to the same body — which is now the tombstone
       // value. The puller distinguishes apply behavior by member's "U:"/"D:"
       // prefix, NOT by body shape.
-      expect(pulled.entries[1]?.body).toBe('{"tombstone":true,"gen":7}')
+      expect(pulled.entries[1]?.body).toBe('{"tombstone":true,"callGen":7}')
     })
   )
 
@@ -335,6 +400,7 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
       yield* kv.channelWriteTombstone({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("D", bodyKey("a")),
         bodyKey: bodyKey("a"),
         tombstoneValue: "T",
@@ -345,7 +411,7 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
-        sinceScore: 0,
+        since: SINCE_COLD,
         limit: 10,
       })
       // Index entry still present, body has TTL'd → null body. Per the
@@ -354,18 +420,21 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
       expect(pulled.entries.length).toBe(1)
       expect(pulled.entries[0]?.member).toBe(memberOf("D", bodyKey("a")))
       expect(pulled.entries[0]?.body).toBeNull()
+      // Expired body → 0 remaining.
+      expect(pulled.entries[0]?.body_ttl_remaining_sec).toBe(0)
     })
   )
 })
 
 describe("KvBackend.memory — channelPullBatch", () => {
-  it.effect("respects sinceScore strictly (>, not >=)", () =>
+  it.effect("respects since.counter strictly within a bucket (>, not >=)", () =>
     Effect.gen(function* () {
       const { kv } = setup()
       for (const ref of ["a", "b", "c"]) {
         yield* kv.channelWriteUpdate({
           channel: CHANNEL,
           counterKey: COUNTER,
+          entryGen: GEN,
           member: memberOf("U", bodyKey(ref)),
           bodyKey: bodyKey(ref),
           bodyValue: ref,
@@ -373,24 +442,25 @@ describe("KvBackend.memory — channelPullBatch", () => {
           indexes: [],
         })
       }
-      // Pull strictly > 1 → returns scores 2 and 3 only.
+      // Warm pull from the GEN bucket strictly > 1 → returns scores 2 and 3 only.
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
-        sinceScore: 1,
+        since: sinceWarm(1),
         limit: 10,
       })
       expect(pulled.entries.map((e) => e.score)).toEqual([2, 3])
     })
   )
 
-  it.effect("respects limit and emits in ascending score order", () =>
+  it.effect("respects limit and emits in lex `(entryGen, counter)` order", () =>
     Effect.gen(function* () {
       const { kv } = setup()
       for (const ref of ["a", "b", "c", "d", "e"]) {
         yield* kv.channelWriteUpdate({
           channel: CHANNEL,
           counterKey: COUNTER,
+          entryGen: GEN,
           member: memberOf("U", bodyKey(ref)),
           bodyKey: bodyKey(ref),
           bodyValue: ref,
@@ -401,20 +471,21 @@ describe("KvBackend.memory — channelPullBatch", () => {
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
-        sinceScore: 0,
+        since: SINCE_COLD,
         limit: 3,
       })
       expect(pulled.entries.map((e) => e.score)).toEqual([1, 2, 3])
-      expect(pulled.headCounter).toBe(5)
+      expect(pulled.head).toEqual({ gen: GEN, counter: 5 })
     })
   )
 
-  it.effect("returns empty entries when nothing newer than sinceScore", () =>
+  it.effect("returns empty entries when nothing newer than since", () =>
     Effect.gen(function* () {
       const { kv } = setup()
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "x",
@@ -424,11 +495,12 @@ describe("KvBackend.memory — channelPullBatch", () => {
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
-        sinceScore: 100,
+        since: sinceWarm(100),
         limit: 10,
       })
       expect(pulled.entries.length).toBe(0)
-      expect(pulled.headCounter).toBe(1)
+      // head still reflects what the channel actually holds.
+      expect(pulled.head).toEqual({ gen: GEN, counter: 1 })
     })
   )
 
@@ -438,6 +510,7 @@ describe("KvBackend.memory — channelPullBatch", () => {
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
         bodyValue: "x",
@@ -448,32 +521,22 @@ describe("KvBackend.memory — channelPullBatch", () => {
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
-        sinceScore: 0,
+        since: SINCE_COLD,
         limit: 10,
       })
       expect(pulled.entries.length).toBe(1)
       expect(pulled.entries[0]?.body).toBeNull()
+      expect(pulled.entries[0]?.body_ttl_remaining_sec).toBe(0)
     })
   )
 
   it.effect("malformed member returns a typed KvError", () =>
     Effect.gen(function* () {
       const { kv } = setup()
-      // Write a malformed member through the public API by skipping
-      // the U:/D: prefix convention. The KvBackend write path
-      // doesn't enforce the convention (member is opaque to it);
-      // pullBatch parses the prefix and returns a typed KvError on
-      // the round-trip when it can't derive the body key.
-      //
-      // Slice 7c note: channels are now stored in a per-instance
-      // native Map sidecar (not in the MemoryStore). Test injection
-      // must go through the public API rather than poking at the
-      // store directly, so this scenario writes a malformed member
-      // via `channelWriteUpdate`. The body key for the malformed
-      // member is irrelevant since the parse fails before MGET.
       yield* kv.channelWriteUpdate({
         channel: CHANNEL,
         counterKey: COUNTER,
+        entryGen: GEN,
         member: "malformed-no-prefix",
         bodyKey: "irrelevant",
         bodyValue: "{}",
@@ -484,7 +547,7 @@ describe("KvBackend.memory — channelPullBatch", () => {
         kv.channelPullBatch({
           channel: CHANNEL,
           counterKey: COUNTER,
-          sinceScore: 0,
+          since: SINCE_COLD,
           limit: 10,
         })
       )
@@ -492,17 +555,66 @@ describe("KvBackend.memory — channelPullBatch", () => {
     })
   )
 
-  it.effect("counter on an empty channel reads 0; head matches no-write state", () =>
+  it.effect("empty channel reads head=(0,0); no entries", () =>
     Effect.gen(function* () {
       const { kv } = setup()
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
-        sinceScore: 0,
+        since: SINCE_COLD,
         limit: 10,
       })
       expect(pulled.entries.length).toBe(0)
-      expect(pulled.headCounter).toBe(0)
+      expect(pulled.head).toEqual({ gen: 0, counter: 0 })
+    })
+  )
+
+  it.effect("warm pull (since.gen > 0) skips mirror entries (entryGen=0); cold pull returns all", () =>
+    Effect.gen(function* () {
+      const { kv } = setup()
+      // One originating write into bucket gen=GEN.
+      yield* kv.channelWriteUpdate({
+        channel: CHANNEL,
+        counterKey: COUNTER,
+        entryGen: GEN,
+        member: memberOf("U", bodyKey("o1")),
+        bodyKey: bodyKey("o1"),
+        bodyValue: "O",
+        bodyTtlSec: 60,
+        indexes: [],
+      })
+      // One mirror write into bucket gen=0.
+      yield* kv.channelWriteUpdate({
+        channel: CHANNEL,
+        counterKey: COUNTER,
+        entryGen: 0,
+        member: memberOf("U", "bak:peerA:call:m1"),
+        bodyKey: "bak:peerA:call:m1",
+        bodyValue: "M",
+        bodyTtlSec: 60,
+        indexes: [],
+      })
+      // Warm pull from GEN bucket, since=(GEN, 0): mirror NOT returned.
+      const warm = yield* kv.channelPullBatch({
+        channel: CHANNEL,
+        counterKey: COUNTER,
+        since: sinceWarm(0),
+        limit: 10,
+      })
+      expect(warm.entries.length).toBe(1)
+      expect(warm.entries[0]?.entryGen).toBe(GEN)
+      // Cold pull from (0, 0): both, in lex order — gen=0 first, then gen=GEN.
+      const cold = yield* kv.channelPullBatch({
+        channel: CHANNEL,
+        counterKey: COUNTER,
+        since: SINCE_COLD,
+        limit: 10,
+      })
+      expect(cold.entries.length).toBe(2)
+      expect(cold.entries[0]?.entryGen).toBe(0)
+      expect(cold.entries[1]?.entryGen).toBe(GEN)
+      // Head = max lex tuple across buckets.
+      expect(cold.head).toEqual({ gen: GEN, counter: 1 })
     })
   )
 })

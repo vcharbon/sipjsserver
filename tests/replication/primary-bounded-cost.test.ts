@@ -48,6 +48,7 @@ describe("T2 — primary-bounded-cost", () => {
         // Phase 1: write all N calls.
         for (const ref of refs) {
           yield* channel.write({
+            entryGen: channel.gen,
             partition: "pri",
             callRef: ref,
             bodyValue: '{"name":"' + ref + '"}',
@@ -55,18 +56,20 @@ describe("T2 — primary-bounded-cost", () => {
             indexes: [],
           })
         }
-        let batch = yield* channel.pullBatch(0, 1000)
+        let batch = yield* channel.pullBatch({ gen: 0, counter: 0 }, 1000)
         expect(batch.entries.length).toBe(N)
 
         // Phase 2: tombstone all N. Channel grows to 2N.
         for (const ref of refs) {
           yield* channel.tombstone({
+            entryGen: channel.gen,
+            callGen: 1,
             partition: "pri",
             callRef: ref,
             indexesToRemove: [],
           })
         }
-        batch = yield* channel.pullBatch(0, 1000)
+        batch = yield* channel.pullBatch({ gen: 0, counter: 0 }, 1000)
         expect(batch.entries.length).toBe(2 * N)
 
         // Phase 3: 30 cycles of churn over 1 hour TestClock.
@@ -82,6 +85,7 @@ describe("T2 — primary-bounded-cost", () => {
           // member key is replaced in place.
           for (const ref of refs) {
             yield* channel.write({
+              entryGen: channel.gen,
               partition: "pri",
               callRef: ref,
               bodyValue: '{"name":"' + ref + '","cycle":' + cycle + '}',
@@ -92,13 +96,15 @@ describe("T2 — primary-bounded-cost", () => {
           // Tombstone all N — D-members likewise replace prior D-members.
           for (const ref of refs) {
             yield* channel.tombstone({
+              entryGen: channel.gen,
+              callGen: 1,
               partition: "pri",
               callRef: ref,
               indexesToRemove: [],
             })
           }
 
-          batch = yield* channel.pullBatch(0, 1000)
+          batch = yield* channel.pullBatch({ gen: 0, counter: 0 }, 1000)
           observedMaxima.push(batch.entries.length)
           // INV1: never above 2N over the full 1-hour simulation.
           expect(batch.entries.length).toBeLessThanOrEqual(2 * N)

@@ -4,7 +4,7 @@
  * Scenario (per docs/plan/grill-me-on-the-spicy-lark.md §D9-NS):
  *   1. Worker A writes call X. A's outgoing channel-to-B carries an
  *      entry; the puller on B drains it via the real `buildPullStream`.
- *   2. The puller's applyFrame is wired through `makeEchoApply`, so
+ *   2. The puller's applyFrame is wired through `makeReplicationApply`, so
  *      after apply B's bak:{A}: contains X AND B's outgoing channel-to-A
  *      carries an echoed entry stamped with B's gen.
  *   3. A's sidecar Redis is wiped (clear all keys). A's process
@@ -31,7 +31,7 @@ import {
   Stream,
 } from "effect"
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
-import { makeEchoApply } from "../../src/replication/EchoApply.js"
+import { makeReplicationApply } from "../../src/replication/EchoApply.js"
 import {
   initialPeerView,
   PullerTransportError,
@@ -71,6 +71,7 @@ describe("NS5 — sidecar wipe recovery", () => {
         // ---- A writes X. Body lives in A's storage; A's channel-to-B
         //      now has the U-member at counter 1.
         yield* channelA0toB.write({
+          entryGen: channelA0toB.gen,
           partition: "pri",
           callRef: "X",
           bodyValue: '{"gen":1,"name":"X"}',
@@ -82,8 +83,11 @@ describe("NS5 — sidecar wipe recovery", () => {
         //      EchoApply so writes to bak:{A}: also bump B's
         //      outgoing channel-to-A.
         const bView = MutableRef.make(initialPeerView("worker-A"))
-        const bApply = makeEchoApply({
+        const bApply = makeReplicationApply({
+          self: "worker-B",
+          source: "worker-A",
           outgoingChannel: channelBtoA,
+          localKv: kvB,
           bodyTtlSec: 60,
         })
         const openFromA0 = (args: {
@@ -93,8 +97,8 @@ describe("NS5 — sidecar wipe recovery", () => {
         }): Stream.Stream<Uint8Array, PullerTransportError> =>
           buildPullStream({
             channel: channelA0toB,
-            gen: A_GEN_INITIAL,
-            initialSince: args.sinceCounter,
+            serverGen: A_GEN_INITIAL,
+            initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
             chunkSize: args.chunkSize,
             noopIntervalMs: 5,
           })
@@ -116,7 +120,7 @@ describe("NS5 — sidecar wipe recovery", () => {
         // Verify B's bak:{A}:call:X exists AND B's channel-to-A has
         // the echoed entry.
         expect(yield* kvB.bodyGet("bak:worker-A:call:X")).not.toBeNull()
-        const bToAEntries = yield* channelBtoA.pullBatch(0, 100)
+        const bToAEntries = yield* channelBtoA.pullBatch({ gen: 0, counter: 0 }, 100)
         expect(bToAEntries.entries.length).toBe(1)
         expect(bToAEntries.entries[0]!.member).toBe("U:bak:worker-A:call:X")
 
@@ -142,8 +146,11 @@ describe("NS5 — sidecar wipe recovery", () => {
         // A's puller against B's channel-to-A; apply via EchoApply so
         // the recovered state lands in pri:{A}: AND echos onward.
         const aView = MutableRef.make(initialPeerView("worker-B"))
-        const aApply = makeEchoApply({
+        const aApply = makeReplicationApply({
+          self: "worker-A",
+          source: "worker-B",
           outgoingChannel: channelA1toB,
+          localKv: kvA1,
           bodyTtlSec: 60,
         })
         const openFromB = (args: {
@@ -153,8 +160,8 @@ describe("NS5 — sidecar wipe recovery", () => {
         }): Stream.Stream<Uint8Array, PullerTransportError> =>
           buildPullStream({
             channel: channelBtoA,
-            gen: B_GEN,
-            initialSince: args.sinceCounter,
+            serverGen: B_GEN,
+            initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
             chunkSize: args.chunkSize,
             noopIntervalMs: 5,
           })

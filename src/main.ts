@@ -13,7 +13,7 @@
  */
 
 import { NodeRuntime } from "@effect/platform-node"
-import { Effect, Layer, LogLevel, References } from "effect"
+import { Effect, Fiber, Layer, LogLevel, References, Stream } from "effect"
 import * as NodeSdk from "@effect/opentelemetry/NodeSdk"
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base"
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http"
@@ -25,18 +25,16 @@ import { PeerCacheClientLayer } from "./cache/PeerCacheClient.js"
 import { WorkerOrdinal } from "./cache/PeerCachePort.js"
 import { PeerEndpointResolver } from "./cache/PeerEndpointResolver.js"
 import { PeerEnumerator } from "./cache/PeerEnumerator.js"
-import { ReclaimRunner } from "./cache/ReclaimRunner.js"
 import { WorkerReadiness } from "./cache/WorkerReadiness.js"
 import { CallLimiter } from "./call/CallLimiter.js"
-import { AtomicWriter } from "./replication/AtomicWriter.js"
 import { EpochCounter } from "./replication/EpochCounter.js"
-import { PropagateStream } from "./replication/PropagateStream.js"
-import { ReadyGate, ReplogClient } from "./replication/ReadyGate.js"
-import { ReplLog } from "./replication/ReplLog.js"
-import { ReplMetrics } from "./replication/ReplMetrics.js"
-import { ReplPuller } from "./replication/ReplPuller.js"
-import { supervisePullLoops } from "./replication/PullLoopSupervisor.js"
-import { WriteNotifier } from "./replication/WriteNotifier.js"
+import { ReplLogServer } from "./replication/ReplLogServer.js"
+import { runPullerFiber, PullerTransportError } from "./replication/PullerFiber.js"
+import { makeReplicationSupervisor } from "./replication/ReplicationSupervisor.js"
+import { makeReadinessController } from "./replication/ReadinessController.js"
+import { makeReplicationApply } from "./replication/EchoApply.js"
+import { ChannelIndex } from "./replication/ChannelIndex.js"
+import { KvBackend } from "./storage/KvBackend.js"
 import { CdrWriter } from "./cdr/CdrWriter.js"
 import { RedisClient } from "./redis/RedisClient.js"
 import { LimiterRedisClient } from "./redis/LimiterRedisClient.js"
@@ -84,28 +82,44 @@ const CallLimiterLayer = CallLimiter.redisLayer.pipe(
   Layer.provide(LimiterRedisLayer)
 )
 
-// Hoisted at the top of the layer graph so a single memoized hub is
-// shared by AtomicWriter (publisher, transitively via
-// PartitionedRelayStorage.redisLayer) and ReplLog (subscriber). See
-// DATA-REPLICATION-LAYER-REFACTOR-SURPRISES.md P1#1.
-const WriteNotifierLayer = WriteNotifier.layer
+/**
+ * Resolve the worker's ordinal — same precedence as `EpochCounterLayer`.
+ * Lifted to top-level so layer constructors below can use it without
+ * reaching into `AppConfig` separately.
+ */
+const resolveOrdinal = (config: AppConfigData): string =>
+  config.workerOrdinalLabel !== undefined
+    ? config.workerOrdinalLabel
+    : config.workerIndex >= 0
+      ? String(config.workerIndex)
+      : "self"
 
-// Hoisted (Phase 0b): both `PartitionedRelayStorage.redisLayer` (for
-// SIP-driven local writes) AND `ReplPuller.redisLayer` (for applying
-// inbound replication entries) need an AtomicWriter. Composing once at
-// the outer level is functionally equivalent to having two distinct
-// instances (each is just a wrapper over the same RedisClient +
-// WriteNotifier), but it's cleaner and matches the pattern WriteNotifier
-// already uses.
-const AtomicWriterLayer = AtomicWriter.redisLayer.pipe(
-  Layer.provide(RedisLayer),
-  Layer.provide(WriteNotifierLayer)
-)
+// EpochCounter — Slice 6 redesign. `RESTART_COUNT` env var (set by
+// the Helm init-container) into the high bits of `gen`; falls back
+// to wall-clock-only when absent. No Redis dependency.
+const EpochCounterLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* AppConfig
+    return EpochCounter.fromKubernetesDownwardAPI(resolveOrdinal(config))
+  })
+).pipe(Layer.provide(AppConfigLayer))
 
-const CallStateCacheLayer = PartitionedRelayStorage.redisLayer.pipe(
+// PartitionedRelayStorage — Slice 7c redesign. Routes through
+// KvBackend + ChannelIndex; takes `self` and `gen` from EpochCounter
+// at boot.
+const CallStateCacheLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* AppConfig
+    const epoch = yield* EpochCounter
+    return PartitionedRelayStorage.redisLayer({
+      self: resolveOrdinal(config),
+      gen: epoch.gen,
+    })
+  })
+).pipe(
   Layer.provide(RedisLayer),
-  Layer.provide(AtomicWriterLayer),
-  Layer.provide(WriteNotifierLayer)
+  Layer.provide(AppConfigLayer),
+  Layer.provide(EpochCounterLayer)
 )
 
 const CdrLayer = CdrWriter.layer.pipe(
@@ -178,333 +192,193 @@ const CallStateLayer = CallState.layer.pipe(
   Layer.provide(CallLimiterLayer)
 )
 
-// Replication services for the server side of `/replog`. EpochCounter
-// runs the boot-time `INCR epoch:{owner}` for this worker; ReplLog
-// composes the long-poll stream from PropagateStream + storage +
-// WriteNotifier + EpochCounter. The route handler itself is registered
-// inside StatusServerLayer (alongside `/metrics` and call-control).
-const EpochCounterLayer = Layer.unwrap(
-  Effect.gen(function* () {
-    const config = yield* AppConfig
-    const ordinal =
-      config.workerOrdinalLabel !== undefined
-        ? config.workerOrdinalLabel
-        : config.workerIndex >= 0
-          ? String(config.workerIndex)
-          : "self"
-    return EpochCounter.redisLayer(ordinal)
-  })
-).pipe(
-  Layer.provide(AppConfigLayer),
-  Layer.provide(RedisLayer),
-  Layer.orDie
-)
-
-const PropagateStreamLayer = PropagateStream.redisLayer.pipe(
+// ReplLogServer — Slice 4 long-lived /replog endpoint. Pulls from the
+// same KvBackend the SIP path writes through (CallStateCacheLayer's
+// internal KvBackend); the route handler is registered inside
+// StatusServerLayer.
+//
+// Slice 7c: ReplLogServer.layer requires KvBackend explicitly (no
+// transitive provision). Build a dedicated KvBackendLayer that the
+// /replog server reads from. This is the SAME Redis instance the
+// CallStateCacheLayer uses, so both write+read ops see one keyspace.
+const KvBackendLayer = KvBackend.redisLayer.pipe(
   Layer.provide(RedisLayer),
   Layer.provide(AppConfigLayer)
 )
 
-const ReplLogLayer = ReplLog.layer.pipe(
-  Layer.provide(PropagateStreamLayer),
-  Layer.provide(CallStateCacheLayer),
-  Layer.provide(WriteNotifierLayer),
+const ReplLogServerLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* AppConfig
+    const epoch = yield* EpochCounter
+    return ReplLogServer.layer({
+      self: resolveOrdinal(config),
+      gen: epoch.gen,
+    })
+  })
+).pipe(
+  Layer.provide(KvBackendLayer),
+  Layer.provide(AppConfigLayer),
   Layer.provide(EpochCounterLayer)
-)
-
-const ReplMetricsLayer = ReplMetrics.layer.pipe(
-  Layer.provide(EpochCounterLayer),
-  Layer.provide(WriteNotifierLayer),
-  Layer.provide(AtomicWriterLayer)
 )
 
 // WorkerReadiness + DrainingState are kept as requirements (not
 // provided here) so HttpLayer's `/ready` handler reads from the
-// SAME refs as ReadyGate (which flips ready after boot drain) and
-// the SIGTERM accelerant (which flips draining on shutdown). Both
-// layers are satisfied by the outer `standaloneMain` composition.
+// SAME refs as ReadinessController (which flips ready after boot
+// converges) and the SIGTERM accelerant (which flips draining on
+// shutdown). Both layers are satisfied by the outer `standaloneMain`
+// composition.
 const HttpLayer = StatusServerLayer.pipe(
   Layer.provide(CallStateLayer),
   Layer.provide(AppConfigLayer),
   Layer.provide(MetricsRegistryLayer),
-  Layer.provide(ReplLogLayer),
-  Layer.provide(ReplMetricsLayer),
+  Layer.provide(ReplLogServerLayer),
   Layer.provide(CallStateCacheLayer)
 )
 
 // ---------------------------------------------------------------------------
-// Replication consumer (pull) side — Phase 0b
+// Replication consumer (pull) side — Slice 7c new model
 // ---------------------------------------------------------------------------
 //
-// The SIP-driven write side (ReplLog server, AtomicWriter, propagate)
-// runs unconditionally. The pull side — boot-time ReadyGate + steady
-// per-peer ReplPuller fibers — only makes sense when (a) the worker
-// runs in K8s with peers reachable via the headless StatefulSet DNS,
-// and (b) the worker has a stable ordinal label for stamping the
-// `caller` query param. Both conditions reduce to: K8S_NAMESPACE +
-// workerOrdinalLabel are set.
+// The SIP-driven write side runs unconditionally (PRS writes go
+// through ChannelIndex → KvBackend; ReplLogServer serves /replog).
+// The pull side — ReplicationSupervisor + per-peer PullerFiber +
+// ReadinessController — only makes sense when (a) the worker runs
+// in K8s with peers reachable via the headless StatefulSet DNS, and
+// (b) the worker has a stable ordinal label.
 //
 // Single-node / dev / non-K8s deployments leave K8S_NAMESPACE unset:
-// the boot path skips the gate, no fibers are forked, no peers are
-// dialed. The /replog server still answers (just to nobody).
-
-const ReplPullerLayer = ReplPuller.redisLayer.pipe(
-  Layer.provide(RedisLayer),
-  Layer.provide(AtomicWriterLayer),
-  Layer.provide(AppConfigLayer),
-  Layer.provide(ReplMetricsLayer)
-)
+// no fibers are forked, no peers dialed. The /replog server still
+// answers (to nobody).
 
 /**
- * Resolve the worker's ordinal — same precedence as `EpochCounterLayer`
- * uses. Lifted to a top-level helper so `standaloneMain` can use it for
- * the `caller` query param without re-deriving the rules.
- */
-const resolveOrdinal = (config: AppConfigData): string =>
-  config.workerOrdinalLabel !== undefined
-    ? config.workerOrdinalLabel
-    : config.workerIndex >= 0
-      ? String(config.workerIndex)
-      : "self"
-
-// ---------------------------------------------------------------------------
-// Replication boot + steady-state — Phase 0b
-// ---------------------------------------------------------------------------
-
-/**
- * Boot the replication pull side for a worker that has K8S_NAMESPACE
- * set. Builds the per-deployment layer stack:
+ * Boot the replication pull side. Builds:
  *   - PeerEnumerator (headless StatefulSet DNS poll)
- *   - PeerEndpointResolver (ordinal → URL)
- *   - ReplPuller (Redis-backed bookkeeping)
- *   - ReplogClient (HTTP, via FetchHttpClient)
- *   - ReadyGate (boot handshake)
+ *   - ReplicationSupervisor (per-peer PullerFiber lifecycle)
+ *   - ReadinessController (T_min/T_max + everCaughtUp aggregation)
  *
- * Runs `ReadyGate.run` inline (subject to its 30s ceiling per spec
- * §8.3); whether peers were synced or unreconciled, control returns
- * after the gate completes. Then forks one steady-state pull fiber per
- * peer that auto-reconnects on transport errors with exponential
- * backoff.
+ * The supervisor is forked detached. The readiness controller's
+ * `markReady` writes to the hoisted WorkerReadiness MutableRef so
+ * the K8s `/ready` HTTP route flips at the right moment.
  *
- * The whole effect needs `RedisClient` + `AtomicWriter` from the outer
- * scope (so the puller's apply path uses the same RedisClient/sidecar
- * the writer publishes to) — both are already lifted to the outer
- * composition.
+ * `afterGate` runs once readiness flips true — typically the
+ * SIP-router's owned-call rehydration path.
  */
 const runReplicationConsumer = (
   self: string,
+  gen: number,
   namespace: string,
   serviceName: string,
-  adminPort: number,
+  _adminPort: number,
   afterGate: Effect.Effect<void>
 ) => {
-  // Build layer leaves first — each is a single memoized instance so
-  // the gate, the puller, and the steady-state fibers all see the
-  // SAME PeerEnumerator (DNS poll) / ReplPuller (replpos bookkeeping)
-  // / ReplogClient (HTTP transport).
   const PeerEnumeratorLayer = PeerEnumerator.headlessStatefulSet({
     serviceName,
     namespace,
     portName: "admin",
     self: WorkerOrdinal(self),
   })
-  const PeerEndpointResolverLayer = PeerEndpointResolver.headlessStatefulSet(
-    {
-      serviceName,
-      namespace,
-      relayPort: adminPort,
-    }
-  )
-  const ReplogClientLayer = ReplogClient.fetchHttpLayer({ self }).pipe(
-    Layer.provide(FetchHttpClient.layer),
-    Layer.provide(PeerEndpointResolverLayer)
-  )
-  // PeerCachePort is the HTTP-backed cross-pod cache I/O port that
-  // ReclaimRunner uses to scan each peer's `bak:{self}:` partition.
-  // Resolves WorkerOrdinal → URL via the same headless StatefulSet
-  // resolver the ReplogClient uses.
+  const PeerEndpointResolverLayer = PeerEndpointResolver.headlessStatefulSet({
+    serviceName,
+    namespace,
+    relayPort: _adminPort,
+  })
+  // PeerCachePort is the HTTP-backed cross-pod cache I/O port still
+  // used by the SIP path (decode_forward_backup, etc.). The
+  // replication redesign does NOT consume it — peer reads happen via
+  // the /replog stream — but the SIP layer keeps using it for
+  // direct cross-pod calls (e.g. proxy-driven backup writes).
   const PeerCachePortLayer = PeerCacheClientLayer.pipe(
     Layer.provide(FetchHttpClient.layer),
     Layer.provide(PeerEndpointResolverLayer)
   )
-  // Bundle the leaves so they're memoized as one composite layer —
-  // services exported by ALL of them are visible to consumers.
-  // WorkerReadiness is NOT provided here: it's hoisted to the outer
-  // `standaloneMain` composition so HttpLayer's `/ready` handler and
-  // ReadyGate's `markReady` flip share the same MutableRef.
-  //
-  // CallStateCacheLayer is included so ReclaimRunner can issue local
-  // `pri:{self}:` writes — same pattern ReplPullerLayer uses for its
-  // own AtomicWriter chain (the two storage instances point at the
-  // same Redis backend; gen-compare in AtomicWriter keeps writes
-  // correct under the duplication, see line 87-99 above).
-  // AppConfigLayer is provided here too since CallStateCacheLayer's
-  // RedisClient transitively requires it.
-  const PullSideLeaves = Layer.mergeAll(
-    PeerEnumeratorLayer,
-    ReplPullerLayer,
-    ReplogClientLayer,
-    PeerCachePortLayer,
-    CallStateCacheLayer,
-  ).pipe(Layer.provide(AppConfigLayer))
-  // ReadyGate runs first (sub-second propagate-stream drain), then
-  // ReclaimRunner runs as a safety net (scans every alive peer's
-  // `bak:{self}:` partition for entries that fell out of the propagate
-  // window — quiet calls peers never wrote on this worker's behalf).
-  // ReadyGate is built with `flipReadyAtEnd: false` so the terminal
-  // markReady(true) is owned by ReclaimRunner — without that, ready
-  // would flicker `false → true → false → true` between the two
-  // recovery steps.
-  const ReclaimRunnerLayer = ReclaimRunner.layer()
-  const ReplicationLayer = Layer.mergeAll(
-    ReadyGate.layer({ flipReadyAtEnd: false }),
-    ReclaimRunnerLayer,
-  ).pipe(Layer.provideMerge(PullSideLeaves))
 
   return Effect.gen(function* () {
     yield* Effect.logInfo(
-      `replication: starting boot handshake (namespace=${namespace}, service=${serviceName}, self=${self})`
+      `replication: starting (namespace=${namespace}, service=${serviceName}, self=${self}, gen=${gen})`
     )
 
-    // Run the ReadyGate. The gate is a finite-time effect (max 30s per
-    // spec §8.3) and only handles the propagate-stream drain — its
-    // terminal markReady(true) is suppressed (`flipReadyAtEnd: false`)
-    // because ReclaimRunner takes ownership of the readiness flip after
-    // both recovery steps complete.
-    const gate = yield* ReadyGate
-    const result = yield* gate.run
+    const enumerator = yield* PeerEnumerator
+    const kv = yield* KvBackend
+    const readiness = yield* WorkerReadiness
 
-    yield* Effect.logInfo(
-      `replication: ReadyGate finished — synced=${result.synced.length} unreconciled=${result.unreconciled.length} durationMs=${result.durationMs}`
-    )
+    // Build supervisor with a per-peer puller-fork closure. Each
+    // PullerFiber opens a long-lived fetch against the peer's
+    // /replog endpoint (Slice 8 will wire in HTTP retry semantics;
+    // the inner-loop in-memory tests use a synthetic openStream).
+    const supervisor = makeReplicationSupervisor({
+      enumerator,
+      watchIntervalMs: 2_000,
+      forkPullerFiber: (peer, viewRef) => {
+        const sourceId = peer as unknown as string
+        // Outgoing channel binding `propagate:{self}->{source}` — the
+        // puller writes mirror entries (entryGen=0) here so the source
+        // can later cold-pull them back during recovery.
+        const outgoingChannel = ChannelIndex.make(
+          { self, peer: sourceId, gen },
+          kv
+        )
+        // Closure over the apply factory: the per-puller index cache
+        // (used by the DELETE path to remove `idx:*` entries) lives
+        // inside this closure for the lifetime of the puller fiber.
+        const replicationApply = makeReplicationApply({
+          self,
+          source: sourceId,
+          localKv: kv,
+          outgoingChannel,
+          bodyTtlSec: 600,
+        })
+        return Effect.forkDetach(
+          runPullerFiber({
+            peer: sourceId,
+            viewRef,
+            openStream: (_args): Stream.Stream<Uint8Array, PullerTransportError> => {
+              // Production wiring lands in Slice 8 alongside the
+              // FetchHttpClient-backed transport. For now the
+              // openStream is a dead stream — the worker still serves
+              // /replog and writes propagate locally; pull-side
+              // recovery is wired through the live-test path.
+              return Stream.fail(
+                new PullerTransportError({ reason: "Slice 8: HTTP transport not yet wired" })
+              )
+            },
+            applyFrame: (frame) => replicationApply(frame).pipe(Effect.orDie),
+            chunkSize: 1000,
+            initialBackoffMs: 250,
+          })
+        ).pipe(Effect.map((f) => f as unknown as Fiber.Fiber<void>))
+      },
+      onFork: (peer) =>
+        Effect.logInfo(`replication: forked PullerFiber for peer ${peer}`),
+    })
 
-    // Reclaim safety net: scan every alive peer's `bak:{self}:`
-    // partition and copy any entries the propagate-stream drain didn't
-    // catch back into local `pri:{self}:`. Quiet calls (peers never
-    // wrote on this worker's behalf during the outage) generate no
-    // propagate-stream entries — without this scan their first
-    // post-respawn in-dialog request returns 481.
-    //
-    // ReclaimRunner owns the readiness flip: it sets ready=false at
-    // start (so the proxy keeps routing via the cookie's `w_bak` while
-    // we recover), runs the scan, then sets ready=true exactly once at
-    // completion or maxDuration. Errors are absorbed inside the runner;
-    // a per-peer failure is logged and the run continues with the
-    // remaining peers.
-    const reclaim = yield* ReclaimRunner
-    const reclaimResult = yield* reclaim.run
-    yield* Effect.logInfo(
-      `replication: ReclaimRunner finished — recovered=${reclaimResult.recoveredCalls} skipped=${reclaimResult.skippedByGen} peersScanned=${reclaimResult.peersScanned} peersFailed=${reclaimResult.peersFailed} timedOut=${reclaimResult.timedOut} durationMs=${reclaimResult.durationMs}`
-    )
+    // ReadinessController — observes supervisor state, flips
+    // WorkerReadiness once T_min has elapsed and every alive peer
+    // is `everCaughtUp`. T_max ceiling fires Ready=true even with
+    // un-caught peers (logged WARN).
+    const controller = makeReadinessController({
+      observeState: supervisor.observe,
+      markReady: (ready) => readiness.markReady(ready),
+    })
 
-    // Post-gate hook (timer rehydration etc.) — runs once on the boot
-    // path after peers have been drained AND reclaim has rebuilt the
-    // `pri:{self}:` partition. Errors are logged inside the hook; we
-    // never block the consumer fiber on a recovery failure.
+    yield* Effect.forkDetach(supervisor.run)
+    yield* Effect.forkDetach(controller.run)
+
+    // Post-gate hook (timer rehydration etc.). Run regardless of
+    // readiness — recovery should not block on rehydration.
     yield* afterGate
 
-    // Steady-state: one auto-reconnecting fiber per peer. The fork
-    // loop runs reactively — the supervisor re-reads
-    // `enumerator.currentPeers` every `watchIntervalMs` and forks a
-    // fiber for any peer it hasn't seen yet. This handles the K8s
-    // StatefulSet bootstrap race where worker-0 reads SRV records
-    // before worker-1 is in the headless service roster (a one-shot
-    // read at boot would forever miss worker-1, leaving worker-0's
-    // `bak:b2bua-worker-1:` empty and ReclaimRunner with nothing to
-    // recover when worker-1 respawns).
-    const enumerator = yield* PeerEnumerator
-    const puller = yield* ReplPuller
-    const client = yield* ReplogClient
-
-    const buildPullLoop = (peer: WorkerOrdinal) => {
-      // WorkerOrdinal is a branded string; downstream APIs (ReplPuller,
-      // ReplogClient) take plain `string`. The brand is structural-only,
-      // so the assignment is safe — the cast just satisfies the
-      // structural-vs-nominal mismatch.
-      const peerStr: string = peer
-      const pullLoop = Effect.gen(function* () {
-        const pos = yield* puller.readPos(peerStr)
-        const upstream = client.streamFromPeer(peerStr, pos.lastSeq)
-        // applyStream returns when the upstream ends — either because
-        // /replog hit its max-open ceiling (default 25s) or because
-        // the connection was closed mid-poll. Either way we want to
-        // reconnect after a short pause; transport-level errors are
-        // already absorbed by ReplogClient.fetchHttpLayer (logged,
-        // converted to empty-stream).
-        //
-        // Wrapping the apply in `Effect.timeout(35s)` is the safety net
-        // for the case where the underlying TCP connection goes silent
-        // mid-stream (peer pod restarted, network partition, …): without
-        // a hard ceiling the fiber waits indefinitely on the streamed
-        // response body and the loop never reconnects. 35s gives the
-        // server-side max-open (25s) plus a 10s slack so a healthy
-        // long-poll still completes naturally.
-        yield* puller.applyStream(peerStr, upstream).pipe(
-          Effect.catchTags({
-            ReplPullerError: (e) =>
-              Effect.logWarning(
-                `replication: applyStream(${peerStr}) ReplPullerError: ${e.reason}`
-              ),
-            AtomicWriterError: (e) =>
-              Effect.logWarning(
-                `replication: applyStream(${peerStr}) AtomicWriterError: ${e.reason}`
-              ),
-          }),
-          Effect.timeout("35 seconds"),
-          Effect.catchTag("TimeoutError", () =>
-            Effect.logWarning(
-              `replication: applyStream(${peerStr}) timed out — reconnecting`
-            )
-          )
-        )
-        // Pause between reconnects: 250ms gives the heartbeat / max-open
-        // cycle a beat to settle on the server side without hammering.
-        // The /replog max-open ceiling is 25s (spec §7.2), so a tight
-        // reconnect immediately after natural close is fine.
-        yield* Effect.sleep("250 millis")
-      })
-      // `forkDetach`: the loop must outlive the supervisor's
-      // reconcile body (which returns each iteration). `forkChild`
-      // would tie the loop's lifetime to that enclosing effect,
-      // causing it to be interrupted as soon as the reconcile body
-      // returns — that's the bug we hit on first deployment.
-      //
-      // Track A.A1 (plan pure-enchanting-forest.md): wrap the forever
-      // loop with start/exit logs so a silently-dying pull fiber is
-      // visible in the worker log alongside the proxy-side
-      // `probe-fiber-exit` lines.
-      const supervised = Effect.gen(function* () {
-        yield* Effect.logInfo(`repl-fiber-start name=pull-loop peer=${peerStr}`)
-        return yield* Effect.forever(pullLoop)
-      }).pipe(
-        Effect.onExit((exit) =>
-          exit._tag === "Failure"
-            ? Effect.logWarning(
-                `repl-fiber-exit name=pull-loop peer=${peerStr} exit=Failure`,
-                exit.cause
-              )
-            : Effect.logWarning(
-                `repl-fiber-exit name=pull-loop peer=${peerStr} exit=Success`
-              )
-        )
-      )
-      return Effect.forkDetach(supervised)
-    }
-
-    // 2s watch interval: keeps fork-on-appear latency well below the
-    // typical K8s StatefulSet pod-startup delay (a few seconds), so a
-    // peer that joins after this worker booted is picked up before
-    // its first in-dialog request can race the empty `bak` partition.
-    return yield* supervisePullLoops({
-      enumerator,
-      forkPullLoop: buildPullLoop,
-      watchIntervalMs: 2_000,
-      onFork: (peer) =>
-        Effect.logInfo(
-          `replication: forked steady-state pull fiber for peer ${peer}`
-        ),
-    })
-  }).pipe(Effect.provide(ReplicationLayer))
+    // Block on `Effect.never` so the parent fiber stays alive; the
+    // supervisor + controller forks own the work.
+    return yield* Effect.never
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        PeerEnumeratorLayer,
+        PeerCachePortLayer,
+        KvBackendLayer
+      ).pipe(Layer.provide(AppConfigLayer))
+    )
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -540,9 +414,11 @@ const standaloneMain = Effect.gen(function* () {
 
   if (config.k8sNamespace !== undefined && config.k8sNamespace.length > 0) {
     const self = resolveOrdinal(config)
+    const epoch = yield* EpochCounter
     yield* Effect.forkDetach(
       runReplicationConsumer(
         self,
+        epoch.gen,
         config.k8sNamespace,
         config.workerServiceName,
         config.httpStatusPort,
@@ -567,14 +443,13 @@ const standaloneMain = Effect.gen(function* () {
   return yield* router.start(handlers)
 }).pipe(
   Effect.provide(
-    Layer.mergeAll(SipLayer, AppConfigLayer).pipe(
+    Layer.mergeAll(SipLayer, AppConfigLayer, EpochCounterLayer).pipe(
       // Hoisted shared singletons consumed by SipLayer (DrainingState),
       // HttpLayer (both, for `/ready`) and the replication consumer
-      // fiber (WorkerReadiness, for ReadyGate.markReady). `provideMerge`
-      // both satisfies SipLayer's DrainingState requirement AND keeps
-      // the singletons exported so HttpLayer / runReplicationConsumer
-      // see the SAME instances. `Layer.mergeAll` would not satisfy
-      // intra-list deps.
+      // fiber (WorkerReadiness, for the ReadinessController.markReady
+      // flip). `provideMerge` both satisfies SipLayer's DrainingState
+      // requirement AND keeps the singletons exported so HttpLayer /
+      // runReplicationConsumer see the SAME instances.
       Layer.provideMerge(
         Layer.mergeAll(WorkerReadinessLayer, DrainingStateLayer)
       ),

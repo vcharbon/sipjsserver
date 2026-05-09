@@ -39,12 +39,19 @@ export interface ChannelIndexConfig {
 }
 
 export interface ChannelWriteArgs {
+  /**
+   * Per Story 7d: the bucket this entry goes into. PRS originating
+   * writes pass `config.gen` (the worker's incarnation gen); the
+   * puller's apply path passes `0` (mirror sentinel). Lex-ordering
+   * on `(entryGen, counter)` is the cycle-break.
+   */
+  readonly entryGen: number
   readonly partition: Partition
   readonly callRef: string
   /**
    * The body to store, encoded as a JSON string. Caller is responsible
-   * for embedding any per-call metadata (e.g. `gen` field) into the
-   * payload — `ChannelIndex` does not parse or rewrite the body.
+   * for embedding any per-call metadata (e.g. `callGen` field) into
+   * the payload — `ChannelIndex` does not parse or rewrite the body.
    */
   readonly bodyValue: string
   readonly bodyTtlSec: number
@@ -56,32 +63,53 @@ export interface ChannelWriteArgs {
 }
 
 export interface ChannelTombstoneArgs {
+  /** Same semantics as `ChannelWriteArgs.entryGen`. */
+  readonly entryGen: number
   readonly partition: Partition
   readonly callRef: string
+  /**
+   * Per-call content version stamped into the tombstone body. The
+   * receiver's apply path uses this in the `callGen` content gate
+   * (skip when `incoming.callGen ≤ local.callGen`). PRS computes it
+   * via read-modify-write: read the existing local body, parse its
+   * `_topology.gen` or `callGen`, increment by 1.
+   *
+   * Without this, a tombstone could be ignored by a receiver whose
+   * local copy is at a higher callGen, OR could be silently
+   * superseded by a stale earlier write that arrives out of order.
+   * See [docs/replication/architecture.md §"Why callGen is still
+   * needed"](../../docs/replication/architecture.md).
+   */
+  readonly callGen: number
   readonly indexesToRemove: ReadonlyArray<string>
 }
 
 export interface ChannelIndexApi {
-  /** Atomic write: body + indexes + counter+1 + ZADD U-member. */
+  /**
+   * Atomic write into the `(channel, entryGen)` bucket: body + indexes
+   * + bucket counter+1 + ZADD U-member into the bucket-scoped sorted
+   * set. Re-writing the same `member` within the same bucket replaces
+   * its score (sorted-set semantics).
+   */
   readonly write: (
     args: ChannelWriteArgs
   ) => Effect.Effect<{ readonly counter: number }, KvError>
 
-  /** Atomic tombstone: body→tombstone (~3min TTL) + DEL indexes + counter+1 + ZADD D-member. */
+  /**
+   * Atomic tombstone in the `(channel, entryGen)` bucket: body→tombstone
+   * (~3 min TTL) + DEL indexes + bucket counter+1 + ZADD D-member.
+   */
   readonly tombstone: (
     args: ChannelTombstoneArgs
   ) => Effect.Effect<{ readonly counter: number }, KvError>
 
-  /** Atomic pull-batch: ZRANGEBYSCORE + body MGET, one snapshot. */
+  /** Atomic pull-batch across all buckets, lex-ordered on `(entryGen, counter)`. */
   readonly pullBatch: (
-    sinceScore: number,
+    since: { readonly gen: number; readonly counter: number },
     limit: number
   ) => Effect.Effect<ChannelPullResult, KvError>
 
-  /** Read the channel's current counter (the head value the puller compares to). */
-  readonly currentCounter: Effect.Effect<number, KvError>
-
-  /** This worker's incarnation gen — exposed for the wire-frame layer. */
+  /** This worker's incarnation gen — used by callers as the originating `entryGen`. */
   readonly gen: number
 }
 
@@ -132,13 +160,12 @@ const make = (
       callRef
     )
 
-  const tombstoneValue = encodeTombstone(config.gen)
-
   const write: ChannelIndexApi["write"] = (args) => {
     const bodyKey = bodyKeyOf(args.partition, args.callRef)
     return kv.channelWriteUpdate({
       channel,
       counterKey,
+      entryGen: args.entryGen,
       member: KvBackend.memberOf("U", bodyKey),
       bodyKey,
       bodyValue: args.bodyValue,
@@ -152,23 +179,25 @@ const make = (
     return kv.channelWriteTombstone({
       channel,
       counterKey,
+      entryGen: args.entryGen,
       member: KvBackend.memberOf("D", bodyKey),
       bodyKey,
-      tombstoneValue,
+      tombstoneValue: encodeTombstone(args.callGen),
       tombstoneTtlSec: DEFAULT_TOMBSTONE_TTL_SEC,
       indexesToRemove: args.indexesToRemove,
     })
   }
 
-  const pullBatch: ChannelIndexApi["pullBatch"] = (sinceScore, limit) =>
-    kv.channelPullBatch({ channel, counterKey, sinceScore, limit })
+  const pullBatch: ChannelIndexApi["pullBatch"] = (since, limit) =>
+    kv.channelPullBatch({ channel, counterKey, since, limit })
 
-  const currentCounter = kv.counterRead(counterKey)
-
-  return { write, tombstone, pullBatch, currentCounter, gen: config.gen }
+  return { write, tombstone, pullBatch, gen: config.gen }
 }
 
 // Pure helper outside Effect.gen so the Effect plugin's preferSchemaOverJson
 // rule does not fire — the tombstone payload is opaque pass-through.
-const encodeTombstone = (gen: number): string =>
-  JSON.stringify({ tombstone: true, gen })
+// `callGen` is the per-call content version: PRS computes it via RMW on
+// the local existing body before propagating the delete. Receivers use
+// it for the per-call content gate (skip when incoming ≤ local).
+const encodeTombstone = (callGen: number): string =>
+  JSON.stringify({ tombstone: true, callGen })

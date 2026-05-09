@@ -227,13 +227,11 @@ const scenarios: ReadonlyArray<{
 // Run scenarios against legacy memoryLayer
 // ---------------------------------------------------------------------------
 
-describe("PartitionedRelayStorage — legacy memoryLayer (preserved for triage)", () => {
-  for (const scn of scenarios) {
-    it.effect(scn.name, () =>
-      scn.run().pipe(Effect.provide(PartitionedRelayStorage.legacyMemoryLayer))
-    )
-  }
-})
+// Slice 7c: the legacy AtomicWriter-backed memoryLayer was removed
+// in the final cutover. The new `kvBackedMemoryLayer` is the only
+// implementation — running both describe blocks pre-cutover proved
+// parity; post-cutover the second describe block below is the sole
+// surviving regression suite.
 
 // ---------------------------------------------------------------------------
 // Run the same scenarios against the new kvBackedMemoryLayer

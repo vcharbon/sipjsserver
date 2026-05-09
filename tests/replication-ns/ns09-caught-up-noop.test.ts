@@ -64,8 +64,8 @@ describe("NS9 — caught-up-noop signal", () => {
       )
       const stream = buildPullStream({
         channel,
-        gen: 1,
-        initialSince: 0,
+        serverGen: 1,
+        initialSince: { gen: 0, counter: 0 },
         chunkSize: 100,
         noopIntervalMs: 5,
       })
@@ -85,6 +85,7 @@ describe("NS9 — caught-up-noop signal", () => {
         kv
       )
       yield* channel.write({
+        entryGen: channel.gen,
         partition: "pri",
         callRef: "X",
         bodyValue: '{"gen":1,"state":"active"}',
@@ -93,8 +94,8 @@ describe("NS9 — caught-up-noop signal", () => {
       })
       const stream = buildPullStream({
         channel,
-        gen: 1,
-        initialSince: 0,
+        serverGen: 1,
+        initialSince: { gen: 0, counter: 0 },
         chunkSize: 100,
         noopIntervalMs: 5,
       })

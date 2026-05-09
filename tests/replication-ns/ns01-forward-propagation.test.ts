@@ -34,6 +34,7 @@ describe("NS1 — forward propagation", () => {
 
       // A writes X.
       yield* A.outgoing.write({
+        entryGen: A.outgoing.gen,
         partition: "pri",
         callRef: "X",
         bodyValue: '{"name":"X","gen":11}',
@@ -61,7 +62,7 @@ describe("NS1 — forward propagation", () => {
       })
 
       // Echo: B's outgoing channel-to-A holds the propagated entry.
-      const echoBatch = yield* B.outgoing.pullBatch(0, 100)
+      const echoBatch = yield* B.outgoing.pullBatch({ gen: 0, counter: 0 }, 100)
       expect(echoBatch.entries.length).toBe(1)
       expect(echoBatch.entries[0]!.member).toBe("U:bak:worker-A:call:X")
 

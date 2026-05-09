@@ -323,6 +323,42 @@ const stampWrittenAtMs = (json: string, nowMs: number): string => {
   return json
 }
 
+/**
+ * Read the per-call content version from an existing body's JSON. Used
+ * by `deleteCall`'s RMW to stamp a strictly-greater `callGen` on the
+ * tombstone (per Story 7d's content-gate invariant).
+ *
+ * Looks for `_topology.gen` (set by `CallState.flushToRedis` for full
+ * Call bodies) first, then top-level `callGen` (set by a prior
+ * tombstone written via `deleteCall`). Returns `0` for missing /
+ * malformed bodies — the caller adds 1, so a fresh delete starts at
+ * `callGen=1`. Pure helper outside Effect.gen for the Effect plugin's
+ * `preferSchemaOverJson` rule (the body is opaque pass-through state).
+ */
+const parseCallGen = (raw: string | null): number => {
+  if (raw === null) return 0
+  try {
+    const decoded = JSON.parse(raw) as unknown
+    if (decoded === null || typeof decoded !== "object") return 0
+    const obj = decoded as Record<string, unknown>
+    let max = 0
+    const topology = obj["_topology"]
+    if (topology !== null && typeof topology === "object") {
+      const tgen = (topology as Record<string, unknown>)["gen"]
+      if (typeof tgen === "number" && Number.isFinite(tgen) && tgen > max) {
+        max = tgen
+      }
+    }
+    const top = obj["callGen"]
+    if (typeof top === "number" && Number.isFinite(top) && top > max) {
+      max = top
+    }
+    return max
+  } catch {
+    return 0
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
@@ -393,12 +429,18 @@ const makeKvBackedExplicit = (
         }
         return
       }
-      // Peer path: route through ChannelIndex(self → peer). The
+      // Peer path: route through ChannelIndex(self → peer) at the
+      // ORIGINATING bucket (entryGen = self.incarnationGen, exposed
+      // via the ChannelIndex binding's `gen` per Story 7d). The
       // channel's `write` does body + indexes + counter + ZADD
-      // atomically and bumps the outgoing channel.
+      // atomically and bumps the outgoing channel. The body's
+      // `_topology.gen` (set by CallState) carries the per-call
+      // content version; the puller's apply path uses it as the
+      // content gate.
       const channel = channels.forPeer(peer)
       yield* channel
         .write({
+          entryGen: channel.gen,
           partition: partitionOf(role),
           callRef,
           bodyValue: stampedJson,
@@ -448,6 +490,7 @@ const makeKvBackedExplicit = (
       const channel = channels.forPeer(peer)
       yield* channel
         .write({
+          entryGen: channel.gen,
           partition: partitionOf(role),
           callRef,
           bodyValue: existing,
@@ -482,11 +525,25 @@ const makeKvBackedExplicit = (
       // Peer delete: write a tombstone via the channel. The
       // tombstone body has its own short TTL; the peer's puller
       // observes the D-member and applies the local DEL.
+      //
+      // Per Story 7d, stamp the tombstone with a callGen STRICTLY
+      // GREATER than the local body's existing callGen via RMW:
+      // read the existing body, parse its `_topology.gen` (or
+      // top-level `callGen` for already-tombstoned local), increment.
+      // The receiver's content gate uses this to ensure the
+      // tombstone supersedes any older mirror that arrives later.
+      // Missing local body → start at callGen=1.
+      const localBodyKey = callBodyKey(role, owner, callRef)
+      const existingBody = yield* kv.bodyGet(localBodyKey)
+      const existingCallGen = parseCallGen(existingBody)
+      const tombstoneCallGen = existingCallGen + 1
       const channel = channels.forPeer(peer)
       yield* channel
         .tombstone({
+          entryGen: channel.gen,
           partition: partitionOf(role),
           callRef,
+          callGen: tombstoneCallGen,
           indexesToRemove: indexes.map(indexStorageKey),
         })
         .pipe(Effect.asVoid)
@@ -540,18 +597,24 @@ export const kvBackedMemoryLayer = (
   })
 
 /**
- * Build a fresh KV-backed PRS API + the underlying store. Mirrors
- * `PartitionedRelayStorage.makeMemoryApi` for `PeerFabric.simulated`
- * compatibility.
+ * Build a fresh KV-backed PRS API + the underlying store + the
+ * KvBackend instance. Mirrors `PartitionedRelayStorage.makeMemoryApi`
+ * for `PeerFabric.simulated` compatibility, plus exposes the
+ * `KvBackend` so test harnesses can construct cross-peer
+ * `ChannelIndex` bindings (used by the new puller path that reads
+ * from a peer's outgoing channel).
  */
 export const makeKvBackedMemoryApi = (
   config: KvBackedPrsConfig
 ): {
   readonly api: PartitionedRelayStorageApi
   readonly store: MemoryStore
+  readonly kv: KvBackendApi
 } => {
   const store = MutableHashMap.empty<string, MemoryStoreEntry>()
-  return { api: makeKvBackedMemoryUnsafe(store, config), store }
+  const kv = KvBackend.makeMemoryUnsafe(store)
+  const api = makeKvBacked(kv, store, config)
+  return { api, store, kv }
 }
 
 // ---------------------------------------------------------------------------

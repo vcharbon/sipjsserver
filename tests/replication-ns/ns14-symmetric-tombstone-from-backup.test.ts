@@ -44,6 +44,7 @@ describe("NS14 — symmetric tombstone from backup", () => {
 
         // Step 1: A writes X. B's puller catches up.
         yield* A.outgoing.write({
+          entryGen: A.outgoing.gen,
           partition: "pri",
           callRef: "X",
           bodyValue: '{"name":"X","gen":51}',
@@ -66,16 +67,19 @@ describe("NS14 — symmetric tombstone from backup", () => {
         // partition="bak" + self=B + peer=A resolves the body key to
         // bak:{A}:call:X (peer is the owner under the bak partition).
         yield* B.outgoing.tombstone({
+          entryGen: B.outgoing.gen,
+          callGen: 1,
           partition: "bak",
           callRef: "X",
           indexesToRemove: [],
         })
 
         // B's bak:{A}:call:X is now the tombstone marker (not the
-        // original "X" content). The marker shape is set by
-        // ChannelIndex's encodeTombstone(gen).
+        // original "X" content). Per Story 7d, the marker carries
+        // the per-call `callGen` (set by PRS via RMW; in this test
+        // we passed `callGen: 1` explicitly above).
         const bAfterTomb = yield* B.kv.bodyGet("bak:worker-A:call:X")
-        expect(bAfterTomb).toBe('{"tombstone":true,"gen":52}')
+        expect(bAfterTomb).toBe('{"tombstone":true,"callGen":1}')
 
         // Step 3: A's puller drains B's outgoing-to-A. The reverse
         // tombstone arrives and DELs A's pri:{A}:call:X (well — sets
@@ -92,9 +96,14 @@ describe("NS14 — symmetric tombstone from backup", () => {
         // A's pri:{A}:call:X is the tombstone marker (under the
         // reverse-direction apply rule).
         const aAfterTomb = yield* A.kv.bodyGet("pri:worker-A:call:X")
-        // The applied tombstone passes through ChannelIndex.tombstone
-        // with self=A, gen=A's gen, so the marker carries A's gen.
-        expect(aAfterTomb).toBe('{"tombstone":true,"gen":51}')
+        // Slice 7c: the puller writes the body verbatim from the
+        // wire (the body field on the data frame), preserving the
+        // original writer's gen. Here the source is B (gen=52), so
+        // A's local pri tombstone marker carries gen=52, NOT A's
+        // local gen. This is correct: the marker tracks the writer
+        // who originally tombstoned the call, which matters for
+        // gen-monotonicity assertions across cluster respawns.
+        expect(aAfterTomb).toBe('{"tombstone":true,"callGen":1}')
 
         yield* aPuller.stop
       })

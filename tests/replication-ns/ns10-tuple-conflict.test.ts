@@ -45,7 +45,8 @@ const dataFrame = (
   op: "update",
   partition: "pri",
   callRef,
-  body: { ver, gen },
+  body: { ver, _topology: { gen: counter } },
+  body_ttl_remaining_sec: 60,
   latency_ms: 0,
 })
 
@@ -141,9 +142,13 @@ describe("NS10 — tuple-conflict resolution", () => {
         ])
         const view = MutableRef.get(viewRef)
         expect(view.watermark).toEqual({ gen: 10, counter: 1 })
-        // Last-applied frame body is "new".
+        // Last-applied frame body is "new". Per Story 7d the
+        // dataFrame helper stamps `_topology.gen = counter` so the
+        // puller's content gate has a monotonic per-call version
+        // for the cross-direction race protection (separate from the
+        // wire-level (gen, counter) watermark).
         const last = applied[applied.length - 1]!
-        expect(last.body).toEqual({ ver: "new", gen: 10 })
+        expect(last.body).toEqual({ ver: "new", _topology: { gen: 1 } })
 
         yield* Fiber.interrupt(fiber)
       })

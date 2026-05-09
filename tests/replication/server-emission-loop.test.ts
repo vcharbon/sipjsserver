@@ -74,8 +74,8 @@ describe("buildPullStream — empty channel emits a noop and waits", () => {
       const { channel } = setup()
       const stream = buildPullStream({
         channel,
-        gen: GEN,
-        initialSince: 0,
+        serverGen: GEN,
+        initialSince: { gen: 0, counter: 0 },
         chunkSize: 100,
         noopIntervalMs: 5,
       })
@@ -92,7 +92,7 @@ describe("buildPullStream — pre-existing entries are emitted as Data frames", 
   it.live("a single pre-existing write is emitted, followed by a noop", () =>
     Effect.gen(function* () {
       const { channel } = setup()
-      yield* channel.write({
+      yield* channel.write({ entryGen: GEN,
         partition: "pri",
         callRef: "abc",
         bodyValue: '{"gen":42,"state":"active"}',
@@ -101,8 +101,8 @@ describe("buildPullStream — pre-existing entries are emitted as Data frames", 
       })
       const stream = buildPullStream({
         channel,
-        gen: GEN,
-        initialSince: 0,
+        serverGen: GEN,
+        initialSince: { gen: 0, counter: 0 },
         chunkSize: 100,
         noopIntervalMs: 5,
       })
@@ -125,7 +125,7 @@ describe("buildPullStream — pre-existing entries are emitted as Data frames", 
     Effect.gen(function* () {
       const { channel } = setup()
       for (const ref of ["a", "b", "c", "d", "e"]) {
-        yield* channel.write({
+        yield* channel.write({ entryGen: GEN,
           partition: "pri",
           callRef: ref,
           bodyValue: `{"gen":42,"ref":"${ref}"}`,
@@ -135,8 +135,8 @@ describe("buildPullStream — pre-existing entries are emitted as Data frames", 
       }
       const stream = buildPullStream({
         channel,
-        gen: GEN,
-        initialSince: 0,
+        serverGen: GEN,
+        initialSince: { gen: 0, counter: 0 },
         chunkSize: 100,
         noopIntervalMs: 5,
       })
@@ -159,7 +159,7 @@ describe("buildPullStream — chunk_size honored, noop emitted on partial batch"
     Effect.gen(function* () {
       const { channel } = setup()
       for (const ref of ["a", "b", "c", "d", "e"]) {
-        yield* channel.write({
+        yield* channel.write({ entryGen: GEN,
           partition: "pri",
           callRef: ref,
           bodyValue: "{}",
@@ -169,8 +169,8 @@ describe("buildPullStream — chunk_size honored, noop emitted on partial batch"
       }
       const stream = buildPullStream({
         channel,
-        gen: GEN,
-        initialSince: 0,
+        serverGen: GEN,
+        initialSince: { gen: 0, counter: 0 },
         chunkSize: 2,
         noopIntervalMs: 5,
       })
@@ -191,7 +191,7 @@ describe("buildPullStream — sinceCounter respected", () => {
     Effect.gen(function* () {
       const { channel } = setup()
       for (const ref of ["a", "b", "c"]) {
-        yield* channel.write({
+        yield* channel.write({ entryGen: GEN,
           partition: "pri",
           callRef: ref,
           bodyValue: "{}",
@@ -201,8 +201,8 @@ describe("buildPullStream — sinceCounter respected", () => {
       }
       const stream = buildPullStream({
         channel,
-        gen: GEN,
-        initialSince: 1, // skip a (score=1)
+        serverGen: GEN,
+        initialSince: { gen: GEN, counter: 1 }, // skip a (score=1)
         chunkSize: 100,
         noopIntervalMs: 5,
       })
@@ -221,7 +221,7 @@ describe("buildPullStream — tombstones surface as delete frames", () => {
   it.live("a tombstone produces a Data frame with op=delete", () =>
     Effect.gen(function* () {
       const { channel } = setup()
-      yield* channel.write({
+      yield* channel.write({ entryGen: GEN,
         partition: "pri",
         callRef: "x",
         bodyValue: '{"gen":42}',
@@ -229,14 +229,16 @@ describe("buildPullStream — tombstones surface as delete frames", () => {
         indexes: [],
       })
       yield* channel.tombstone({
+        entryGen: GEN,
         partition: "pri",
         callRef: "x",
+        callGen: 1,
         indexesToRemove: [],
       })
       const stream = buildPullStream({
         channel,
-        gen: GEN,
-        initialSince: 0,
+        serverGen: GEN,
+        initialSince: { gen: 0, counter: 0 },
         chunkSize: 100,
         noopIntervalMs: 5,
       })
@@ -257,15 +259,17 @@ describe("buildPullStream — tombstones surface as delete frames", () => {
       // real-clock streaming).
       const { kv, channel } = setup()
       yield* channel.tombstone({
+        entryGen: GEN,
         partition: "pri",
         callRef: "x",
+        callGen: 1,
         indexesToRemove: [],
       })
       yield* kv.bodyDel("pri:worker-A:call:x")
       const stream = buildPullStream({
         channel,
-        gen: GEN,
-        initialSince: 0,
+        serverGen: GEN,
+        initialSince: { gen: 0, counter: 0 },
         chunkSize: 100,
         noopIntervalMs: 5,
       })

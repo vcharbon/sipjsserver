@@ -60,6 +60,13 @@ import {
   type PullFrame,
 } from "./ReplicationProtocol.js"
 
+// Re-export DataFrame so callers wiring `applyFrame` only need to
+// import from PullerFiber. (Slice 7c regression: tests previously
+// imported `DataFrame` from this module via type-side-effect
+// re-export; making it explicit keeps imports stable across the
+// cutover.)
+export type { DataFrame } from "./ReplicationProtocol.js"
+
 // ---------------------------------------------------------------------------
 // PeerView — per-peer record the supervisor maintains. See §D5.3.
 // ---------------------------------------------------------------------------

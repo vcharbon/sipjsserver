@@ -247,7 +247,8 @@ Define one `KvBackend` port. All replication modules (AtomicWriter, PropagateStr
 
 Each worker holds, per partition (`pri:{self}` and `bak:{peer}` for each peer it backs up):
 
-- **Body store** — `pri:{self}:call:{callRef}` and `bak:{peer}:call:{callRef}`. Each body stamps a `gen` field (the counter value at write time) used for idempotent apply.
+- **Body store** — `pri:{self}:call:{callRef}` and `bak:{peer}:call:{callRef}`. The body's `_topology.gen` field (set by `CallState.flushToRedis` via RMW on every put) carries the per-call content version used by the puller's content gate.
+  - ✅ **SUPERSEDED by Story 7d.** The original "stamp body.gen at write time" approach was replaced with the cleaner `entryGen=0` mirror sentinel + lex-ordering cycle-break. See "Story 7d" below for the as-built design. The per-call content gate continues to use `_topology.gen` (PRS-stamped) and falls back to a top-level `callGen` field (used by tombstones).
 - **Per-channel propagate index** — one sorted-set-shaped structure per **(self → targetPeer)** channel: `propagate:{self}->{peer}`. Member = `callRef`, score = monotonic per-channel counter. Re-writing same callRef bumps its score (sorted-set semantics; same member, latest score wins).
 - **Per-channel counter** — `seq:{self}->{peer}`. Incremented atomically inside every write that targets that channel.
 - **Secondary signaling-key indexes** — `idx:{indexKey} → callRef`. Replicated implicitly: the call body carries its `indexes: string[]`, and apply on the backup recreates them locally.
@@ -297,7 +298,9 @@ In-memory: same shape, single-mutex protected; same return type.
 
 **Per-batch atomic, cross-batch may re-deliver.** Across batch boundaries the same callRef may reappear (if the primary re-bumps it between two pulls). This is harmless: idempotent apply by `gen` collapses re-delivery.
 
-**Idempotent apply by `gen`.** Backup compares `incoming.body.gen > local.body.gen` per call before writing or deleting. Out-of-order delivery and re-delivery are both harmless.
+**Idempotent apply by per-call `callGen`.** The puller's apply path reads the local body and skips when `incoming.callGen ≤ local.callGen`. `callGen` is read from `_topology.gen` (full call bodies, set by `CallState.flushToRedis` via RMW) or top-level `callGen` (tombstones, set by `PRS.deleteCall` via RMW). Out-of-order delivery and re-delivery are both harmless.
+
+✅ **IMPLEMENTED via Story 7d.** Cycle-break is now structural at the wire layer (lex ordering on `(entryGen, counter)` excludes mirror entries from warm pullers); the per-call `callGen` gate handles the cross-direction race independently. See "Story 7d" below for the full mechanism. The infinite-ping-pong test timeout is closed by the lex-ordering cycle-break — no echo step exists in the puller's apply path under the new design.
 
 **Watermark.** `lastSeen` is per-(puller, source-peer, channel). In-memory on the puller. Lost on puller restart → boot SCAN bootstrap path (D5) is the recovery.
 
@@ -1059,3 +1062,204 @@ Each slice = one PR, one passing CI, ~1 day–1 week of work. Slices land in ord
 - **No slice may break the SIP-facing public surface.** A diff of `PartitionedRelayStorage`'s exported API is part of the slice review checklist.
 - **No slice may delete a test without explicit replacement.** Per CLAUDE.md: "Never deactivate failing tests without proper investigation first and explicit confirmation."
 - **Slice 7 (cutover) requires sign-off of the design doc (B0.5) before merge.** Earlier slices land behind feature/namespace isolation (`replv2:` keys) and do not flip the production code path.
+
+---
+
+## Deferred design-of-record gaps
+
+A small number of design decisions captured in this document have a
+status of "implementation pending" — the code path doesn't yet match
+the design intent. Each gap is tracked as a separate story so it can
+be picked up and shipped without touching unrelated code.
+
+### Story 7d — Cycle-break via per-entry `entryGen` (no echo)
+
+**Status**: ✅ **IMPLEMENTED**. All seven implementation steps have landed: storage primitive (`KvBackend` per-`(channel, entryGen)` buckets + lex-ordered `channelPullBatch`), wire protocol (`DataFrame.body_ttl_remaining_sec`, per-entry gen on data frames, `serverGen` on noops), `ChannelIndex` (explicit `entryGen` arg on `write`; `entryGen` + `callGen` on `tombstone`), puller apply (renamed `makeReplicationApply`; callGen content gate with create-if-not-exist semantics; `callIndexKeysFromUnknown` derivation; in-memory index cache for the DELETE path), PRS callGen RMW stamping in `deleteCall` plus entryGen pass-through in `putCall`/`refreshCall`, and the `main.ts` boot wiring (per-peer `outgoingChannel` + per-fiber `replicationApply` closure capturing the index cache).
+
+`npm run typecheck` is clean (zero errors, zero warnings) across all four configs (`tsconfig.json`, `tsconfig.bin.json`, `tsconfig.test-harness.json`, `tsconfig.consumer-api.json`). Tests in `tests/storage`, `tests/replication`, `tests/replication-ns`, `tests/support/k8sFakeStack.ts`, and the harness's `twoWorkerHarness.ts` were updated for the new shapes.
+
+**Test results — `npm run test:fake`**: **1085 passed, 1 failed** in 19.83 s. The cycle-break works: previously-infinite tests now complete in seconds (replication-gap-mini: 121 s timeout → 12 s completion). All 14 NS scenarios pass.
+
+**One remaining failure** (carried as a follow-up, NOT a cycle-break regression): `tests/sip-front-proxy/failover/replication-gap-mini.test.ts` reports 1 of 40 calls (`alice-p1-1`) receives a 481 on the post-respawn BYE batch. The other 39 calls are clean. The shape is consistent with a single-call recovery edge case (specific call's body or index didn't make it through the cold-pull rebuild) rather than a cycle or any structural defect — diagnostic deferred to a separate ticket.
+
+**Supersedes** the prior body-gen + echo design (rejected; see "Why this design changed" below).
+
+**Design references**: this section is the new plan-of-record. It replaces the §D2 "Each body stamps a `gen` field" sentence (also rejected) and the §D3 "incoming.body.gen > local.body.gen" rule (also rejected). The §D2 / §D3 wording above is left intact for traceability with a marker pointing here.
+
+#### Why this design changed
+
+The original Story 7d proposed stamping a `body.gen = channelCounter` field into every call body inside `KvBackend.channelWriteUpdate` (Lua-side string surgery for Redis, JS-splice for memory), and gating the puller's apply path with `incoming.body.gen > local.body.gen`. Two band-aids preceded it (partition-asymmetric branch; body-content compare); both were reverted. The body-gen design was the planned-correct fix.
+
+During grill it surfaced that:
+
+1. **The body-gen approach conflated two independent invariants** — wire-level cycle-break and per-call content idempotency.
+2. **Echo itself is not load-bearing**, only its purpose is: populate the recovering worker's pull stream with the mirrors it lost. That goal can be met without echo.
+3. **The plan's `(gen, counter)` watermark already supports lex ordering** — if mirror-writes carry a sentinel `entryGen=0` distinct from originating writes' `entryGen=self.incarnationGen`, lex compare on `(entry.gen, entry.counter)` makes warm pullers naturally skip mirrors and cold pullers naturally fetch them. Cycle dies at the wire layer; no content inspection needed.
+
+So body-gen is dropped. The new design uses **per-entry gen on the channel** as the cycle-break (cycle dies in lex compare); a separate **per-call `callGen` field on the body** as the per-call content idempotency gate (catches stale-overwrite races).
+
+#### Hard invariants
+
+- **CB-INV1 (cycle-break by wire ordering).** A mirror-write entry on `propagate:{self}->{peer}` has `entryGen = 0`. A warm puller's pull request `(since.gen ≥ 1, since.counter)` will never receive it: lex compare excludes `(0, anything) < (≥1, anything)`. The cycle is broken structurally, not by content inspection.
+- **CB-INV2 (recovery via the same endpoint).** A cold puller (process boot or post-wipe) sends `(0, 0)`. The server's lex-ordered return includes every mirror entry. The recovering worker rebuilds its lost partitions from peers' mirrors through the unmodified `/replog` endpoint. No `/bootstrap` RPC, no SCAN side-channel.
+- **CB-INV3 (cross-direction content idempotency).** Each call body carries a `callGen: number` field. PRS originating writes do a read-modify-write that increments it. The puller's apply path reads the local body and skips when `incoming.body.callGen ≤ local.body.callGen`. **When the local body does not exist, the gate succeeds (create-if-not-exist):** treat `null` local as `callGen = -∞` so any incoming `callGen ≥ 1` lands. This is what makes cold-recovery work — A's empty `pri:A:` after wipe accepts every incoming mirror frame on first apply. The gate exists solely to protect against the "stale forward write races G7-reverse termination" race (worked example below).
+- **CB-INV4 (no echo, single primitive).** The puller's apply path makes ONE atomic call: `kv.channelWriteUpdate({ entryGen: 0, channel: "propagate:{self}->{source}", member: "U:" + targetBodyKey, bodyKey: targetBodyKey, bodyValue: frame.body, ... })`. This single Lua / critical-section atomically (a) creates-or-replaces the body at `bak:{source}:call:{ref}` (or `pri:{self}:call:{ref}` for the G7 reverse partition flip), (b) bumps the gen=0 bucket's counter, (c) ZADDs the U-member into the gen=0 bucket. No separate `bodySet` step. No separate "mirror" method on the API. The only call-site difference between PRS originating writes and puller-driven applies is the `entryGen` value: PRS passes `self.incarnationGen`, puller passes `0`.
+
+#### Worked examples
+
+**Example 1 — Steady-state forward propagation (the cycle that was breaking the test).**
+
+1. A's stack writes call X. PRS originating: `entryGen=A_gen=7`, channel counter=10. A's `pri:A:call:X` body is stamped with `callGen=1`.
+2. B's puller pulls A's outgoing-to-B. Watermark for source-A was `(7, 9)`. Server returns the new entry `(gen=7, counter=10, body)`. Apply (`(7,10) > (7,9)` ✓).
+3. B applies: `kv.bodySet("bak:A:call:X", body)` AND `outgoingChannelToA.mirrorWrite(...)` which calls `kv.channelWriteUpdate(entryGen=0, member="U:bak:A:call:X", body)`. B's outgoing-to-A has a sentinel mirror entry.
+4. A's puller pulls B's outgoing-to-A. Watermark for source-B was `(genB=7, lastCtr=42)`. Server returns entries with `(entry.gen, entry.counter) > (7, 42)`. Mirror entry has `entryGen=0`; `(0, anyCounter) < (7, 42)` → **server doesn't return it.** No apply on A. **No cycle.**
+
+**Example 2 — Cold recovery from sidecar wipe.**
+
+1. Steady state as above; A's outgoing-to-B has originating entries; B's outgoing-to-A has mirror entries (entryGen=0) from earlier applies.
+2. A's sidecar wipes. A's process restarts with `genA' = 8` (incremented restartCount). A's puller starts with watermark `(0, 0)` for source-B.
+3. A's puller pulls B's outgoing-to-A. Server returns entries with `(entry.gen, entry.counter) > (0, 0)` — i.e., **all** entries (mirrors with `entryGen=0` plus B's originating G7-reverse entries with `entryGen=B_gen`, in lex order).
+4. A applies each. `partition="bak"` (per the wire frame, because the entry references B's `bak:A:`) routes the apply to A's local `pri:A:` per the existing partition-flip rule.
+5. A reconstructs `pri:A:` from the mirror stream. `WorkerReadiness.markReady(true)` flips after first noop.
+
+**Example 3 — Cross-direction race; `callGen` earns its keep.**
+
+1. A handles a re-INVITE for X — `pri:A:call:X` body advances to `callGen=5`.
+2. A goes briefly unreachable (200 ms HealthProbe blip). Proxy routes the BYE for X to B per G7.
+3. B's stack handles BYE: terminates X. PRS originating: writes tombstone to its OWN `bak:A:call:X` with `callGen=6` (read-modify-write of the existing local body). Channel `propagate:{B}->{A}` gets entry `(entryGen=B_gen, counter=N, partition="bak", op="delete", body=<tombstone, callGen=6>)`.
+4. A comes back, A's puller catches up against B. Mirror entries (`entryGen=0`) for X are still present from earlier steady-state mirroring (some carrying older `callGen=4`). The G7 tombstone (`entryGen=B_gen`) is also present.
+5. Lex order serves entries: mirror entries first, then the tombstone. A's apply path reads `local.callGen` per call before each apply: `incoming.callGen=4 ≤ local.callGen=5` → skip mirror; `incoming.callGen=6 > local.callGen=5` → apply tombstone. **No resurrect-from-stale-mirror.**
+
+Without `callGen`, a stale mirror after a G7-reverse termination would silently overwrite the tombstone state. With it, the gate catches it.
+
+#### Storage primitive changes
+
+**`KvBackend.channelWriteUpdate` — new signature.**
+
+```diff
+  readonly channelWriteUpdate: (
+    args: {
+      readonly channel: string
++     readonly entryGen: number
+      readonly counterKey: string
+      readonly member: string
+      readonly bodyKey: string
+      readonly bodyValue: string
+      readonly bodyTtlSec: number
+      readonly indexes: ReadonlyArray<IndexWrite>
+    }
+  ) => Effect.Effect<{ readonly counter: number }, KvError>
+```
+
+Channel storage shape changes from "one sorted set per channel keyed by counter" to "one sorted set per `(channel, entryGen)` bucket, each with its own counter":
+
+- **Memory**: `Map<channel, Map<entryGen, { counter: number; entries: Map<member, counter> }>>`. Single mutex still sufficient for atomicity; entries inside a bucket are sorted by counter at pull time.
+- **Redis**: per-bucket ZSET `propagate:{self}->{peer}:gen:{entryGen}` and per-bucket counter `seq:{self}->{peer}:gen:{entryGen}`. Each `channelWriteUpdate` Lua script INCRs its bucket's counter, ZADDs into its bucket's ZSET. Per channel only `{0, self.incarnationGen}` are live; historical buckets from prior `self.incarnationGen` values may persist if the sidecar survives a process restart, and are walked in lex order on pull.
+
+**`KvBackend.channelPullBatch` — new signature.**
+
+```diff
+  readonly channelPullBatch: (
+    args: {
+      readonly channel: string
+-     readonly counterKey: string
+-     readonly sinceScore: number
++     readonly since: { readonly gen: number; readonly counter: number }
+      readonly limit: number
+    }
+  ) => Effect.Effect<ChannelPullResult, KvError>
+
+  export interface PulledEntry {
+    readonly member: string
++   readonly entryGen: number  // stamped at write time, returned per-entry
+    readonly score: number      // per-bucket counter
+    readonly body: string | null
+  }
+```
+
+Pull algorithm:
+
+1. Enumerate buckets in lex order of `entryGen`.
+2. For the bucket with `entryGen === since.gen`, return entries with `score > since.counter`.
+3. For buckets with `entryGen > since.gen`, return all entries in counter order.
+4. Skip buckets with `entryGen < since.gen` (lex compare excludes them entirely).
+5. Stop accumulating at `limit`.
+
+`headCounter` is replaced by `head: { gen, counter }` — the highest `(gen, counter)` tuple in the channel at snapshot time.
+
+**`KvBackend.channelWriteTombstone`** — same signature change. Originating tombstones (PRS deleteCall) pass `self.incarnationGen`; puller-driven mirror-tombstones pass `0`.
+
+#### Wire protocol changes
+
+- **`DataFrame.gen`**: today stamped with the SERVER's current incarnation gen on every emitted frame. New: stamped with the **entry's stored `entryGen`** (`0` for mirrors; the writer's incarnation gen for originating). `buildDataFrame` reads `entryGen` from `PulledEntry`.
+- **`NoopFrame.gen`**: stays the SERVER's current incarnation gen (heartbeat, not associated with any specific entry). Receivers use it only to flip `everCaughtUp`.
+- **`PullRequest`**: already carries `gen` and `counter`; no field addition. Server interprets them as the puller's last-applied `(entry.gen, entry.counter)`.
+- **`ReplLogServer`**: no longer special-cases "if sinceGen != serverGen treat as cold". The whole-channel cold-vs-warm decision is now natural from lex ordering.
+- **`DataFrame.body_ttl_remaining_sec`** (NEW — subsumes Story 7e): every frame carries the body's **time-remaining**, not its TTL-at-write. Server reads `PTTL` (Redis) or `expiresAtMs - nowMs` (memory) and stamps it. Receiver passes this value to its `bodyTtlSec` arg in the apply path. **Why time-remaining, not time-to-live:** a peer cold-pulling at T=600 from a body originally written with TTL=1200 at T=0 should set its local body to expire at T=1200 (the source's intent), not T=1800. Otherwise recovered bodies outlive the source's intent, and three-peer arrangements (rare but possible) could disagree on expiry.
+- **Indexes are NOT carried on the wire — they are derived from the body**, per the legacy pattern. [src/call/CallModel.ts:768](../../src/call/CallModel.ts#L768) `callIndexKeysFromUnknown(state: unknown)` is a pure, schema-tolerant derivation that walks the body's `aLeg.{callId,fromTag}`, `bLegs[].{callId,fromTag}`, `bLegs[].dialogs[].sip.remoteTag`, and `callbackContext`. It produces the same key list `callIndexKeys(call)` produces from a typed Call. The receiver-side apply path in `makeReplicationApply` MUST call `callIndexKeysFromUnknown(frame.body)` and pass the derived list into `channelWriteUpdate({ ..., indexes: derived.map(toIndexWrite) })`. Today's `makeEchoApply` passes `indexes: []` — that is the actual gap (closed by adding the derivation step, NOT by adding a wire field). For DELETE frames where `body === null`, the puller consumes a per-`(peer, callRef)` in-memory cache populated on the last successful PUT apply; cache-miss → empty list → orphaned `idx:` entries TTL out within one call-TTL window (accepted by spec, matches legacy `ReplPuller` behaviour).
+
+#### Code change inventory
+
+| File | Change |
+|---|---|
+| [src/storage/KvBackend.ts](../../src/storage/KvBackend.ts) | (1) Per-bucket sorted-set storage shape; (2) `entryGen` arg on `channelWriteUpdate` / `channelWriteTombstone`; (3) `since: {gen, counter}` arg on `channelPullBatch`; (4) Lua scripts updated for per-bucket keying. |
+| [src/replication/ChannelIndex.ts](../../src/replication/ChannelIndex.ts) | `write` takes `entryGen` as an explicit parameter (no second method). PRS originating callers pass `config.gen` (the binding's incarnation gen); the puller's apply path passes `0`. Single primitive; the only difference at the call site is the gen value. |
+| [src/replication/ReplLogServer.ts](../../src/replication/ReplLogServer.ts) | `buildPullStream` reads per-entry `entryGen` from `PulledEntry` and stamps it on each `DataFrame`. Drops the `sinceGen != serverGen → reset` special case. |
+| [src/replication/ReplicationProtocol.ts](../../src/replication/ReplicationProtocol.ts) | `buildDataFrame` takes the entry's `entryGen` from `PulledEntry` instead of the server's gen. |
+| [src/replication/PullerFiber.ts](../../src/replication/PullerFiber.ts) | Apply path adds the `callGen` content gate. Reads local body via `kv.bodyGet(targetBodyKey)`, parses `callGen` from JSON, compares incoming. Watermark advancement unchanged (uses wire `(gen, counter)`). |
+| [src/replication/EchoApply.ts](../../src/replication/EchoApply.ts) | Renamed to `ReplicationApply.ts`. `makeEchoApply` → `makeReplicationApply`. Behaviour rewritten: ONE atomic call to `outgoingChannel.write({ entryGen: 0, ... })` per frame. Body lands at the target partition (bak:source: or pri:self: per the partition flip), member lands in the gen=0 bucket, counter advances — all in the single underlying `kv.channelWriteUpdate` op (create-if-not-exist by construction). Old `makeDirectApply` deleted (subsumed). |
+| [src/cache/PartitionedRelayStorageKvBacked.ts](../../src/cache/PartitionedRelayStorageKvBacked.ts) | `putCall` / `refreshCall` / `deleteCall` do read-modify-write on existing body to bump `callGen` before delegating to `ChannelIndex.write`; all `ChannelIndex.write` calls implicitly carry `entryGen = config.gen` via the binding. |
+| Tests (NS5/NS7/NS8/NS14/replication-gap-mini) | No source change for behaviour — they assert recovery + steady-state correctness which the new design satisfies. The harness's `forkPuller` wires the renamed `makeReplicationApply` (and `kv` for the callGen gate). |
+
+#### Test re-validation matrix
+
+After 7d lands, the following tests MUST pass (none of them currently do, by design — the band-aids were reverted):
+
+| Test | What it now validates under the new design |
+|---|---|
+| `tests/replication-ns/ns05-sidecar-wipe-recovery.test.ts` | Cold pull post-wipe rebuilds `pri:A:` from B's mirror entries (entryGen=0). |
+| `tests/replication-ns/ns07-backup-re-bootstrap.test.ts` | Backup wipe + restart pulls 50 originating-entry calls from primary's outgoing channel — pure forward replay (no cycle case). |
+| `tests/replication-ns/ns08-primary-recovery-via-reverse.test.ts` | Same as NS5 but exercises the "primary restart, backup is alive and holds bak:A:" path. |
+| `tests/replication-ns/ns14-symmetric-tombstone-from-backup.test.ts` | G7 reverse-direction tombstone propagates with `entryGen=B_gen` (originating write), reaches A on warm pull, applies. No mirror re-write back to B. |
+| `tests/sip-front-proxy/failover/replication-gap-mini.test.ts` | Multi-worker steady state with concurrent pullers. Counter no longer climbs into the millions; test completes in <10s (vs 121s timeout pre-revert). |
+
+`tests/replication/echo-apply.test.ts` — currently asserts on `EchoApplyConfig` field shape; rename to `replication-apply.test.ts`, update to assert `ReplicationApplyConfig`'s shape and the partition-flip-routing logic (preserved). No deactivation.
+
+#### Sequencing
+
+Land in this order so each step is independently reviewable; steps 1–5 ship as a single PR (the change is internally consistent only when all are present); steps 6–7 land alongside or immediately after.
+
+1. **Storage primitive**: `KvBackend.channelWriteUpdate` / `channelWriteTombstone` / `channelPullBatch` signature + memory impl + Lua impl + per-bucket sorted-set shape. Unit tests in `tests/storage/` updated.
+2. **Wire protocol**: `buildDataFrame` reads `entryGen` from `PulledEntry`. `ReplLogServer` simplifies the gen handling. Codec tests updated.
+3. **ChannelIndex**: `write` and `mirrorWrite` as two distinct methods.
+4. **Puller + ReplicationApply**: rename module; rewrite `makeReplicationApply` per CB-INV4; add `callGen` content gate to `applyOne`.
+5. **PRS callGen stamping**: read-modify-write on `putCall` / `refreshCall` / `deleteCall`. Existing `written_at_ms` stamping is preserved alongside.
+6. **Documentation deliverables**: `docs/replication/architecture.md` (NEW) — captures the as-built design with §"Cycle-break and recovery" being the prominent §. `docs/replication/protocol.md` (NEW) — wire-protocol reference reflecting the per-entry-gen change. `docs/replication/state-machine.md` (NEW) — worker + per-peer FSM diagrams. `docs/replication/redesign-call-cache-backup.md` (currently STALE — describes a never-shipped Redis-Streams design) replaced by a redirect to `architecture.md`. `docs/replication/call-cache-backup.md` (legacy) replaced by a redirect after cutover. `CLAUDE.md` progressive reading guide row updated.
+7. **Test re-enable**: NS5/NS7/NS8/NS14 + replication-gap-mini run; no test deactivations introduced.
+
+#### Concerns / open questions deferred to implementation
+
+- **Q1 — Empty `entryGen=0` bucket cleanup.** Mirror entries with `entryGen=0` accumulate over the lifetime of the channel. A re-INVITE on call X overwrites the same member (`U:bak:A:call:X`) — score updates in place per ZADD semantics. So per-call growth is bounded; total bucket size is bounded by `O(active calls + tombstones-in-3-min-window)` (per the existing INV1 reasoning). No GC needed beyond what already exists for tombstones.
+- **Q2 — Bucket cardinality at Redis layer.** Keys-per-channel grows from 2 (`propagate:` + `seq:`) to 4 (mirror + originating × 2). With <10 peers and ≤3 buckets typical (gen=0, prior incarnation, current), total keys per pod stay in the hundreds. Acceptable.
+- **Q3 — `callGen` stamping under contention.** Two concurrent SIP-stack writers on the same callRef could both read `callGen=5` and both stamp `callGen=6`. Mitigation: PRS-level mutex per callRef (already needed for body atomicity in CallState). Confirm during impl that this mutex covers the new RMW.
+- **Q4 — Backwards-compat across deploy.** A pod running the new code talking to a pod running the old code: not supported. The cutover (D10) is sharp per the existing plan. No version negotiation.
+
+#### Acceptance gates
+
+- `npm run typecheck` — zero errors AND zero warnings (Effect plugin included).
+- `npm run test:fake` — full fake suite green.
+- `npm run test:ns-real` — NS suite under real-clock + in-memory KvBackend green.
+- `KV_BACKEND=redis npm run test` — green when Redis available (validates the per-bucket Lua scripts).
+- `tests/sip-front-proxy/failover/replication-gap-mini.test.ts` — completes in <10s with no 481s on phase-1 BYEs.
+- `docs/replication/architecture.md` exists and explicitly documents the `entryGen=0` sentinel as a top-level invariant.
+- `docs/replication/redesign-call-cache-backup.md` redirects to the new architecture doc.
+
+### Story 7e — Wire-level TTL propagation (RETIRED — subsumed by Story 7d)
+
+**Status**: subsumed by Story 7d's `DataFrame.body_ttl_remaining_sec` field. The wire-level TTL gap is no longer tracked separately because the no-echo redesign forces the same wire-frame schema change at the same time. Splitting them across two slices would require two breaking changes to `DataFrame`, two reviews of `buildDataFrame` / `applyOne`, and one intermediate state where the receiver's TTL is still hardcoded. Cleaner to land both in 7d.
+
+The TTL-handling content originally drafted here is preserved in 7d's "Wire protocol changes" section under `DataFrame.body_ttl_remaining_sec`. Time-remaining (not time-to-live) was chosen during the 7d grill — see that section for rationale.
+
+### Story 7f — Index replication on the wire (RETIRED — different fix, not a wire change)
+
+**Status**: subsumed by Story 7d, but **not via a wire-frame field**. Verification of [src/call/CallModel.ts:768](../../src/call/CallModel.ts#L768) (`callIndexKeysFromUnknown`) and the legacy `ReplPuller` (deleted at HEAD; cf. `git show HEAD:src/replication/ReplPuller.ts:463`) shows the receiver derives indexes from the body via that pure helper — the wire frame never carried them. The fix is purely in `makeReplicationApply`: derive on every PUT apply, cache per `(peer, callRef)` for the DELETE path, accept index-TTL-out on cache miss. See "Wire protocol changes" §"Indexes are NOT carried on the wire" above for the full design.

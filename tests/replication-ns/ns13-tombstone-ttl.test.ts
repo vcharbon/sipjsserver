@@ -39,6 +39,7 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
       )
 
       yield* chan.write({
+        entryGen: chan.gen,
         partition: "pri",
         callRef: "X",
         bodyValue: '{"gen":1}',
@@ -46,6 +47,8 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
         indexes: [],
       })
       yield* chan.tombstone({
+        entryGen: chan.gen,
+        callGen: 1,
         partition: "pri",
         callRef: "X",
         indexesToRemove: [],
@@ -53,7 +56,7 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
 
       // Sanity: tombstone is the current body before TTL.
       expect(yield* kv.bodyGet("pri:worker-A:call:X")).toBe(
-        '{"tombstone":true,"gen":1}'
+        '{"tombstone":true,"callGen":1}'
       )
 
       // Advance just past the tombstone TTL (180 s default).
@@ -64,7 +67,7 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
 
       // D-member is still in the channel — caller (the puller) sees
       // null body and applies an implicit DEL.
-      const pulled = yield* chan.pullBatch(0, 10)
+      const pulled = yield* chan.pullBatch({ gen: 0, counter: 0 }, 10)
       const dEntries = pulled.entries.filter((e) => e.member.startsWith("D:"))
       expect(dEntries.length).toBe(1)
       expect(dEntries[0]?.body).toBeNull()
@@ -82,6 +85,7 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
 
       for (const ref of ["a", "b", "c"]) {
         yield* chan.write({
+          entryGen: chan.gen,
           partition: "pri",
           callRef: ref,
           bodyValue: `{"gen":1,"ref":"${ref}"}`,
@@ -89,6 +93,8 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
           indexes: [],
         })
         yield* chan.tombstone({
+          entryGen: chan.gen,
+          callGen: 1,
           partition: "pri",
           callRef: ref,
           indexesToRemove: [],
@@ -104,7 +110,7 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
 
       // Channel still carries the U+D pairs (six members total) but
       // every body resolves to null.
-      const pulled = yield* chan.pullBatch(0, 100)
+      const pulled = yield* chan.pullBatch({ gen: 0, counter: 0 }, 100)
       expect(pulled.entries.length).toBe(6)
       expect(pulled.entries.every((e) => e.body === null)).toBe(true)
     })

@@ -34,29 +34,26 @@
  */
 
 import {
-  Clock,
   Data,
   Effect,
   Layer,
   MutableHashMap,
-  Option,
   ServiceMap,
   Stream,
 } from "effect"
-import { RedisClient, RedisError } from "../redis/RedisClient.js"
-import {
-  AtomicWriter,
-  type AtomicWriterError,
-  type PropagateDirection,
-} from "../replication/AtomicWriter.js"
-// Lazy import — only consumed inside Layer.sync bodies so the
-// module cycle (PartitionedRelayStorageKvBacked imports types and
-// the class statics from this file) is resolved before either
+import type { PropagateDirection } from "./PartitionRef.js"
+// Lazy import — only consumed inside Layer.suspend / function bodies
+// so the module cycle (PartitionedRelayStorageKvBacked imports types
+// and the class statics from this file) is resolved before either
 // initializer fires.
 import {
   kvBackedMemoryLayer,
+  kvBackedRedisLayer,
   makeKvBackedMemoryApi,
 } from "./PartitionedRelayStorageKvBacked.js"
+import type { AppConfig } from "../config/AppConfig.js"
+import type { RedisClient } from "../redis/RedisClient.js"
+import type { KvBackendApi } from "../storage/KvBackend.js"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -219,153 +216,20 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
   // --------------------------------------------------------------------------
 
   /**
-   * Production: backed by RedisClient. Issues `SETEX` / `EXPIRE` /
-   * `DEL` directly. SCAN is cursor-walked one batch at a time, with a
-   * `Stream.async` pull boundary that yields the runtime in between
-   * iterations.
+   * Production: backed by `kvBackedRedisLayer` (KvBackend + ChannelIndex
+   * over RedisClient). Caller passes the worker's identity (`self`)
+   * and incarnation `gen` — typically resolved from `AppConfig` and
+   * `EpochCounter.fromKubernetesDownwardAPI`.
+   *
+   * The `redisLayer` constant is no longer a no-arg `Layer.Layer<…>`;
+   * it's a function returning the layer. Boot wiring (`main.ts`)
+   * supplies the config explicitly.
    */
-  static readonly redisLayer = Layer.effect(
-    PartitionedRelayStorage,
-    Effect.gen(function* () {
-      const redis = yield* RedisClient
-      const writer = yield* AtomicWriter
-
-      const wrapErr = (err: RedisError): StorageError =>
-        new StorageError({ reason: err.reason })
-
-      const wrapWriterErr = (err: AtomicWriterError): StorageError =>
-        new StorageError({ reason: err.reason })
-
-      const getCall = (
-        role: PartitionRole,
-        owner: string,
-        callRef: string
-      ): Effect.Effect<string | null, StorageError> =>
-        redis
-          .get(PartitionedRelayStorage.callKey(role, owner, callRef))
-          .pipe(Effect.mapError(wrapErr))
-
-      const getIndex = (
-        indexKey: string
-      ): Effect.Effect<string | null, StorageError> =>
-        redis
-          .get(PartitionedRelayStorage.indexKey(indexKey))
-          .pipe(Effect.mapError(wrapErr))
-
-      const putCall = (
-        role: PartitionRole,
-        owner: string,
-        callRef: string,
-        json: string,
-        indexes: ReadonlyArray<string>,
-        ttlSec: number,
-        opts?: PartitionedRelayWriteOptions
-      ): Effect.Effect<void, StorageError> =>
-        writer
-          .put(role, owner, callRef, json, indexes, ttlSec, opts)
-          .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
-
-      const refreshCall = (
-        role: PartitionRole,
-        owner: string,
-        callRef: string,
-        indexes: ReadonlyArray<string>,
-        ttlSec: number,
-        opts?: PartitionedRelayWriteOptions
-      ): Effect.Effect<void, StorageError> =>
-        writer
-          .refresh(role, owner, callRef, indexes, ttlSec, opts)
-          .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
-
-      const deleteCall = (
-        role: PartitionRole,
-        owner: string,
-        callRef: string,
-        indexes: ReadonlyArray<string>,
-        opts?: PartitionedRelayWriteOptions
-      ): Effect.Effect<void, StorageError> =>
-        writer
-          .delete(role, owner, callRef, indexes, opts)
-          .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
-
-      const scanCalls = (
-        role: PartitionRole,
-        owner: string,
-        opts?: { readonly batch?: number }
-      ): Stream.Stream<ScanEntry, StorageError> => {
-        const batch = opts?.batch ?? PartitionedRelayStorage.DEFAULT_SCAN_BATCH
-        const pattern = PartitionedRelayStorage.scanPattern(role, owner)
-        const callPrefix = `${role}:${owner}:call:`
-        const callPrefixLen = callPrefix.length
-
-        // Cursor-walk one batch per pull, yielding to the runtime
-        // between iterations so concurrent local writes are not
-        // starved while the scan is in progress.
-        return Stream.paginate("0", (cursor) =>
-          Effect.gen(function* () {
-            // Use ioredis directly via redis.raw — RedisClient.scanKeys
-            // accumulates ALL keys before returning, defeating the
-            // pacing requirement. We need cursor-by-cursor control.
-            const [nextCursor, keys] = yield* Effect.tryPromise({
-              try: () =>
-                redis.raw.scan(
-                  cursor,
-                  "MATCH",
-                  // ioredis applies the `keyPrefix` option transparently;
-                  // we pass the bare pattern. For the default RedisClient
-                  // setup the prefix is glued globally per-connection via
-                  // `pk()` — but raw.scan on this client does NOT apply
-                  // pk(). We mirror the internal `pk` logic here.
-                  scanPatternWithGlobalPrefix(redis, pattern),
-                  "COUNT",
-                  batch
-                ),
-              catch: (err) =>
-                new StorageError({
-                  reason: err instanceof Error ? err.message : String(err),
-                }),
-            })
-            // Strip the global prefix so the user-facing keys come
-            // back in our local namespace.
-            const localKeys = keys.map(stripGlobalPrefix(redis))
-            // GET each value + TTL in a single pipeline batch.
-            const entries = yield* fetchEntries(redis, localKeys, callPrefixLen)
-            // Yield the runtime so concurrent local Redis ops can
-            // interleave (the whole point of D10's pacing).
-            yield* Effect.yieldNow
-            const next: Option.Option<string> =
-              nextCursor === "0" ? Option.none() : Option.some(nextCursor)
-            return [entries as ReadonlyArray<ScanEntry>, next] as const
-          })
-        )
-      }
-
-      return {
-        getCall,
-        getIndex,
-        putCall,
-        refreshCall,
-        deleteCall,
-        scanCalls,
-      }
-    })
-  )
-  // AtomicWriter requires a WriteNotifier (it publishes on every
-  // successful peer-bearing write so ReplLog's long-poll handlers can
-  // push entries to subscribers within milliseconds). We intentionally
-  // do NOT embed `WriteNotifier.layer` here: ReplLog must subscribe to
-  // the same hub instance the writer publishes to, and the only
-  // reliable way to achieve that is to hoist `WriteNotifier.layer` to
-  // the outermost composition so a single memoized instance is shared.
-  //
-  // Phase 0b additionally hoists `AtomicWriter.redisLayer` itself: the
-  // production `ReplPuller.redisLayer` (consumer of /replog from peers)
-  // also needs AtomicWriter to apply backup writes. Keeping a single
-  // shared AtomicWriter is functionally fine (each is a thin wrapper
-  // over the same RedisClient + WriteNotifier), but composing it once
-  // at the top avoids two redundant service instances.
-  // Therefore `redisLayer`'s external requirement is now:
-  // `RedisClient | AtomicWriter | WriteNotifier`.
+  static readonly redisLayer = (config: {
+    readonly self: string
+    readonly gen: number
+  }): Layer.Layer<PartitionedRelayStorage, never, RedisClient | AppConfig> =>
+    kvBackedRedisLayer(config)
 
   /**
    * Tests: in-memory MutableHashMap. As of Slice 7c, the default
@@ -392,27 +256,14 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
     Layer.suspend(() => kvBackedMemoryLayer({ self: "self", gen: 1 }))
 
   /**
-   * Pre-Slice-7c memoryLayer. Kept on the public surface temporarily
-   * so a regression triage can swap layers at the test boundary
-   * without code changes. Will be removed in the final cleanup once
-   * the swap is fully validated.
-   */
-  static readonly legacyMemoryLayer = Layer.sync(
-    PartitionedRelayStorage,
-    () => makeMemoryApi().api
-  )
-
-  /**
    * Build a fresh in-memory `PartitionedRelayStorageApi` instance plus a
-   * handle to the underlying store. Slice 5's `PeerFabric.simulated`
-   * uses this to materialise N independent peer "sidecars" while still
-   * sharing the exact memoryLayer semantics — every peer's storage is
-   * the same object the rest of the codebase already exercises.
+   * handle to the underlying store. Used by `PeerFabric.simulated` to
+   * materialise N independent peer "sidecars".
    *
-   * As of Slice 7c, the default factory is the KV-backed implementation
-   * with `self="self"`. Multi-worker callers (PeerFabric) should use
-   * `makeMemoryApiFor(self)` so each peer's storage is correctly
-   * identified for the per-`(self, peer)` ChannelIndex bindings.
+   * Defaults to `self="self"`, `gen=1`. Multi-worker callers
+   * (PeerFabric) should use `makeMemoryApiFor(self)` so each peer's
+   * storage is correctly identified for the per-`(self, peer)`
+   * ChannelIndex bindings.
    */
   static readonly makeMemoryApi = (): MemoryApiHandle =>
     kvBackedMemoryApiHandle("self", 1)
@@ -427,11 +278,6 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
     self: string,
     gen: number = 1
   ): MemoryApiHandle => kvBackedMemoryApiHandle(self, gen)
-
-  /**
-   * Pre-Slice-7c factory. Kept temporarily for regression triage.
-   */
-  static readonly makeLegacyMemoryApi = (): MemoryApiHandle => makeMemoryApi()
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +298,7 @@ const kvBackedMemoryApiHandle = (self: string, gen: number): MemoryApiHandle => 
   return {
     api: built.api,
     store: built.store as unknown as MutableHashMap.MutableHashMap<string, MemoryEntry>,
+    kv: built.kv,
   }
 }
 
@@ -467,190 +314,16 @@ interface MemoryEntry {
 /**
  * Materialised in-memory storage handle. The `api` is the public
  * service surface; `store` is exposed for snapshot inspection by
- * `PeerFabric.simulated`'s test control API.
+ * `PeerFabric.simulated`'s test control API. Slice 7c also exposes
+ * the underlying `KvBackend` so test harnesses can construct
+ * cross-peer `ChannelIndex` bindings needed by the new
+ * `runPullerFiber` path (a peer's outgoing-to-self channel lives
+ * inside this KvBackend instance, separate from the `store`).
  */
 export interface MemoryApiHandle {
   readonly api: PartitionedRelayStorageApi
   readonly store: MutableHashMap.MutableHashMap<string, MemoryEntry>
+  readonly kv: KvBackendApi
 }
 
-const makeMemoryApi = (): MemoryApiHandle => {
-  const store = MutableHashMap.empty<string, MemoryEntry>()
-  const writer = AtomicWriter.makeMemoryUnsafe(store)
-
-  const wrapWriterErr = (err: AtomicWriterError): StorageError =>
-    new StorageError({ reason: err.reason })
-
-  const sweep = (key: string, nowMs: number): Option.Option<MemoryEntry> => {
-    const opt = MutableHashMap.get(store, key)
-    if (Option.isNone(opt)) return Option.none()
-    if (opt.value.expiresAtMs <= nowMs) {
-      MutableHashMap.remove(store, key)
-      return Option.none()
-    }
-    return opt
-  }
-
-  const getCall = (
-    role: PartitionRole,
-    owner: string,
-    callRef: string
-  ): Effect.Effect<string | null, StorageError> =>
-    Effect.gen(function* () {
-      const ms = yield* Clock.currentTimeMillis
-      return yield* Effect.sync(() => {
-        const opt = sweep(
-          PartitionedRelayStorage.callKey(role, owner, callRef),
-          ms
-        )
-        return Option.isSome(opt) ? opt.value.value : null
-      })
-    })
-
-  const getIndex = (
-    indexKey: string
-  ): Effect.Effect<string | null, StorageError> =>
-    Effect.gen(function* () {
-      const ms = yield* Clock.currentTimeMillis
-      return yield* Effect.sync(() => {
-        const opt = sweep(PartitionedRelayStorage.indexKey(indexKey), ms)
-        return Option.isSome(opt) ? opt.value.value : null
-      })
-    })
-
-  const putCall = (
-    role: PartitionRole,
-    owner: string,
-    callRef: string,
-    json: string,
-    indexes: ReadonlyArray<string>,
-    ttlSec: number,
-    opts?: PartitionedRelayWriteOptions
-  ): Effect.Effect<void, StorageError> =>
-    writer
-      .put(role, owner, callRef, json, indexes, ttlSec, opts)
-      .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
-
-  const refreshCall = (
-    role: PartitionRole,
-    owner: string,
-    callRef: string,
-    indexes: ReadonlyArray<string>,
-    ttlSec: number,
-    opts?: PartitionedRelayWriteOptions
-  ): Effect.Effect<void, StorageError> =>
-    writer
-      .refresh(role, owner, callRef, indexes, ttlSec, opts)
-      .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
-
-  const deleteCall = (
-    role: PartitionRole,
-    owner: string,
-    callRef: string,
-    indexes: ReadonlyArray<string>,
-    opts?: PartitionedRelayWriteOptions
-  ): Effect.Effect<void, StorageError> =>
-    writer
-      .delete(role, owner, callRef, indexes, opts)
-      .pipe(Effect.mapError(wrapWriterErr), Effect.asVoid)
-
-  const scanCalls = (
-    role: PartitionRole,
-    owner: string
-  ): Stream.Stream<ScanEntry, StorageError> => {
-    const callPrefix = `${role}:${owner}:call:`
-    return Stream.unwrap(
-      Effect.gen(function* () {
-        const ms = yield* Clock.currentTimeMillis
-        const matches: Array<ScanEntry> = []
-        for (const [key, entry] of store) {
-          if (!key.startsWith(callPrefix)) continue
-          if (entry.expiresAtMs <= ms) continue
-          const callRef = key.slice(callPrefix.length)
-          const ttlSec = Math.max(
-            0,
-            Math.ceil((entry.expiresAtMs - ms) / 1000)
-          )
-          matches.push({ callRef, json: entry.value, ttlSec })
-        }
-        return Stream.fromIterable(matches)
-      })
-    )
-  }
-
-  return {
-    api: {
-      getCall,
-      getIndex,
-      putCall,
-      refreshCall,
-      deleteCall,
-      scanCalls,
-    },
-    store,
-  }
-}
-
-// ---------------------------------------------------------------------------
-// redis-layer scan helpers
-// ---------------------------------------------------------------------------
-
-// Helper: read the global key prefix from RedisClient's underlying ioredis
-// `keyPrefix` option so we can prepend it ourselves when calling raw.scan.
-// The wrapped operations (`get`/`setex`/etc.) all go through `pk()`; raw
-// commands bypass that, so we mirror the prefix logic locally.
-const scanPatternWithGlobalPrefix = (
-  redis: { readonly raw: { options: { keyPrefix?: string | undefined } } },
-  pattern: string
-): string => {
-  const prefix = redis.raw.options?.keyPrefix
-  return prefix !== undefined && prefix.length > 0 ? `${prefix}${pattern}` : pattern
-}
-
-const stripGlobalPrefix =
-  (redis: { readonly raw: { options: { keyPrefix?: string | undefined } } }) =>
-  (key: string): string => {
-    const prefix = redis.raw.options?.keyPrefix
-    if (prefix !== undefined && prefix.length > 0 && key.startsWith(prefix)) {
-      return key.slice(prefix.length)
-    }
-    return key
-  }
-
-const fetchEntries = (
-  redis: {
-    readonly raw: {
-      readonly mget: (...keys: Array<string>) => Promise<Array<string | null>>
-      readonly pttl: (key: string) => Promise<number>
-      readonly options: { readonly keyPrefix?: string | undefined }
-    }
-  },
-  localKeys: ReadonlyArray<string>,
-  callPrefixLen: number
-): Effect.Effect<Array<ScanEntry>, StorageError> =>
-  Effect.tryPromise({
-    try: async () => {
-      if (localKeys.length === 0) return []
-      const prefix = redis.raw.options?.keyPrefix ?? ""
-      const fullKeys = localKeys.map((k) => `${prefix}${k}`)
-      const values = await redis.raw.mget(...fullKeys)
-      const ttls = await Promise.all(fullKeys.map((k) => redis.raw.pttl(k)))
-      const out: Array<ScanEntry> = []
-      for (let i = 0; i < localKeys.length; i++) {
-        const v = values[i] ?? null
-        const ttlMs = ttls[i] ?? -2
-        if (v === null || ttlMs < 0) continue // disappeared mid-scan
-        out.push({
-          callRef: localKeys[i]!.slice(callPrefixLen),
-          json: v,
-          ttlSec: Math.max(0, Math.ceil(ttlMs / 1000)),
-        })
-      }
-      return out
-    },
-    catch: (err) =>
-      new StorageError({
-        reason: err instanceof Error ? err.message : String(err),
-      }),
-  })
 

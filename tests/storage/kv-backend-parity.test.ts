@@ -45,9 +45,17 @@ interface OpRecord {
   readonly bodyValue?: string
   readonly indexes?: ReadonlyArray<{ key: string; value: string; ttlSec: number }>
   readonly indexesToRemove?: ReadonlyArray<string>
-  readonly sinceScore?: number
+  readonly sinceGen?: number
+  readonly sinceCounter?: number
   readonly limit?: number
 }
+
+// All originating writes use a fixed bucket gen for parity. Per Story
+// 7d the storage primitive partitions every channel by `entryGen`; the
+// parity sequence stays inside a single bucket so memory and Redis
+// pull lex orders are equivalent (single-bucket walk = counter-only
+// order).
+const PARITY_GEN = 7
 
 /**
  * Deterministic sequence covering: writes (with and without indexes),
@@ -63,7 +71,7 @@ const SEQUENCE: ReadonlyArray<OpRecord> = [
     bodyValue: '{"v":2}',
     indexes: [{ key: "idx:leg:CID-100", value: "beta", ttlSec: 60 }],
   },
-  { tag: "PULL", sinceScore: 0, limit: 10 },
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
   { tag: "U", callRef: "alpha", bodyValue: '{"v":1.1}', indexes: [] },
   {
     tag: "U",
@@ -74,13 +82,13 @@ const SEQUENCE: ReadonlyArray<OpRecord> = [
       { key: "idx:leg:CID-201", value: "gamma", ttlSec: 60 },
     ],
   },
-  { tag: "PULL", sinceScore: 1, limit: 10 },
-  { tag: "PULL", sinceScore: 0, limit: 2 },
+  { tag: "PULL", sinceGen: PARITY_GEN, sinceCounter: 1, limit: 10 },
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 2 },
   { tag: "D", callRef: "beta", indexesToRemove: ["idx:leg:CID-100"] },
-  { tag: "PULL", sinceScore: 0, limit: 10 },
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
   { tag: "U", callRef: "delta", bodyValue: '{"v":4}', indexes: [] },
   { tag: "D", callRef: "never-written", indexesToRemove: [] },
-  { tag: "PULL", sinceScore: 0, limit: 10 },
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
 ]
 
 const CHANNEL = "propagate:self->peerA"
@@ -104,6 +112,7 @@ const applySequence = (
           .channelWriteUpdate({
             channel: CHANNEL,
             counterKey: COUNTER,
+            entryGen: PARITY_GEN,
             member: memberOf("U", bodyKey(op.callRef!)),
             bodyKey: bodyKey(op.callRef!),
             bodyValue: op.bodyValue!,
@@ -117,6 +126,7 @@ const applySequence = (
           .channelWriteTombstone({
             channel: CHANNEL,
             counterKey: COUNTER,
+            entryGen: PARITY_GEN,
             member: memberOf("D", bodyKey(op.callRef!)),
             bodyKey: bodyKey(op.callRef!),
             tombstoneValue: '{"tombstone":true}',
@@ -130,7 +140,7 @@ const applySequence = (
           .channelPullBatch({
             channel: CHANNEL,
             counterKey: COUNTER,
-            sinceScore: op.sinceScore!,
+            since: { gen: op.sinceGen ?? 0, counter: op.sinceCounter ?? 0 },
             limit: op.limit!,
           })
           .pipe(Effect.orDie)
@@ -150,7 +160,7 @@ const expectParity = (a: ApplyResult, b: ApplyResult): void => {
   expect(a.counters).toEqual(b.counters)
   expect(a.pulls.length).toBe(b.pulls.length)
   for (let i = 0; i < a.pulls.length; i++) {
-    expect(a.pulls[i]?.headCounter).toBe(b.pulls[i]?.headCounter)
+    expect(a.pulls[i]?.head).toEqual(b.pulls[i]?.head)
     expect(a.pulls[i]?.entries).toEqual(b.pulls[i]?.entries)
   }
   expect(a.finalBodies).toEqual(b.finalBodies)

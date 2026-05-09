@@ -57,10 +57,11 @@ describe("T7 — steady-state lag through the puller", () => {
         for (let i = 0; i < N_CALLS; i++) {
           const nowMs = Date.now()
           yield* channel.write({
+            entryGen: channel.gen,
             partition: "pri",
             callRef: `c-${i}`,
             bodyValue: JSON.stringify({
-              gen: A_GEN,
+              _topology: { gen: i + 1 },
               i,
               written_at_ms: nowMs,
             }),
@@ -81,8 +82,8 @@ describe("T7 — steady-state lag through the puller", () => {
             openStream: (args): Stream.Stream<Uint8Array, PullerTransportError> =>
               buildPullStream({
                 channel,
-                gen: A_GEN,
-                initialSince: args.sinceCounter,
+                serverGen: A_GEN,
+                initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
                 chunkSize: args.chunkSize,
                 noopIntervalMs: 5,
               }),

@@ -23,7 +23,7 @@ import {
   Stream,
 } from "effect"
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
-import { makeEchoApply } from "../../src/replication/EchoApply.js"
+import { makeReplicationApply } from "../../src/replication/EchoApply.js"
 import {
   initialPeerView,
   PullerTransportError,
@@ -57,6 +57,7 @@ describe("NS7 — backup re-bootstrap", () => {
         // Write N calls.
         for (let i = 0; i < N_CALLS; i++) {
           yield* channelAtoB.write({
+            entryGen: channelAtoB.gen,
             partition: "pri",
             callRef: `call-${i}`,
             bodyValue: `{"gen":${A_GEN},"i":${i}}`,
@@ -74,8 +75,11 @@ describe("NS7 — backup re-bootstrap", () => {
         )
 
         const b0View = MutableRef.make(initialPeerView("worker-A"))
-        const b0Apply = makeEchoApply({
+        const b0Apply = makeReplicationApply({
+          self: "worker-B",
+          source: "worker-A",
           outgoingChannel: channelB0toA,
+          localKv: kvB0,
           bodyTtlSec: 60,
         })
         const openA = (args: {
@@ -85,8 +89,8 @@ describe("NS7 — backup re-bootstrap", () => {
         }): Stream.Stream<Uint8Array, PullerTransportError> =>
           buildPullStream({
             channel: channelAtoB,
-            gen: A_GEN,
-            initialSince: args.sinceCounter,
+            serverGen: A_GEN,
+            initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
             chunkSize: args.chunkSize,
             noopIntervalMs: 5,
           })
@@ -123,8 +127,11 @@ describe("NS7 — backup re-bootstrap", () => {
         )
 
         const b1View = MutableRef.make(initialPeerView("worker-A"))
-        const b1Apply = makeEchoApply({
+        const b1Apply = makeReplicationApply({
+          self: "worker-B",
+          source: "worker-A",
           outgoingChannel: channelB1toA,
+          localKv: kvB1,
           bodyTtlSec: 60,
         })
         const b1Fiber = yield* Effect.forkChild(

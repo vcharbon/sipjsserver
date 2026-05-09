@@ -6,22 +6,22 @@
  *
  * Server-side emission loop (per design doc Wire Protocol §):
  *   while connection_open:
- *     entries = channelIndex.pullBatch(watermark, chunk_size)
- *     for e in entries: emit data_frame(e); watermark = e.score
- *     if entries.length == chunk_size: continue immediately
- *     else: emit noop(headCounter); sleep 100ms
+ *     batch = channelIndex.pullBatch({ gen: req.gen, counter: req.counter }, chunk_size)
+ *     for e in batch.entries:
+ *       emit data_frame(e) — gen comes from e.entryGen, ttl-remaining from e
+ *     if batch.entries.length == chunk_size: continue immediately
+ *     else: emit noop({ gen: serverGen, counter: batch.head.counter }); sleep 100ms
  *
  * The loop runs forever — there is no max-open. Pullers manage reconnect
  * on transport failure; correctness does not depend on connection
- * lifetime. Frames are emitted in strictly ascending `(gen, counter)`
- * order; `gen` is constant for the server's lifetime.
+ * lifetime. Frames are emitted in strictly ascending lex `(gen, counter)`
+ * order across per-`(channel, entryGen)` buckets; the underlying storage
+ * primitive walks buckets in lex order.
  *
- * If the requesting `gen` is older than the server's current `gen`, the
- * effective `sinceScore` resets to 0 — the puller is from a prior
- * incarnation and needs a full bootstrap of the new gen's data. No
- * special "gen_mismatch" frame is emitted; the natural `(gen, counter)`
- * ordering on subsequent frames carries them past the puller's
- * (now stale) watermark.
+ * Per Story 7d there is no `sinceGen != serverGen` special case — every
+ * entry carries its own `entryGen` (mirrors at `0`, originating at the
+ * writer's incarnation gen), and lex compare on `(entry.gen, entry.counter)`
+ * naturally handles cross-incarnation watermarks.
  */
 
 import {
@@ -119,12 +119,6 @@ const makeServer = (
     sinceCounter,
     chunkSize,
   }) => {
-    // If the puller's gen is from a prior incarnation, treat the
-    // request as cold-start — the new gen's frames will sort above
-    // anything the puller previously stored.
-    const effectiveSinceCounter =
-      sinceGen === config.gen ? sinceCounter : 0
-
     const channelIndex: ChannelIndexApi = ChannelIndex.make(
       { self: config.self, peer: caller, gen: config.gen },
       kv
@@ -132,8 +126,8 @@ const makeServer = (
 
     return buildPullStream({
       channel: channelIndex,
-      gen: config.gen,
-      initialSince: effectiveSinceCounter,
+      serverGen: config.gen,
+      initialSince: { gen: sinceGen, counter: sinceCounter },
       chunkSize,
       noopIntervalMs: noopMs,
     })
@@ -148,8 +142,14 @@ const makeServer = (
 
 interface BuildPullStreamArgs {
   readonly channel: ChannelIndexApi
-  readonly gen: number
-  readonly initialSince: number
+  /**
+   * The server's incarnation gen — stamped on Noop frames as the
+   * heartbeat marker. Per Story 7d, Data frames carry per-entry
+   * `entryGen` instead (read from `PulledEntry`); the server's gen
+   * here is purely for noop heartbeats.
+   */
+  readonly serverGen: number
+  readonly initialSince: { readonly gen: number; readonly counter: number }
   readonly chunkSize: number
   readonly noopIntervalMs: number
 }
@@ -173,14 +173,18 @@ export const buildPullStream = (
  *      partial. We sleep at the START of the next tick — never at the
  *      end of the current one — so the noop frame the previous tick
  *      emitted is flushed downstream before we block.
- *   2. Pull a batch from the channel.
- *   3. Emit one Data frame per entry.
- *   4. If the batch was partial, emit a Noop frame at `headCounter` and
- *      mark `partial=true` so the next tick begins with a sleep.
+ *   2. Pull a batch from the channel via lex-ordered bucket walk.
+ *   3. Emit one Data frame per entry — `gen` and `body_ttl_remaining_sec`
+ *      come from the entry itself (per Story 7d).
+ *   4. If the batch was partial, emit a Noop frame at `head` (the
+ *      channel's lex-greatest tuple) and mark `partial=true` so the
+ *      next tick begins with a sleep.
+ *   5. Advance the cursor to the LAST entry's `(entryGen, score)` —
+ *      this is the strict lex-greater anchor for the next pull.
  */
 const recurseTick = (
   args: BuildPullStreamArgs,
-  since: number,
+  since: { gen: number; counter: number },
   sleepFirst: boolean
 ): Stream.Stream<Uint8Array> =>
   Stream.unwrap(
@@ -194,7 +198,7 @@ const recurseTick = (
       const nowMs = yield* Clock.currentTimeMillis
       const frames: Array<Uint8Array> = []
       for (const entry of batch.entries) {
-        const data = buildDataFrame(entry, args.gen, nowMs)
+        const data = buildDataFrame(entry, nowMs)
         if (data === null) continue
         frames.push(textEncoder.encode(encodeFrame(data)))
       }
@@ -202,15 +206,18 @@ const recurseTick = (
       if (partial) {
         const noop: NoopFrame = {
           _tag: "Noop",
-          gen: args.gen,
-          counter: batch.headCounter,
+          gen: args.serverGen,
+          counter: batch.head.counter,
           latency_ms: 0,
         }
         frames.push(textEncoder.encode(encodeFrame(noop)))
       }
       const nextSince =
         batch.entries.length > 0
-          ? batch.entries[batch.entries.length - 1]!.score
+          ? (() => {
+              const last = batch.entries[batch.entries.length - 1]!
+              return { gen: last.entryGen, counter: last.score }
+            })()
           : since
       return Stream.concat(
         Stream.fromIterable(frames),

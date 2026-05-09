@@ -53,16 +53,34 @@ export class KvError extends Data.TaggedError("KvError")<{
  * since the index entry was written (rare; tombstone-ttl race) or because
  * a concurrent delete/expire collapsed it. The puller treats `null` body
  * as "apply implicit DEL" — the body has gone, so the call must be gone.
+ *
+ * `entryGen` is the bucket the entry was written under (per Story 7d):
+ *   - `0`  — mirror entry written by a puller's apply path
+ *   - `>0` — originating entry written by PRS, stamped with the writer's
+ *           incarnation gen
+ * `score` is the per-bucket counter (monotonic within the bucket).
+ * `body_ttl_remaining_sec` is computed at pull time as `(expiresAtMs -
+ *   nowMs) / 1000` (memory) or `PTTL` (Redis) so receivers can stamp
+ *   their local copies with the source's intended remaining lifetime,
+ *   not a fresh full TTL. `0` for already-expired bodies (treated as
+ *   implicit DEL upstream).
  */
 export interface PulledEntry {
   readonly member: string
+  readonly entryGen: number
   readonly score: number
   readonly body: string | null
+  readonly body_ttl_remaining_sec: number
 }
 
 export interface ChannelPullResult {
   readonly entries: ReadonlyArray<PulledEntry>
-  readonly headCounter: number
+  /**
+   * Head tuple — the highest `(entryGen, counter)` across all buckets
+   * of the channel at snapshot time. Used by the puller for the
+   * caught-up signal in noop frames.
+   */
+  readonly head: { readonly gen: number; readonly counter: number }
 }
 
 /**
@@ -80,6 +98,15 @@ export interface IndexWrite {
 export interface ChannelWriteUpdateArgs {
   readonly channel: string
   readonly counterKey: string
+  /**
+   * The bucket this write goes into. PRS originating writes pass the
+   * worker's incarnation gen; the puller's apply path passes `0`
+   * (mirror sentinel — see Story 7d in
+   * docs/plan/grill-me-on-the-spicy-lark.md). Storage internally
+   * derives bucket-scoped channel + counter keys by appending
+   * `:gen:{entryGen}` so multiple gens coexist on one channel.
+   */
+  readonly entryGen: number
   readonly member: string
   readonly bodyKey: string
   readonly bodyValue: string
@@ -90,6 +117,8 @@ export interface ChannelWriteUpdateArgs {
 export interface ChannelWriteTombstoneArgs {
   readonly channel: string
   readonly counterKey: string
+  /** Same semantics as `ChannelWriteUpdateArgs.entryGen`. */
+  readonly entryGen: number
   readonly member: string
   readonly bodyKey: string
   readonly tombstoneValue: string
@@ -100,7 +129,18 @@ export interface ChannelWriteTombstoneArgs {
 export interface ChannelPullBatchArgs {
   readonly channel: string
   readonly counterKey: string
-  readonly sinceScore: number
+  /**
+   * Lex-ordered watermark. Storage walks per-`(channel, entryGen)`
+   * buckets in ascending lex order; for the bucket where
+   * `entryGen === since.gen` returns members with `score > since.counter`;
+   * for buckets with `entryGen > since.gen` returns all members in
+   * counter order; buckets with `entryGen < since.gen` are skipped.
+   *
+   * Cold pull = `{ gen: 0, counter: 0 }` returns everything (all
+   * buckets, all members). Warm pull naturally skips mirror entries
+   * because `(0, *) < (≥1, *)` lexicographically.
+   */
+  readonly since: { readonly gen: number; readonly counter: number }
   readonly limit: number
 }
 
@@ -108,6 +148,23 @@ export interface KvBackendApi {
   // ---- Body store --------------------------------------------------------
 
   readonly bodyGet: (key: string) => Effect.Effect<string | null, KvError>
+  /**
+   * Direct body write WITHOUT bumping any propagate channel. Used by
+   * the puller's apply path: a frame that arrived via replication
+   * already advanced its source channel; re-bumping the local
+   * channel would create an infinite ping-pong as soon as both peers
+   * run pullers concurrently. The `bodySet` primitive lets the
+   * puller write locally without provoking re-propagation.
+   *
+   * Original-write paths (SIP-driven `PartitionedRelayStorage.putCall`)
+   * MUST NOT use this — they need the channel side effect via
+   * `channelWriteUpdate` to be visible to peers.
+   */
+  readonly bodySet: (
+    key: string,
+    value: string,
+    ttlSec: number
+  ) => Effect.Effect<void, KvError>
   readonly bodyDel: (key: string) => Effect.Effect<void, KvError>
   readonly bodyMget: (
     keys: ReadonlyArray<string>
@@ -120,11 +177,18 @@ export interface KvBackendApi {
   // ---- Atomic composite ops ---------------------------------------------
 
   /**
-   * Atomic write: SET body with TTL, INCR counter, ZADD member at the new
-   * counter, SET each index with its TTL — all in one transaction.
+   * Atomic write: SET body with TTL, INCR bucket counter, ZADD member into
+   * the bucket-scoped sorted set, SET each index with its TTL — all in one
+   * transaction. Bucket = `(channel, entryGen)`; storage derives the per-
+   * bucket sorted set and counter by appending `:gen:{entryGen}` to the
+   * `channel` and `counterKey` arguments.
    *
-   * Re-writing the same `member` updates its score (sorted-set semantics:
-   * latest write wins). Returns the assigned counter value (the new score).
+   * Re-writing the same `member` within the same bucket updates its score
+   * (sorted-set semantics). Re-writing the same `member` under a DIFFERENT
+   * `entryGen` creates an independent entry in a different bucket — both
+   * exist; pull walks them in lex order.
+   *
+   * Returns the assigned counter value (the new score within the bucket).
    */
   readonly channelWriteUpdate: (
     args: ChannelWriteUpdateArgs
@@ -132,8 +196,10 @@ export interface KvBackendApi {
 
   /**
    * Atomic tombstone: SET body to a tombstone marker with a SHORT TTL
-   * (typically ~3 min), INCR counter, ZADD member (with the "D:" prefix),
-   * DEL each named secondary index — all in one transaction.
+   * (typically ~3 min), INCR bucket counter, ZADD member (with the "D:"
+   * prefix) into the bucket-scoped sorted set, DEL each named secondary
+   * index — all in one transaction. Same bucket semantics as
+   * `channelWriteUpdate`.
    *
    * The tombstone body is what the puller fetches via `channelPullBatch` to
    * learn that the call was deleted. After the tombstone TTL expires, the
@@ -145,14 +211,18 @@ export interface KvBackendApi {
   ) => Effect.Effect<{ readonly counter: number }, KvError>
 
   /**
-   * Atomic batched pull: ZRANGEBYSCORE on the channel for entries with
-   * score strictly greater than `sinceScore` (limited to `limit`), then
-   * MGET on the bodies derived from each member by stripping the "U:"/"D:"
-   * prefix — all in one snapshot.
+   * Atomic batched pull across all buckets of `channel`, lex-ordered by
+   * `(entryGen, counter)`. Walks buckets in ascending entryGen order;
+   * within each bucket returns members with `score > since.counter` (when
+   * `entryGen === since.gen`) or all members (when `entryGen > since.gen`).
+   * Skips buckets with `entryGen < since.gen`. Stops accumulating at
+   * `limit`. Each returned entry carries its bucket's `entryGen` and its
+   * body's remaining TTL (`(expiresAtMs - nowMs) / 1000` for memory,
+   * `PTTL` for Redis).
    *
-   * `headCounter` is the channel's current counter at snapshot time, used
-   * by the puller to detect "caught up to head" (`entries.length < limit
-   * AND lastEntryScore == headCounter`, or `entries.length == 0`).
+   * `head` is the highest `(entryGen, counter)` across all buckets at
+   * snapshot time. The puller uses this in noop frames as the
+   * caught-up-to-head signal.
    */
   readonly channelPullBatch: (
     args: ChannelPullBatchArgs
@@ -227,81 +297,144 @@ export class KvBackend extends ServiceMap.Service<KvBackend, KvBackendApi>()(
   // -----------------------------------------------------------------------
 
   /**
-   * Atomic write of (counter+1, body, indexes, ZADD member).
+   * Atomic write of (counter+1, body, indexes, ZADD member). Per
+   * Story 7d the channel is partitioned into per-`entryGen` buckets;
+   * this Lua derives the bucket-scoped sorted-set key and counter
+   * key from the base names by appending `:gen:{entryGen}`. The
+   * bucket-membership marker (`gens:{channel}` SADD) makes the pull
+   * script's bucket enumeration cheap.
    *
-   * KEYS = [counterKey, channel, bodyKey, idx1, idx2, ...]
-   * ARGV = [member, bodyValue, bodyTtlSec, idxCount,
+   * KEYS = [counterKeyBase, channelBase, bucketsSetKey, bodyKey, idx1, idx2, ...]
+   * ARGV = [entryGen, member, bodyValue, bodyTtlSec, idxCount,
    *         idxValue1, idxTtl1, idxValue2, idxTtl2, ...]
-   * Returns: counter (integer)
+   * Returns: counter (integer) — within the entryGen bucket
    */
   static readonly CHANNEL_WRITE_UPDATE_LUA = `
-local counter = redis.call("INCR", KEYS[1])
-redis.call("SETEX", KEYS[3], tonumber(ARGV[3]), ARGV[2])
-local idxCount = tonumber(ARGV[4])
+local entryGen = tonumber(ARGV[1])
+local bucketCounterKey = KEYS[1] .. ":gen:" .. entryGen
+local bucketChannelKey = KEYS[2] .. ":gen:" .. entryGen
+local counter = redis.call("INCR", bucketCounterKey)
+redis.call("SADD", KEYS[3], entryGen)
+redis.call("SETEX", KEYS[4], tonumber(ARGV[4]), ARGV[3])
+local idxCount = tonumber(ARGV[5])
 for i = 1, idxCount do
-  local key = KEYS[3 + i]
-  local val = ARGV[4 + (i - 1) * 2 + 1]
-  local ttl = tonumber(ARGV[4 + (i - 1) * 2 + 2])
+  local key = KEYS[4 + i]
+  local val = ARGV[5 + (i - 1) * 2 + 1]
+  local ttl = tonumber(ARGV[5 + (i - 1) * 2 + 2])
   redis.call("SETEX", key, ttl, val)
 end
-redis.call("ZADD", KEYS[2], counter, ARGV[1])
+redis.call("ZADD", bucketChannelKey, counter, ARGV[2])
 return counter
 `
 
   /**
    * Atomic tombstone write (counter+1, tombstone body w/ short TTL,
-   * remove indexes, ZADD D-member).
+   * remove indexes, ZADD D-member). Same per-bucket derivation as
+   * CHANNEL_WRITE_UPDATE_LUA.
    *
-   * KEYS = [counterKey, channel, bodyKey, idxToRemove1, idxToRemove2, ...]
-   * ARGV = [member, tombstoneValue, tombstoneTtlSec, idxRemoveCount]
-   * Returns: counter (integer)
+   * KEYS = [counterKeyBase, channelBase, bucketsSetKey, bodyKey, idxToRemove1, idxToRemove2, ...]
+   * ARGV = [entryGen, member, tombstoneValue, tombstoneTtlSec, idxRemoveCount]
+   * Returns: counter (integer) — within the entryGen bucket
    */
   static readonly CHANNEL_WRITE_TOMBSTONE_LUA = `
-local counter = redis.call("INCR", KEYS[1])
-redis.call("SETEX", KEYS[3], tonumber(ARGV[3]), ARGV[2])
-local removeCount = tonumber(ARGV[4])
+local entryGen = tonumber(ARGV[1])
+local bucketCounterKey = KEYS[1] .. ":gen:" .. entryGen
+local bucketChannelKey = KEYS[2] .. ":gen:" .. entryGen
+local counter = redis.call("INCR", bucketCounterKey)
+redis.call("SADD", KEYS[3], entryGen)
+redis.call("SETEX", KEYS[4], tonumber(ARGV[4]), ARGV[3])
+local removeCount = tonumber(ARGV[5])
 for i = 1, removeCount do
-  redis.call("DEL", KEYS[3 + i])
+  redis.call("DEL", KEYS[4 + i])
 end
-redis.call("ZADD", KEYS[2], counter, ARGV[1])
+redis.call("ZADD", bucketChannelKey, counter, ARGV[2])
 return counter
 `
 
   /**
-   * Atomic batched pull: ZRANGEBYSCORE on the channel + GET on each
-   * derived body key, all in one snapshot.
+   * Atomic batched pull across all buckets of a channel, lex-ordered
+   * by `(entryGen, counter)`. Walks per-bucket sorted sets in
+   * ascending entryGen order. For each entry returns
+   * `[entryGen, counter, member, body, bodyTtlMs]` so the wire layer
+   * can stamp per-entry gen and the receiver can preserve the body's
+   * remaining TTL.
    *
-   * KEYS = [counterKey, channel]
-   * ARGV = [sinceScore, limit, prefixWithColon]
+   * KEYS = [counterKeyBase, channelBase, bucketsSetKey]
+   * ARGV = [sinceGen, sinceCounter, limit, prefixWithColon]
    *   - prefixWithColon: the RedisClient's per-pod key prefix WITH the
    *     trailing colon (e.g. "sipas:") — needed to construct the
    *     prefixed bodyKey from the unprefixed bodyKey suffix encoded in
    *     each ZSET member.
-   * Returns: [headCounter, member1, score1, body1, member2, score2, body2, ...]
+   * Returns: [headGen, headCounter,
+   *           entryGen1, counter1, member1, body1, bodyTtlMs1,
+   *           entryGen2, counter2, member2, body2, bodyTtlMs2, ...]
    *   - body* may be `false` (Redis-nil) when the body has been DEL'd or
-   *     TTL'd between writeand pull. The caller maps false → null.
+   *     TTL'd between write and pull. The caller maps false → null.
+   *   - bodyTtlMs* is the body's PTTL (ms remaining) or 0 when missing
+   *     / no-expire. The caller divides by 1000 and ceils to seconds.
    */
   static readonly CHANNEL_PULL_BATCH_LUA = `
-local headCounter = tonumber(redis.call("GET", KEYS[1]) or "0")
-local sinceScore = tonumber(ARGV[1])
-local limit = tonumber(ARGV[2])
-local prefix = ARGV[3]
+local sinceGen = tonumber(ARGV[1])
+local sinceCounter = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local prefix = ARGV[4]
 
-local rangeResult = redis.call("ZRANGEBYSCORE", KEYS[2], "(" .. sinceScore, "+inf", "WITHSCORES", "LIMIT", 0, limit)
+-- Enumerate buckets via the per-channel "gens" set, sort numerically.
+local rawGens = redis.call("SMEMBERS", KEYS[3])
+local gens = {}
+for _, g in ipairs(rawGens) do
+  table.insert(gens, tonumber(g))
+end
+table.sort(gens)
 
-local response = { headCounter }
-local i = 1
-while i < #rangeResult do
-  local member = rangeResult[i]
-  local score = tonumber(rangeResult[i + 1])
-  -- Strip the "U:" or "D:" prefix to get the bodyKey (without RedisClient prefix).
-  local bodyKeySuffix = string.sub(member, 3)
-  local prefixedBodyKey = prefix .. bodyKeySuffix
-  local body = redis.call("GET", prefixedBodyKey)
-  table.insert(response, member)
-  table.insert(response, score)
-  table.insert(response, body)
-  i = i + 2
+-- Compute head: highest (entryGen, maxCounterInBucket) lex across all
+-- buckets. Read each bucket's counter via GET.
+local headGen = 0
+local headCounter = 0
+for _, g in ipairs(gens) do
+  local cnt = tonumber(redis.call("GET", KEYS[1] .. ":gen:" .. g) or "0")
+  if cnt > 0 and (g > headGen or (g == headGen and cnt > headCounter)) then
+    headGen = g
+    headCounter = cnt
+  end
+end
+
+local response = { headGen, headCounter }
+local emitted = 0
+for _, g in ipairs(gens) do
+  if emitted >= limit then break end
+  if g >= sinceGen then
+    local minScore
+    if g == sinceGen then
+      minScore = "(" .. sinceCounter
+    else
+      minScore = "(0"
+    end
+    local remaining = limit - emitted
+    local rangeResult = redis.call("ZRANGEBYSCORE", KEYS[2] .. ":gen:" .. g, minScore, "+inf", "WITHSCORES", "LIMIT", 0, remaining)
+    local i = 1
+    while i < #rangeResult do
+      local member = rangeResult[i]
+      local score = tonumber(rangeResult[i + 1])
+      local bodyKeySuffix = string.sub(member, 3)
+      local prefixedBodyKey = prefix .. bodyKeySuffix
+      local body = redis.call("GET", prefixedBodyKey)
+      local pttl = -2
+      if body ~= false then
+        pttl = redis.call("PTTL", prefixedBodyKey)
+        if pttl < 0 then pttl = 0 end
+      else
+        pttl = 0
+      end
+      table.insert(response, g)
+      table.insert(response, score)
+      table.insert(response, member)
+      table.insert(response, body)
+      table.insert(response, pttl)
+      emitted = emitted + 1
+      i = i + 2
+    end
+  end
 end
 
 return response
@@ -373,24 +506,39 @@ export type MemoryStore = MutableHashMap.MutableHashMap<
 const NO_EXPIRY_MS = Number.MAX_SAFE_INTEGER
 
 /**
- * In-memory channel representation. Stored as a native `Map<member,
- * score>` per channel, kept in a per-`KvBackend`-instance sidecar
- * (NOT in the `MemoryStore`). The original design encoded channels
- * as JSON strings inside the same `MemoryStore` so callers could
- * snapshot a single map; profiling under Slice 7c showed this was
+ * In-memory channel representation. Per Story 7d, every channel is
+ * partitioned into per-`entryGen` buckets so the `(gen, counter)`
+ * lex-ordered cycle-break works (mirror entries land in bucket
+ * gen=0; originating entries in bucket gen=self.incarnationGen). A
+ * channel's data structure is thus `Map<entryGen, ChannelBucket>`
+ * where each `ChannelBucket` is a native `Map<member, counter>`.
+ *
+ * Buckets are kept in a per-`KvBackend`-instance sidecar (NOT in
+ * the `MemoryStore`). The original design encoded channels as JSON
+ * strings inside the same `MemoryStore`; profiling showed this was
  * O(N) per write (`JSON.parse` + `JSON.stringify` of the whole
  * channel state on every `channelWriteUpdate`) and made the SIP
- * scenario suite GC-thrash on workers with thousands of calls.
+ * scenario suite GC-thrash on workers with thousands of calls. The
+ * native-Map representation keeps every operation O(1) (write) or
+ * O(N) without parse cost (pull). The `MemoryStore` carries bodies,
+ * indexes, and per-bucket counters only. `PeerFabric.snapshotPeer`
+ * and other store-iteration callers are unaffected because they
+ * only iterate body/idx keys.
  *
- * The native-Map representation keeps every operation O(1) (write)
- * or O(N) without parse cost (pull). The `MemoryStore` no longer
- * carries channel state; it holds bodies, indexes, and counters
- * only. `PeerFabric.snapshotPeer` and other store-iteration callers
- * are unaffected because they only iterate body/idx keys.
+ * Per-bucket counter keys are derived from the caller's
+ * `counterKey` arg by appending `:gen:{entryGen}` (matching the
+ * Redis-side derivation), so each bucket has an independent
+ * monotonic sequence.
  */
-type ChannelMap = Map<string, number>
+type ChannelBucket = Map<string, number>
+type ChannelBuckets = Map<number, ChannelBucket>
 
-const emptyChannelMap = (): ChannelMap => new Map<string, number>()
+const emptyChannelBucket = (): ChannelBucket => new Map<string, number>()
+const emptyChannelBuckets = (): ChannelBuckets => new Map<number, ChannelBucket>()
+
+/** Storage key for a per-bucket counter. */
+const bucketCounterKeyOf = (counterKey: string, entryGen: number): string =>
+  `${counterKey}:gen:${entryGen}`
 
 const liveEntry = (
   store: MemoryStore,
@@ -419,15 +567,61 @@ const removeEntry = (store: MemoryStore, key: string): void => {
   MutableHashMap.remove(store, key)
 }
 
-const getOrCreateChannelMap = (
-  channels: Map<string, ChannelMap>,
-  key: string
-): ChannelMap => {
-  const existing = channels.get(key)
+const getOrCreateChannelBuckets = (
+  channels: Map<string, ChannelBuckets>,
+  channel: string
+): ChannelBuckets => {
+  const existing = channels.get(channel)
   if (existing !== undefined) return existing
-  const fresh = emptyChannelMap()
-  channels.set(key, fresh)
+  const fresh = emptyChannelBuckets()
+  channels.set(channel, fresh)
   return fresh
+}
+
+const getOrCreateChannelBucket = (
+  buckets: ChannelBuckets,
+  entryGen: number
+): ChannelBucket => {
+  const existing = buckets.get(entryGen)
+  if (existing !== undefined) return existing
+  const fresh = emptyChannelBucket()
+  buckets.set(entryGen, fresh)
+  return fresh
+}
+
+/**
+ * Compute the channel's head tuple — the highest `(entryGen, counter)`
+ * across all buckets at snapshot time. Used as the caught-up signal in
+ * `channelPullBatch`'s response (server emits this in noop frames).
+ *
+ * Returns `(0, 0)` for an empty channel. The lex compare on the
+ * puller side handles "no progress" correctly (the puller's watermark
+ * will already be `≥ (0, 0)`).
+ *
+ * This walks per-bucket counter STORE entries (not the in-memory
+ * bucket map size) — counter-key reads survive bucket-empty races
+ * and match the Redis side's `GET seq:{channel}:gen:{entryGen}`.
+ */
+const computeHead = (
+  buckets: ChannelBuckets | undefined
+): { gen: number; counter: number } => {
+  if (buckets === undefined || buckets.size === 0) return { gen: 0, counter: 0 }
+  let bestGen = 0
+  let bestCounter = 0
+  for (const entryGen of buckets.keys()) {
+    const bucket = buckets.get(entryGen)
+    if (bucket === undefined || bucket.size === 0) continue
+    let maxInBucket = 0
+    for (const score of bucket.values()) {
+      if (score > maxInBucket) maxInBucket = score
+    }
+    if (maxInBucket === 0) continue
+    if (entryGen > bestGen || (entryGen === bestGen && maxInBucket > bestCounter)) {
+      bestGen = entryGen
+      bestCounter = maxInBucket
+    }
+  }
+  return { gen: bestGen, counter: bestCounter }
 }
 
 const incrCounter = (
@@ -462,15 +656,25 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
   const exclusive = mutex.withPermits(1)
 
   // Per-`KvBackend`-instance channel sidecar — `Map<channelKey,
-  // Map<member, score>>`. Native Map keeps writes O(1) and avoids
-  // GC pressure from per-write JSON.stringify of the full channel
-  // state. Channels live for the lifetime of this KvBackend
+  // Map<entryGen, Map<member, counter>>>`. Per Story 7d each channel
+  // is partitioned into per-`entryGen` buckets; pull walks them in
+  // lex order. Channels live for the lifetime of this KvBackend
   // instance; sharing a `MemoryStore` across instances does NOT
   // share the channels (use-case: `PeerFabric.simulated`'s per-peer
   // makeMemoryApiFor — channels are correctly per-peer).
-  const channels = new Map<string, ChannelMap>()
+  const channels = new Map<string, ChannelBuckets>()
 
   const nowMs = Clock.currentTimeMillis
+
+  const bodySet: KvBackendApi["bodySet"] = (key, value, ttlSec) =>
+    exclusive(
+      Effect.gen(function* () {
+        const ms = yield* nowMs
+        yield* Effect.sync(() =>
+          setEntry(store, key, value, ms + ttlSec * 1000)
+        )
+      })
+    )
 
   const bodyGet: KvBackendApi["bodyGet"] = (key) =>
     exclusive(
@@ -510,15 +714,25 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
       Effect.gen(function* () {
         const ms = yield* nowMs
         return yield* Effect.sync(() => {
-          const counter = incrCounter(store, args.counterKey, ms)
+          // Per-bucket counter — independent monotonic per (channel,
+          // entryGen). Mirror writes (entryGen=0) and originating
+          // writes (entryGen=self.gen) advance independent sequences.
+          const counter = incrCounter(
+            store,
+            bucketCounterKeyOf(args.counterKey, args.entryGen),
+            ms
+          )
           setEntry(store, args.bodyKey, args.bodyValue, ms + args.bodyTtlSec * 1000)
           for (const idx of args.indexes) {
             setEntry(store, idx.key, idx.value, ms + idx.ttlSec * 1000)
           }
-          // Native Map write: O(1). Re-writing the same `member` key
-          // replaces its score (sorted-set semantics) — no allocation.
-          const ch = getOrCreateChannelMap(channels, args.channel)
-          ch.set(args.member, counter)
+          // Bucket write: O(1). Re-writing the same `member` within
+          // the same bucket replaces its counter (sorted-set semantics
+          // within the bucket). The same member may also exist in
+          // other buckets independently — pull walks all of them.
+          const buckets = getOrCreateChannelBuckets(channels, args.channel)
+          const bucket = getOrCreateChannelBucket(buckets, args.entryGen)
+          bucket.set(args.member, counter)
           return { counter }
         })
       })
@@ -529,7 +743,11 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
       Effect.gen(function* () {
         const ms = yield* nowMs
         return yield* Effect.sync(() => {
-          const counter = incrCounter(store, args.counterKey, ms)
+          const counter = incrCounter(
+            store,
+            bucketCounterKeyOf(args.counterKey, args.entryGen),
+            ms
+          )
           setEntry(
             store,
             args.bodyKey,
@@ -539,8 +757,9 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
           for (const idxKey of args.indexesToRemove) {
             removeEntry(store, idxKey)
           }
-          const ch = getOrCreateChannelMap(channels, args.channel)
-          ch.set(args.member, counter)
+          const buckets = getOrCreateChannelBuckets(channels, args.channel)
+          const bucket = getOrCreateChannelBucket(buckets, args.entryGen)
+          bucket.set(args.member, counter)
           return { counter }
         })
       })
@@ -550,40 +769,66 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
     exclusive(
       Effect.gen(function* () {
         const ms = yield* nowMs
-        const ch = channels.get(args.channel)
-        const headCounter = readCounter(store, args.counterKey, ms)
-        if (ch === undefined || ch.size === 0) {
-          return { entries: [] as ReadonlyArray<PulledEntry>, headCounter }
+        const buckets = channels.get(args.channel)
+
+        // Compute head as max (entryGen, counter) lex across buckets,
+        // BEFORE filtering. This is what the puller's noop-frame uses
+        // as caught-up signal; needs to advance even when the puller
+        // skips all entries (e.g. warm puller against gen=0 mirror
+        // writes).
+        const head = computeHead(buckets)
+
+        if (buckets === undefined || buckets.size === 0) {
+          return { entries: [] as ReadonlyArray<PulledEntry>, head }
         }
-        // Iterate the native Map; filter by sinceScore. Avoids the
-        // legacy `Object.entries(view.entries)` allocation pattern.
-        const all: Array<{ member: string; score: number }> = []
-        for (const [member, score] of ch) {
-          if (score > args.sinceScore) all.push({ member, score })
-        }
-        all.sort((a, b) => a.score - b.score)
-        const slice = all.length > args.limit ? all.slice(0, args.limit) : all
+
+        // Walk buckets in ascending lex order of entryGen. Per
+        // bucket, return entries with `counter > since.counter`
+        // when `entryGen === since.gen`, or all entries (counter > 0)
+        // when `entryGen > since.gen`. Skip buckets with
+        // `entryGen < since.gen`.
+        const sortedGens = Array.from(buckets.keys()).sort((a, b) => a - b)
         const entries: Array<PulledEntry> = []
-        for (const { member, score } of slice) {
-          const bodyKey = KvBackend.bodyKeyFromMember(member)
-          if (bodyKey === null) {
-            return yield* new KvError({
-              reason: `channelPullBatch: malformed member "${member}" in channel ${args.channel}`,
+        for (const entryGen of sortedGens) {
+          if (entryGen < args.since.gen) continue
+          const minCounter = entryGen === args.since.gen ? args.since.counter : 0
+          const bucket = buckets.get(entryGen)!
+          const filtered: Array<{ member: string; score: number }> = []
+          for (const [member, score] of bucket) {
+            if (score > minCounter) filtered.push({ member, score })
+          }
+          filtered.sort((a, b) => a.score - b.score)
+          for (const { member, score } of filtered) {
+            if (entries.length >= args.limit) break
+            const bodyKey = KvBackend.bodyKeyFromMember(member)
+            if (bodyKey === null) {
+              return yield* new KvError({
+                reason: `channelPullBatch: malformed member "${member}" in channel ${args.channel}`,
+              })
+            }
+            const live = liveEntry(store, bodyKey, ms)
+            const body_ttl_remaining_sec =
+              live === null
+                ? 0
+                : Math.max(0, Math.ceil((live.expiresAtMs - ms) / 1000))
+            entries.push({
+              member,
+              entryGen,
+              score,
+              body: live === null ? null : live.value,
+              body_ttl_remaining_sec,
             })
           }
-          const live = liveEntry(store, bodyKey, ms)
-          entries.push({
-            member,
-            score,
-            body: live === null ? null : live.value,
-          })
+          if (entries.length >= args.limit) break
         }
-        return { entries, headCounter }
+
+        return { entries, head }
       })
     )
 
   return {
     bodyGet,
+    bodySet,
     bodyDel,
     bodyMget,
     counterRead,
@@ -606,39 +851,58 @@ const wrapRedisErr = (err: { reason: string }): KvError =>
   new KvError({ reason: err.reason })
 
 /**
- * Decode the alternating `[headCounter, m1, s1, b1, m2, s2, b2, ...]`
+ * Decode the
+ * `[headGen, headCounter, entryGen1, counter1, member1, body1, bodyTtlMs1, ...]`
  * payload returned by CHANNEL_PULL_BATCH_LUA into a typed result.
  *
  * `body` arrives as `string` for an existing key, or `false` (Redis-nil)
  * for a missing one — we normalize the latter to `null` so callers see a
- * consistent type regardless of backend.
+ * consistent type regardless of backend. `bodyTtlMs` is an integer ≥ 0;
+ * we ceil to seconds to match the memory backend's `expiresAtMs` math.
  */
 const decodePullBatchResult = (raw: unknown): ChannelPullResult => {
-  if (!Array.isArray(raw) || raw.length === 0) {
-    return { entries: [], headCounter: 0 }
+  if (!Array.isArray(raw) || raw.length < 2) {
+    return { entries: [], head: { gen: 0, counter: 0 } }
   }
-  const headCounter = toFiniteNumber(raw[0]) ?? 0
+  const head = {
+    gen: toFiniteNumber(raw[0]) ?? 0,
+    counter: toFiniteNumber(raw[1]) ?? 0,
+  }
   const entries: Array<PulledEntry> = []
-  let i = 1
-  while (i + 2 < raw.length + 1) {
-    if (i + 2 >= raw.length + 1) break
-    const member = raw[i]
+  let i = 2
+  while (i + 4 < raw.length + 1) {
+    if (i + 4 >= raw.length + 1) break
+    const entryGen = toFiniteNumber(raw[i])
     const score = toFiniteNumber(raw[i + 1])
-    const body = raw[i + 2]
-    if (typeof member !== "string" || score === null) {
+    const member = raw[i + 2]
+    const body = raw[i + 3]
+    const bodyTtlMs = toFiniteNumber(raw[i + 4])
+    if (entryGen === null || score === null || typeof member !== "string") {
       // Malformed payload — should never happen with our Lua; fail loudly
       // rather than silently swallow.
       break
     }
+    const body_ttl_remaining_sec = bodyTtlMs !== null && bodyTtlMs > 0
+      ? Math.max(0, Math.ceil(bodyTtlMs / 1000))
+      : 0
     entries.push({
       member,
+      entryGen,
       score,
       body: typeof body === "string" ? body : null,
+      body_ttl_remaining_sec,
     })
-    i += 3
+    i += 5
   }
-  return { entries, headCounter }
+  return { entries, head }
 }
+
+/**
+ * Per-channel "gens" set key — the membership marker our Lua scripts
+ * SADD into on every write. Pull reads it via SMEMBERS to enumerate
+ * buckets in lex order.
+ */
+const channelGensSetOf = (channel: string): string => `${channel}:gens`
 
 const toFiniteNumber = (raw: unknown): number | null => {
   if (typeof raw === "number" && Number.isFinite(raw)) return raw
@@ -652,6 +916,9 @@ const makeRedisKv = (
 ): KvBackendApi => {
   const bodyGet: KvBackendApi["bodyGet"] = (key) =>
     redis.get(key).pipe(Effect.mapError(wrapRedisErr))
+
+  const bodySet: KvBackendApi["bodySet"] = (key, value, ttlSec) =>
+    redis.setex(key, ttlSec, value).pipe(Effect.mapError(wrapRedisErr))
 
   const bodyDel: KvBackendApi["bodyDel"] = (key) =>
     redis.del(key).pipe(Effect.mapError(wrapRedisErr), Effect.asVoid)
@@ -681,9 +948,16 @@ const makeRedisKv = (
     )
 
   const channelWriteUpdate: KvBackendApi["channelWriteUpdate"] = (args) => {
-    const keys: Array<string> = [args.counterKey, args.channel, args.bodyKey]
+    const bucketsSetKey = channelGensSetOf(args.channel)
+    const keys: Array<string> = [
+      args.counterKey,
+      args.channel,
+      bucketsSetKey,
+      args.bodyKey,
+    ]
     for (const idx of args.indexes) keys.push(idx.key)
     const argv: Array<string | number> = [
+      args.entryGen,
       args.member,
       args.bodyValue,
       args.bodyTtlSec,
@@ -709,9 +983,16 @@ const makeRedisKv = (
   }
 
   const channelWriteTombstone: KvBackendApi["channelWriteTombstone"] = (args) => {
-    const keys: Array<string> = [args.counterKey, args.channel, args.bodyKey]
+    const bucketsSetKey = channelGensSetOf(args.channel)
+    const keys: Array<string> = [
+      args.counterKey,
+      args.channel,
+      bucketsSetKey,
+      args.bodyKey,
+    ]
     for (const k of args.indexesToRemove) keys.push(k)
     const argv: Array<string | number> = [
+      args.entryGen,
       args.member,
       args.tombstoneValue,
       args.tombstoneTtlSec,
@@ -737,8 +1018,8 @@ const makeRedisKv = (
     redis
       .eval(
         KvBackend.CHANNEL_PULL_BATCH_LUA,
-        [args.counterKey, args.channel],
-        [args.sinceScore, args.limit, prefixWithColon]
+        [args.counterKey, args.channel, channelGensSetOf(args.channel)],
+        [args.since.gen, args.since.counter, args.limit, prefixWithColon]
       )
       .pipe(
         Effect.mapError(wrapRedisErr),
@@ -747,6 +1028,7 @@ const makeRedisKv = (
 
   return {
     bodyGet,
+    bodySet,
     bodyDel,
     bodyMget,
     counterRead,

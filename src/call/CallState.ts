@@ -26,7 +26,7 @@ import {
   type PartitionRole,
   type StorageError,
 } from "../cache/PartitionedRelayStorage.js"
-import type { PropagateDirection } from "../replication/AtomicWriter.js"
+import type { PropagateDirection } from "../cache/PartitionRef.js"
 import { AppConfig } from "../config/AppConfig.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
 import { RedisError } from "../redis/RedisClient.js"
