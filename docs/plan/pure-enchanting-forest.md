@@ -38,9 +38,52 @@ Acceptance: the log stream around the next cliff (or a clean run) tells us which
 - `probe-recv` fires but `HealthChange` does not flip dead→alive → `setHealth` resolution bug; A3 = fix the resolution path.
 - `HealthChange` flips correctly but `[ProxyCore] no alive workers` persists → routing-side state divergence; A3 = LoadBalancer cache invalidation.
 
-### A3. Recovery hardening — gated on A2 evidence
+#### A2 verdict — DONE (run [`endurance-1h-vip-chaos-20260508-rerun-trackA`](../../test-results/k8s-endurance/endurance-1h-vip-chaos-20260508-rerun-trackA/))
 
-Choose the specific item(s) from the original plan's P1 #7-9 (auto-restart, socket re-bind, "still dead" heartbeat) plus #10-12 (unit + fake-clock tests) **based on what A2 reveals**, not in advance. This is intentional: the original plan paid the cost of writing all three before knowing which was the actual failure mode.
+Cliff at **21:14:12**, again in steady state (chaos[0] fires later at 21:16:06). Sequence captured by Track A.A1 logging:
+
+- 21:14:00.630 — `probe-send` fires for both workers.
+- 21:14:00.632 — `probe-recv` from worker-0 only (status=200). **No reply from worker-1.**
+- 21:14:02.130 — `probe-miss worker=b2bua-worker-1 consecutive=1/3`.
+- 21:14:05.633 — both workers now missing (worker-0's reply also stops).
+- 21:14:09.134 — worker-1 hits 3/3 → `HealthChange ... to=dead source=probe`.
+- 21:14:12.636 — worker-0 hits 3/3 → `HealthChange ... to=dead source=probe`.
+- After the cliff: `probe-send` keeps firing; `probe-recv` from worker-1 does NOT return until 22:01:56 — **47 minutes 47 seconds** of silence, ending only when chaos[5] forced a worker-1 pod restart.
+- `probe-fiber-exit` and `repl-fiber-exit` never fire anywhere in the run.
+
+**Diagnosis:** the cliff is on the **worker side**, not the proxy side. The probe fired send/recv/miss/HealthChange exactly as designed. All four proxy-side hypotheses are ruled out:
+
+| Hypothesis | Evidence | Verdict |
+|---|---|---|
+| Probe fiber died | No `probe-fiber-exit` in the log | RULED OUT |
+| Sends but no replies (probe socket dead) | `probe-recv` was firing for the OTHER worker at the same wall-clock and resumed for both after restart | RULED OUT (probe socket healthy) |
+| Recv but no flip (setHealth bug) | No `probe-recv` after the cliff means there was nothing to flip | N/A |
+| Flip but routing diverges | `HealthChange` fires correctly to `dead`, then back to `alive` via k8s source after restart | RULED OUT |
+
+**Worker-side smoking gun:** during the 47-minute silence, the worker keeps logging:
+
+- HTTP `/ready` answers `200 OK` every 5 s.
+- `repl: sampler-window` ticks every 1 s.
+- Replication pull loop keeps reconnecting (35 s force-timeout cycle) and applies frames successfully.
+- Transaction timeouts begin firing 8 s after the cliff (worker's outbound BYEs not getting final responses).
+
+So the **Node event loop, HTTP server, and replication client are all responsive** — but the **SIP UDP listener is wedged**. K8s readiness probe (`/ready`) returns green throughout, so K8s never replaces the pod and the worker stays in Service rotation. Only an external chaos kill brings it back.
+
+This pattern matches the user's hypothesis from the grilling: a worker-internal stall specific to the SIP request-handling path (most plausibly Redis sidecar memory / scan saturation under propagate-set growth, or a fiber starvation on the SIP path). The investigation moves to Track B's design with the constraint that the new architecture must:
+
+- Either prevent the SIP path from being starved by replication work, OR
+- Have a liveness signal that actually reflects SIP responsiveness (not just `/ready` HTTP), so K8s replaces a wedged pod.
+
+### A3. Recovery hardening — DROPPED
+
+The original A3 menu (probe auto-restart, socket re-bind, miss-heartbeat) is moot — the probe is doing its job correctly. The fault is on the worker side, in scope for Track B.
+
+Bridging mitigations to consider out-of-band of the design rewrite (small, low-risk):
+
+- Move the K8s liveness probe from HTTP `/ready` to a SIP-OPTIONS probe (or any check that exercises the actual UDP listener). This breaks the "alive but silent" failure mode by forcing K8s to restart a wedged pod within tens of seconds rather than tens of minutes.
+- Add a metric `sip_udp_recv_lag_seconds` (time since last UDP packet processed) so the alerting story exists today even before Track B lands.
+
+These are **not** part of this plan — list here for the next planning conversation.
 
 ---
 
