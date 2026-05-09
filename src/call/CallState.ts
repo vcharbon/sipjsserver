@@ -475,6 +475,21 @@ export class CallState extends ServiceMap.Service<
         // `idx:{indexKey} → callRef`. The callRef itself encodes the
         // primary, so a single hop here gives us everything we need
         // for the subsequent `checkout` to derive the partition path.
+        //
+        // CAVEAT — single-owner invariant interaction (spec §0):
+        // `idx:` keys today live only on the worker that wrote them.
+        // When this worker is acting as **backup** for a call (i.e.
+        // the call body is in `bak:{primary}:call:{ref}` on our
+        // sidecar after replication), the matching `idx:leg:…` entry
+        // is NOT replicated alongside, so this lookup returns
+        // undefined and SipRouter rejects the request 481. That is
+        // the exact failure mode tracked in
+        // `docs/replication/call-cache-backup.md` §0 corollary 1
+        // (refusing to serve while primary is down breaks the
+        // invariant) and the open fix is scoped in
+        // `docs/plan/bye-takeover-replicated-indexes-fix.md` §3.
+        // Until that ships, in-flight in-dialog requests that fail
+        // over to the backup will 481.
         const ref = yield* storage
           .getIndex(legKey(callId, tag))
           .pipe(Effect.mapError(toRedisErr))

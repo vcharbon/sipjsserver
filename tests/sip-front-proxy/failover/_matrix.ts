@@ -100,11 +100,17 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
       port: BOB_PORT,
     })
 
+    // Per-scenario limiter id, so the matrix runs in parallel without
+    // counter cross-talk. limit=1 lets the post-teardown
+    // `expectLimiterCount(0)` distinguish "decremented properly" from
+    // "leaked" definitively.
+    const limiterId = `matrix-${matrixName(c)}`
     const inviteHeaders = {
       "X-Api-Call": JSON.stringify({
         action: "route",
         destination: { host: BOB_HOST, port: BOB_PORT },
         new_ruri: `sip:bob@${BOB_HOST}:${BOB_PORT}`,
+        call_limiter: [{ id: limiterId, limit: 1 }],
       }),
     }
 
@@ -132,6 +138,10 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
       owner: W2,
       present: false,
     })
+    // Slice 3 — limiter accounting checkpoints. This INVITE is the
+    // single increment for the call's lifetime; nothing else should
+    // touch the counter until the BYE teardown.
+    s.cluster.expectLimiterCount(limiterId, 1)
 
     // ── First switch: kill the primary ─────────────────────────────
     s.cluster.kill(W1)
@@ -255,6 +265,14 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
       owner: W2,
       present: false,
     })
+
+    // Slice 3 — limiter terminator. After the BYE drain, the
+    // cluster-shared counter must be back at zero regardless of which
+    // worker handled the BYE. Catches: backup-served BYEs that
+    // forget to emit `decrement-limiter`, switchback BYEs that
+    // decrement the wrong window, and any in-dialog method that
+    // erroneously increments.
+    s.cluster.expectLimiterCount(limiterId, 0)
   })
     .runOn(["k8sFailover"])
     .skipFinalSweep()

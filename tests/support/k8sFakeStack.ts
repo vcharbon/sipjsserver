@@ -248,6 +248,11 @@ export function k8sFakeStackLayer(opts: K8sFakeStackOpts) {
     sharedCdrLayer,
     sharedLimiterLayer,
     opts.simulateMissingOutboundProxy === true,
+    {
+      store: limiterStore,
+      windowSec: opts.config.limiterWindowSeconds,
+      activeWindows: opts.config.limiterActiveWindows,
+    },
   )
 
   return Layer.mergeAll(
@@ -294,6 +299,11 @@ function buildClusterWithWorkersLayer(
   sharedCdrLayer: Layer.Layer<CdrWriter>,
   sharedLimiterLayer: Layer.Layer<CallLimiter>,
   simulateMissingOutboundProxy: boolean = false,
+  limiterIntrospect?: {
+    readonly store: LimiterMemoryStore
+    readonly windowSec: number
+    readonly activeWindows: number
+  },
 ): Layer.Layer<
   SimulatedK8sCluster,
   never,
@@ -508,6 +518,7 @@ function buildClusterWithWorkersLayer(
     const lifecycle: WorkerLifecycle = {
       handles,
       sutScope,
+      ...(limiterIntrospect !== undefined ? { limiter: limiterIntrospect } : {}),
       registryAdd: (id) => {
         const w = clusterWorkers.find(
           (cw) => (cw.id as unknown as string) === (id as unknown as string),

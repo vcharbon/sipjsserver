@@ -37,6 +37,8 @@ import {
   Exit,
   Layer,
   Metric,
+  MutableHashMap,
+  Option,
   Scope,
   ServiceMap,
 } from "effect"
@@ -200,6 +202,51 @@ export interface SimulatedK8sClusterApi {
   ) => Effect.Effect<void>
 
   /**
+   * Assert that worker `id`'s sidecar holds the SIP-derived index
+   * `idx:leg:{callId}|{tag}` mapped to a non-empty callRef. Direct
+   * regression test for the production 481 storm
+   * (`docs/plan/fix-the-mising-issue-pure-platypus.md`): when the
+   * backup's storage-side index is missing, `resolveFromSipKey` falls
+   * through and the in-dialog request is rejected with 481. Reading
+   * the snapshot after replication settle proves the puller wrote the
+   * idx alongside the bak: body. `present: false` asserts absence
+   * (useful post-tombstone).
+   *
+   * Pass `tag` when the test pins the From-tag (e.g. via custom
+   * `from.tag` in `s.agent` config). When omitted, asserts at least
+   * one `idx:leg:{callId}|*` entry exists for any tag — the common
+   * case since framework agent tags are randomly generated.
+   *
+   * Returns the stored callRef on success (`undefined` for absence
+   * assertions).
+   */
+  readonly expectIndexOnBackup: (
+    id: WorkerId,
+    opts: {
+      readonly callId: string
+      readonly tag?: string
+      readonly present?: boolean
+    }
+  ) => Effect.Effect<string | undefined>
+
+  /**
+   * Assert that the cluster-shared limiter holds `expected` total
+   * inflight count for `limiterId` (summed across the last
+   * `activeWindows` windows, matching `CallLimiter.checkAndIncrement`
+   * read semantics). TTL-expired entries are swept against
+   * `Clock.currentTimeMillis` before summing. The cluster's limiter
+   * store is populated by `k8sFakeStackLayer`'s `sharedLimiterLayer`
+   * — the same `MutableHashMap` every worker writes to, mirroring
+   * production's cluster-shared `LimiterRedisClient`.
+   *
+   * Use the matching limiter id passed in `X-Api-Call.call_limiter[]`.
+   */
+  readonly expectLimiterCount: (
+    limiterId: string,
+    expected: number
+  ) => Effect.Effect<void>
+
+  /**
    * Iterate every still-live worker (handles whose scope hasn't been
    * closed by `kill`) and collect leak reports for any worker whose
    * `CallState`/`TimerService` is not clean. Returns an empty array on
@@ -290,6 +337,18 @@ export interface WorkerLifecycle {
    * PeerFabric.rebootWorker). Run BEFORE rebuilding the worker.
    */
   readonly onRebootSideEffects: (id: WorkerId) => Effect.Effect<void>
+  /**
+   * Cluster-shared limiter store + windowing config so
+   * `expectLimiterCount` can sum the last `activeWindows` windows
+   * exactly the way `CallLimiter.checkAndIncrement` does. Optional —
+   * when absent, `expectLimiterCount` returns a clear "not wired"
+   * error rather than silently passing.
+   */
+  readonly limiter?: {
+    readonly store: import("../../call/CallLimiter.js").LimiterMemoryStore
+    readonly windowSec: number
+    readonly activeWindows: number
+  }
 }
 
 /**
@@ -528,6 +587,96 @@ export const SimulatedK8sClusterLayer = (
           }
         })
 
+      const indexLegKey = (callId: string, tag: string): string =>
+        `idx:leg:${callId}|${tag}`
+      const indexLegPrefix = (callId: string): string =>
+        `idx:leg:${callId}|`
+
+      const expectIndexOnBackup: SimulatedK8sClusterApi["expectIndexOnBackup"] =
+        (id, { callId, tag, present = true }) =>
+          Effect.gen(function* () {
+            const snap = yield* fabric.snapshotPeer(workerOf(id).ordinal)
+            const found =
+              tag !== undefined
+                ? snap.entries.find((e) => e.key === indexLegKey(callId, tag))
+                : snap.entries.find((e) =>
+                    e.key.startsWith(indexLegPrefix(callId))
+                  )
+            if (present && found === undefined) {
+              const expectedKey =
+                tag !== undefined
+                  ? indexLegKey(callId, tag)
+                  : `${indexLegPrefix(callId)}*`
+              const idxKeys = snap.entries
+                .map((e) => e.key)
+                .filter((k) => k.startsWith("idx:"))
+                .join(", ")
+              return yield* Effect.die(
+                new K8sClusterAssertionError({
+                  message: `expectIndexOnBackup: peer ${id} missing index "${expectedKey}". Present idx:* keys: [${idxKeys}]`,
+                })
+              )
+            }
+            if (!present && found !== undefined) {
+              return yield* Effect.die(
+                new K8sClusterAssertionError({
+                  message: `expectIndexOnBackup: peer ${id} unexpectedly has index "${found.key}" → "${found.value}"`,
+                })
+              )
+            }
+            return found?.value
+          })
+
+      const expectLimiterCount: SimulatedK8sClusterApi["expectLimiterCount"] = (
+        limiterId,
+        expected
+      ) =>
+        Effect.gen(function* () {
+          if (lifecycle === undefined || lifecycle.limiter === undefined) {
+            return yield* Effect.die(
+              new K8sClusterAssertionError({
+                message:
+                  `expectLimiterCount: cluster was built without limiter wiring — ` +
+                  `pass opts.limiterStore + windowing config in SimulatedK8sClusterLayer.`,
+              })
+            )
+          }
+          const { store, windowSec, activeWindows } = lifecycle.limiter
+          const ms = yield* Clock.currentTimeMillis
+          const sec = Math.floor(ms / 1000)
+          const currentWin = sec - (sec % windowSec)
+          // Sweep first so a TTL'd window doesn't inflate the sum
+          // (mirrors `buildMemoryLimiterImpl.sweep` semantics).
+          const expired: string[] = []
+          for (const [k, v] of store) {
+            if (v.expiresAtMs <= ms) expired.push(k)
+          }
+          for (const k of expired) MutableHashMap.remove(store, k)
+          let total = 0
+          for (let i = activeWindows - 1; i >= 0; i--) {
+            const w = currentWin - i * windowSec
+            const key = `limiter:${limiterId}:${w}`
+            const opt = MutableHashMap.get(store, key)
+            if (Option.isSome(opt)) total += opt.value.count
+          }
+          if (total !== expected) {
+            const dump: string[] = []
+            for (const [k, v] of store) {
+              if (k.startsWith(`limiter:${limiterId}:`)) {
+                dump.push(`${k} → count=${v.count}`)
+              }
+            }
+            return yield* Effect.die(
+              new K8sClusterAssertionError({
+                message:
+                  `expectLimiterCount(${limiterId}): expected ${expected}, ` +
+                  `got ${total} (sum of last ${activeWindows} windows ending ${currentWin}). ` +
+                  `Store: [${dump.join(", ") || "<empty>"}]`,
+              })
+            )
+          }
+        })
+
       const verifyCleanStateOnAllWorkers: SimulatedK8sClusterApi["verifyCleanStateOnAllWorkers"] =
         () =>
           Effect.gen(function* () {
@@ -567,6 +716,8 @@ export const SimulatedK8sClusterLayer = (
         snapshotRoutingMetrics,
         expectReplicatedTo,
         expectCallStateOn,
+        expectIndexOnBackup,
+        expectLimiterCount,
         verifyCleanStateOnAllWorkers,
       }
     })

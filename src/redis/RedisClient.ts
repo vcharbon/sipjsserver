@@ -64,6 +64,11 @@ export const makeRedisOps = (
   label: string
 ): Effect.Effect<RedisOps, never, Scope.Scope> =>
   Effect.gen(function* () {
+    // Capture parent runtime services so the ioredis event listeners
+    // (sync Node callbacks) can emit Effect.logWarning lines on the
+    // worker's logger. Redis connect/reconnect/error events are rare
+    // and load-bearing for failover diagnostics — they MUST surface.
+    const parentServices = yield* Effect.services<never>()
     const client: RedisInstance = yield* Effect.acquireRelease(
       Effect.callback<RedisInstance>((resume) => {
         const redis = new RedisConstructor(url, { lazyConnect: true })
@@ -76,6 +81,44 @@ export const makeRedisOps = (
           redis.disconnect()
         })
     )
+
+    // Wire ioredis lifecycle events to WARN-level logs. ioredis handles
+    // its own auto-reconnect; we surface every transition so any
+    // production blip is visible in worker logs without needing TRACE.
+    client.on("connect", () => {
+      Effect.runForkWith(parentServices)(
+        Effect.logWarning(`Redis (${label}): TCP connect to ${url}`)
+      )
+    })
+    client.on("ready", () => {
+      Effect.runForkWith(parentServices)(
+        Effect.logWarning(`Redis (${label}): ready (handshake complete)`)
+      )
+    })
+    client.on("error", (err: Error) => {
+      Effect.runForkWith(parentServices)(
+        Effect.logWarning(`Redis (${label}): error — ${err.message}`)
+      )
+    })
+    client.on("close", () => {
+      Effect.runForkWith(parentServices)(
+        Effect.logWarning(`Redis (${label}): connection closed`)
+      )
+    })
+    client.on("reconnecting", (delayMs: number) => {
+      Effect.runForkWith(parentServices)(
+        Effect.logWarning(
+          `Redis (${label}): reconnecting in ${delayMs}ms`
+        )
+      )
+    })
+    client.on("end", () => {
+      Effect.runForkWith(parentServices)(
+        Effect.logWarning(
+          `Redis (${label}): connection ended (no further reconnects)`
+        )
+      )
+    })
 
     yield* Effect.logInfo(`Redis (${label}) connected to ${url}`)
 

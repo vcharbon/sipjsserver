@@ -13,7 +13,7 @@
  */
 
 import { NodeRuntime } from "@effect/platform-node"
-import { Effect, Fiber, Layer, LogLevel, References, Stream } from "effect"
+import { Effect, Fiber, Layer, LogLevel, References } from "effect"
 import * as NodeSdk from "@effect/opentelemetry/NodeSdk"
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base"
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http"
@@ -29,7 +29,8 @@ import { WorkerReadiness } from "./cache/WorkerReadiness.js"
 import { CallLimiter } from "./call/CallLimiter.js"
 import { EpochCounter } from "./replication/EpochCounter.js"
 import { ReplLogServer } from "./replication/ReplLogServer.js"
-import { runPullerFiber, PullerTransportError } from "./replication/PullerFiber.js"
+import { runPullerFiber } from "./replication/PullerFiber.js"
+import { makePullerOpenStream } from "./replication/PullerHttpTransport.js"
 import { makeReplicationSupervisor } from "./replication/ReplicationSupervisor.js"
 import { makeReadinessController } from "./replication/ReadinessController.js"
 import { makeReplicationApply } from "./replication/EchoApply.js"
@@ -43,7 +44,7 @@ import { SignalingNetwork } from "./sip/SignalingNetwork.js"
 import { StatusServerLayer } from "./http/StatusServer.js"
 import { HttpReferenceAdapterLayer } from "./decision/adapters/http-reference/HttpReferenceAdapter.js"
 import { TracingService } from "./tracing/TracingService.js"
-import { FetchHttpClient } from "effect/unstable/http"
+import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { handlers, B2buaCoreLayer } from "./b2bua/B2buaCore.js"
 import { DrainingState } from "./b2bua/DrainingState.js"
 import { OverloadController } from "./b2bua/OverloadController.js"
@@ -300,11 +301,22 @@ const runReplicationConsumer = (
     const enumerator = yield* PeerEnumerator
     const kv = yield* KvBackend
     const readiness = yield* WorkerReadiness
+    // FetchHttpClient-backed client used by every per-peer puller's
+    // openStream below. Resolved once here so the puller fork closure
+    // can capture it.
+    const httpClient = yield* HttpClient.HttpClient
+    const resolver = yield* PeerEndpointResolver
 
     // Build supervisor with a per-peer puller-fork closure. Each
-    // PullerFiber opens a long-lived fetch against the peer's
-    // /replog endpoint (Slice 8 will wire in HTTP retry semantics;
-    // the inner-loop in-memory tests use a synthetic openStream).
+    // PullerFiber opens a long-lived NDJSON fetch against the peer's
+    // /replog endpoint via HttpClientResponse.stream — the response
+    // body is consumed as a Uint8Array stream, line-buffered into
+    // PullFrames by PullerFiber's `consumeStream`. The server side
+    // (ReplLogServer) bounds work via `chunk_size`: the underlying
+    // Lua `CHANNEL_PULL_BATCH_LUA` enforces `LIMIT 0 chunk_size` per
+    // ZRANGEBYSCORE call AND emits one Noop per drained batch, so
+    // even a long-stale puller reconnect cannot lock the source's
+    // Redis past one chunk's worth of work (~ms range at 1000).
     const supervisor = makeReplicationSupervisor({
       enumerator,
       watchIntervalMs: 2_000,
@@ -327,20 +339,17 @@ const runReplicationConsumer = (
           outgoingChannel,
           bodyTtlSec: 600,
         })
+        const openStream = makePullerOpenStream({
+          self,
+          source: sourceId,
+          client: httpClient,
+          resolver,
+        })
         return Effect.forkDetach(
           runPullerFiber({
             peer: sourceId,
             viewRef,
-            openStream: (_args): Stream.Stream<Uint8Array, PullerTransportError> => {
-              // Production wiring lands in Slice 8 alongside the
-              // FetchHttpClient-backed transport. For now the
-              // openStream is a dead stream — the worker still serves
-              // /replog and writes propagate locally; pull-side
-              // recovery is wired through the live-test path.
-              return Stream.fail(
-                new PullerTransportError({ reason: "Slice 8: HTTP transport not yet wired" })
-              )
-            },
+            openStream,
             applyFrame: (frame) => replicationApply(frame).pipe(Effect.orDie),
             chunkSize: 1000,
             initialBackoffMs: 250,
@@ -374,8 +383,10 @@ const runReplicationConsumer = (
     Effect.provide(
       Layer.mergeAll(
         PeerEnumeratorLayer,
+        PeerEndpointResolverLayer,
         PeerCachePortLayer,
-        KvBackendLayer
+        KvBackendLayer,
+        FetchHttpClient.layer
       ).pipe(Layer.provide(AppConfigLayer))
     )
   )

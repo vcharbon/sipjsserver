@@ -279,6 +279,33 @@ export type K8sStepAction =
       readonly kind: "expectLagSeqZero"
       readonly peers: ReadonlyArray<string>
     }
+  | {
+      /**
+       * Assert that worker `workerId`'s sidecar holds the
+       * SIP-derived index `idx:leg:{callId}|{tag}`. Used to verify
+       * replication delivered the index alongside the call body —
+       * the missing storage-side index is what drove production's
+       * `decode_forward_backup → 481` storm. `tag` may be omitted
+       * when the test does not pin the From-tag (random-generated
+       * by the framework); the assertion then matches any tag.
+       */
+      readonly kind: "expectIndexOnBackup"
+      readonly workerId: string
+      readonly callId: string
+      readonly tag?: string
+      readonly present?: boolean
+    }
+  | {
+      /**
+       * Assert the cluster-shared CallLimiter holds `expected`
+       * inflight count for `limiterId`, summed across the active
+       * windows the same way `CallLimiter.checkAndIncrement` reads.
+       * Direct introspection of the shared MutableHashMap.
+       */
+      readonly kind: "expectLimiterCount"
+      readonly limiterId: string
+      readonly expected: number
+    }
 
 /**
  * Routing-decision kinds the failover matrix asserts on. Mirrors the

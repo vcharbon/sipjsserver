@@ -792,6 +792,44 @@ function executeK8s(
         state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
         return
       }
+      case "expectIndexOnBackup": {
+        const peerId = WorkerId(a.workerId)
+        const present = a.present ?? true
+        const exit = yield* Effect.exit(
+          cluster.expectIndexOnBackup(peerId, {
+            callId: a.callId,
+            ...(a.tag !== undefined ? { tag: a.tag } : {}),
+            present,
+          })
+        )
+        if (exit._tag === "Failure") {
+          state.results.push(makeStepResult({
+            stepIndex: index,
+            step,
+            status: "fail",
+            error: `expectIndexOnBackup failed: ${formatCause(exit.cause)}`,
+          }))
+          return
+        }
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
+      case "expectLimiterCount": {
+        const exit = yield* Effect.exit(
+          cluster.expectLimiterCount(a.limiterId, a.expected)
+        )
+        if (exit._tag === "Failure") {
+          state.results.push(makeStepResult({
+            stepIndex: index,
+            step,
+            status: "fail",
+            error: `expectLimiterCount failed: ${formatCause(exit.cause)}`,
+          }))
+          return
+        }
+        state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+        return
+      }
       case "expectRoutedTo": {
         const minCount = a.minCount ?? 1
         const decision = a.decision as RoutingDecisionKind
