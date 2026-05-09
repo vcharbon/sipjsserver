@@ -46,7 +46,7 @@ That property cannot be patched into the existing shape — `propagate:{peer}` w
 ## Hard invariants (INV)
 
 - **INV1 (HARD).** A backup unreachable for arbitrary duration imposes **zero growing cost** on its primary — no unbounded buffers, no growing scan time, no memory pressure on the primary's sidecar.
-- **INV2.** Single-owner: a backup never promotes; the primary at INVITE time owns its calls' authoritative state for life. The cookie's `w_pri` is the primary for the call's whole lifetime. (See memory `project_call_partition_invariant`.)
+- **INV2 — Single-owner.** The backup **serves** in-dialog traffic the proxy routes to it: it bumps `callGen`, advances the call state machine, and writes the new state into `bak:{w_pri}:call:{ref}` (never into its own `pri:`). Reverse-propagate ships those writes back to the original primary so on its reboot it recovers the latest state. "A backup never promotes" refers to the partition reference / cookie ordinals — the primary at INVITE time owns its calls' authoritative state for life — *not* to whether the backup answers requests. **Refusing to serve while primary is down is a bug, not this invariant.** (See memory `project_call_partition_invariant` and [call-cache-backup.md §0](./call-cache-backup.md).)
 - **INV3.** Idempotent apply: re-delivering an entry whose `gen ≤ local-gen` is a no-op.
 - **INV4.** Boot recovery completes within **30 s P99** wall-clock from pod start to `WorkerReadiness.markReady(true)`, including SCAN-based bootstrap of `bak:{self}:` from every alive peer.
 - **INV5.** A successful long-poll connection close — natural max-open or client disconnect — never loses entries that the primary has durably written. The puller's watermark advances strictly monotonically as entries are applied.

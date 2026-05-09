@@ -41,7 +41,7 @@ Non-goals:
 
 Hard invariants:
 - **INV1.** A backup unreachable for arbitrary duration imposes **zero growing cost** on its primary.
-- **INV2.** Single-owner: a backup never promotes; the cookie's `wPri` is the primary for the call's whole lifetime.
+- **INV2 — Single-owner.** The backup **serves** traffic the proxy routes to it (bumping gen/state in `bak:{wPri}:` and propagating back via reverse-propagate); it never moves the call into its own `pri:`, and the cookie's `wPri` is fixed for the call's whole lifetime. "Never promotes" refers to ownership reference only — the backup must still serve. Refusing to serve while primary is down is a bug (see [call-cache-backup.md §0 corollary 1](./call-cache-backup.md)).
 - **INV3.** Idempotent apply: re-delivering an entry whose `(entry.gen, entry.counter)` is `≤` the puller's watermark is a no-op. Cross-direction stale writes are caught by the per-call `callGen` content gate.
 - **INV4.** Boot recovery completes within **30 s P99** wall-clock from pod start to `WorkerReadiness.markReady(true)`.
 - **INV5.** A successful long-poll close (server max-open or client disconnect) never loses entries the primary has durably written. The puller's watermark advances strictly monotonically as entries are applied.

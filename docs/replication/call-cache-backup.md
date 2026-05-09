@@ -27,7 +27,7 @@ The proxy stamps the cookie at INVITE time as `v=2|w_pri=<id>|w_bak=<id>|c=<call
 
 Five corollaries that every component must respect:
 
-1. **Backup never promotes.** When the proxy `decode_forward_backup`s a request to worker B because primary A is unreachable, B serves the request *as backup*. There is no "B becomes the new primary." Logs and metrics distinguish the role for observability; behaviour does not branch on it. (D16 in [TODO_doubleWrite.md](../todos/TODO_doubleWrite.md).)
+1. **Backup serves traffic and bumps gen/state — the partition reference never moves.** When the proxy `decode_forward_backup`s a request to worker B because primary A is unreachable, B **must** answer the request, advance the call's state machine, increment `callGen`, and write the new state into `bak:{A}:call:{ref}` on its own sidecar. *Refusing to serve is a bug, not the invariant.* Updates flow back to A via reverse-propagate (corollary 3). The shorthand "**backup never promotes**" means only that the partition reference (`pri:{A}:`) and the cookie ordinals stay with A for the call's whole life — B never moves the call into `pri:{B}:` and the proxy never re-stamps `w_pri`. Logs and metrics distinguish the role for observability; **the serve/no-serve decision must not branch on the role**. If you find code or a comment that reads "if (role === 'backup') reject / 481 / skip", that is the invariant being violated, not enforced. (D16 in [TODO_doubleWrite.md](../todos/TODO_doubleWrite.md). Repeat offender — see `docs/plan/bye-takeover-replicated-indexes-fix.md` §3 for the latest instance.)
 
 2. **`pri:{P}:call:{ref}` is written only by P, ever.** No other worker writes into another worker's primary partition. Even when B is serving traffic for a call whose `w_pri=A` and A is dead, B writes the updated state into B's own `bak:{A}:call:{ref}` partition — never into B's `pri:{B}:`.
 
@@ -37,7 +37,12 @@ Five corollaries that every component must respect:
 
 5. **There is never a moment of dual ownership.** Because primary-rights never move, two workers cannot simultaneously think they own the same call. On primary's restart the primary's `pri:{P}:` is the merge of (its own pre-crash state, if any) and (the reverse-propagate stream from peers); since reverse-propagate writes happened strictly *after* the crash, the `(epoch, seq)` pair on those writes is strictly newer than anything pre-crash. No conflict resolution beyond gen comparison is needed.
 
-The colloquial term "takeover" appears in older sections of this doc and in code comments. Read it as **"the backup served the request from `bak:{w_pri}:`"** — never as "the backup became primary." If you find a comment or doc paragraph that implies promotion to primary, treat it as a bug to fix in the same PR that touches the surrounding code.
+The colloquial term "takeover" appears in older sections of this doc and in code comments. Read it as **"the backup served the request from `bak:{w_pri}:` and wrote the updated state back to the same partition"** — never as "the backup became primary," and never as "the backup refuses to serve." Two opposite mis-readings are equally wrong:
+
+- **(a) Backup is promoted to primary** — false; `pri:{A}:` and the cookie ordinals stay with A.
+- **(b) Backup refuses to serve while primary is down** — also false; the backup serves *as backup*, bumping gen/state in `bak:{A}:` and propagating back. Refusing to serve breaks the in-flight call and the propagate-back contract.
+
+If you find a comment, doc paragraph, log message, or code branch that implies either (a) or (b), treat it as a bug to fix in the same PR that touches the surrounding code.
 
 ---
 
