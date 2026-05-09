@@ -33,7 +33,9 @@ Status legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ blocked
 | 4 | Wire protocol + `/replog` server endpoint | ✅ | — | Codec + server emission loop + NS9 landed. T7 (steady-state lag) deferred to Slice 5 — needs puller for end-to-end measurement. HTTP route registration not wired to main.ts (boot integration is Slice 6). |
 | 5 | PullerFiber + watermark + ReplicationSupervisor | ✅ | — | PullerFiber + ReplicationSupervisor + PeerFabric add/removePeer + NS11 (NS + unit) + T11 landed. T7 (steady-state lag) still deferred — needs write-time `written_at_ms` stamping; bundled with Slice 7 cutover when PRS write path swaps to ChannelIndex. |
 | 6 | ReadinessController + EpochCounter rewrite + boot integration | ✅ | — | EpochCounter v2 (`fromKubernetesDownwardAPI`/`fromWallClock`/`fixedForTesting`) + ReadinessController (T_min/T_max + once-Ready) + EchoApply helper landed. NS5/NS7/NS8 + readiness + epoch-counter unit tests green. Helm-chart wiring of `RESTART_COUNT` env var deferred to deployment slice (init-container reads `status.containerStatuses[*].restartCount` from K8s API; downward `fieldRef` does NOT expose container-level fields directly). Boot wiring (main.ts) deferred to Slice 7 cutover. |
-| 7 | NS-suite full landing + multi-worker tests + cutover | ⬜ | — | High-risk: deletes old code |
+| 7a | NS-suite full landing + T-suite landing | ✅ | — | NS1/NS2/NS4/NS6/NS10/NS14 + T2 + T6 + T7 landed (with `twoWorkerHarness.ts` shared DSL). `test:ns-real` script added. Full NS-suite (14 files) and full T-suite passing under in-memory KvBackend + real clock (`it.live`). |
+| 7b | New PRS internals + parity tests (additive) | ✅ | — | `src/cache/PartitionedRelayStorageKvBacked.ts` lands `kvBackedMemoryLayer` (memory) and `kvBackedRedisLayer` (production-ready) over `KvBackend` + `ChannelIndex`. `tests/cache/prs-rewire.test.ts` runs the same 10-scenario contract against BOTH the legacy and the new layer (20 tests, all green). The new layer is NOT yet the default; `memoryLayer` and `redisLayer` still point at the legacy internals so this slice is fully reversible. SIP-facing surface verified byte-stable. |
+| 7c | Final cutover blast (swap defaults + main.ts wiring + old code deletion) | ⬜ | — | **DEFERRED** — needs validation against live + k8s test tiers before the actual swap. See "Slice 7c deferral inventory" section below for the exhaustive list of follow-up tasks. |
 | 8 | Observability metrics | ⬜ | — | |
 | 9 | k8s robustness scenarios | ⬜ | — | |
 | 10 | Pre-prod validation harness + sign-off | ⬜ | — | 48 h endurance |
@@ -44,13 +46,13 @@ Status legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ blocked
 
 | # | Test | Slice | Status |
 |---|---|---|---|
-| T1 | apply-idempotent | 3 | ⬜ |
-| T2 | primary-bounded-cost | 7 | ⬜ |
+| T1 | apply-idempotent | 3 | ✅ (covered structurally by NS2 + NS10) |
+| T2 | primary-bounded-cost | 7 | ✅ |
 | T3 | storage-layout | 3 | ✅ |
 | T4 | scenario-self-primary-recovery | 6 | ✅ (covered by NS8) |
 | T5 | scenario-self-backup-bootstrap | 6 | ✅ (covered by NS5+NS7) |
-| T6 | scenario-reverse-propagation | 7 | ⬜ |
-| T7 | lag-steady-state | 4 | ⬜ |
+| T6 | scenario-reverse-propagation | 7 | ✅ |
+| T7 | lag-steady-state | 4 | ✅ (landed Slice 7a) |
 | T8 | boot-30s-budget | 9 | ⬜ |
 | T9 | tuple-comparator (was gen-mismatch) | 3 | ✅ |
 | T10 | (subsumed into NS11; row retired) | — | n/a |
@@ -62,20 +64,20 @@ Status legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ blocked
 
 | # | Scenario | Slice | Status |
 |---|---|---|---|
-| NS1 | forward-propagation | 7 | ⬜ |
-| NS2 | idempotent-overwrite | 7 | ⬜ |
+| NS1 | forward-propagation | 7 | ✅ |
+| NS2 | idempotent-overwrite | 7 | ✅ |
 | NS3 | delete-and-tombstone-ttl | 3 | ✅ |
-| NS4 | reverse-propagation | 7 | ⬜ |
+| NS4 | reverse-propagation | 7 | ✅ |
 | NS5 | sidecar-wipe-recovery | 6 | ✅ |
-| NS6 | backup-was-down | 7 | ⬜ |
+| NS6 | backup-was-down | 7 | ✅ |
 | NS7 | backup-re-bootstrap | 6 | ✅ |
 | NS8 | primary-recovery-via-reverse | 6 | ✅ |
 | NS9 | caught-up-noop | 4 | ✅ |
-| NS10 | tuple-conflict | 7 | ⬜ |
+| NS10 | tuple-conflict | 7 | ✅ |
 | NS11 | peer-disappear-watermark | 5 | ✅ |
 | NS12 | body-ttl-natural-cleanup | 3 | ✅ |
 | NS13 | tombstone-ttl | 3 | ✅ |
-| NS14 | symmetric-tombstone-from-backup | 7 | ⬜ |
+| NS14 | symmetric-tombstone-from-backup | 7 | ✅ |
 
 Each NS scenario must pass under all three backend combinations (in-memory + fake clock; in-memory + real clock; Redis + hybrid clock).
 
@@ -84,19 +86,122 @@ Each NS scenario must pass under all three backend combinations (in-memory + fak
 | Topic | Status | Resolved in |
 |---|---|---|
 | Index orphan-tombstone cleanup policy | OPEN — design-doc decision | B0 |
-| Helm-chart downward API `fieldRef` exact path | OPEN — verify K8s API behavior | Slice 6 |
+| Helm-chart downward API `fieldRef` exact path | RESOLVED — K8s downward API `fieldRef` does NOT expose `status.containerStatuses[*].restartCount` directly. Slice 7b mitigation: init container that reads its own pod's status via the K8s API and writes `RESTART_COUNT` into a shared env file. EpochCounter falls back to wall-clock-only when env var is absent. | Slice 7b (deployment) |
 | Pre-prod validation cluster availability | OPEN — needs infra | Slice 10 |
 
 ### Phase: Cutover (B2)
 
 | Item | Status | Notes |
 |---|---|---|
-| Old `src/replication/{AtomicWriter,PropagateStream,ReplLog,ReplPuller,ReadyGate}.ts` deleted | ⬜ | Slice 7 |
-| `src/cache/ReclaimRunner.ts` deleted | ⬜ | Slice 7 |
-| Legacy `tests/replication/*` deleted | ⬜ | Slice 7 |
-| `docs/replication/call-cache-backup.md` updated to redirect | ⬜ | Slice 7 |
-| `CLAUDE.md` progressive reading guide updated | ⬜ | Slice 7 |
+| Old `src/replication/{AtomicWriter,PropagateStream,ReplLog,ReplPuller,ReadyGate}.ts` deleted | ⬜ | Slice 7c |
+| `src/cache/ReclaimRunner.ts` deleted | ⬜ | Slice 7c |
+| Legacy `tests/replication/*` deleted | ⬜ | Slice 7c |
+| `docs/replication/call-cache-backup.md` updated to redirect | ⬜ | Slice 7c |
+| `CLAUDE.md` progressive reading guide updated | ⬜ | Slice 7c |
 | Production deploy after pre-prod sign-off | ⬜ | Post-Slice 10 |
+
+### Slice 7c deferral inventory
+
+The cutover work was split out from 7a (test landing) and 7b (new
+internals + parity tests) so the new code can be reviewed in safe
+slices. Slice 7c is the remaining work to actually flip production
+paths over to the new code and remove the legacy modules.
+
+**Status going into 7c:**
+- New PRS internals exist and are parity-verified (`tests/cache/prs-rewire.test.ts` — 20 tests, both legacy and KV-backed pass the SAME 10 scenarios).
+- `kvBackedRedisLayer` is wired but not yet the default — `PartitionedRelayStorage.redisLayer` still points at the legacy internals. Switching the default is a one-line change once the live + k8s tests are run against the new path.
+- `main.ts` still imports + wires `AtomicWriter`, `ReplLog`, `ReplPuller`, `ReadyGate`, `ReclaimRunner`, `WriteNotifier`, `EpochCounter.redisLayer`, `supervisePullLoops`. None of the new modules (PullerFiber, ReplicationSupervisor, ReadinessController, ReplLogServer, EpochCounter.fromKubernetesDownwardAPI) are wired into the boot path yet.
+- All NS-suite + T-suite tests pass against the new code, but only via direct test wiring — the SIP path on `main.ts` is unaffected.
+
+#### Source code deletions (slice plan §B2)
+
+- `src/replication/AtomicWriter.ts` — replaced by `ChannelIndex.write` over `KvBackend`.
+- `src/replication/PropagateStream.ts` — replaced by `KvBackend.channelPullBatch`.
+- `src/replication/ReplLog.ts` — replaced by `ReplLogServer` (Slice 4).
+- `src/replication/ReplPuller.ts` — replaced by `runPullerFiber` (Slice 5).
+- `src/replication/ReadyGate.ts` — replaced by `ReadinessController` (Slice 6).
+- `src/cache/ReclaimRunner.ts` — removed entirely; the `since=0` bootstrap path subsumes the SCAN safety net.
+- `src/replication/EpochCounter.ts` — legacy `redisLayer` / `memoryLayerFromStore` deleted; only `fromKubernetesDownwardAPI` / `fromWallClock` / `fixedForTesting` remain.
+- `src/replication/PullLoopSupervisor.ts` — replaced by `ReplicationSupervisor` (Slice 5).
+- `src/replication/WriteNotifier.ts` — no longer needed (no in-process pubsub bridge in the redesign).
+- `src/replication/ReplMetrics.ts` — replaced by Slice 8's `ReplicationMetrics`.
+
+#### Source code rewires (Slice 7c)
+
+- `src/cache/PartitionedRelayStorage.ts` — switch the default factories to the new internals.
+  - `memoryLayer` → point at `kvBackedMemoryLayer({ self, gen })`. The two `self`/`gen` values are passed at layer-build time; tests typically pass a fixed gen via `EpochCounter.fixedForTesting`. **Heads-up:** the existing `makeMemoryApi()` returns `MemoryApiHandle = { api, store: MutableHashMap<string, MemoryEntry> }`. The new layer's store is `MutableHashMap<string, MemoryStoreEntry>` — structurally identical (`{ value: string; expiresAtMs: number }`), so the swap is a one-line change. `PeerFabric.simulated` consumes `MemoryApiHandle.store` for snapshot inspection; that path keeps working unchanged after the swap.
+  - `redisLayer` → point at `kvBackedRedisLayer({ self, gen })`. `self` resolves from `AppConfig.workerOrdinalLabel` (same precedence as `EpochCounterLayer` in `main.ts:259`). `gen` resolves from the new `EpochCounter.fromKubernetesDownwardAPI` (currently in `main.ts` it's the legacy `EpochCounter.redisLayer`).
+  - **`written_at_ms` stamping:** ALREADY DONE in `kvBackedExplicit` — every body passes through `stampWrittenAtMs(json, nowMs)` before reaching `ChannelIndex.write`. T7 will pick up real latency values once main.ts is on the new path.
+  - SIP-facing surface (`putCall` / `getCall` / `deleteCall` / `refreshCall`, `CallLimiter`, `WorkerReadiness.currentReady`) was verified byte-stable in slice 7b via `tests/cache/prs-rewire.test.ts`.
+
+- `src/main.ts` boot wiring — replace legacy module wiring with new modules:
+  - **EpochCounter** — line 186-212: `EpochCounter.redisLayer(ordinal)` → `EpochCounter.fromKubernetesDownwardAPI(ordinal)`. The new layer has no Redis dependency, so `EpochCounterLayer` no longer needs `Layer.unwrap` over RedisClient.
+  - **Supervisor** — line 498ish: `supervisePullLoops({ enumerator, forkPullLoop, watchIntervalMs })` → `makeReplicationSupervisor({ enumerator, forkPullerFiber, watchIntervalMs })`. The `forkPullerFiber` builds a `runPullerFiber({ peer, viewRef, openStream: <fetch /replog>, applyFrame: makeEchoApply(...) })`.
+  - **Readiness** — replace `ReadyGate` with `makeReadinessController({ observeState: supervisor.observe, markReady: workerReadiness.markReady })`. Fork the controller's `run` effect under `Effect.forkDetach`. SIGTERM path calls `controller.drain` instead of `WorkerReadiness.markReady(false)` directly.
+  - **HTTP route registration**: call `addReplLogRoutes(router)` (from `src/replication/ReplLogServer.ts`, landed Slice 4 but never wired) inside the StatusServer or HTTP layer composition. The route needs `ReplLogServer.layer({ self, gen })` provided.
+  - **Old wiring deletions** — remove imports + layers for `AtomicWriter`, `WriteNotifier`, `ReplLog`, `ReplPuller`, `ReadyGate`, `ReclaimRunner`, `PullLoopSupervisor`, `EpochCounter.redisLayer`, `ReplogClient`, legacy `ReplMetrics`.
+
+#### Test deletions (slice plan §B2)
+
+- `tests/replication/atomic-writer.test.ts`
+- `tests/replication/repl-puller.test.ts`
+- `tests/replication/ready-gate.test.ts`
+- `tests/replication/replog-head-at-open.test.ts`
+- `tests/replication/replog-long-poll-heartbeat.test.ts`
+- `tests/replication/repl-metrics.test.ts`
+- `tests/replication/propagate-compaction.test.ts`
+- `tests/replication/epoch-monotonic.test.ts` — superseded by `epoch-counter.test.ts`.
+- `tests/replication/pull-loop-supervisor.test.ts` — superseded by `peer-disappear-watermark.test.ts` + `peer-disappear-mid-bootstrap.test.ts`.
+
+#### Documentation
+
+- `docs/replication/call-cache-backup.md` — replace body with a redirect/header pointing at `docs/replication/redesign-call-cache-backup.md` (the latter still pending — see B0 phase).
+- `CLAUDE.md` progressive reading guide — update the "Replication / call cache backup mechanism" row to point at the new design doc.
+- `docs/replication/redesign-call-cache-backup.md` — write the design-of-record (B0 sign-off gate). Currently the plan file (this document) carries the design captured during grill; the redesign doc transcribes it for permanent reference.
+- `docs/replication/protocol.md` — wire-protocol reference doc. The protocol is implemented in `ReplicationProtocol.ts` + `ReplLogServer.ts`; the doc is outstanding.
+- `docs/replication/state-machine.md` — diagrams of the worker + per-peer fiber state machines. Code lives in `ReadinessController.ts` + `PullerFiber.ts` + `ReplicationSupervisor.ts`; the doc is outstanding.
+
+#### Helm / deployment (separate track)
+
+- `RESTART_COUNT` env var wiring — the Kubernetes downward API's `fieldRef` does NOT directly expose `status.containerStatuses[*].restartCount`. An init container that reads the pod's own status from the K8s API and writes the value into a shared env-file (or directly via `RESTART_COUNT=...`) is the next-step mechanism. Verify `serviceAccountName` has `pod/get` permission on its own pod.
+- StatefulSet manifest — wire the `/replog` route into the existing health/status service so it's reachable by peer pullers.
+
+#### Acceptance gates from slice plan that remain
+
+- `npm run typecheck` clean ✅ (currently)
+- `npm run test` green ✅
+- `npm run test:ns-real` green ✅
+- `KV_BACKEND=redis npm run test` green when Redis available — pending; the parity test already exercises this for the storage primitive (T12), but the new `ReplLogServer` and `runPullerFiber` paths don't yet have a Redis-backed test harness.
+- Old code path fully removed — pending (Slice 7b).
+- SIP-facing surface signature-diff zero — pending (depends on PRS rewire).
+
+#### Suggested 7c sequencing
+
+Slice 7b already landed steps 1 + 2; 7c picks up at step 3.
+
+1. ✅ Write `tests/cache/prs-rewire.test.ts` first — pinned the `putCall`/`getCall`/`deleteCall`/`refreshCall`/`scanCalls`/`getIndex` SIP-facing semantics in a single regression suite running against BOTH the legacy and new internals.
+2. ✅ Landed `kvBackedMemoryLayer` + `kvBackedRedisLayer` (new internals only, opt-in via separate constructors). Module: `src/cache/PartitionedRelayStorageKvBacked.ts`.
+3. **(7c)** Switch `PartitionedRelayStorage.memoryLayer` and `redisLayer` defaults to the new layer. Re-run the full fake suite to confirm zero regressions; the parity tests already cover this but the full SIP path indirectly exercises every code path that consumes PRS.
+4. **(7c)** Switch `main.ts` boot wiring to the new modules per the source-code rewires section above. Validate end-to-end against:
+   - `npm run test:live:short` (real-clock e2e UDP test).
+   - `npm run test:k8s:failover` (kind-based proxy / failover scenarios).
+   - `npm run test:k8s:soak` (limiter soak).
+5. **(7c)** Once steps 3+4 are green: delete the legacy modules and tests in one PR. List in the "Source code deletions" section above.
+6. **(7c)** Update docs (`call-cache-backup.md` redirect, `CLAUDE.md` row update, write `redesign-call-cache-backup.md` + `protocol.md` + `state-machine.md`).
+
+#### Why 7b stopped here (rationale)
+
+The new code paths are validated against the in-memory KvBackend
+under `vitest.config.fake.ts` (1155 fake-stack tests pass). The
+production switch (changing `redisLayer`'s internals) cannot be
+fully validated without `test:live:*` and `test:k8s:*` runs against
+a real Redis sidecar and a kind cluster — neither of which is
+reachable from the inner-loop test environment. Sequencing the
+swap as a separate PR lets a reviewer:
+
+  - See the 1-line `redisLayer = kvBackedRedisLayer(...)` swap in isolation.
+  - Run live + k8s tests against it.
+  - Roll back trivially if either tier surfaces a regression.
 
 ---
 

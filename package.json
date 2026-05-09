@@ -42,6 +42,7 @@
     "test:ci": "npm run test:fake && npm run test:live:medium",
     "test:nightly": "npm run test:fake && npm run test:live:long && npm run test:k8s:failover && npm run test:k8s:soak",
     "test:fake": "vitest run -c vitest.config.fake.ts",
+    "test:ns-real": "vitest run -c vitest.config.fake.ts tests/replication-ns",
     "test:live:short": "TEST_TIER=short vitest run -c vitest.config.live.ts",
     "test:live:medium": "TEST_TIER=medium vitest run -c vitest.config.live.ts",
     "test:live:long": "TEST_TIER=long vitest run -c vitest.config.live.ts",
