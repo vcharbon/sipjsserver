@@ -204,9 +204,18 @@ const recurseTick = (
       }
       const partial = batch.entries.length < args.chunkSize
       if (partial) {
+        // Noop carries the actual head tuple `(head.gen, head.counter)`,
+        // not `(serverGen, head.counter)`. With per-`(channel, entryGen)`
+        // buckets (Story 7d), `head.gen` may differ from `serverGen` —
+        // e.g. a channel with gen=0 mirror entries but an empty
+        // gen=`serverGen` originating bucket has `head.gen=0`. Stamping
+        // `serverGen` with `head.counter` from a different bucket
+        // fabricates a tuple that no entry occupies; the puller
+        // advances watermark to it and then filters out future
+        // originating writes whose counter is ≤ that value.
         const noop: NoopFrame = {
           _tag: "Noop",
-          gen: args.serverGen,
+          gen: batch.head.gen,
           counter: batch.head.counter,
           latency_ms: 0,
         }
