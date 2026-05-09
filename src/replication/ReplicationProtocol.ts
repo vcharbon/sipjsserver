@@ -78,6 +78,29 @@ export class ProtocolError extends Data.TaggedError("ProtocolError")<{
 }> {}
 
 // ---------------------------------------------------------------------------
+// Tuple ordering
+// ---------------------------------------------------------------------------
+
+/**
+ * Lexicographic compare on `(gen, counter)`. The puller's apply rule —
+ * "apply iff `(F.gen, F.counter) > watermark`" — uses this exclusively;
+ * gen rollover is naturally handled because new-gen tuples sort above
+ * old-gen tuples regardless of where the new counter resets.
+ *
+ * Returns -1 / 0 / 1 in the standard sort-comparator shape.
+ */
+export const compareGenCounter = (
+  a: { readonly gen: number; readonly counter: number },
+  b: { readonly gen: number; readonly counter: number }
+): -1 | 0 | 1 => {
+  if (a.gen < b.gen) return -1
+  if (a.gen > b.gen) return 1
+  if (a.counter < b.counter) return -1
+  if (a.counter > b.counter) return 1
+  return 0
+}
+
+// ---------------------------------------------------------------------------
 // Codec — pure helpers (intentionally outside Effect.gen so the Effect
 // plugin's preferSchemaOverJson rule does not fire on the JSON ops).
 // ---------------------------------------------------------------------------

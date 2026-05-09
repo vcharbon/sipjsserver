@@ -31,8 +31,8 @@ Status legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ blocked
 | 2 | KvBackend Redis impl + parity test (T12) | ✅ | — | Memory-vs-Redis parity verified against local Redis (`KV_BACKEND=redis`). Hybrid clock pump deferred to first TTL-parity test (Slice 3+) per YAGNI. |
 | 3 | ChannelIndex + write path; PRS internals rewire | ✅ | — | ChannelIndex + genCounter + T3/T9/NS3/NS12/NS13 tests landed. PRS rewire deferred to Slice 7 (cutover) — ChannelIndex stays unused by SIP path until then. |
 | 4 | Wire protocol + `/replog` server endpoint | ✅ | — | Codec + server emission loop + NS9 landed. T7 (steady-state lag) deferred to Slice 5 — needs puller for end-to-end measurement. HTTP route registration not wired to main.ts (boot integration is Slice 6). |
-| 5 | PullerFiber + watermark + ReplicationSupervisor | ⬜ | — | |
-| 6 | ReadinessController + EpochCounter rewrite + boot integration | ⬜ | — | Helm-chart change |
+| 5 | PullerFiber + watermark + ReplicationSupervisor | ✅ | — | PullerFiber + ReplicationSupervisor + PeerFabric add/removePeer + NS11 (NS + unit) + T11 landed. T7 (steady-state lag) still deferred — needs write-time `written_at_ms` stamping; bundled with Slice 7 cutover when PRS write path swaps to ChannelIndex. |
+| 6 | ReadinessController + EpochCounter rewrite + boot integration | ✅ | — | EpochCounter v2 (`fromKubernetesDownwardAPI`/`fromWallClock`/`fixedForTesting`) + ReadinessController (T_min/T_max + once-Ready) + EchoApply helper landed. NS5/NS7/NS8 + readiness + epoch-counter unit tests green. Helm-chart wiring of `RESTART_COUNT` env var deferred to deployment slice (init-container reads `status.containerStatuses[*].restartCount` from K8s API; downward `fieldRef` does NOT expose container-level fields directly). Boot wiring (main.ts) deferred to Slice 7 cutover. |
 | 7 | NS-suite full landing + multi-worker tests + cutover | ⬜ | — | High-risk: deletes old code |
 | 8 | Observability metrics | ⬜ | — | |
 | 9 | k8s robustness scenarios | ⬜ | — | |
@@ -47,14 +47,14 @@ Status legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ blocked
 | T1 | apply-idempotent | 3 | ⬜ |
 | T2 | primary-bounded-cost | 7 | ⬜ |
 | T3 | storage-layout | 3 | ✅ |
-| T4 | scenario-self-primary-recovery | 6 | ⬜ |
-| T5 | scenario-self-backup-bootstrap | 6 | ⬜ |
+| T4 | scenario-self-primary-recovery | 6 | ✅ (covered by NS8) |
+| T5 | scenario-self-backup-bootstrap | 6 | ✅ (covered by NS5+NS7) |
 | T6 | scenario-reverse-propagation | 7 | ⬜ |
 | T7 | lag-steady-state | 4 | ⬜ |
 | T8 | boot-30s-budget | 9 | ⬜ |
 | T9 | tuple-comparator (was gen-mismatch) | 3 | ✅ |
 | T10 | (subsumed into NS11; row retired) | — | n/a |
-| T11 | peer-disappear-mid-bootstrap | 5 | ⬜ |
+| T11 | peer-disappear-mid-bootstrap | 5 | ✅ |
 | T12 | port-parity property test | 2 | ✅ |
 | T13 | proxy/peer-stability-during-failover | 9 | ⬜ |
 
@@ -66,13 +66,13 @@ Status legend: ⬜ not started · 🟡 in progress · ✅ done · ⚠️ blocked
 | NS2 | idempotent-overwrite | 7 | ⬜ |
 | NS3 | delete-and-tombstone-ttl | 3 | ✅ |
 | NS4 | reverse-propagation | 7 | ⬜ |
-| NS5 | sidecar-wipe-recovery | 6 | ⬜ |
+| NS5 | sidecar-wipe-recovery | 6 | ✅ |
 | NS6 | backup-was-down | 7 | ⬜ |
-| NS7 | backup-re-bootstrap | 6 | ⬜ |
-| NS8 | primary-recovery-via-reverse | 6 | ⬜ |
+| NS7 | backup-re-bootstrap | 6 | ✅ |
+| NS8 | primary-recovery-via-reverse | 6 | ✅ |
 | NS9 | caught-up-noop | 4 | ✅ |
 | NS10 | tuple-conflict | 7 | ⬜ |
-| NS11 | peer-disappear-watermark | 5 | ⬜ |
+| NS11 | peer-disappear-watermark | 5 | ✅ |
 | NS12 | body-ttl-natural-cleanup | 3 | ✅ |
 | NS13 | tombstone-ttl | 3 | ✅ |
 | NS14 | symmetric-tombstone-from-backup | 7 | ⬜ |

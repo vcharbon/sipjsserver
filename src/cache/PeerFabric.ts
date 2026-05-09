@@ -100,6 +100,25 @@ export interface PeerFabricControlApi {
   readonly setErrorRate: (peer: WorkerOrdinal, rate: number) => Effect.Effect<void>
   /** Synchronous snapshot of the peer's store. */
   readonly snapshotPeer: (peer: WorkerOrdinal) => Effect.Effect<PeerSnapshot>
+  /**
+   * Add a new peer to the fabric mid-test. Allocates a fresh
+   * `MemoryApiHandle` and marks it `alive`. After this returns, the
+   * peer is visible via `fabric.peers`, `storageOf`, `storageLayerOf`,
+   * and `PeerEnumerator.fromFabric`. No-op if the peer already exists.
+   *
+   * Slice 5 of the replication redesign: enables NS11 (peer-disappear-
+   * watermark) and the d6a2b7b regression scenario where a peer arrives
+   * after the worker first checked the enumerator.
+   */
+  readonly addPeer: (peer: WorkerOrdinal) => Effect.Effect<void>
+  /**
+   * Remove a peer from the fabric. After this returns, `fabric.peers`
+   * no longer lists it and `PeerEnumerator.fromFabric` reports a
+   * shrunk set on the next read. The peer's prior storage is
+   * discarded; if it is later re-added it starts fresh. No-op if the
+   * peer is not present.
+   */
+  readonly removePeer: (peer: WorkerOrdinal) => Effect.Effect<void>
 }
 
 export class PeerFabricControl extends ServiceMap.Service<
@@ -120,7 +139,7 @@ interface PeerState {
 }
 
 interface FabricInner {
-  readonly peers: ReadonlyMap<WorkerOrdinal, PeerState>
+  readonly peers: Map<WorkerOrdinal, PeerState>
   readonly partitions: MutableRef.MutableRef<ReadonlySet<string>>
   readonly rng: () => number
 }
@@ -180,7 +199,7 @@ export class PeerFabric extends ServiceMap.Service<PeerFabric, PeerFabricApi>()(
     readonly control: PeerFabricControlApi
   } => {
     const inner = makeFabricInner(workers, opts?.rng ?? Math.random)
-    const fabricApi = makeFabricApi(inner, workers)
+    const fabricApi = makeFabricApi(inner)
     const controlApi = makeControlApi(inner)
     const layer = Layer.succeedServices(
       ServiceMap.make(PeerFabric, fabricApi).pipe(
@@ -228,10 +247,7 @@ const peerOrThrow = (
 const partitionKey = (a: WorkerOrdinal, b: WorkerOrdinal): string =>
   a < b ? `${a}|${b}` : `${b}|${a}`
 
-const makeFabricApi = (
-  inner: FabricInner,
-  workers: ReadonlyArray<WorkerOrdinal>
-): PeerFabricApi => {
+const makeFabricApi = (inner: FabricInner): PeerFabricApi => {
   const storageOf = (ordinal: WorkerOrdinal): MemoryApiHandle =>
     peerOrThrow(inner, ordinal, "PeerFabric.storageOf").handle
 
@@ -248,8 +264,13 @@ const makeFabricApi = (
   ): Layer.Layer<PeerCachePort> =>
     Layer.sync(PeerCachePort, () => makeCachePort(inner, self))
 
+  // `peers` is a getter so `addPeer` / `removePeer` mutations are
+  // immediately visible to callers (most importantly
+  // `PeerEnumerator.fromFabric`, which iterates this on every read).
   return {
-    peers: workers,
+    get peers() {
+      return Array.from(inner.peers.keys()).sort() as ReadonlyArray<WorkerOrdinal>
+    },
     storageOf,
     storageLayerOf,
     cachePortLayerOf,
@@ -520,6 +541,31 @@ const makeControlApi = (inner: FabricInner): PeerFabricControlApi => {
       }
     })
 
+  const addPeer = (peer: WorkerOrdinal): Effect.Effect<void> =>
+    Effect.sync(() => {
+      if (inner.peers.has(peer)) return
+      inner.peers.set(peer, {
+        ordinal: peer,
+        handle: PartitionedRelayStorage.makeMemoryApi(),
+        health: "alive",
+        latencyMs: 0,
+        errorRate: 0,
+      })
+    })
+
+  const removePeer = (peer: WorkerOrdinal): Effect.Effect<void> =>
+    Effect.sync(() => {
+      inner.peers.delete(peer)
+      // Drop any partitions that name this peer — otherwise a re-added
+      // peer would inherit a stale partition flag.
+      const next = new Set(MutableRef.get(inner.partitions))
+      for (const key of [...next]) {
+        const [a, b] = key.split("|") as [WorkerOrdinal, WorkerOrdinal]
+        if (a === peer || b === peer) next.delete(key)
+      }
+      MutableRef.set(inner.partitions, next)
+    })
+
   return {
     killWorker,
     sigtermWorker,
@@ -530,5 +576,7 @@ const makeControlApi = (inner: FabricInner): PeerFabricControlApi => {
     setLatency,
     setErrorRate,
     snapshotPeer,
+    addPeer,
+    removePeer,
   }
 }
