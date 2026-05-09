@@ -6,8 +6,11 @@
  *   1. Frames are emitted in strictly ascending `(gen, counter)` order.
  *   2. When a batch is full (entries.length === chunk_size), the loop
  *      pulls the next batch immediately — no idle sleep.
- *   3. When a batch is partial, the loop emits a `noop` frame at
- *      `headCounter` and then sleeps `noopIntervalMs`.
+ *   3. When a batch is partial, the loop emits a `noop` frame at the
+ *      channel's head tuple `(head.gen, head.counter)` and then sleeps
+ *      `noopIntervalMs`. (`head.gen` may differ from `serverGen` when
+ *      gen=0 mirror entries exist on a channel whose `serverGen` bucket
+ *      is still empty — see ReplLogServer's noop construction.)
  *   4. The `noop` frame is the caught-up signal: receiver flips
  *      `everCaughtUp = true` on first noop.
  *
@@ -69,7 +72,7 @@ const decodeStream = (
   })
 
 describe("buildPullStream — empty channel emits a noop and waits", () => {
-  it.live("first frame on an empty channel is a noop at counter=0", () =>
+  it.live("first frame on an empty channel is a noop at (head.gen=0, counter=0)", () =>
     Effect.gen(function* () {
       const { channel } = setup()
       const stream = buildPullStream({
@@ -82,7 +85,11 @@ describe("buildPullStream — empty channel emits a noop and waits", () => {
       const frames = yield* decodeStream(stream, 1)
       expect(frames.length).toBe(1)
       expect(frames[0]?._tag).toBe("Noop")
-      expect(frames[0]?.gen).toBe(GEN)
+      // Noop carries the channel's head tuple `(head.gen, head.counter)`.
+      // An empty channel has head=(0, 0); the puller's watermark advance
+      // to (0, 0) is a no-op, so subsequent originating writes at
+      // gen=`serverGen`, counter=1.. clear the watermark and apply.
+      expect(frames[0]?.gen).toBe(0)
       expect(frames[0]?.counter).toBe(0)
     })
   )

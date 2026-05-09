@@ -48,6 +48,13 @@ interface OpRecord {
   readonly sinceGen?: number
   readonly sinceCounter?: number
   readonly limit?: number
+  /**
+   * Per-op override for the bucket the U/D lands in. Defaults to
+   * `PARITY_GEN`. Multi-bucket sequences set this explicitly to
+   * mix mirror writes (entryGen=0) with originating writes (entryGen
+   * = worker incarnation gen) on the same channel.
+   */
+  readonly entryGen?: number
 }
 
 // All originating writes use a fixed bucket gen for parity. Per Story
@@ -107,45 +114,7 @@ const applySequence = (
     const counters: Array<number> = []
     const pulls: Array<ChannelPullResult> = []
     for (const op of SEQUENCE) {
-      if (op.tag === "U") {
-        const r = yield* kv
-          .channelWriteUpdate({
-            channel: CHANNEL,
-            counterKey: COUNTER,
-            entryGen: PARITY_GEN,
-            member: memberOf("U", bodyKey(op.callRef!)),
-            bodyKey: bodyKey(op.callRef!),
-            bodyValue: op.bodyValue!,
-            bodyTtlSec: 60,
-            indexes: op.indexes ?? [],
-          })
-          .pipe(Effect.orDie)
-        counters.push(r.counter)
-      } else if (op.tag === "D") {
-        const r = yield* kv
-          .channelWriteTombstone({
-            channel: CHANNEL,
-            counterKey: COUNTER,
-            entryGen: PARITY_GEN,
-            member: memberOf("D", bodyKey(op.callRef!)),
-            bodyKey: bodyKey(op.callRef!),
-            tombstoneValue: '{"tombstone":true}',
-            tombstoneTtlSec: 180,
-            indexesToRemove: op.indexesToRemove ?? [],
-          })
-          .pipe(Effect.orDie)
-        counters.push(r.counter)
-      } else {
-        const r = yield* kv
-          .channelPullBatch({
-            channel: CHANNEL,
-            counterKey: COUNTER,
-            since: { gen: op.sinceGen ?? 0, counter: op.sinceCounter ?? 0 },
-            limit: op.limit!,
-          })
-          .pipe(Effect.orDie)
-        pulls.push(r)
-      }
+      yield* runOp(kv, op, counters, pulls)
     }
     const touched = ["alpha", "beta", "gamma", "delta", "never-written"]
     const finalBodies: Array<{ key: string; body: string | null }> = []
@@ -154,6 +123,167 @@ const applySequence = (
       finalBodies.push({ key: bodyKey(ref), body })
     }
     return { counters, pulls, finalBodies }
+  })
+
+/**
+ * Run a single op against the backend, mirroring the structure of
+ * `applySequence` but reusable across multiple sequences (single-bucket
+ * vs multi-bucket vs cross-incarnation).
+ */
+const runOp = (
+  kv: KvBackendApi,
+  op: OpRecord,
+  counters: Array<number>,
+  pulls: Array<ChannelPullResult>
+): Effect.Effect<void, never> =>
+  Effect.gen(function* () {
+    const entryGen = op.entryGen ?? PARITY_GEN
+    if (op.tag === "U") {
+      const r = yield* kv
+        .channelWriteUpdate({
+          channel: CHANNEL,
+          counterKey: COUNTER,
+          entryGen,
+          member: memberOf("U", bodyKey(op.callRef!)),
+          bodyKey: bodyKey(op.callRef!),
+          bodyValue: op.bodyValue!,
+          bodyTtlSec: 60,
+          indexes: op.indexes ?? [],
+        })
+        .pipe(Effect.orDie)
+      counters.push(r.counter)
+    } else if (op.tag === "D") {
+      const r = yield* kv
+        .channelWriteTombstone({
+          channel: CHANNEL,
+          counterKey: COUNTER,
+          entryGen,
+          member: memberOf("D", bodyKey(op.callRef!)),
+          bodyKey: bodyKey(op.callRef!),
+          tombstoneValue: '{"tombstone":true}',
+          tombstoneTtlSec: 180,
+          indexesToRemove: op.indexesToRemove ?? [],
+        })
+        .pipe(Effect.orDie)
+      counters.push(r.counter)
+    } else {
+      const r = yield* kv
+        .channelPullBatch({
+          channel: CHANNEL,
+          counterKey: COUNTER,
+          since: { gen: op.sinceGen ?? 0, counter: op.sinceCounter ?? 0 },
+          limit: op.limit!,
+        })
+        .pipe(Effect.orDie)
+      pulls.push(r)
+    }
+  })
+
+// ---------------------------------------------------------------------------
+// Multi-bucket sequence — exercises the Story 7d cycle-break primitives
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirror writes (entryGen=0) interleaved with originating writes
+ * (entryGen=PARITY_GEN), pulled at varying lex watermarks. Asserts the
+ * Lua's per-channel "gens" SADD + numeric sort + per-bucket
+ * ZRANGEBYSCORE walk produces identical output to the memory backend's
+ * native-Map + numeric-sort path.
+ *
+ * Critical invariants this exercises (none touched by SEQUENCE above):
+ *   - Cold pull (gen=0, counter=0) returns gen=0 entries before
+ *     gen=PARITY_GEN entries, lex order.
+ *   - Warm pull (gen=PARITY_GEN, counter=N) skips gen=0 entries
+ *     entirely.
+ *   - Same callRef in both buckets coexists as two independent entries
+ *     (mirror at gen=0 + originating at gen=PARITY_GEN); ZADD member
+ *     re-write semantics apply within each bucket but NOT across.
+ *   - head tuple computed across all buckets.
+ *   - per-entry entryGen propagated correctly through PulledEntry.
+ */
+const MIRROR_GEN = 0
+const MULTI_BUCKET_SEQUENCE: ReadonlyArray<OpRecord> = [
+  // Mirror write to bucket gen=0.
+  { tag: "U", callRef: "alpha", bodyValue: '{"v":1,"src":"mirror"}', entryGen: MIRROR_GEN },
+  // Cold pull: returns the mirror entry. head=(0, 1).
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
+  // Originating write to bucket gen=PARITY_GEN.
+  { tag: "U", callRef: "beta", bodyValue: '{"v":2,"src":"orig"}' },
+  // Cold pull: returns BOTH (gen=0 first, then gen=PARITY_GEN).
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
+  // Warm pull from gen=PARITY_GEN bucket: skips the mirror.
+  { tag: "PULL", sinceGen: PARITY_GEN, sinceCounter: 0, limit: 10 },
+  // Same callRef in BOTH buckets — distinct entries.
+  { tag: "U", callRef: "alpha", bodyValue: '{"v":1,"src":"orig"}' }, // gen=PARITY_GEN
+  // Cold pull returns alpha-mirror + beta-orig + alpha-orig (3 entries).
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
+  // Mirror tombstone in gen=0 bucket.
+  { tag: "D", callRef: "alpha", entryGen: MIRROR_GEN, indexesToRemove: [] },
+  // Re-write the mirror member (same callRef) — score bumps within gen=0 bucket.
+  { tag: "U", callRef: "alpha", bodyValue: '{"v":3,"src":"mirror2"}', entryGen: MIRROR_GEN },
+  // Final cold pull with limit=2: tests across-bucket cursor.
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 2 },
+  // Final cold pull, full: head should be the max lex tuple across both buckets.
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 100 },
+]
+
+const applyMultiBucketSequence = (
+  kv: KvBackendApi
+): Effect.Effect<ApplyResult, never> =>
+  Effect.gen(function* () {
+    const counters: Array<number> = []
+    const pulls: Array<ChannelPullResult> = []
+    for (const op of MULTI_BUCKET_SEQUENCE) {
+      yield* runOp(kv, op, counters, pulls)
+    }
+    const touched = ["alpha", "beta"]
+    const finalBodies: Array<{ key: string; body: string | null }> = []
+    for (const ref of touched) {
+      const body = yield* kv.bodyGet(bodyKey(ref)).pipe(Effect.orDie)
+      finalBodies.push({ key: bodyKey(ref), body })
+    }
+    return { counters, pulls, finalBodies }
+  })
+
+// ---------------------------------------------------------------------------
+// Cross-incarnation sequence — exercises bucket persistence across gens
+// ---------------------------------------------------------------------------
+
+/**
+ * Simulates a sidecar surviving a process restart: the worker's
+ * incarnation gen changes from GEN1 to GEN2; old-incarnation buckets
+ * persist in storage and the puller's lex-walk steps through them in
+ * gen-ascending order. This is the "old incarnation's bucket persists
+ * if the sidecar survives" case called out in
+ * docs/replication/architecture.md §"Storage layout".
+ */
+const GEN1 = 5
+const GEN2 = 8
+const CROSS_INCARNATION_SEQUENCE: ReadonlyArray<OpRecord> = [
+  // Old incarnation writes one entry.
+  { tag: "U", callRef: "old", bodyValue: '{"v":"old"}', entryGen: GEN1 },
+  // New incarnation begins; some originating writes.
+  { tag: "U", callRef: "new1", bodyValue: '{"v":"n1"}', entryGen: GEN2 },
+  { tag: "U", callRef: "new2", bodyValue: '{"v":"n2"}', entryGen: GEN2 },
+  // Cold pull walks both buckets in gen order: GEN1 first, then GEN2.
+  { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
+  // A puller mid-incarnation (since=GEN1, counter=1): returns NOTHING from GEN1
+  // (counter > 1 has no entries) but ALL of GEN2 (gen > sinceGen).
+  { tag: "PULL", sinceGen: GEN1, sinceCounter: 1, limit: 10 },
+  // A puller already past GEN2's first counter: returns only counter > 1 from GEN2.
+  { tag: "PULL", sinceGen: GEN2, sinceCounter: 1, limit: 10 },
+]
+
+const applyCrossIncarnationSequence = (
+  kv: KvBackendApi
+): Effect.Effect<ApplyResult, never> =>
+  Effect.gen(function* () {
+    const counters: Array<number> = []
+    const pulls: Array<ChannelPullResult> = []
+    for (const op of CROSS_INCARNATION_SEQUENCE) {
+      yield* runOp(kv, op, counters, pulls)
+    }
+    return { counters, pulls, finalBodies: [] }
   })
 
 const expectParity = (a: ApplyResult, b: ApplyResult): void => {
@@ -171,7 +301,7 @@ const expectParity = (a: ApplyResult, b: ApplyResult): void => {
 // ---------------------------------------------------------------------------
 
 describe("KvBackend port-parity — memory determinism", () => {
-  it.effect("two independent in-memory instances produce identical observable state", () =>
+  it.effect("two independent in-memory instances produce identical observable state (single-bucket sequence)", () =>
     Effect.gen(function* () {
       const storeA = MutableHashMap.empty<string, MemoryStoreEntry>()
       const storeB = MutableHashMap.empty<string, MemoryStoreEntry>()
@@ -179,6 +309,30 @@ describe("KvBackend port-parity — memory determinism", () => {
       const b = KvBackend.makeMemoryUnsafe(storeB)
       const ra = yield* applySequence(a)
       const rb = yield* applySequence(b)
+      expectParity(ra, rb)
+    })
+  )
+
+  it.effect("two independent in-memory instances produce identical observable state (multi-bucket Story 7d sequence)", () =>
+    Effect.gen(function* () {
+      const storeA = MutableHashMap.empty<string, MemoryStoreEntry>()
+      const storeB = MutableHashMap.empty<string, MemoryStoreEntry>()
+      const a = KvBackend.makeMemoryUnsafe(storeA)
+      const b = KvBackend.makeMemoryUnsafe(storeB)
+      const ra = yield* applyMultiBucketSequence(a)
+      const rb = yield* applyMultiBucketSequence(b)
+      expectParity(ra, rb)
+    })
+  )
+
+  it.effect("two independent in-memory instances produce identical observable state (cross-incarnation sequence)", () =>
+    Effect.gen(function* () {
+      const storeA = MutableHashMap.empty<string, MemoryStoreEntry>()
+      const storeB = MutableHashMap.empty<string, MemoryStoreEntry>()
+      const a = KvBackend.makeMemoryUnsafe(storeA)
+      const b = KvBackend.makeMemoryUnsafe(storeB)
+      const ra = yield* applyCrossIncarnationSequence(a)
+      const rb = yield* applyCrossIncarnationSequence(b)
       expectParity(ra, rb)
     })
   )
@@ -215,7 +369,7 @@ describe.skipIf(!REDIS_PARITY_ENABLED)(
   "KvBackend port-parity — memory vs Redis",
   () => {
     it.live(
-      "memory and Redis backends produce identical observable state for the standard sequence",
+      "memory and Redis backends produce identical observable state for the single-bucket sequence",
       () =>
         Effect.gen(function* () {
           const storeA = MutableHashMap.empty<string, MemoryStoreEntry>()
@@ -223,6 +377,40 @@ describe.skipIf(!REDIS_PARITY_ENABLED)(
           const { backend: redisBackend, teardown } = yield* buildRedisBackend
           const memResult = yield* applySequence(memBackend)
           const redisResult = yield* applySequence(redisBackend)
+          try {
+            expectParity(memResult, redisResult)
+          } finally {
+            yield* teardown
+          }
+        }).pipe(Effect.scoped)
+    )
+
+    it.live(
+      "memory and Redis backends produce identical observable state for the multi-bucket Story 7d sequence",
+      () =>
+        Effect.gen(function* () {
+          const storeA = MutableHashMap.empty<string, MemoryStoreEntry>()
+          const memBackend = KvBackend.makeMemoryUnsafe(storeA)
+          const { backend: redisBackend, teardown } = yield* buildRedisBackend
+          const memResult = yield* applyMultiBucketSequence(memBackend)
+          const redisResult = yield* applyMultiBucketSequence(redisBackend)
+          try {
+            expectParity(memResult, redisResult)
+          } finally {
+            yield* teardown
+          }
+        }).pipe(Effect.scoped)
+    )
+
+    it.live(
+      "memory and Redis backends produce identical observable state for the cross-incarnation sequence",
+      () =>
+        Effect.gen(function* () {
+          const storeA = MutableHashMap.empty<string, MemoryStoreEntry>()
+          const memBackend = KvBackend.makeMemoryUnsafe(storeA)
+          const { backend: redisBackend, teardown } = yield* buildRedisBackend
+          const memResult = yield* applyCrossIncarnationSequence(memBackend)
+          const redisResult = yield* applyCrossIncarnationSequence(redisBackend)
           try {
             expectParity(memResult, redisResult)
           } finally {
