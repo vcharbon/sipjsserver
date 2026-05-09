@@ -95,7 +95,10 @@ describe("PeerCacheClient ↔ PeerRelay HTTP round-trip", () => {
         const arr = Array.from(items)
         expect(arr).toHaveLength(1)
         expect(arr[0]!.callRef).toBe("call-1@host")
-        expect(arr[0]!.json).toBe('{"hello":"world"}')
+        // Slice 7c: PRS now stamps `written_at_ms` into the body for
+        // T7 latency. Parse-and-check rather than byte-equality.
+        const parsed = JSON.parse(arr[0]!.json) as Record<string, unknown>
+        expect(parsed["hello"]).toBe("world")
       }).pipe(Effect.provide(clientLayer))
     }).pipe(Effect.provide(ServerLayer)) as Effect.Effect<void>
   )

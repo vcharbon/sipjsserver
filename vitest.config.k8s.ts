@@ -33,6 +33,11 @@ export default defineConfig({
     globalSetup: ["./tests/k8s/globalSetup.ts"],
     pool: "forks",
     forks: { singleFork: true },
+    // Cap the singleton fork at 1 GB so a runaway test cannot starve
+    // the rest of WSL. Applies to `npx vitest` as well as `npm run test*`.
+    poolOptions: {
+      forks: { execArgv: ["--max-old-space-size=1024"] },
+    },
     fileParallelism: false,
     testTimeout: 5 * 60 * 1000,
     hookTimeout: 10 * 60 * 1000,

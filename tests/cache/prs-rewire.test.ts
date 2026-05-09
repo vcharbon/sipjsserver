@@ -227,10 +227,10 @@ const scenarios: ReadonlyArray<{
 // Run scenarios against legacy memoryLayer
 // ---------------------------------------------------------------------------
 
-describe("PartitionedRelayStorage — legacy memoryLayer (existing)", () => {
+describe("PartitionedRelayStorage — legacy memoryLayer (preserved for triage)", () => {
   for (const scn of scenarios) {
     it.effect(scn.name, () =>
-      scn.run().pipe(Effect.provide(PartitionedRelayStorage.memoryLayer))
+      scn.run().pipe(Effect.provide(PartitionedRelayStorage.legacyMemoryLayer))
     )
   }
 })

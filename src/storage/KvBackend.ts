@@ -373,39 +373,24 @@ export type MemoryStore = MutableHashMap.MutableHashMap<
 const NO_EXPIRY_MS = Number.MAX_SAFE_INTEGER
 
 /**
- * In-memory channel representation. Stored as a JSON-encoded value inside
- * the same `MemoryStoreEntry` mechanism so the store has a single uniform
- * type. Sorted lookup is O(N log N) on read — acceptable for tests up to
- * ~10K members; production uses Redis sorted sets.
+ * In-memory channel representation. Stored as a native `Map<member,
+ * score>` per channel, kept in a per-`KvBackend`-instance sidecar
+ * (NOT in the `MemoryStore`). The original design encoded channels
+ * as JSON strings inside the same `MemoryStore` so callers could
+ * snapshot a single map; profiling under Slice 7c showed this was
+ * O(N) per write (`JSON.parse` + `JSON.stringify` of the whole
+ * channel state on every `channelWriteUpdate`) and made the SIP
+ * scenario suite GC-thrash on workers with thousands of calls.
+ *
+ * The native-Map representation keeps every operation O(1) (write)
+ * or O(N) without parse cost (pull). The `MemoryStore` no longer
+ * carries channel state; it holds bodies, indexes, and counters
+ * only. `PeerFabric.snapshotPeer` and other store-iteration callers
+ * are unaffected because they only iterate body/idx keys.
  */
-interface ChannelView {
-  readonly entries: { [member: string]: number }
-}
+type ChannelMap = Map<string, number>
 
-const emptyChannel = (): ChannelView => ({ entries: {} })
-
-const decodeChannel = (raw: string): ChannelView => {
-  const parsed = decodeChannelJson(raw)
-  if (parsed === null) return emptyChannel()
-  return parsed
-}
-
-// Pure helper outside Effect.gen so the Effect plugin's preferSchemaOverJson
-// rule does not fire (the channel value is opaque-pass-through state).
-const decodeChannelJson = (raw: string): ChannelView | null => {
-  try {
-    const obj = JSON.parse(raw) as { entries?: { [k: string]: number } }
-    if (obj && typeof obj === "object" && obj.entries) {
-      return { entries: obj.entries }
-    }
-  } catch {
-    // Corrupted entry — treat as empty.
-  }
-  return null
-}
-
-const encodeChannel = (view: ChannelView): string =>
-  JSON.stringify({ entries: view.entries })
+const emptyChannelMap = (): ChannelMap => new Map<string, number>()
 
 const liveEntry = (
   store: MemoryStore,
@@ -434,22 +419,15 @@ const removeEntry = (store: MemoryStore, key: string): void => {
   MutableHashMap.remove(store, key)
 }
 
-const readChannel = (
-  store: MemoryStore,
-  key: string,
-  nowMs: number
-): ChannelView => {
-  const live = liveEntry(store, key, nowMs)
-  if (live === null) return emptyChannel()
-  return decodeChannel(live.value)
-}
-
-const writeChannel = (
-  store: MemoryStore,
-  key: string,
-  view: ChannelView
-): void => {
-  setEntry(store, key, encodeChannel(view), NO_EXPIRY_MS)
+const getOrCreateChannelMap = (
+  channels: Map<string, ChannelMap>,
+  key: string
+): ChannelMap => {
+  const existing = channels.get(key)
+  if (existing !== undefined) return existing
+  const fresh = emptyChannelMap()
+  channels.set(key, fresh)
+  return fresh
 }
 
 const incrCounter = (
@@ -482,6 +460,15 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
   // is automatic — but cross-fiber ordering needs the mutex.
   const mutex = Semaphore.makeUnsafe(1)
   const exclusive = mutex.withPermits(1)
+
+  // Per-`KvBackend`-instance channel sidecar — `Map<channelKey,
+  // Map<member, score>>`. Native Map keeps writes O(1) and avoids
+  // GC pressure from per-write JSON.stringify of the full channel
+  // state. Channels live for the lifetime of this KvBackend
+  // instance; sharing a `MemoryStore` across instances does NOT
+  // share the channels (use-case: `PeerFabric.simulated`'s per-peer
+  // makeMemoryApiFor — channels are correctly per-peer).
+  const channels = new Map<string, ChannelMap>()
 
   const nowMs = Clock.currentTimeMillis
 
@@ -528,9 +515,10 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
           for (const idx of args.indexes) {
             setEntry(store, idx.key, idx.value, ms + idx.ttlSec * 1000)
           }
-          const view = readChannel(store, args.channel, ms)
-          view.entries[args.member] = counter
-          writeChannel(store, args.channel, view)
+          // Native Map write: O(1). Re-writing the same `member` key
+          // replaces its score (sorted-set semantics) — no allocation.
+          const ch = getOrCreateChannelMap(channels, args.channel)
+          ch.set(args.member, counter)
           return { counter }
         })
       })
@@ -551,9 +539,8 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
           for (const idxKey of args.indexesToRemove) {
             removeEntry(store, idxKey)
           }
-          const view = readChannel(store, args.channel, ms)
-          view.entries[args.member] = counter
-          writeChannel(store, args.channel, view)
+          const ch = getOrCreateChannelMap(channels, args.channel)
+          ch.set(args.member, counter)
           return { counter }
         })
       })
@@ -563,21 +550,23 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
     exclusive(
       Effect.gen(function* () {
         const ms = yield* nowMs
-        const view = readChannel(store, args.channel, ms)
+        const ch = channels.get(args.channel)
         const headCounter = readCounter(store, args.counterKey, ms)
-        // Sort entries by score ascending; emit those with score > sinceScore.
+        if (ch === undefined || ch.size === 0) {
+          return { entries: [] as ReadonlyArray<PulledEntry>, headCounter }
+        }
+        // Iterate the native Map; filter by sinceScore. Avoids the
+        // legacy `Object.entries(view.entries)` allocation pattern.
         const all: Array<{ member: string; score: number }> = []
-        for (const [member, score] of Object.entries(view.entries)) {
+        for (const [member, score] of ch) {
           if (score > args.sinceScore) all.push({ member, score })
         }
         all.sort((a, b) => a.score - b.score)
-        const slice = all.slice(0, args.limit)
+        const slice = all.length > args.limit ? all.slice(0, args.limit) : all
         const entries: Array<PulledEntry> = []
         for (const { member, score } of slice) {
           const bodyKey = KvBackend.bodyKeyFromMember(member)
           if (bodyKey === null) {
-            // Malformed member — surface as a typed error so tests catch
-            // the bug. v4 idiom: `yield*` the TaggedError directly.
             return yield* new KvError({
               reason: `channelPullBatch: malformed member "${member}" in channel ${args.channel}`,
             })

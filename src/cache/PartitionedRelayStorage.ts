@@ -49,6 +49,14 @@ import {
   type AtomicWriterError,
   type PropagateDirection,
 } from "../replication/AtomicWriter.js"
+// Lazy import — only consumed inside Layer.sync bodies so the
+// module cycle (PartitionedRelayStorageKvBacked imports types and
+// the class statics from this file) is resolved before either
+// initializer fires.
+import {
+  kvBackedMemoryLayer,
+  makeKvBackedMemoryApi,
+} from "./PartitionedRelayStorageKvBacked.js"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -360,14 +368,36 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
   // `RedisClient | AtomicWriter | WriteNotifier`.
 
   /**
-   * Tests: in-memory MutableHashMap + Effect Clock. TTL is enforced
-   * on access (sweep-on-touch), matching `CallStateCache.memoryLayer`.
-   * Writes route through an embedded AtomicWriter that wraps the same
-   * MutableHashMap with a single-permit Semaphore — this gives the
-   * memory layer the same all-or-nothing contract as the Lua-backed
-   * production layer (Slice 1, [docs/replication/call-cache-backup.md §5.7](../../docs/replication/call-cache-backup.md)).
+   * Tests: in-memory MutableHashMap. As of Slice 7c, the default
+   * memory layer is backed by the new `kvBackedMemoryLayer`
+   * (KvBackend + ChannelIndex), parity-verified against the legacy
+   * AtomicWriter path in `tests/cache/prs-rewire.test.ts`.
+   *
+   * Defaults: `self="self"`, `gen=1`. Tests that need a different
+   * worker identity should construct a layer via
+   * `kvBackedMemoryLayer({ self, gen })` directly, or use
+   * `makeMemoryApiFor(self)`.
+   *
+   * The legacy AtomicWriter-backed layer is preserved as
+   * `legacyMemoryLayer` for the duration of the cutover so any
+   * regression that surfaces post-swap can be diagnosed by binary
+   * bisection.
    */
-  static readonly memoryLayer = Layer.sync(
+  // `Layer.suspend` defers `kvBackedMemoryLayer(...)` past this class's
+  // static-initializer phase, dodging the module-cycle TDZ where
+  // `PartitionedRelayStorage` is still being defined when the cyclic
+  // module's `Layer.sync(PartitionedRelayStorage, ...)` would capture
+  // the tag.
+  static readonly memoryLayer: Layer.Layer<PartitionedRelayStorage> =
+    Layer.suspend(() => kvBackedMemoryLayer({ self: "self", gen: 1 }))
+
+  /**
+   * Pre-Slice-7c memoryLayer. Kept on the public surface temporarily
+   * so a regression triage can swap layers at the test boundary
+   * without code changes. Will be removed in the final cleanup once
+   * the swap is fully validated.
+   */
+  static readonly legacyMemoryLayer = Layer.sync(
     PartitionedRelayStorage,
     () => makeMemoryApi().api
   )
@@ -379,12 +409,50 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
    * sharing the exact memoryLayer semantics — every peer's storage is
    * the same object the rest of the codebase already exercises.
    *
-   * The returned `store` reference is exposed so the fabric's
-   * `snapshotPeer` test API can read every entry without going through
-   * the public surface (snapshots include expired entries that the
-   * sweep-on-touch ops would otherwise hide).
+   * As of Slice 7c, the default factory is the KV-backed implementation
+   * with `self="self"`. Multi-worker callers (PeerFabric) should use
+   * `makeMemoryApiFor(self)` so each peer's storage is correctly
+   * identified for the per-`(self, peer)` ChannelIndex bindings.
    */
-  static readonly makeMemoryApi = (): MemoryApiHandle => makeMemoryApi()
+  static readonly makeMemoryApi = (): MemoryApiHandle =>
+    kvBackedMemoryApiHandle("self", 1)
+
+  /**
+   * Variant of `makeMemoryApi` that accepts the worker's ordinal so
+   * the per-peer ChannelIndex bindings carry the correct `self`
+   * identity. Used by `PeerFabric.simulated` to construct one
+   * storage per worker.
+   */
+  static readonly makeMemoryApiFor = (
+    self: string,
+    gen: number = 1
+  ): MemoryApiHandle => kvBackedMemoryApiHandle(self, gen)
+
+  /**
+   * Pre-Slice-7c factory. Kept temporarily for regression triage.
+   */
+  static readonly makeLegacyMemoryApi = (): MemoryApiHandle => makeMemoryApi()
+}
+
+// ---------------------------------------------------------------------------
+// KV-backed `MemoryApiHandle` adapter
+// ---------------------------------------------------------------------------
+
+/**
+ * Adapt `makeKvBackedMemoryApi`'s return shape (whose store carries
+ * `MemoryStoreEntry` from `KvBackend`) to this module's
+ * `MemoryApiHandle` shape (`MemoryEntry`). The two entry types are
+ * structurally identical (`{ value: string; expiresAtMs: number }`),
+ * so the cast at the boundary is safe; the alternative would be a
+ * runtime copy of every entry on every call, which is wasteful for
+ * a test-only path.
+ */
+const kvBackedMemoryApiHandle = (self: string, gen: number): MemoryApiHandle => {
+  const built = makeKvBackedMemoryApi({ self, gen })
+  return {
+    api: built.api,
+    store: built.store as unknown as MutableHashMap.MutableHashMap<string, MemoryEntry>,
+  }
 }
 
 // ---------------------------------------------------------------------------

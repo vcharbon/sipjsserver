@@ -458,21 +458,28 @@ describe("KvBackend.memory — channelPullBatch", () => {
 
   it.effect("malformed member returns a typed KvError", () =>
     Effect.gen(function* () {
-      const { store, kv } = setup()
-      // Write a malformed member directly into the channel (skipping the
-      // U:/D: prefix convention) to simulate a programming bug upstream.
-      yield* Effect.sync(() =>
-        MutableHashMap.set(store, CHANNEL, {
-          value: JSON.stringify({ entries: { "malformed-no-prefix": 1 } }),
-          expiresAtMs: Number.MAX_SAFE_INTEGER,
-        })
-      )
-      yield* Effect.sync(() =>
-        MutableHashMap.set(store, COUNTER, {
-          value: "1",
-          expiresAtMs: Number.MAX_SAFE_INTEGER,
-        })
-      )
+      const { kv } = setup()
+      // Write a malformed member through the public API by skipping
+      // the U:/D: prefix convention. The KvBackend write path
+      // doesn't enforce the convention (member is opaque to it);
+      // pullBatch parses the prefix and returns a typed KvError on
+      // the round-trip when it can't derive the body key.
+      //
+      // Slice 7c note: channels are now stored in a per-instance
+      // native Map sidecar (not in the MemoryStore). Test injection
+      // must go through the public API rather than poking at the
+      // store directly, so this scenario writes a malformed member
+      // via `channelWriteUpdate`. The body key for the malformed
+      // member is irrelevant since the parse fails before MGET.
+      yield* kv.channelWriteUpdate({
+        channel: CHANNEL,
+        counterKey: COUNTER,
+        member: "malformed-no-prefix",
+        bodyKey: "irrelevant",
+        bodyValue: "{}",
+        bodyTtlSec: 60,
+        indexes: [],
+      })
       const result = yield* Effect.exit(
         kv.channelPullBatch({
           channel: CHANNEL,

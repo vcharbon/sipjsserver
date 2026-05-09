@@ -222,7 +222,7 @@ const makeFabricInner = (
   for (const w of workers) {
     peers.set(w, {
       ordinal: w,
-      handle: PartitionedRelayStorage.makeMemoryApi(),
+      handle: PartitionedRelayStorage.makeMemoryApiFor(w),
       health: "alive",
       latencyMs: 0,
       errorRate: 0,
@@ -472,7 +472,7 @@ const makeControlApi = (inner: FabricInner): PeerFabricControlApi => {
     Effect.sync(() => {
       const st = peerOrThrow(inner, peer, "PeerFabricControl.rebootWorker")
       // Fresh store mimics ephemeral sidecar Redis (no persistence).
-      st.handle = PartitionedRelayStorage.makeMemoryApi()
+      st.handle = PartitionedRelayStorage.makeMemoryApiFor(peer)
       st.health = "alive"
       st.latencyMs = 0
       st.errorRate = 0
@@ -546,7 +546,7 @@ const makeControlApi = (inner: FabricInner): PeerFabricControlApi => {
       if (inner.peers.has(peer)) return
       inner.peers.set(peer, {
         ordinal: peer,
-        handle: PartitionedRelayStorage.makeMemoryApi(),
+        handle: PartitionedRelayStorage.makeMemoryApiFor(peer),
         health: "alive",
         latencyMs: 0,
         errorRate: 0,

@@ -38,7 +38,12 @@ describe("PartitionedRelayStorage.memoryLayer", () => {
         const items = Array.from(scanned)
         expect(items).toHaveLength(1)
         expect(items[0]!.callRef).toBe("call-1")
-        expect(items[0]!.json).toBe('{"hello":"world"}')
+        // Slice 7c: PRS now stamps `written_at_ms` into the body so
+        // the puller can compute end-to-end replication latency
+        // (T7). The user-supplied content is preserved; we parse and
+        // assert on the relevant fields rather than byte-equality.
+        const parsed = JSON.parse(items[0]!.json) as Record<string, unknown>
+        expect(parsed["hello"]).toBe("world")
         expect(items[0]!.ttlSec).toBeGreaterThan(0)
       })
     )
