@@ -147,14 +147,20 @@ export class CallState extends ServiceMap.Service<
   {
     /** Create a new call and store it in memory. Returns the callRef. */
     readonly create: (call: Call) => Effect.Effect<string>
-    /** Acquire the semaphore for a call, load from cache if needed. */
-    readonly checkout: (callRef: string) => Effect.Effect<Call | undefined, RedisError>
-    /** Update a call in memory (must be checked out). */
+    /**
+     * Run `body` while holding the per-callRef serialisation permit. The
+     * call is loaded from memory or cache before `body` runs; the permit
+     * is released by `Semaphore.withPermits`'s uninterruptible finalizer
+     * on success, error, and fiber interrupt — so callers cannot leak it.
+     */
+    readonly withCall: <A, E, R>(
+      callRef: string,
+      body: (call: Call | undefined) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | RedisError, R>
+    /** Update a call in memory (must be inside a `withCall` body). */
     readonly update: (callRef: string, fn: (call: Call) => Call) => Effect.Effect<void>
-    /** Get call without checkout (read-only, from memory only). */
+    /** Get call without serialisation (read-only, from memory only). */
     readonly peek: (callRef: string) => Effect.Effect<Call | undefined>
-    /** Release the semaphore (call this after processing a message). */
-    readonly release: (callRef: string) => Effect.Effect<void>
     /** Flush a call to the cache. Memory entry stays. */
     readonly flushToRedis: (callRef: string) => Effect.Effect<void, RedisError>
     /** Remove a call from memory and schedule cache cleanup. */
@@ -378,10 +384,14 @@ export class CallState extends ServiceMap.Service<
         return call.callRef
       })
 
-      const checkout = Effect.fnUntraced(function* (callRef: string) {
-        const sem = yield* getSemaphore(callRef)
-        yield* Semaphore.take(sem, 1)
-
+      // Pure load: returns the live call for `callRef` from memory or
+      // cache, or `undefined` for cache-miss / tombstone / decode-error /
+      // terminated-or-terminating-state. Holds no semaphore by itself —
+      // it must run inside a `sem.withPermits(1)(...)` block (see
+      // `withCall` below) so concurrent events for the same callRef are
+      // serialised. Tombstone / decode-failure rationale: see
+      // `isReplicationTombstone` and `logDecodeFailure` above.
+      const loadCall = Effect.fnUntraced(function* (callRef: string) {
         const inMemory = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
         if (inMemory !== undefined) return inMemory
 
@@ -390,51 +400,24 @@ export class CallState extends ServiceMap.Service<
           .getCall(role, primary, callRef)
           .pipe(Effect.mapError(toRedisErr))
 
-        // Three "no live call to return" branches feed the same cleanup:
-        //
-        //   1. cache miss (`json === null`)
-        //   2. cache holds a replication tombstone (deletion sentinel)
-        //   3. cache body fails to schema-decode (corruption / regression)
-        //
-        // All three release the semaphore acquired above + drop the map
-        // slot so a misrouted request / late retransmission / cross-
-        // worker stray packet does not leak one SemaphoreImpl per hit.
-        // See sippperftest investigation 2026-05-02 for the measured
-        // leak rate (~2 sems per call under 100 cps + 2 workers) on the
-        // historical `json === null` path; the orDie path used to add a
-        // second leak (SchemaError → defect → consumer catchCause →
-        // semaphore never released, future checkouts of the same callRef
-        // block on Semaphore.take forever).
-        const releaseAndDropSlot = Effect.gen(function* () {
-          yield* Semaphore.release(sem, 1)
-          yield* Effect.sync(() => MutableHashMap.remove(semaphores, callRef))
-        })
-
-        if (json === null) {
-          yield* releaseAndDropSlot
-          return undefined
-        }
+        if (json === null) return undefined
 
         if (isReplicationTombstone(json)) {
           // Late retransmit on a deleted call — RFC 3261 §12.2.2 says
           // the worker should reply 481 anyway, which the SipRouter
-          // caller does on `checkout === undefined`. Demoted to debug:
-          // expected at low rates whenever a peer's tombstone races a
-          // last in-dialog message.
+          // caller does on `withCall`-body `call === undefined`.
           yield* Effect.logDebug(
-            `[CallState] checkout saw replication tombstone for ${callRef} — treating as no-call`,
+            `[CallState] loadCall saw replication tombstone for ${callRef} — treating as no-call`,
           )
-          yield* releaseAndDropSlot
           return undefined
         }
 
-        const decoded = yield* Schema.decodeUnknownEffect(JsonCallSchema)(json).pipe(
-          Effect.tapErrorTag("SchemaError", logDecodeFailure("checkout", callRef, json)),
-          Effect.catchTag("SchemaError", () =>
-            Effect.as(releaseAndDropSlot, undefined),
-          ),
+        const decodedOpt = yield* Schema.decodeUnknownEffect(JsonCallSchema)(json).pipe(
+          Effect.tapErrorTag("SchemaError", logDecodeFailure("loadCall", callRef, json)),
+          Effect.option,
         )
-        if (decoded === undefined) return undefined
+        if (Option.isNone(decodedOpt)) return undefined
+        const decoded = decodedOpt.value
 
         // Don't reload terminated/terminating calls into memory from cache.
         // "terminated": lingered in cache for retransmission safety but must
@@ -444,16 +427,11 @@ export class CallState extends ServiceMap.Service<
         //   entry expire naturally (or be cleaned by loadOwnedCalls).
         if (decoded.state === "terminated" || decoded.state === "terminating") {
           if (decoded.state === "terminating") {
-            yield* Effect.logWarning(`Checkout skipping terminating call ${callRef} from cache — stuck after crash, deleting`)
+            yield* Effect.logWarning(`loadCall skipping terminating call ${callRef} from cache — stuck after crash, deleting`)
             yield* storage
               .deleteCall(role, primary, callRef, callIndexKeys(decoded))
               .pipe(Effect.mapError(toRedisErr))
           }
-          yield* Semaphore.release(sem, 1)
-          // Same orphan-semaphore cleanup as the json===null branch above.
-          // Without this, every retransmitted message for an already-
-          // terminated call leaks a SemaphoreImpl.
-          yield* Effect.sync(() => MutableHashMap.remove(semaphores, callRef))
           return undefined
         }
 
@@ -461,6 +439,38 @@ export class CallState extends ServiceMap.Service<
         yield* indexCall(decoded)
         return decoded
       })
+
+      // Public API: run `body` under the per-callRef serialisation
+      // permit. `Semaphore.withPermits(1)` releases the permit in an
+      // uninterruptible finalizer on success, error, AND fiber
+      // interrupt, so the take/release pair cannot leak — the dangerous
+      // shape that the historical `checkout` + `release` API allowed.
+      // See sippperftest investigation 2026-05-02 for the measured
+      // leak rate (~2 sems per call under 100 cps + 2 workers) on the
+      // pre-fix code.
+      const withCall = <A, E, R>(
+        callRef: string,
+        body: (call: Call | undefined) => Effect.Effect<A, E, R>,
+      ): Effect.Effect<A, E | RedisError, R> =>
+        Effect.gen(function* () {
+          const sem = yield* getSemaphore(callRef)
+          return yield* sem.withPermits(1)(
+            Effect.gen(function* () {
+              const call = yield* loadCall(callRef)
+              const result = yield* body(call)
+              if (call === undefined) {
+                // Memory hygiene: drop the per-callRef sem slot for
+                // callRefs with no live call so the map cannot grow
+                // unboundedly under retransmits / strays. Benign under
+                // races: a concurrent fiber that re-creates the slot
+                // protects nothing (no shared state for a missing call)
+                // and the next sweep through this branch drops it again.
+                yield* Effect.sync(() => MutableHashMap.remove(semaphores, callRef))
+              }
+              return result
+            }),
+          )
+        })
 
       const update = Effect.fnUntraced(function* (
         callRef: string,
@@ -476,13 +486,6 @@ export class CallState extends ServiceMap.Service<
 
       const peek = Effect.fnUntraced(function* (callRef: string) {
         return Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
-      })
-
-      const release = Effect.fnUntraced(function* (callRef: string) {
-        const sem = Option.getOrUndefined(MutableHashMap.get(semaphores, callRef))
-        if (sem !== undefined) {
-          yield* Semaphore.release(sem, 1)
-        }
       })
 
       const flushToRedis = Effect.fnUntraced(function* (callRef: string) {
@@ -916,7 +919,7 @@ export class CallState extends ServiceMap.Service<
         layerScope,
       )
 
-      return { create, checkout, update, peek, release, flushToRedis, remove, forcePurge, resolveFromSipKey, stats, statsSync, loadOwnedCalls, flushAllCalls }
+      return { create, withCall, update, peek, flushToRedis, remove, forcePurge, resolveFromSipKey, stats, statsSync, loadOwnedCalls, flushAllCalls }
     })
   )
 }

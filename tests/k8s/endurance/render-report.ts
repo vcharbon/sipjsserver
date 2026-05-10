@@ -111,6 +111,47 @@ interface QueueDepthSeries {
   readonly perPair: Readonly<Record<string, ReadonlyArray<number>>>
 }
 
+/**
+ * One series per (metric × pod × labels-without-`pod`-key). Each
+ * series shares the report's master time grid so all metric charts
+ * pan/zoom together. The `label` is what shows in the chart legend
+ * (e.g. `worker-0[reason=request_invite]`).
+ */
+interface MetricSeries {
+  readonly label: string
+  readonly values: ReadonlyArray<number>
+}
+
+interface MetricSeriesGrid {
+  readonly t: ReadonlyArray<number>
+  readonly series: ReadonlyArray<MetricSeries>
+}
+
+/**
+ * Snapshot of the worker-side Prometheus metrics that the recorder
+ * collects in `metrics/<pod>.ndjson`. Only the metrics that materially
+ * help diagnose the freeze / overload classes are charted; everything
+ * else stays in the CSVs for ad-hoc inspection.
+ */
+interface WorkerMetricCharts {
+  readonly gcWindowPause: MetricSeriesGrid
+  readonly loopLagP95: MetricSeriesGrid
+  readonly eventQueueDepth: MetricSeriesGrid
+  readonly eventQueueDropsRate: MetricSeriesGrid
+  readonly terminatingByBucket: MetricSeriesGrid
+  readonly activeTimers: MetricSeriesGrid
+  readonly forcePurgeTotal: MetricSeriesGrid
+  readonly handlerTimeoutsRate: MetricSeriesGrid
+  readonly udpQueueDepth: MetricSeriesGrid
+  readonly udpDropsRate: MetricSeriesGrid
+  readonly overloadFraction: MetricSeriesGrid
+  readonly overloadShedProb: MetricSeriesGrid
+  readonly otelBspQueueDepth: MetricSeriesGrid
+  readonly otelBspDroppedRate: MetricSeriesGrid
+  readonly procVmRss: MetricSeriesGrid
+  readonly procThreads: MetricSeriesGrid
+}
+
 interface ReportData {
   readonly runId: string
   readonly tStart: number
@@ -137,6 +178,7 @@ interface ReportData {
   readonly streams: ReadonlyArray<SippStream>
   readonly proxyWarnings: WarningSeries
   readonly queueDepth: QueueDepthSeries
+  readonly workerMetrics: WorkerMetricCharts
 }
 
 /* -------------------------------------------------------------------- */
@@ -200,16 +242,19 @@ const parseSippStatCsv = async (
     const callRate = idxCallRateP >= 0 ? parseFloat(cols[idxCallRateP] ?? "0") : 0
     const failedP = parseFloat(cols[idxFailedP] ?? "0")
     const successP = idxSuccessP >= 0 ? parseFloat(cols[idxSuccessP] ?? "0") : 0
-    // Sipp CSV writes one trailing cumulative-only row whose period
-    // values are 0; skip it by requiring a positive period count when
-    // we already have rows.
+    // Sipp writes one trailing cumulative-only row at shutdown whose
+    // period counters are all zero. Drop ONLY that final row — never
+    // mid-test rows: under saturation a SIPP stream may legitimately
+    // launch zero new calls and see zero answers in a 10s period
+    // while still holding thousands of calls in CurrentCall, and
+    // those rows are exactly the "wedged" plateau the report needs.
     if (
-      i > 1 &&
+      i === lines.length - 1 &&
       callRate === 0 &&
       failedP === 0 &&
       successP === 0
     ) {
-      continue
+      break
     }
     t.push(unix)
     callsPerSec.push(Number.isFinite(callRate) ? callRate : 0)
@@ -489,6 +534,161 @@ const replayInviteRate = (
 }
 
 /* -------------------------------------------------------------------- */
+/* Worker /metrics scrape — series builder                               */
+/* -------------------------------------------------------------------- */
+
+interface MetricRow {
+  readonly tScrape: string
+  readonly pod: string
+  readonly metric: string
+  readonly labels: Record<string, string>
+  readonly value: number
+}
+
+interface ProcRow {
+  readonly tScrape: string
+  readonly pod: string
+  readonly VmRSS?: number
+  readonly Threads?: number
+}
+
+/**
+ * Build a `metric × pod × split-label` master grid. `kind` selects
+ * gauge semantics (sample-mean per bucket) vs counter semantics (raw
+ * delta over each bucket, divided by the bucket period to yield a
+ * per-second rate). `splitLabel` projects rows onto a single label
+ * dimension — useful for `b2bua_overload_fraction{signal=…}` etc.
+ *
+ * Empty buckets are filled with 0 (rate) or carry-forward (gauge) so
+ * the resulting series is dense and uPlot can connect points cleanly
+ * even across the rare missed scrape interval.
+ */
+const buildMetricSeries = (
+  rows: ReadonlyArray<MetricRow>,
+  metric: string,
+  kind: "gauge" | "rate",
+  tStart: number,
+  tEnd: number,
+  periodSec: number,
+  splitLabel?: string,
+): MetricSeriesGrid => {
+  const buckets = Math.max(1, Math.ceil((tEnd - tStart) / periodSec))
+  const t: Array<number> = new Array(buckets)
+  for (let i = 0; i < buckets; i++) t[i] = tStart + i * periodSec
+
+  // Group rows by (pod, splitValue), preserving scrape time order.
+  const grouped = new Map<string, Array<{ readonly t: number; readonly v: number }>>()
+  for (const r of rows) {
+    if (r.metric !== metric) continue
+    const splitV = splitLabel === undefined ? "" : (r.labels[splitLabel] ?? "")
+    const key = splitV === "" ? r.pod : `${r.pod}[${splitLabel}=${splitV}]`
+    const tSec = new Date(r.tScrape).getTime() / 1000
+    if (!Number.isFinite(tSec)) continue
+    let list = grouped.get(key)
+    if (list === undefined) {
+      list = []
+      grouped.set(key, list)
+    }
+    list.push({ t: tSec, v: r.value })
+  }
+
+  const series: Array<MetricSeries> = []
+  const labels = Array.from(grouped.keys()).sort()
+  for (const lab of labels) {
+    const samples = grouped.get(lab)!
+    samples.sort((a, b) => a.t - b.t)
+    const out: Array<number> = new Array(buckets).fill(0)
+    if (kind === "gauge") {
+      const sum: Array<number> = new Array(buckets).fill(0)
+      const cnt: Array<number> = new Array(buckets).fill(0)
+      for (const s of samples) {
+        if (s.t < tStart || s.t > tEnd) continue
+        const idx = Math.min(buckets - 1, Math.floor((s.t - tStart) / periodSec))
+        sum[idx] = (sum[idx] ?? 0) + s.v
+        cnt[idx] = (cnt[idx] ?? 0) + 1
+      }
+      // carry-forward last seen bucket value into empty buckets so the
+      // line stays continuous; leading empties stay at 0.
+      let last = 0
+      for (let i = 0; i < buckets; i++) {
+        const c = cnt[i] ?? 0
+        if (c > 0) {
+          last = (sum[i] ?? 0) / c
+          out[i] = last
+        } else {
+          out[i] = last
+        }
+      }
+    } else {
+      // counter — delta between successive samples, attributed to the
+      // bucket that contains the *later* sample, divided by bucket
+      // period for a per-second rate.
+      for (let i = 1; i < samples.length; i++) {
+        const a = samples[i - 1]!
+        const b = samples[i]!
+        if (b.t < tStart || b.t > tEnd) continue
+        const dv = Math.max(0, b.v - a.v)
+        const idx = Math.min(buckets - 1, Math.floor((b.t - tStart) / periodSec))
+        out[idx] = (out[idx] ?? 0) + dv / periodSec
+      }
+    }
+    series.push({ label: lab, values: out })
+  }
+  return { t, series }
+}
+
+const buildProcSeries = (
+  rows: ReadonlyArray<ProcRow>,
+  field: "VmRSS" | "Threads",
+  tStart: number,
+  tEnd: number,
+  periodSec: number,
+): MetricSeriesGrid => {
+  const buckets = Math.max(1, Math.ceil((tEnd - tStart) / periodSec))
+  const t: Array<number> = new Array(buckets)
+  for (let i = 0; i < buckets; i++) t[i] = tStart + i * periodSec
+  const byPod = new Map<string, Array<{ readonly t: number; readonly v: number }>>()
+  for (const r of rows) {
+    const v = r[field]
+    if (typeof v !== "number") continue
+    const tSec = new Date(r.tScrape).getTime() / 1000
+    if (!Number.isFinite(tSec)) continue
+    let list = byPod.get(r.pod)
+    if (list === undefined) {
+      list = []
+      byPod.set(r.pod, list)
+    }
+    list.push({ t: tSec, v })
+  }
+  const series: Array<MetricSeries> = []
+  for (const pod of Array.from(byPod.keys()).sort()) {
+    const samples = byPod.get(pod)!
+    samples.sort((a, b) => a.t - b.t)
+    const out: Array<number> = new Array(buckets).fill(0)
+    const sum: Array<number> = new Array(buckets).fill(0)
+    const cnt: Array<number> = new Array(buckets).fill(0)
+    for (const s of samples) {
+      if (s.t < tStart || s.t > tEnd) continue
+      const idx = Math.min(buckets - 1, Math.floor((s.t - tStart) / periodSec))
+      sum[idx] = (sum[idx] ?? 0) + s.v
+      cnt[idx] = (cnt[idx] ?? 0) + 1
+    }
+    let last = 0
+    for (let i = 0; i < buckets; i++) {
+      const c = cnt[i] ?? 0
+      if (c > 0) {
+        last = (sum[i] ?? 0) / c
+        out[i] = last
+      } else {
+        out[i] = last
+      }
+    }
+    series.push({ label: pod, values: out })
+  }
+  return { t, series }
+}
+
+/* -------------------------------------------------------------------- */
 /* Main                                                                  */
 /* -------------------------------------------------------------------- */
 
@@ -573,6 +773,61 @@ const buildReportData = async (artifactDir: string): Promise<ReportData> => {
   allSamples.sort((a, b) => a.t - b.t)
   const queueDepth = bucketQueueDepth(allSamples, tStart, tEnd, SAMPLE_PERIOD_SEC)
 
+  // Worker /metrics scrape — slurp every metrics/<pod>.ndjson into a
+  // flat row list, then build per-chart series. The recorder pre-
+  // filters to known metrics, so unrelated rows are absent rather
+  // than expensive to skip here.
+  const metricsDir = path.join(artifactDir, "metrics")
+  const metricsFiles = await fsp.readdir(metricsDir).catch(() => [] as Array<string>)
+  const metricRows: Array<MetricRow> = []
+  const procRows: Array<ProcRow> = []
+  for (const f of metricsFiles) {
+    if (f.endsWith(".proc.ndjson")) {
+      const rows = await readNdjson<ProcRow>(path.join(metricsDir, f))
+      for (const r of rows) procRows.push(r)
+    } else if (f.endsWith(".ndjson")) {
+      const rows = await readNdjson<MetricRow>(path.join(metricsDir, f))
+      for (const r of rows) metricRows.push(r)
+    }
+  }
+
+  const series = (
+    metric: string,
+    kind: "gauge" | "rate",
+    splitLabel?: string,
+  ): MetricSeriesGrid =>
+    buildMetricSeries(metricRows, metric, kind, tStart, tEnd, SAMPLE_PERIOD_SEC, splitLabel)
+
+  const workerMetrics: WorkerMetricCharts = {
+    gcWindowPause: series("b2bua_gc_window_pause_seconds", "gauge"),
+    loopLagP95: series("b2bua_loop_lag_ms_p95", "gauge"),
+    eventQueueDepth: series("b2bua_worker_event_queue_depth", "gauge"),
+    eventQueueDropsRate: series(
+      "b2bua_worker_event_queue_drops_total",
+      "rate",
+      "reason",
+    ),
+    terminatingByBucket: series(
+      "b2bua_worker_terminating_calls",
+      "gauge",
+      "age_bucket",
+    ),
+    activeTimers: series("b2bua_worker_active_timers", "gauge"),
+    forcePurgeTotal: series("b2bua_worker_call_force_purge_total", "gauge"),
+    handlerTimeoutsRate: series(
+      "b2bua_worker_event_handler_timeouts_total",
+      "rate",
+    ),
+    udpQueueDepth: series("b2bua_udp_queue_depth", "gauge"),
+    udpDropsRate: series("b2bua_udp_drops_total", "rate", "reason"),
+    overloadFraction: series("b2bua_overload_fraction", "gauge", "signal"),
+    overloadShedProb: series("b2bua_overload_shed_probability", "gauge"),
+    otelBspQueueDepth: series("b2bua_otel_bsp_queue_depth", "gauge"),
+    otelBspDroppedRate: series("b2bua_otel_bsp_dropped_total", "rate"),
+    procVmRss: buildProcSeries(procRows, "VmRSS", tStart, tEnd, SAMPLE_PERIOD_SEC),
+    procThreads: buildProcSeries(procRows, "Threads", tStart, tEnd, SAMPLE_PERIOD_SEC),
+  }
+
   return {
     runId: meta.runId,
     tStart,
@@ -591,6 +846,7 @@ const buildReportData = async (artifactDir: string): Promise<ReportData> => {
     streams,
     proxyWarnings: { t: warnRate.t, ratePerSec: warnRate.rate },
     queueDepth,
+    workerMetrics,
   }
 }
 
@@ -946,6 +1202,43 @@ const emitHtml = (data: ReportData): string => {
         makeChart('Replication queue depth (worker → peer, mean over 5s buckets)',
           charts, xs, seriesData, 'events');
       }
+
+      // Worker-side /metrics scrape charts. One series per pod (and
+      // per label dimension where the metric is split). All share the
+      // master t-grid so cursor-sync lets you cross-reference any
+      // anomaly (e.g. a GC pause spike) with the SIPP-stream chart up
+      // top.
+      function plotMetricGrid(title, grid, yLabel) {
+        if (!grid || !grid.series || grid.series.length === 0) return;
+        const xs = grid.t;
+        const seriesData = grid.series.map(function (s, i) {
+          return {
+            label: s.label.replace(/b2bua-worker-/g, 'w'),
+            values: s.values,
+            color: SERIES_COLORS[i % SERIES_COLORS.length],
+          };
+        });
+        makeChart(title, charts, xs, seriesData, yLabel);
+      }
+      const wm = DATA.workerMetrics || {};
+      plotMetricGrid('Event-loop lag p95 (ms)', wm.loopLagP95, 'ms');
+      plotMetricGrid('GC pause per scrape window (s)', wm.gcWindowPause, 's');
+      plotMetricGrid('Inbound event queue depth', wm.eventQueueDepth, 'events');
+      plotMetricGrid('Inbound event queue drops/sec by reason', wm.eventQueueDropsRate, '/sec');
+      plotMetricGrid('Terminating calls by age bucket (gte300s = stuck-terminating canary)',
+        wm.terminatingByBucket, 'calls');
+      plotMetricGrid('Active timers (live fiber count)', wm.activeTimers, 'fibers');
+      plotMetricGrid('call_force_purge_total (Slice 1.4 safety net hits)',
+        wm.forcePurgeTotal, 'count');
+      plotMetricGrid('event_handler_timeouts_total (rate)', wm.handlerTimeoutsRate, '/sec');
+      plotMetricGrid('UDP queue depth', wm.udpQueueDepth, 'pkts');
+      plotMetricGrid('UDP drops/sec by reason', wm.udpDropsRate, '/sec');
+      plotMetricGrid('Overload fraction by signal', wm.overloadFraction, 'fraction');
+      plotMetricGrid('Overload shed probability', wm.overloadShedProb, 'fraction');
+      plotMetricGrid('OTel BSP queue depth', wm.otelBspQueueDepth, 'spans');
+      plotMetricGrid('OTel BSP dropped spans/sec', wm.otelBspDroppedRate, '/sec');
+      plotMetricGrid('Process resident set size (kB)', wm.procVmRss, 'kB');
+      plotMetricGrid('Process thread count', wm.procThreads, 'threads');
 
       // Force a resize after construction so the drawing buffer matches
       // the laid-out container width even if the initial measurement was

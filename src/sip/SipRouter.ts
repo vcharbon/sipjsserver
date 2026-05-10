@@ -692,85 +692,89 @@ export class SipRouter extends ServiceMap.Service<
             return
           }
 
-          // Step 2: Checkout call
-          const call = yield* callState.checkout(callRef)
-          if (call === undefined) {
-            const summary = event.type === "sip"
-              ? (event.message.type === "request"
-                  ? `${event.message.method} ${event.message.uri}`
-                  : `${(event.message as SipResponse).status} ${(event.message as SipResponse).reason}`)
-              : event.type
-            const legInfo = legHint ? ` leg=${legHint}` : ""
-            yield* Effect.logWarning(`Call ${callRef} not found on checkout for ${summary}${legInfo} — rejecting`)
-            // RFC 3261 §12.2.2 — reject requests for vanished calls with 481
-            if (event.type === "sip" && event.message.type === "request" && event.message.method !== "ACK") {
-              const rejectMsg = generateResponse(event.message as SipRequest, 481, "Call/Transaction Does Not Exist", {
-                toTag: newTag(),
-                contact: { user: "b2bua", host: transport.localAddress.ip, port: transport.localAddress.port },
+          // Step 2: Run handler under the per-callRef serialisation
+          // permit. `withCall` loads the call, holds the permit for the
+          // body, and releases it via `Semaphore.withPermits`'s
+          // uninterruptible finalizer — so a defect / interrupt mid-
+          // body cannot leak the permit (the historical hazard of the
+          // old `checkout` + JS try/finally `release` shape).
+          yield* callState.withCall(callRef, (call) =>
+            Effect.gen(function* () {
+              if (call === undefined) {
+                const summary = event.type === "sip"
+                  ? (event.message.type === "request"
+                      ? `${event.message.method} ${event.message.uri}`
+                      : `${(event.message as SipResponse).status} ${(event.message as SipResponse).reason}`)
+                  : event.type
+                const legInfo = legHint ? ` leg=${legHint}` : ""
+                yield* Effect.logWarning(`Call ${callRef} not found on checkout for ${summary}${legInfo} — rejecting`)
+                // RFC 3261 §12.2.2 — reject requests for vanished calls with 481
+                if (event.type === "sip" && event.message.type === "request" && event.message.method !== "ACK") {
+                  const rejectMsg = generateResponse(event.message as SipRequest, 481, "Call/Transaction Does Not Exist", {
+                    toTag: newTag(),
+                    contact: { user: "b2bua", host: transport.localAddress.ip, port: transport.localAddress.port },
+                  })
+                  yield* txnLayer.send(rejectMsg, { host: event.rinfo.address, port: event.rinfo.port }, "response")
+                }
+                return
+              }
+
+              // Step 3: Determine leg and dialog
+              const { leg, dialog, direction } = legHint
+                ? findLegAndDialog(call, legHint)
+                : { leg: call.aLeg, dialog: call.aLeg.dialogs[0] as Dialog | undefined, direction: "from-a" as const }
+
+              const nowMs = yield* Clock.currentTimeMillis
+              const resolvedCtx: ResolvedContext = {
+                call, callRef, leg, dialog, direction, event, config, callControl, limiter, nowMs
+              }
+
+              // Step 4: Run handler inside tracing span
+              const spanName = event.type === "sip"
+                ? (event.message.type === "request"
+                    ? `sip.recv.${event.message.method}`
+                    : `sip.recv.${(event.message as SipResponse).status}`)
+                : event.type === "timer" ? `timer.${event.timerType}`
+                : event.type === "internal-event" ? `internal.${event.topic}.${event.outcome}`
+                : `sip.${event.type}`
+
+              const attrs: Record<string, unknown> = {
+                "sip.call_ref": callRef,
+                "sip.call_id.a_leg": call.aLeg.callId,
+              }
+              if (call.bLegs.length > 0) {
+                attrs["sip.call_id.b_leg"] = call.bLegs[0]!.callId
+              }
+              if (event.type === "internal-event") {
+                attrs["internal.topic"] = event.topic
+                attrs["internal.outcome"] = event.outcome
+              }
+              if (event.type === "sip") {
+                attrs["net.peer.addr"] = `${event.rinfo.address}:${event.rinfo.port}`
+                attrs["sip.direction"] = direction === "from-a" ? "inbound" : "outbound"
+                if (event.message.type === "request") {
+                  attrs["sip.method"] = event.message.method
+                } else {
+                  attrs["sip.status_code"] = (event.message as SipResponse).status
+                }
+                if (call.sampled === true) {
+                  attrs["sip.raw_message"] = tracing.scrubMessage(serialize(event.message).toString("utf-8"))
+                }
+              }
+
+              const handler = handlers.inDialog
+              const inner = Effect.gen(function* () {
+                const result = yield* handler(resolvedCtx)
+                // Emit span events declared by the handler
+                if (result.spanEvents && result.spanEvents.length > 0) {
+                  yield* tracing.emitSpanEvents(result.spanEvents)
+                }
+                yield* processResult(callRef, result, handlers, nowMs)
               })
-              yield* txnLayer.send(rejectMsg, { host: event.rinfo.address, port: event.rinfo.port }, "response")
-            }
-            return
-          }
 
-          try {
-            // Step 3: Determine leg and dialog
-            const { leg, dialog, direction } = legHint
-              ? findLegAndDialog(call, legHint)
-              : { leg: call.aLeg, dialog: call.aLeg.dialogs[0] as Dialog | undefined, direction: "from-a" as const }
-
-            const nowMs = yield* Clock.currentTimeMillis
-            const resolvedCtx: ResolvedContext = {
-              call, callRef, leg, dialog, direction, event, config, callControl, limiter, nowMs
-            }
-
-            // Step 4: Run handler inside tracing span
-            const spanName = event.type === "sip"
-              ? (event.message.type === "request"
-                  ? `sip.recv.${event.message.method}`
-                  : `sip.recv.${(event.message as SipResponse).status}`)
-              : event.type === "timer" ? `timer.${event.timerType}`
-              : event.type === "internal-event" ? `internal.${event.topic}.${event.outcome}`
-              : `sip.${event.type}`
-
-            const attrs: Record<string, unknown> = {
-              "sip.call_ref": callRef,
-              "sip.call_id.a_leg": call.aLeg.callId,
-            }
-            if (call.bLegs.length > 0) {
-              attrs["sip.call_id.b_leg"] = call.bLegs[0]!.callId
-            }
-            if (event.type === "internal-event") {
-              attrs["internal.topic"] = event.topic
-              attrs["internal.outcome"] = event.outcome
-            }
-            if (event.type === "sip") {
-              attrs["net.peer.addr"] = `${event.rinfo.address}:${event.rinfo.port}`
-              attrs["sip.direction"] = direction === "from-a" ? "inbound" : "outbound"
-              if (event.message.type === "request") {
-                attrs["sip.method"] = event.message.method
-              } else {
-                attrs["sip.status_code"] = (event.message as SipResponse).status
-              }
-              if (call.sampled === true) {
-                attrs["sip.raw_message"] = tracing.scrubMessage(serialize(event.message).toString("utf-8"))
-              }
-            }
-
-            const handler = handlers.inDialog
-            const inner = Effect.gen(function* () {
-              const result = yield* handler(resolvedCtx)
-              // Emit span events declared by the handler
-              if (result.spanEvents && result.spanEvents.length > 0) {
-                yield* tracing.emitSpanEvents(result.spanEvents)
-              }
-              yield* processResult(callRef, result, handlers, nowMs)
-            })
-
-            yield* tracing.withProcessingSpan({ call, name: spanName, attributes: attrs, effect: inner })
-          } finally {
-            yield* callState.release(callRef)
-          }
+              yield* tracing.withProcessingSpan({ call, name: spanName, attributes: attrs, effect: inner })
+            }),
+          )
         }).pipe(
           Effect.catchTag("RedisError", (e) =>
             Effect.logError(`Redis error in withCall: ${e.reason}`)

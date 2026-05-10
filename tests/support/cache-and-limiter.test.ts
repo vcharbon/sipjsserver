@@ -125,8 +125,6 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
       // Peek confirms it's in memory
       const inMemory = yield* state.peek(call.callRef)
       expect(inMemory?.callRef).toBe(call.callRef)
-
-      yield* state.release(call.callRef)
     }).pipe(Effect.provide(callStateLayer))
   )
 
@@ -142,8 +140,8 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
       yield* state.flushToRedis(call.callRef)
       yield* state.remove(call.callRef)
 
-      // Call is gone from both memory and cache — checkout returns undefined
-      const reloaded = yield* state.checkout(call.callRef)
+      // Call is gone from both memory and cache — withCall sees undefined
+      const reloaded = yield* state.withCall(call.callRef, (c) => Effect.succeed(c))
       expect(reloaded).toBeUndefined()
     }).pipe(Effect.provide(callStateLayer))
   )

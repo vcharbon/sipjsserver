@@ -46,6 +46,7 @@ import { HttpReferenceAdapterLayer } from "./decision/adapters/http-reference/Ht
 import { TracingService } from "./tracing/TracingService.js"
 import { TracerHealthSignal, runTracerHealthSupervisor } from "./observability/tracer-health.js"
 import { MeasuredBatchSpanProcessor, MeasuredSpanExporter } from "./observability/bsp-measured.js"
+import { CircuitBreakerSpanExporter } from "./observability/otel-circuit-breaker.js"
 import { installOtelDiagBridge } from "./observability/otel-diag.js"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { handlers, B2buaCoreLayer } from "./b2bua/B2buaCore.js"
@@ -176,8 +177,16 @@ const BSP_SCHEDULED_DELAY_MS = 1_000
 const BSP_EXPORT_TIMEOUT_MS = 2_000
 
 const measuredBsp = (config: AppConfigData): MeasuredBatchSpanProcessor => {
+  // Front the OTLP HTTP exporter with a circuit breaker so a dead
+  // collector produces at most two HTTP attempts (initial + one
+  // probe after a 30 s cooldown) before the worker stops touching
+  // the network. Without this, BSP scheduledDelayMillis = 1 s causes
+  // a permanent 1 Hz ECONNREFUSED loop that burns ~25 % CPU per
+  // worker post-test (observed in run post-fix-validation-6).
   const exporter = new MeasuredSpanExporter(
-    new OTLPTraceExporter({ url: config.otelTracesUrl, timeoutMillis: BSP_EXPORT_TIMEOUT_MS }),
+    new CircuitBreakerSpanExporter(
+      new OTLPTraceExporter({ url: config.otelTracesUrl, timeoutMillis: BSP_EXPORT_TIMEOUT_MS }),
+    ),
   )
   const inner = new BatchSpanProcessor(exporter, {
     maxQueueSize: BSP_MAX_QUEUE_SIZE,
