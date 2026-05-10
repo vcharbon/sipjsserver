@@ -373,7 +373,12 @@ const sanitizeCid = (cid: string): string => cid.replace(/[^A-Za-z0-9._@-]/g, "_
 const emitMetricCsvs = async (artifactDir: string) => {
   const dir = path.join(artifactDir, "metrics")
   const files = await fs.readdir(dir).catch(() => [] as Array<string>)
-  const ndjsonFiles = files.filter((f) => f.endsWith(".ndjson"))
+  // Skip `<pod>.proc.ndjson` — different schema (per-process /proc snapshot,
+  // no `metric`/`labels` fields). Those files are consumed by the report
+  // renderer separately; only Prometheus-shaped scrapes feed CSVs.
+  const ndjsonFiles = files.filter(
+    (f) => f.endsWith(".ndjson") && !f.endsWith(".proc.ndjson"),
+  )
   for (const f of ndjsonFiles) {
     const rows = await readNdjson<MetricRow>(path.join(dir, f)).catch(
       () => [] as Array<MetricRow>,

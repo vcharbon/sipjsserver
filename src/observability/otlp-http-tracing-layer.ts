@@ -39,6 +39,20 @@ export interface OtlpHttpTracingOptions {
  * Build a NodeSdk layer that exports spans via OTLP HTTP. Provide it
  * to `b2buaEmbeddedLayer` as the `tracing` option, or compose it under
  * any Effect program that uses `Effect.tracerWith` / span APIs.
+ *
+ * Slice 5.1 of the endurance hardening plan
+ * ([docs/plan/endurance-stuck-terminating-and-overload-hardening.md](docs/plan/endurance-stuck-terminating-and-overload-hardening.md))
+ * caps the BSP defaults so a stalled OTLP collector cannot grow worker
+ * heap without bound. Concretely:
+ *   maxQueueSize:        2048 → 1024
+ *   maxExportBatchSize:   512 →  256
+ *   scheduledDelayMillis: 5_000 → 1_000
+ *   exportTimeoutMillis: 30_000 → 2_000
+ *
+ * The kill-switch + measured-BSP wiring lives in the standalone
+ * `src/main.ts`; embedded consumers can mirror it if they want the
+ * same hardening but the bare-bones override here already caps the
+ * heap exposure on its own.
  */
 export const otlpHttpTracingLayer = (
   opts: OtlpHttpTracingOptions,
@@ -51,7 +65,13 @@ export const otlpHttpTracingLayer = (
           serviceVersion: opts.serviceVersion ?? "unknown",
         },
         spanProcessor: new BatchSpanProcessor(
-          new OTLPTraceExporter({ url: opts.tracesUrl }),
+          new OTLPTraceExporter({ url: opts.tracesUrl, timeoutMillis: 2_000 }),
+          {
+            maxQueueSize: 1024,
+            maxExportBatchSize: 256,
+            scheduledDelayMillis: 1_000,
+            exportTimeoutMillis: 2_000,
+          },
         ),
         tracerConfig: {
           spanLimits: {

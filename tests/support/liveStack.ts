@@ -33,6 +33,7 @@ import { OverloadController } from "../../src/b2bua/OverloadController.js"
 import { RedisClient } from "../../src/redis/RedisClient.js"
 import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { TracingService } from "../../src/tracing/TracingService.js"
+import { TracerHealthSignal } from "../../src/observability/tracer-health.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { B2buaCoreLayer } from "../../src/b2bua/B2buaCore.js"
 import { DrainingState } from "../../src/b2bua/DrainingState.js"
@@ -93,7 +94,13 @@ export function liveStackLayer(opts: {
     Layer.provide(OverloadLayer)
   )
 
-  const TracingLayer = TracingService.layer.pipe(Layer.provide(AppConfigLayer))
+  const TracingLayer = TracingService.layer.pipe(
+    Layer.provide(AppConfigLayer),
+    // Slice 5.3 — live stack doesn't run a BSP supervisor, so wire
+    // the always-healthy noop signal so the per-request hot path in
+    // TracingService is never gated.
+    Layer.provide(TracerHealthSignal.noop),
+  )
   const CdrLayer = CdrWriter.layer.pipe(Layer.provide(AppConfigLayer))
 
   return B2buaCoreLayer.pipe(

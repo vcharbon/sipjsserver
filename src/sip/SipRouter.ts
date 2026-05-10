@@ -11,7 +11,7 @@
  * them at call-site time with real Via/Contact specs.
  */
 
-import { Clock, Effect, Layer, ServiceMap, Stream, Tracer } from "effect"
+import { Clock, Duration, Effect, Layer, ServiceMap, Stream, Tracer } from "effect"
 import type { RemoteInfo, SipRequest, SipResponse, B2BUAMessage } from "./types.js"
 import { TransactionLayer } from "./TransactionLayer.js"
 import { UdpTransport } from "./UdpTransport.js"
@@ -31,6 +31,7 @@ import { CallLimiter } from "../call/CallLimiter.js"
 import { TimerService } from "../call/TimerService.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
 import { TracingService } from "../tracing/TracingService.js"
+import { MetricsRegistry } from "../observability/MetricsRegistry.js"
 import { DrainingState } from "../b2bua/DrainingState.js"
 import { WorkerReadiness } from "../cache/WorkerReadiness.js"
 import { RedisError } from "../redis/RedisClient.js"
@@ -97,6 +98,33 @@ export function describeEvent(event: CallEvent): string {
       return `timeout${event.legId ? ` leg=${event.legId}` : ""}`
     case "internal-event":
       return `internal:${event.topic}/${event.outcome}`
+  }
+}
+
+/**
+ * Verbose discriminator for event-handler timeout logs. Includes every
+ * piece of routing info we have on the event so the first hit (which
+ * the operator will see exactly once before metrics fire) identifies
+ * the offending class without needing a heap snapshot.
+ */
+export function describeEventDetail(event: CallEvent): string {
+  switch (event.type) {
+    case "sip": {
+      const msg = event.message
+      const callId = msg.parsed?.callId ?? "?"
+      if (msg.type === "request") {
+        return `event=sip method=${msg.method} call-id=${callId} from=${event.rinfo.address}:${event.rinfo.port}`
+      }
+      return `event=sip status=${msg.status} call-id=${callId} from=${event.rinfo.address}:${event.rinfo.port}`
+    }
+    case "timer":
+      return `event=timer type=${event.timerType} callRef=${event.callRef}${event.legId ? ` leg=${event.legId}` : ""}`
+    case "cancelled":
+      return `event=cancelled call-id=${event.callId} fromTag=${event.fromTag}`
+    case "timeout":
+      return `event=timeout callRef=${event.callRef} method=${event.method}${event.legId ? ` leg=${event.legId}` : ""} branch=${event.branch}`
+    case "internal-event":
+      return `event=internal topic=${event.topic} outcome=${event.outcome} callRef=${event.callRef}`
   }
 }
 
@@ -251,6 +279,20 @@ export class SipRouter extends ServiceMap.Service<
       const tracing = yield* TracingService
       const draining = yield* DrainingState
       const readiness = yield* WorkerReadiness
+      const registry = yield* MetricsRegistry
+
+      // Slice 1.4 + event-handler safety: counters surfaced via
+      // MetricsRegistry. `eventHandlerTimeoutTotal` flips on first hit
+      // and identifies (via the accompanying log line) the event class
+      // that hung; `forcePurgeTotal` counts safety-timer rescue
+      // operations driven from `timerHandler` below. Both should stay
+      // at zero in a healthy run.
+      let eventHandlerTimeoutTotal = 0
+      let forcePurgeTotal = 0
+      registry.sipRouter = {
+        eventHandlerTimeoutTotal: () => eventHandlerTimeoutTotal,
+        forcePurgeTotal: () => forcePurgeTotal,
+      }
       // Bind background forks to the layer's scope so they die when
       // the worker scope closes. Required for the simulated cluster's
       // `kill`/respawn cycle in failover tests — `forkDetach` would
@@ -268,22 +310,56 @@ export class SipRouter extends ServiceMap.Service<
         const event: CallEvent = { type: "timer" as const, timerType, callRef, legId }
         return Effect.gen(function* () {
           const call = yield* callState.peek(callRef)
-          const body = withCall(handlers, event)
-          if (call?.sampled === true && call.traceId !== undefined && call.rootSpanId !== undefined) {
-            const attrs: Record<string, string> = {
-              "sip.call_ref": callRef,
-              "sip.timer_type": timerType,
-            }
-            if (legId !== undefined) attrs["sip.leg_id"] = legId
-            yield* body.pipe(
-              Effect.withSpan("timer.fire", {
-                parent: Tracer.externalSpan({ traceId: call.traceId, spanId: call.rootSpanId, sampled: true }),
-                attributes: attrs,
-              })
-            )
-          } else {
-            yield* body
-          }
+          const baseBody = withCall(handlers, event)
+          const tracedBody =
+            call?.sampled === true && call.traceId !== undefined && call.rootSpanId !== undefined
+              ? baseBody.pipe(
+                  Effect.withSpan("timer.fire", {
+                    parent: Tracer.externalSpan({
+                      traceId: call.traceId,
+                      spanId: call.rootSpanId,
+                      sampled: true,
+                    }),
+                    attributes: {
+                      "sip.call_ref": callRef,
+                      "sip.timer_type": timerType,
+                      ...(legId !== undefined ? { "sip.leg_id": legId } : {}),
+                    },
+                  }),
+                )
+              : baseBody
+
+          // Slice 1.4 — safety-net force-purge. The
+          // `terminating_timeout` timer is the call's last-resort
+          // cleanup path. If its handler errors (e.g. a downstream
+          // schema/encode failure surfaced as a defect via orDie) or
+          // hangs past the per-event budget, the rule chain's
+          // `terminate-leg` actions never run and the call drifts in
+          // `terminating` until the 60-s orphan sweep notices.
+          // Force-purge here drives the same recovery the orphan
+          // sweep would have done, on demand.
+          //
+          // For other timer types we just log and move on — keepalive
+          // hangs do not justify discarding the call's state, and the
+          // orphan sweep / next safety timer will catch anything truly
+          // stuck.
+          const guarded = tracedBody.pipe(
+            Effect.timeout(Duration.millis(config.eventHandlerTimeoutMs)),
+            Effect.catchCause((cause) =>
+              Effect.gen(function* () {
+                yield* Effect.logError(
+                  `Timer handler ${timerType} for call ${callRef}` +
+                    `${legId ? ` leg=${legId}` : ""} failed or timed out`,
+                  cause,
+                )
+                if (timerType === "terminating_timeout") {
+                  forcePurgeTotal++
+                  yield* callState.forcePurge(callRef, "safety_timer_failure")
+                }
+              }),
+            ),
+          )
+          yield* guarded
         })
       }
 
@@ -849,9 +925,11 @@ export class SipRouter extends ServiceMap.Service<
         for (const call of calls) {
           const handler = (cr: string, tt: TimerType, lid: string | undefined) =>
             timerHandler(handlers, cr, tt, lid)
-          // eslint-disable-next-line no-console
-          console.log(
-            `[diag] rehydrate ${call.callRef} aLeg.localCSeq=${call.aLeg.dialogs[0]?.sip.localCSeq} bLeg=${call.bLegs[0]?.dialogs[0]?.sip.localCSeq} timers=${call.timers.map((t) => t.id + "@" + t.fireAt).join(",")}`,
+          // Slice 6: demoted from bare `console.log` so the diag line
+          // rides the structured logger (timestamps, level, scope) and
+          // is suppressed at production log levels.
+          yield* Effect.logDebug(
+            `rehydrate ${call.callRef} aLeg.localCSeq=${call.aLeg.dialogs[0]?.sip.localCSeq} bLeg=${call.bLegs[0]?.dialogs[0]?.sip.localCSeq} timers=${call.timers.map((t) => t.id + "@" + t.fireAt).join(",")}`,
           )
           yield* timers.restoreFromEntries(call.callRef, call.timers, handler)
         }
@@ -876,6 +954,23 @@ export class SipRouter extends ServiceMap.Service<
               break
           }
           return withCall(handlers, event).pipe(
+            // Per-event safety timeout. The first hit identifies the
+            // event class that hung — log all the discriminators we
+            // have so triage doesn't need a heap snapshot. The wrap
+            // intentionally sits *outside* the catchCause so the
+            // existing error-logging path stays in charge of plain
+            // failures; only Cause.TimeoutError is intercepted here.
+            Effect.timeoutOrElse({
+              duration: Duration.millis(config.eventHandlerTimeoutMs),
+              orElse: () =>
+                Effect.gen(function* () {
+                  eventHandlerTimeoutTotal++
+                  const detail = describeEventDetail(event)
+                  yield* Effect.logError(
+                    `Event handler timed out after ${config.eventHandlerTimeoutMs}ms — ${detail}`,
+                  )
+                }),
+            }),
             Effect.catchCause((cause) =>
               Effect.logError(`Unhandled error processing event [${describeEvent(event)}]`, cause)
             )

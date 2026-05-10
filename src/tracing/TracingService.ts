@@ -21,6 +21,7 @@ import { Effect, Layer, ServiceMap, Tracer } from "effect"
 import { randomBytes } from "node:crypto"
 import { AppConfig } from "../config/AppConfig.js"
 import type { Call } from "../call/CallModel.js"
+import { TracerHealthSignal } from "../observability/tracer-health.js"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -129,6 +130,7 @@ export class TracingService extends ServiceMap.Service<
     TracingService,
     Effect.gen(function* () {
       const config = yield* AppConfig
+      const health = yield* TracerHealthSignal
       const globalSampleRate = config.traceSampleRate
       const tombstoneEnabled = config.traceTombstoneEnabled
 
@@ -161,6 +163,17 @@ export class TracingService extends ServiceMap.Service<
         E,
         R
       > => {
+        // Slice 5.3 — when the OTel BSP is saturated, fall through to
+        // the unwrapped effect (no span allocation, no tombstone).
+        // Synthetic trace + span IDs keep the call record's shape
+        // stable so persistence + downstream code stays unaffected.
+        if (health.isSaturated()) {
+          return Effect.map(opts.effect, (result) => ({
+            result,
+            traceId: randomTraceId(),
+            spanId: randomSpanId(),
+          }))
+        }
         if (opts.sampled) {
           // Use Effect.withSpan (public API) to create a root span.
           // Effect.currentSpan retrieves traceId/spanId for storage on Call record.
@@ -212,6 +225,7 @@ export class TracingService extends ServiceMap.Service<
         readonly effect: Effect.Effect<A, E, R>
       }): Effect.Effect<A, E, R> => {
         if (
+          health.isSaturated() ||
           opts.call.sampled !== true ||
           opts.call.traceId === undefined ||
           opts.call.rootSpanId === undefined
@@ -234,7 +248,7 @@ export class TracingService extends ServiceMap.Service<
         readonly name: string
         readonly attributes: Record<string, unknown>
       }): Effect.Effect<void> => {
-        if (opts.call.sampled !== true) {
+        if (health.isSaturated() || opts.call.sampled !== true) {
           return Effect.void
         }
         // Create a zero-duration child span under the current processing span.

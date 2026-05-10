@@ -42,6 +42,8 @@ export function testAppConfigDefaults(overrides?: Partial<AppConfigData>): AppCo
     callControlNewCallTimeoutMs: 5000,
     callControlFailureTimeoutMs: 5000,
     callControlReferTimeoutMs: 5000,
+    eventHandlerTimeoutMs: 10000,
+    timerHandlerTimeoutMs: 5000,
     redisFlushIdleMs: 2000,
     traceSampleRate: 0,
     otelTracesUrl: "http://localhost:4318/v1/traces",

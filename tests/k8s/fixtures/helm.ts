@@ -17,6 +17,21 @@ export const PROXY_HOST_VALUES = resolve(
   "tests/k8s/values/sip-front-proxy.host.yaml",
 )
 export const WORKER_VALUES = resolve(REPO_ROOT, "tests/k8s/values/b2bua-worker.yaml")
+/**
+ * Endurance-specific overlay layered on top of WORKER_VALUES when
+ * launching from `tests/k8s/endurance/run-endurance.ts`. Adds memory
+ * limit + diagnostic NODE_OPTIONS (heap-snapshot signal, near-limit
+ * auto-dump) so the next freeze produces an analyzable artifact
+ * instead of an opaque stuck state. See
+ * `tests/k8s/values/b2bua-worker.endurance.yaml` and memory note
+ * `project_replication_dual_writer_collapse.md`. Memleak harness
+ * (`sippperftest/memleak-test-k8s.sh`) explicitly does NOT consume
+ * this overlay — it has its own.
+ */
+export const WORKER_VALUES_ENDURANCE = resolve(
+  REPO_ROOT,
+  "tests/k8s/values/b2bua-worker.endurance.yaml",
+)
 
 export interface HelmInstallOpts {
   readonly release: string
@@ -80,12 +95,15 @@ export const installRedis = (namespace: string) =>
     waitTimeoutSec: 60,
   })
 
-export const installWorker = (namespace: string) =>
+export const installWorker = (
+  namespace: string,
+  opts?: { readonly extraValues?: ReadonlyArray<string> },
+) =>
   helmInstall({
     release: "b2bua-worker",
     chart: WORKER_CHART,
     namespace,
-    valuesFiles: [WORKER_VALUES],
+    valuesFiles: [WORKER_VALUES, ...(opts?.extraValues ?? [])],
     waitTimeoutSec: 120,
   })
 

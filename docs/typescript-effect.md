@@ -3,6 +3,8 @@
 All code uses TypeScript with Effect v4 (effect-smol). When designing or modifying TypeScript in this project, activate the `effect` skill first to load the idiomatic-usage guide.
 If `<ide_diagnostics>` errors look stale or contradict `npm run typecheck`, trust typecheck — the IDE process is sometimes one edit behind.
 
+NEVER use resource reservation in a way that doesnt guarnatee that the resourec is cleared. Always use the safe resource usage way. For Semaphore this means never use  Semaphore.take(sem, X) then code then Semaphore.release() , always use Semaphore.withPermit instead.
+
 ## Core patterns
 
 - Services, Layers, `Effect.gen`, `Schema`, typed errors.
@@ -46,6 +48,7 @@ This is the most commonly mis-fixed v3 → v4 case, and the mis-fix is silent (c
 - `Effect.catchCause` only when you genuinely need to handle defects + interrupts together. Rare; document at the call site why a defect-swallowing catch is correct here.
 
 Reaching for `catchCause` as a drop-in replacement for v3 `catchAll` is a regression — it re-introduces the same anti-pattern v4 removed.
+
 
 ### `preferSchemaOverJson` plugin warning
 

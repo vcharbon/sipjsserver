@@ -13,15 +13,29 @@ import { AppConfig } from "../../src/config/AppConfig.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { CallState } from "../../src/call/CallState.js"
+import { TimerService } from "../../src/call/TimerService.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
 import { NoOpCdrLayer } from "./networkLeaves.js"
+import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 
 const limiterLayer = CallLimiter.memoryLayer.pipe(Layer.provideMerge(AppConfig.layer))
+// Slice 1.5: CallState now drops timer fibers as part of every cleanup
+// path (remove / orphan sweep / force-purge), so it depends on
+// TimerService. Provide the same MetricsRegistry instance to both so
+// timer counters and call-state buckets land in one place.
+const timerLayer = TimerService.layer.pipe(
+  Layer.provide(MetricsRegistry.layer),
+  Layer.provide(AppConfig.layer),
+)
 // CallState's orphan-sweep decrement path needs the SAME CallLimiter instance
 // the test asserts against, so expose it upstream via `provideMerge`.
+// Slice 4 endurance hardening: CallState now publishes terminating-bucket
+// metrics into the registry, so a registry instance must be in scope.
 const callStateLayer = CallState.layer.pipe(
   Layer.provide(PartitionedRelayStorage.memoryLayer),
   Layer.provide(NoOpCdrLayer),
+  Layer.provide(MetricsRegistry.layer),
+  Layer.provide(timerLayer),
   Layer.provideMerge(limiterLayer)
 )
 

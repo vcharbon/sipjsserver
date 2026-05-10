@@ -287,6 +287,103 @@ function renderPrometheus(
     }
   }
 
+  // ── TransactionLayer event-queue (Slice 2/4) ───────────────────────
+  if (reg.transactionLayer) {
+    const tl = reg.transactionLayer
+    header(
+      "b2bua_worker_event_queue_depth",
+      "gauge",
+      "Current depth of the inbound TransactionLayer event queue.",
+    )
+    m("b2bua_worker_event_queue_depth", tl.eventQueueDepth())
+
+    header(
+      "b2bua_worker_event_queue_capacity",
+      "gauge",
+      "Static capacity of the inbound TransactionLayer event queue (drop-on-full above this).",
+    )
+    m("b2bua_worker_event_queue_capacity", tl.eventQueueCapacity)
+
+    header(
+      "b2bua_worker_event_queue_drops_total",
+      "counter",
+      "Inbound events dropped because the bounded event queue was full, by reason class.",
+    )
+    m("b2bua_worker_event_queue_drops_total", tl.eventQueueDrops.request_invite, { reason: "request_invite" })
+    m("b2bua_worker_event_queue_drops_total", tl.eventQueueDrops.request_other, { reason: "request_other" })
+    m("b2bua_worker_event_queue_drops_total", tl.eventQueueDrops.response, { reason: "response" })
+    m("b2bua_worker_event_queue_drops_total", tl.eventQueueDrops.cancelled, { reason: "cancelled" })
+    m("b2bua_worker_event_queue_drops_total", tl.eventQueueDrops.timeout, { reason: "timeout" })
+  }
+
+  // ── Active timer fibers (Slice 4) ──────────────────────────────────
+  if (reg.timers) {
+    header(
+      "b2bua_worker_active_timers",
+      "gauge",
+      "Live count of timer fibers tracked by TimerService.",
+    )
+    m("b2bua_worker_active_timers", reg.timers.activeCount())
+
+    header(
+      "b2bua_worker_timer_handler_timeouts_total",
+      "counter",
+      "Timer handlers that exceeded timerHandlerTimeoutMs and were force-cancelled.",
+    )
+    m("b2bua_worker_timer_handler_timeouts_total", reg.timers.handlerTimeoutTotal())
+  }
+
+  // ── SipRouter consumer safety (Slice 1.4 / event-timeout) ──────────
+  if (reg.sipRouter) {
+    const r = reg.sipRouter
+    header(
+      "b2bua_worker_event_handler_timeouts_total",
+      "counter",
+      "Inbound events whose withCall handler exceeded eventHandlerTimeoutMs.",
+    )
+    m("b2bua_worker_event_handler_timeouts_total", r.eventHandlerTimeoutTotal())
+
+    header(
+      "b2bua_worker_call_force_purge_total",
+      "counter",
+      "Calls force-purged after the safety-net terminating_timeout handler errored or hung.",
+    )
+    m("b2bua_worker_call_force_purge_total", r.forcePurgeTotal())
+  }
+
+  // ── Calls in 'terminating' state, bucketed by age (Slice 4 canary) ─
+  if (reg.callState) {
+    const buckets = reg.callState.terminatingByBucket()
+    header(
+      "b2bua_worker_terminating_calls",
+      "gauge",
+      "Calls currently in 'terminating' state, bucketed by time spent in that state. The 'gte300s' bucket should always read zero.",
+    )
+    m("b2bua_worker_terminating_calls", buckets.lt10s, { age_bucket: "lt10s" })
+    m("b2bua_worker_terminating_calls", buckets.lt60s, { age_bucket: "lt60s" })
+    m("b2bua_worker_terminating_calls", buckets.lt300s, { age_bucket: "lt300s" })
+    m("b2bua_worker_terminating_calls", buckets.gte300s, { age_bucket: "gte300s" })
+  }
+
+  // ── OTel pipeline (Slice 5) ────────────────────────────────────────
+  if (reg.otelPipeline) {
+    const o = reg.otelPipeline
+    header("b2bua_otel_bsp_queue_depth", "gauge", "Current OTel BatchSpanProcessor queue depth.")
+    m("b2bua_otel_bsp_queue_depth", o.bspQueueDepth())
+
+    header("b2bua_otel_bsp_queue_capacity", "gauge", "Configured BSP maxQueueSize.")
+    m("b2bua_otel_bsp_queue_capacity", o.bspQueueCapacity)
+
+    header("b2bua_otel_bsp_dropped_total", "counter", "Spans dropped at the BSP because its queue was full.")
+    m("b2bua_otel_bsp_dropped_total", o.bspDroppedTotal())
+
+    header("b2bua_otel_tracer_disabled_total", "counter", "Tracer kill-switch transitions, by reason.")
+    const reasons = o.tracerDisabledTotal()
+    for (const [reason, value] of Object.entries(reasons)) {
+      m("b2bua_otel_tracer_disabled_total", value, { reason })
+    }
+  }
+
   // ── Replication metrics ────────────────────────────────────────────
   // Slice 7c: the legacy ReplMetrics module is gone; new metrics
   // (Slice 8 ReplicationMetrics) will land in a follow-up. The
@@ -386,6 +483,28 @@ export const StatusServerLayer: Layer.Layer<
                     gc: w.gc,
                   }
             )
+            // Endurance hardening (Slice 4): surface the new event-queue,
+            // timer, terminating-bucket, and OTel metrics into the
+            // /debug/memory JSON so the leak harness picks them up
+            // directly, without scraping Prometheus text.
+            const eventQueue = registry.transactionLayer
+              ? {
+                  depth: registry.transactionLayer.eventQueueDepth(),
+                  capacity: registry.transactionLayer.eventQueueCapacity,
+                  drops: registry.transactionLayer.eventQueueDrops,
+                }
+              : undefined
+            const activeTimers = registry.timers?.activeCount()
+            const terminating = registry.callState?.terminatingByBucket()
+            const otel = registry.otelPipeline
+              ? {
+                  bspQueueDepth: registry.otelPipeline.bspQueueDepth(),
+                  bspQueueCapacity: registry.otelPipeline.bspQueueCapacity,
+                  bspDroppedTotal: registry.otelPipeline.bspDroppedTotal(),
+                  tracerDisabledTotal: registry.otelPipeline.tracerDisabledTotal(),
+                }
+              : undefined
+
             return yield* HttpServerResponse.json({
               process: {
                 pid: process.pid,
@@ -405,11 +524,15 @@ export const StatusServerLayer: Layer.Layer<
                   callsMap: callStateStats.concurrent,
                   sipIndex: callStateStats.sipIndexSize,
                   semaphores: callStateStats.semaphoresSize,
+                  activeTimers,
                 },
                 callStateRemoveInvocations: callStateStats.removeInvocations,
                 callStateOrphanSweepRecovered: callStateStats.orphanSweepRecoveredCount,
                 byeDispositionInvariantViolations: getByeDispositionInvariantViolationCount(),
                 callStateTotal: callStateStats.total,
+                eventQueue,
+                terminating,
+                otel,
               },
               workers: workerData,
               timestamp: Date.now(),

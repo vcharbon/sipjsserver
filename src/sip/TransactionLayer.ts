@@ -27,6 +27,8 @@ import {
 import { _generateAckForNon2xx, generateResponse } from "./generators.js"
 import { OverloadController } from "../b2bua/OverloadController.js"
 import { parseVia, parseNameAddr } from "./parsers/custom/structured-headers.js"
+import { AppConfig } from "../config/AppConfig.js"
+import { MetricsRegistry } from "../observability/MetricsRegistry.js"
 
 // ---------------------------------------------------------------------------
 // Transaction event types (emitted upstream to SipRouter)
@@ -184,11 +186,35 @@ const TXN_MAX_AGE = 35_000        // Safety-net max age (just above Timer H/J = 
 // Service
 // ---------------------------------------------------------------------------
 
+/**
+ * Reason tag for events shed when the inbound event queue is full.
+ * Operators want to know which message class is being dropped under
+ * sustained backpressure (request_invite, request_other, response,
+ * cancelled, timeout) — not just an aggregate drop count.
+ */
+export type EventQueueDropReason =
+  | "request_invite"
+  | "request_other"
+  | "response"
+  | "cancelled"
+  | "timeout"
+
 export interface TransactionLayerMetrics {
   /** Current number of active transactions (gauge). */
   readonly activeTransactions: () => number
   /** Total messages processed since start (counter). */
   messagesProcessed: number
+  /** Current depth of the inbound event queue (gauge). */
+  readonly eventQueueDepth: () => number
+  /** Static capacity of the inbound event queue (informational). */
+  readonly eventQueueCapacity: number
+  /**
+   * Counter of events dropped because the inbound queue was at capacity,
+   * keyed by the reason class. Producers never block on a full queue —
+   * dropping the newest event is preferable to applying backpressure to
+   * the UDP receive path.
+   */
+  readonly eventQueueDrops: Record<EventQueueDropReason, number>
 }
 
 export class TransactionLayer extends ServiceMap.Service<
@@ -235,6 +261,8 @@ export class TransactionLayer extends ServiceMap.Service<
       const parser = yield* SipParser
       const transport = yield* UdpTransport
       const overload = yield* OverloadController
+      const config = yield* AppConfig
+      const registry = yield* MetricsRegistry
       // Capture the layer's scope so every internal background fiber
       // (sweep, retransmit, Timer B/F/H/J cleanups, ingest stream) is
       // forked INTO it. With the previous `forkDetach` defaults the
@@ -249,12 +277,37 @@ export class TransactionLayer extends ServiceMap.Service<
         Effect.forkIn(eff, layerScope)
 
       const txnMap = MutableHashMap.empty<string, Transaction>()
-      const eventQueue = yield* Queue.unbounded<TransactionEvent, Cause.Done>()
+      // Bounded event queue — sized at 4× the UDP recv queue so brief
+      // scheduler stalls don't shed events unnecessarily, but a
+      // pathological consumer slowdown caps retained heap. The previous
+      // `Queue.unbounded` retained the entire `LazyHeaders` graph for
+      // every parked event during long stalls (root cause of the
+      // 29 K-LazyHeaders / 21 K-OPTIONS-probe leak observed in the
+      // 2026-05-09 endurance run). Producers never block on a full
+      // queue — they drop newest, increment a counter, and log a WARN
+      // on the 0→non-zero transition. See
+      // docs/plan/endurance-stuck-terminating-and-overload-hardening.md
+      // (Slice 2).
+      const eventQueueCapacity = Math.max(64, config.udpQueueMax * 4)
+      const eventQueue = yield* Queue.bounded<TransactionEvent, Cause.Done>(eventQueueCapacity)
+
+      const eventQueueDrops: Record<EventQueueDropReason, number> = {
+        request_invite: 0,
+        request_other: 0,
+        response: 0,
+        cancelled: 0,
+        timeout: 0,
+      }
+      let totalDrops = 0
 
       const txnMetrics: TransactionLayerMetrics = {
         activeTransactions: () => MutableHashMap.size(txnMap),
         messagesProcessed: 0,
+        eventQueueDepth: () => Queue.sizeUnsafe(eventQueue),
+        eventQueueCapacity,
+        eventQueueDrops,
       }
+      registry.transactionLayer = txnMetrics
 
       // ── Helpers ──────────────────────────────────────────────────────
 
@@ -272,8 +325,37 @@ export class TransactionLayer extends ServiceMap.Service<
           Effect.catchCause((cause) => Effect.logError(`TransactionLayer send error`, cause))
         )
 
+      const dropReasonOf = (event: TransactionEvent): EventQueueDropReason => {
+        switch (event.type) {
+          case "cancelled":
+            return "cancelled"
+          case "timeout":
+            return "timeout"
+          case "message":
+            if (event.message.type === "response") return "response"
+            return event.message.method === "INVITE" ? "request_invite" : "request_other"
+        }
+      }
+
+      // Producers MUST NOT block on a full queue — that would push
+      // backpressure into the UDP receive path and drop *everything*,
+      // not just the newest. `Queue.offerUnsafe` returns false when the
+      // bounded queue is at capacity (drop-newest semantics).
       const emit = (event: TransactionEvent): Effect.Effect<void> =>
-        Effect.sync(() => Queue.offerUnsafe(eventQueue, event))
+        Effect.gen(function* () {
+          const accepted = Queue.offerUnsafe(eventQueue, event)
+          if (accepted) return
+          const reason = dropReasonOf(event)
+          eventQueueDrops[reason]++
+          totalDrops++
+          // Log the 0→non-zero transition only — per-event WARNs in a
+          // saturation scenario would themselves be the next leak.
+          if (totalDrops === 1) {
+            yield* Effect.logWarning(
+              `TransactionLayer event queue full (capacity=${eventQueueCapacity}); first drop reason=${reason}`,
+            )
+          }
+        })
 
       // ── Cleanup sweep ────────────────────────────────────────────────
 

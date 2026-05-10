@@ -192,16 +192,24 @@ const pollMetrics = (
         namespace,
         "app.kubernetes.io/name=b2bua-worker",
       ).pipe(Effect.orElseSucceed(() => []))
-      const all = [...proxyPods, ...workerPods]
-      for (const pod of all) {
+      const all: Array<{ pod: typeof proxyPods[number]; metricsPort: number }> = [
+        ...proxyPods.map((pod) => ({ pod, metricsPort: 9090 })),
+        // Workers serve /metrics on the StatusServer (admin port = 3002,
+        // see deploy/helm/b2bua-worker/values.yaml). Earlier this loop
+        // scraped 9090 for both, which silently returned ECONNREFUSED
+        // on workers and left `metrics/<worker>.ndjson` empty for the
+        // entire run — see endurance-2026-05-09t20-26-22-853z. Without
+        // worker metrics, we cannot observe `b2bua_gc_pause_*` /
+        // `b2bua_overload_*` over time, which are the load-bearing
+        // diagnostic signals for the 15-min freeze investigation.
+        ...workerPods.map((pod) => ({ pod, metricsPort: 3002 })),
+      ]
+      for (const { pod, metricsPort } of all) {
         if (!pod.ready) continue
-        // Both proxy and worker expose /metrics on :9090 via wget inside
-        // the container. The wrapper tolerates ECONNREFUSED for pods
-        // whose /metrics isn't wired (returns empty).
         const text = yield* execInPod(namespace, pod.name, defaultContainerFor(pod.name), [
           "wget",
           "-qO-",
-          "http://localhost:9090/metrics",
+          `http://localhost:${metricsPort}/metrics`,
         ]).pipe(
           Effect.matchEffect({
             onSuccess: (r) => Effect.succeed(r.stdout),
@@ -221,6 +229,46 @@ const pollMetrics = (
           path.join(artifactDir, "metrics", `${pod.name}.ndjson`),
           rows,
         )
+
+        // Light memory + CPU sample alongside Prometheus scrape so we
+        // always have ground truth even if /metrics is silent (e.g.
+        // worker stuck in a 4-second GC pause that overlaps the
+        // scrape; or chart change moves the metrics port). This is
+        // the diagnostic we wished we had during run
+        // endurance-2026-05-09t20-26-22-853z when the only visible
+        // signal post-freeze was probe-miss on the proxy.
+        const procText = yield* execInPod(namespace, pod.name, defaultContainerFor(pod.name), [
+          "sh",
+          "-c",
+          "awk '/^(VmRSS|VmSize|VmHWM|VmData|Threads|voluntary_ctxt_switches|nonvoluntary_ctxt_switches|State):/' /proc/1/status",
+        ]).pipe(
+          Effect.matchEffect({
+            onSuccess: (r) => Effect.succeed(r.stdout),
+            onFailure: () => Effect.succeed(""),
+          }),
+        )
+        if (procText.length > 0) {
+          const procRow: Record<string, string | number> = {
+            tScrape,
+            pod: pod.name,
+          }
+          for (const line of procText.split("\n")) {
+            const [k, ...rest] = line.split(":")
+            if (k === undefined || rest.length === 0) continue
+            const v = rest.join(":").trim()
+            if (v.endsWith(" kB")) {
+              const n = Number.parseInt(v.slice(0, -3), 10)
+              if (!Number.isNaN(n)) procRow[k] = n
+            } else {
+              const n = Number.parseInt(v, 10)
+              procRow[k] = Number.isNaN(n) ? v : n
+            }
+          }
+          yield* appendNdjsonRows(
+            path.join(artifactDir, "metrics", `${pod.name}.proc.ndjson`),
+            [procRow],
+          )
+        }
       }
       yield* Effect.sleep(`${intervalMs} millis`)
     }

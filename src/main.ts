@@ -44,6 +44,9 @@ import { SignalingNetwork } from "./sip/SignalingNetwork.js"
 import { StatusServerLayer } from "./http/StatusServer.js"
 import { HttpReferenceAdapterLayer } from "./decision/adapters/http-reference/HttpReferenceAdapter.js"
 import { TracingService } from "./tracing/TracingService.js"
+import { TracerHealthSignal, runTracerHealthSupervisor } from "./observability/tracer-health.js"
+import { MeasuredBatchSpanProcessor, MeasuredSpanExporter } from "./observability/bsp-measured.js"
+import { installOtelDiagBridge } from "./observability/otel-diag.js"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { handlers, B2buaCoreLayer } from "./b2bua/B2buaCore.js"
 import { DrainingState } from "./b2bua/DrainingState.js"
@@ -139,18 +142,67 @@ const CallControlLayer = HttpReferenceAdapterLayer.pipe(
   Layer.provide(MetricsRegistryLayer)
 )
 
+// Slice 5.3 — live kill switch. Production uses the live flag (toggled
+// by `runTracerHealthSupervisor` further down); embedded/test paths
+// keep `TracerHealthSignal.noop` so the per-request hot path in
+// TracingService is identical when there is no BSP to monitor.
+const TracerHealthLayer = TracerHealthSignal.live
+
 const TracingLayer = TracingService.layer.pipe(
-  Layer.provide(AppConfigLayer)
+  Layer.provide(AppConfigLayer),
+  Layer.provide(TracerHealthLayer),
 )
+
+// Slice 5.1/5.2/5.3 — BSP overload protection.
+//
+//   * Override BSP defaults (`maxQueueSize: 2048 → 1024`,
+//     `maxExportBatchSize: 512 → 256`, `scheduledDelayMillis: 5_000
+//     → 1_000`, `exportTimeoutMillis: 30_000 → 2_000`). With the
+//     collector unreachable this caps in-flight retained span objects
+//     at ≈ maxQueueSize + maxExportBatchSize ≈ 1.3 K and pinned HTTP
+//     connections at ≤ 2 s × concurrent batches.
+//   * Wrap exporter + processor in their measured variants so
+//     `b2bua_otel_bsp_*` metrics report depth / drops without poking
+//     at the upstream BSP's private fields.
+//   * `installOtelDiagBridge` routes the SDK `diag` channel through
+//     the Effect logger AND increments the drop counter when BSP
+//     surfaces a "Dropping span" warning.
+//   * `runTracerHealthSupervisor` (forked further down in
+//     `standaloneMain`) toggles the kill switch when BSP queue depth
+//     exceeds 80 % of capacity for ≥ 3 s.
+const BSP_MAX_QUEUE_SIZE = 1024
+const BSP_MAX_EXPORT_BATCH_SIZE = 256
+const BSP_SCHEDULED_DELAY_MS = 1_000
+const BSP_EXPORT_TIMEOUT_MS = 2_000
+
+const measuredBsp = (config: AppConfigData): MeasuredBatchSpanProcessor => {
+  const exporter = new MeasuredSpanExporter(
+    new OTLPTraceExporter({ url: config.otelTracesUrl, timeoutMillis: BSP_EXPORT_TIMEOUT_MS }),
+  )
+  const inner = new BatchSpanProcessor(exporter, {
+    maxQueueSize: BSP_MAX_QUEUE_SIZE,
+    maxExportBatchSize: BSP_MAX_EXPORT_BATCH_SIZE,
+    scheduledDelayMillis: BSP_SCHEDULED_DELAY_MS,
+    exportTimeoutMillis: BSP_EXPORT_TIMEOUT_MS,
+  })
+  const wrapped = new MeasuredBatchSpanProcessor(inner, exporter, BSP_MAX_QUEUE_SIZE)
+  installOtelDiagBridge(wrapped)
+  return wrapped
+}
+
+// Lifted to module scope so the supervisor (built later) and the
+// metrics registration can reach back to the same instance the
+// NodeSdk layer constructed.
+let bspSingleton: MeasuredBatchSpanProcessor | undefined
 
 const OtelLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* AppConfig
+    const bsp = measuredBsp(config)
+    bspSingleton = bsp
     return NodeSdk.layer(() => ({
       resource: { serviceName: "sip-b2bua", serviceVersion: "0.1.0" },
-      spanProcessor: new BatchSpanProcessor(
-        new OTLPTraceExporter({ url: config.otelTracesUrl })
-      ),
+      spanProcessor: bsp,
       tracerConfig: {
         spanLimits: { attributeValueLengthLimit: config.otelMaxAttributeValueLength }
       }
@@ -180,6 +232,11 @@ const SipLayer = B2buaCoreLayer.pipe(
   Layer.provide(CallControlLayer),
   Layer.provide(TracingLayer),
   Layer.provide(CdrLayer),
+  // Slice 4: TransactionLayer / TimerService / CallState now publish
+  // metrics back to the registry. Provide the same singleton layer
+  // already used by UdpLayer / OverloadControllerLayer above so the
+  // /metrics + /debug/memory endpoints see one consistent registry.
+  Layer.provide(MetricsRegistryLayer),
 )
 
 // ---------------------------------------------------------------------------
@@ -190,7 +247,8 @@ const CallStateLayer = CallState.layer.pipe(
   Layer.provide(AppConfigLayer),
   Layer.provide(CallStateCacheLayer),
   Layer.provide(CdrLayer),
-  Layer.provide(CallLimiterLayer)
+  Layer.provide(CallLimiterLayer),
+  Layer.provide(MetricsRegistryLayer),
 )
 
 // ReplLogServer — Slice 4 long-lived /replog endpoint. Pulls from the
@@ -407,6 +465,28 @@ const standaloneMain = Effect.gen(function* () {
   // Run HTTP server in a detached background fiber
   yield* Effect.forkDetach(Layer.launch(HttpLayer))
 
+  // Slice 5 — wire the BSP-decorator metrics into the registry and
+  // start the kill-switch supervisor. Both are no-ops when OtelLayer
+  // hasn't constructed a BSP yet (e.g. unit tests that swap OtelLayer
+  // for a stub) — `bspSingleton` stays undefined.
+  if (bspSingleton !== undefined) {
+    const bsp = bspSingleton
+    const metrics = yield* MetricsRegistry
+    const signal = yield* TracerHealthSignal
+    metrics.otelPipeline = {
+      bspQueueDepth: () => bsp.queueDepth(),
+      bspQueueCapacity: bsp.maxQueueSize,
+      bspDroppedTotal: () => bsp.droppedTotal(),
+      tracerDisabledTotal: () => signal.disabledTotal(),
+    }
+    yield* Effect.forkDetach(
+      runTracerHealthSupervisor({
+        queueDepth: () => bsp.queueDepth(),
+        maxQueueSize: bsp.maxQueueSize,
+      }),
+    )
+  }
+
   // Replication consumer: ReadyGate boot handshake + per-peer steady
   // pull fibers. Skipped when K8S_NAMESPACE is unset (single-node /
   // dev / non-K8s). The HTTP server above already serves /replog so
@@ -464,6 +544,12 @@ const standaloneMain = Effect.gen(function* () {
       Layer.provideMerge(
         Layer.mergeAll(WorkerReadinessLayer, DrainingStateLayer)
       ),
+      // Slice 5.3 — TracerHealthSignal + MetricsRegistry are shared
+      // singletons too: SipLayer's TracingService consults the signal
+      // on every span, and the supervisor / metrics-publish block in
+      // `standaloneMain` reads back the same instances.
+      Layer.provideMerge(TracerHealthLayer),
+      Layer.provideMerge(MetricsRegistryLayer),
       Layer.provideMerge(OtelLayer)
     )
   )

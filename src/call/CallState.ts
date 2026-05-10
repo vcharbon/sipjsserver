@@ -33,8 +33,98 @@ import { RedisError } from "../redis/RedisClient.js"
 import { CallLimiter } from "./CallLimiter.js"
 import type { Call } from "./CallModel.js"
 import { Call as CallSchema, callIndexKeys, isFullyResolved, parseCallRef, setByeDisposition } from "./CallModel.js"
+import { MetricsRegistry, type TerminatingCallsByBucket } from "../observability/MetricsRegistry.js"
+import { TimerService } from "./TimerService.js"
 
 const JsonCallSchema = Schema.fromJsonString(CallSchema)
+
+// ---------------------------------------------------------------------------
+// Schema-error diagnostics
+// ---------------------------------------------------------------------------
+//
+// Endurance run 2026-05-09 surfaced a `SchemaError: Missing key at
+// ['callRef']` from inside a `terminating_timeout` timer body, which
+// `Effect.orDie` converted to a defect that halted the safety-net
+// rule chain. The actual offending JSON / Call value never made it
+// into the log — the error was just `cause`-formatted with no
+// payload context. The two helpers below log the failing
+// payload (truncated) before re-promoting the SchemaError to a
+// defect, so the next occurrence prints what is actually wrong with
+// the data.
+
+const MAX_DIAG_PAYLOAD_CHARS = 2_000
+
+const truncate = (s: string): string =>
+  s.length <= MAX_DIAG_PAYLOAD_CHARS
+    ? s
+    : `${s.slice(0, MAX_DIAG_PAYLOAD_CHARS)}…(truncated, full length=${s.length})`
+
+const safeStringifyCall = (call: Call): string => {
+  try {
+    // Encoded → JSON-serialisable shape, but skip schema validation so
+    // the diagnostic itself can never throw.
+    return truncate(JSON.stringify(call))
+  } catch (err) {
+    return `<JSON.stringify failed: ${err instanceof Error ? err.message : String(err)}>`
+  }
+}
+
+const logDecodeFailure = (
+  source: string,
+  callRef: string | undefined,
+  raw: string,
+) =>
+  Effect.fnUntraced(function* (err: Schema.SchemaError) {
+    yield* Effect.logError(
+      `[CallState] SchemaError on ${source}` +
+        `${callRef !== undefined ? ` callRef=${callRef}` : ""} — ${err.message}` +
+        ` payload=${truncate(raw)}`,
+    )
+  })
+
+const logEncodeFailure = (source: string, call: Call) =>
+  Effect.fnUntraced(function* (err: Schema.SchemaError) {
+    yield* Effect.logError(
+      `[CallState] SchemaError on ${source} callRef=${call.callRef} state=${call.state}` +
+        ` — ${err.message} value=${safeStringifyCall(call)}`,
+    )
+  })
+
+// ---------------------------------------------------------------------------
+// Replication-tombstone detection
+// ---------------------------------------------------------------------------
+//
+// `src/replication/ChannelIndex.ts:encodeTombstone` stamps the body
+// slot with `{tombstone: true, callGen: N}` when a call is deleted, so
+// peers' open long-poll observes the deletion on the same channel that
+// carries normal call writes. The tombstone has its own TTL and lives
+// in the cache slot for that grace window.
+//
+// `checkout` must recognise this wire format *before* attempting to
+// schema-decode the body as a Call — otherwise every late retransmit
+// for a deleted call (e.g. a BYE 200 OK arriving after the call was
+// already removed) feeds the tombstone to `JsonCallSchema`, the decode
+// fails on the missing `callRef` field, and the SchemaError defect
+// propagates to the SipRouter consumer's catchCause as "Unhandled
+// error processing event [sip:200]". Endurance run
+// post-fix-validation-5-20260510-1617 measured 4-13/min of these.
+//
+// Cheap `includes("\"tombstone\"")` prefix test before `JSON.parse`
+// keeps the hot path (a real Call body) unparsed-twice; only payloads
+// that already look like tombstones pay the parse cost.
+const isReplicationTombstone = (json: string): boolean => {
+  if (!json.includes('"tombstone"')) return false
+  try {
+    const obj = JSON.parse(json) as unknown
+    return (
+      obj !== null &&
+      typeof obj === "object" &&
+      (obj as { tombstone?: unknown }).tombstone === true
+    )
+  } catch {
+    return false
+  }
+}
 
 // ---------------------------------------------------------------------------
 // SIP key helpers (used both for in-memory sipIndex and cache index keys)
@@ -69,6 +159,19 @@ export class CallState extends ServiceMap.Service<
     readonly flushToRedis: (callRef: string) => Effect.Effect<void, RedisError>
     /** Remove a call from memory and schedule cache cleanup. */
     readonly remove: (callRef: string) => Effect.Effect<void, RedisError>
+    /**
+     * Last-resort cleanup for one specific call — same recovery actions as
+     * the orphan sweep but driven on demand. Used by the safety-net
+     * `terminating_timeout` timer when its rule-chain handler errored or
+     * timed out, so the call doesn't have to wait up to 60 s for the
+     * orphan sweep to notice.
+     *
+     * No-op when the call is no longer in `callsMap` (race with a
+     * concurrent rule-path remove). Internal failures (CDR / limiter /
+     * cache) are logged but never propagated — force-purge is itself
+     * the last line of defence.
+     */
+    readonly forcePurge: (callRef: string, reason: string) => Effect.Effect<void>
     /** Resolve a SIP key (callId|tag) to a callRef, checking memory then cache. */
     readonly resolveFromSipKey: (callId: string, tag: string) => Effect.Effect<string | undefined, RedisError>
     /** Get stats for the status endpoint. */
@@ -88,6 +191,8 @@ export class CallState extends ServiceMap.Service<
       const config = yield* AppConfig
       const cdr = yield* CdrWriter
       const limiter = yield* CallLimiter
+      const registry = yield* MetricsRegistry
+      const timers = yield* TimerService
       const ttl = config.callContextTtlSec
       // Slice 4/5: this worker's ordinal, used to compute
       // `(role, primary)` from a callRef. Prefers the explicit
@@ -284,24 +389,52 @@ export class CallState extends ServiceMap.Service<
         const json = yield* storage
           .getCall(role, primary, callRef)
           .pipe(Effect.mapError(toRedisErr))
-        if (json === null) {
-          // No call exists for this callRef — neither in memory nor cache.
-          // The semaphore that `getSemaphore` just inserted is now orphaned:
-          // the caller will not invoke `remove(callRef)` (there's no call to
-          // remove), and the orphan sweep at the bottom of this layer only
-          // iterates callsMap so it would never see this entry. Without this
-          // cleanup, every misrouted request / late retransmission / cross-
-          // worker stray packet would leak one SemaphoreImpl until process
-          // restart. See sippperftest investigation 2026-05-02 for the
-          // measured leak rate (~2 sems per call under 100 cps + 2 workers).
+
+        // Three "no live call to return" branches feed the same cleanup:
+        //
+        //   1. cache miss (`json === null`)
+        //   2. cache holds a replication tombstone (deletion sentinel)
+        //   3. cache body fails to schema-decode (corruption / regression)
+        //
+        // All three release the semaphore acquired above + drop the map
+        // slot so a misrouted request / late retransmission / cross-
+        // worker stray packet does not leak one SemaphoreImpl per hit.
+        // See sippperftest investigation 2026-05-02 for the measured
+        // leak rate (~2 sems per call under 100 cps + 2 workers) on the
+        // historical `json === null` path; the orDie path used to add a
+        // second leak (SchemaError → defect → consumer catchCause →
+        // semaphore never released, future checkouts of the same callRef
+        // block on Semaphore.take forever).
+        const releaseAndDropSlot = Effect.gen(function* () {
           yield* Semaphore.release(sem, 1)
           yield* Effect.sync(() => MutableHashMap.remove(semaphores, callRef))
+        })
+
+        if (json === null) {
+          yield* releaseAndDropSlot
+          return undefined
+        }
+
+        if (isReplicationTombstone(json)) {
+          // Late retransmit on a deleted call — RFC 3261 §12.2.2 says
+          // the worker should reply 481 anyway, which the SipRouter
+          // caller does on `checkout === undefined`. Demoted to debug:
+          // expected at low rates whenever a peer's tombstone races a
+          // last in-dialog message.
+          yield* Effect.logDebug(
+            `[CallState] checkout saw replication tombstone for ${callRef} — treating as no-call`,
+          )
+          yield* releaseAndDropSlot
           return undefined
         }
 
         const decoded = yield* Schema.decodeUnknownEffect(JsonCallSchema)(json).pipe(
-          Effect.orDie,
+          Effect.tapErrorTag("SchemaError", logDecodeFailure("checkout", callRef, json)),
+          Effect.catchTag("SchemaError", () =>
+            Effect.as(releaseAndDropSlot, undefined),
+          ),
         )
+        if (decoded === undefined) return undefined
 
         // Don't reload terminated/terminating calls into memory from cache.
         // "terminated": lingered in cache for retransmission safety but must
@@ -376,6 +509,7 @@ export class CallState extends ServiceMap.Service<
         }
 
         const json = yield* Schema.encodeEffect(JsonCallSchema)(bumped).pipe(
+          Effect.tapErrorTag("SchemaError", logEncodeFailure("flushToRedis", bumped)),
           Effect.orDie
         )
         const { role, primary } = partitionOf(callRef)
@@ -409,6 +543,14 @@ export class CallState extends ServiceMap.Service<
 
         // Diagnostic: count remove() invocations to detect missed cleanups.
         removeInvocations++
+
+        // Slice 1.5 — guarantee that no timer fiber outlives the call.
+        // Today the rule path's InvariantEnforcer issues
+        // `cancel-all-timers` before `remove-call`, so this is
+        // idempotent for that path. It exists to also cover any future
+        // caller of `remove()` (e.g. force-purge) without re-deriving
+        // the invariant.
+        yield* timers.cancelAll(callRef)
 
         // Clean memory + SIP index
         yield* Effect.sync(() => {
@@ -515,6 +657,36 @@ export class CallState extends ServiceMap.Service<
         orphanSweepRecoveredCount,
       })
 
+      // Bucket every call currently in `terminating` by how long it has
+      // been in that state. The historical bug (see
+      // docs/plan/endurance-stuck-terminating-and-overload-hardening.md
+      // Slice 1) drifted calls indefinitely inside `terminating`; the
+      // `gte300s` bucket should always read zero in healthy systems.
+      // Age is derived from the safety-net `terminating_timeout` timer:
+      // `enteredAt = timer.fireAt - 64s`. For crash-recovered calls
+      // that lost the timer entry, fall back to `createdAt` so the
+      // canary still trips.
+      const TERMINATING_TIMEOUT_MS = 64_000
+      const terminatingByBucket = (): TerminatingCallsByBucket => {
+        const now = Date.now()
+        let lt10s = 0
+        let lt60s = 0
+        let lt300s = 0
+        let gte300s = 0
+        for (const [, call] of callsMap) {
+          if (call.state !== "terminating") continue
+          const safety = call.timers.find((t) => t.type === "terminating_timeout")
+          const enteredAt = safety !== undefined ? safety.fireAt - TERMINATING_TIMEOUT_MS : call.createdAt
+          const ageMs = now - enteredAt
+          if (ageMs < 10_000) lt10s++
+          else if (ageMs < 60_000) lt60s++
+          else if (ageMs < 300_000) lt300s++
+          else gte300s++
+        }
+        return { lt10s, lt60s, lt300s, gte300s }
+      }
+      registry.callState = { terminatingByBucket }
+
       const loadOwnedCalls = Effect.fnUntraced(function* (workerIndex: number) {
         // Slice 4: with the partitioned keyspace, "calls owned by self
         // as primary" live in `pri:{self.ordinal}:call:*`. The Option-C
@@ -529,6 +701,10 @@ export class CallState extends ServiceMap.Service<
 
         for (const entry of entries) {
           const decoded = yield* Schema.decodeUnknownEffect(JsonCallSchema)(entry.json).pipe(
+            Effect.tapErrorTag(
+              "SchemaError",
+              logDecodeFailure("loadOwnedCalls", undefined, entry.json),
+            ),
             Effect.orDie,
           )
 
@@ -537,6 +713,12 @@ export class CallState extends ServiceMap.Service<
           // will never arrive. Delete from cache to prevent permanent leaks.
           if (decoded.state === "terminating") {
             yield* Effect.logWarning(`Skipping terminating call ${decoded.callRef} on recovery — deleting from cache`)
+            // Slice 1.5 — defensive cancelAll. No fibers are armed yet
+            // for this call on this boot (rehydrate happens after
+            // loadOwnedCalls), so this is a no-op today. Kept so the
+            // "drop the call" primitive is consistently paired with
+            // "drop its timers" on every code path.
+            yield* timers.cancelAll(decoded.callRef)
             yield* storage
               .deleteCall("pri", selfOrdinal, decoded.callRef, callIndexKeys(decoded))
               .pipe(Effect.mapError(toRedisErr))
@@ -569,7 +751,10 @@ export class CallState extends ServiceMap.Service<
           if (bumped !== call) {
             MutableHashMap.set(callsMap, callRef, bumped)
           }
-          const json = yield* Schema.encodeEffect(JsonCallSchema)(bumped).pipe(Effect.orDie)
+          const json = yield* Schema.encodeEffect(JsonCallSchema)(bumped).pipe(
+            Effect.tapErrorTag("SchemaError", logEncodeFailure("flushAllCalls", bumped)),
+            Effect.orDie,
+          )
           const { role, primary } = partitionOf(callRef)
           const indexes = callIndexKeys(bumped)
           // Slice 6 + Slice B: same peer-selection rule as flushToRedis;
@@ -588,6 +773,105 @@ export class CallState extends ServiceMap.Service<
         yield* Effect.logInfo(`Flushed ${flushed} calls to cache`)
       })
 
+      // ── Force-purge primitive shared by orphan sweep + safety-timer ────
+      // Performs the full set of side effects the rule-path `remove-call`
+      // would have done for one specific call, plus the leg-disposition
+      // force-resolve that `terminating-safety-timeout` does. The caller
+      // is responsible for the diagnostic log line (orphan sweep prints
+      // age; the safety-timer path prints the failure reason).
+      //
+      // All inner failures are caught + logged. Force-purge is itself
+      // the last line of defence — if its CDR write / cache delete /
+      // limiter decrement bounces, we still want every other step to
+      // run so the in-memory entry is gone.
+      const forcePurgeOne = Effect.fnUntraced(function* (callRef: string) {
+        const original = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
+        if (original === undefined) return
+
+        let promoted = original
+        const wasTerminating = promoted.state === "terminating"
+        if (wasTerminating) {
+          for (const leg of [promoted.aLeg, ...promoted.bLegs]) {
+            const bd = leg.byeDisposition
+            if (bd === undefined || bd === "bye_sent") {
+              promoted = setByeDisposition(promoted, leg.legId, "bye_timeout")
+            }
+          }
+          if (isFullyResolved(promoted)) {
+            promoted = { ...promoted, state: "terminated" }
+          }
+        }
+
+        yield* cdr.write(promoted).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logError(`Force-purge CDR write failed for ${callRef}`, cause)
+          )
+        )
+
+        const { role, primary } = partitionOf(callRef)
+
+        // Mirror the InvariantEnforcer's decrement-limiter on the
+        // rule path: the natural primary releases its window slots
+        // when the call truly ends. Backups must not decrement
+        // (would double-decrement on takeover races).
+        if (wasTerminating && role === "pri") {
+          for (const entry of promoted.limiterEntries) {
+            yield* limiter.decrement(entry.limiterId, entry.originWindow).pipe(
+              Effect.catchTag("RedisError", (e) =>
+                Effect.logError(
+                  `Force-purge limiter decrement failed for ${callRef} ` +
+                    `(limiter=${entry.limiterId}): ${e.reason}`
+                )
+              )
+            )
+          }
+        }
+
+        // Drop the call's timer fibers BEFORE removing the in-memory
+        // entry, otherwise a still-armed keepalive or safety timer
+        // would fire against a callRef that no longer resolves, eating
+        // CPU + emitting an OTel span every cycle until the timer
+        // expires.
+        yield* timers.cancelAll(callRef)
+
+        MutableHashMap.remove(callsMap, callRef)
+        MutableHashMap.remove(semaphores, callRef)
+        MutableHashMap.remove(sipIndex, `${promoted.aLeg.callId}|${promoted.aLeg.fromTag}`)
+        for (const dialog of promoted.aLeg.dialogs) {
+          const aLocalTag = dialog.sip.localTag
+          if (aLocalTag && aLocalTag !== promoted.aLeg.fromTag) {
+            MutableHashMap.remove(sipIndex, `${promoted.aLeg.callId}|${aLocalTag}`)
+          }
+        }
+        for (const bLeg of promoted.bLegs) {
+          MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`)
+          MutableHashMap.remove(sipIndex, bLeg.callId)
+          for (const dialog of bLeg.dialogs) {
+            const bTag = dialog.sip.remoteTag
+            if (bTag) MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bTag}`)
+          }
+        }
+        const indexes = callIndexKeys(promoted)
+        const peerOpt = propagatePeerFor(role, primary, promoted._topology)
+        const direction = directionFor(role)
+        yield* storage
+          .deleteCall(role, primary, callRef, indexes, { peer: peerOpt, direction })
+          .pipe(
+            Effect.catchTag("PartitionedRelayStorageError", (e) =>
+              Effect.logError(`Force-purge Redis delete failed for ${callRef}: ${e.reason}`)
+            )
+          )
+      })
+
+      const forcePurge = Effect.fnUntraced(function* (callRef: string, reason: string) {
+        const present = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
+        if (present === undefined) return
+        yield* Effect.logWarning(
+          `[CallState] Force-purging call ${callRef} state=${present.state} reason=${reason}`
+        )
+        yield* forcePurgeOne(callRef)
+      })
+
       // ── Orphan sweep ──────────────────────────────────────────────────
       // Last-line recovery: if the rule-engine cleanup path missed a call (or
       // the worker crashed mid-cleanup), the sweep performs the *full* set of
@@ -600,96 +884,18 @@ export class CallState extends ServiceMap.Service<
       const ORPHAN_SWEEP_INTERVAL_MS = 60_000
 
       const sweepOnce = Effect.gen(function* () {
-        const orphans: Array<{ callRef: string; call: Call }> = []
+        const orphans: Array<{ callRef: string; state: Call["state"]; createdAt: number }> = []
         for (const [callRef, call] of callsMap) {
           if (call.state === "terminated" || call.state === "terminating") {
-            orphans.push({ callRef, call })
+            orphans.push({ callRef, state: call.state, createdAt: call.createdAt })
           }
         }
-        for (const { callRef, call: original } of orphans) {
-          // Force-resolve any leg whose BYE never reached terminal disposition
-          // so isFullyResolved() returns true and the CDR / cleanup record is
-          // internally consistent. Mirrors what `terminating-safety-timeout`
-          // would have produced if the rule path had completed.
-          let promoted = original
-          const wasTerminating = promoted.state === "terminating"
-          if (wasTerminating) {
-            for (const leg of [promoted.aLeg, ...promoted.bLegs]) {
-              const bd = leg.byeDisposition
-              if (bd === undefined || bd === "bye_sent") {
-                promoted = setByeDisposition(promoted, leg.legId, "bye_timeout")
-              }
-            }
-            if (isFullyResolved(promoted)) {
-              promoted = { ...promoted, state: "terminated" }
-            }
-          }
-
+        for (const { callRef, state, createdAt } of orphans) {
           yield* Effect.logWarning(
-            `[CallState] Orphan sweep recovering ${original.state} call ${callRef}` +
-              ` (age ${Date.now() - promoted.createdAt}ms)`
+            `[CallState] Orphan sweep recovering ${state} call ${callRef}` +
+              ` (age ${Date.now() - createdAt}ms)`
           )
-
-          yield* cdr.write(promoted).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logError(`Orphan sweep CDR write failed for ${callRef}`, cause)
-            )
-          )
-
-          const { role, primary } = partitionOf(callRef)
-
-          // The rule-path InvariantEnforcer issues `decrement-limiter` for
-          // every entry in `call.limiterEntries` on the terminating→terminated
-          // promotion. The sweep takes a different code path and previously
-          // skipped this, leaking one INCR per orphan into the limiter window
-          // keys until TTL (1200s default). Only the call's natural primary
-          // ever calls the limiter — backups must not, or we'd double-decrement
-          // on takeover races. role==="pri" here is exactly the original
-          // primary acting on its own call.
-          if (wasTerminating && role === "pri") {
-            for (const entry of promoted.limiterEntries) {
-              yield* limiter.decrement(entry.limiterId, entry.originWindow).pipe(
-                Effect.catchTag("RedisError", (e) =>
-                  Effect.logError(
-                    `Orphan sweep limiter decrement failed for ${callRef} ` +
-                      `(limiter=${entry.limiterId}): ${e.reason}`
-                  )
-                )
-              )
-            }
-          }
-
-          // Mirror remove(): drop in-memory state, then atomic Redis delete +
-          // tombstone propagation. Ignore RedisError so one failing peer
-          // doesn't stop the rest of the sweep.
-          MutableHashMap.remove(callsMap, callRef)
-          MutableHashMap.remove(semaphores, callRef)
-          MutableHashMap.remove(sipIndex, `${promoted.aLeg.callId}|${promoted.aLeg.fromTag}`)
-          for (const dialog of promoted.aLeg.dialogs) {
-            const aLocalTag = dialog.sip.localTag
-            if (aLocalTag && aLocalTag !== promoted.aLeg.fromTag) {
-              MutableHashMap.remove(sipIndex, `${promoted.aLeg.callId}|${aLocalTag}`)
-            }
-          }
-          for (const bLeg of promoted.bLegs) {
-            MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bLeg.fromTag}`)
-            MutableHashMap.remove(sipIndex, bLeg.callId)
-            for (const dialog of bLeg.dialogs) {
-              const bTag = dialog.sip.remoteTag
-              if (bTag) MutableHashMap.remove(sipIndex, `${bLeg.callId}|${bTag}`)
-            }
-          }
-          const indexes = callIndexKeys(promoted)
-          const peerOpt = propagatePeerFor(role, primary, promoted._topology)
-          const direction = directionFor(role)
-          yield* storage
-            .deleteCall(role, primary, callRef, indexes, { peer: peerOpt, direction })
-            .pipe(
-              Effect.catchTag("PartitionedRelayStorageError", (e) =>
-                Effect.logError(`Orphan sweep Redis delete failed for ${callRef}: ${e.reason}`)
-              )
-            )
-
+          yield* forcePurgeOne(callRef)
           orphanSweepRecoveredCount++
         }
       })
@@ -710,7 +916,7 @@ export class CallState extends ServiceMap.Service<
         layerScope,
       )
 
-      return { create, checkout, update, peek, release, flushToRedis, remove, resolveFromSipKey, stats, statsSync, loadOwnedCalls, flushAllCalls }
+      return { create, checkout, update, peek, release, flushToRedis, remove, forcePurge, resolveFromSipKey, stats, statsSync, loadOwnedCalls, flushAllCalls }
     })
   )
 }

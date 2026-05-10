@@ -52,7 +52,7 @@ export const keepaliveRule: RuleDefinition<undefined, undefined> = {
   match: {
     kind: "timer",
     timerType: "keepalive",
-    callState: ["active", "terminating"],
+    callState: ["active"],
   },
 
   init: () => undefined,
@@ -112,7 +112,7 @@ export const keepaliveTimeoutRule: RuleDefinition<undefined, undefined> = {
   match: {
     kind: "timer",
     timerType: "keepalive_timeout",
-    callState: ["active", "terminating"],
+    callState: ["active"],
   },
 
   init: () => undefined,

@@ -21,6 +21,7 @@ import { CallLimiter } from "../call/CallLimiter.js"
 import { PartitionedRelayStorage } from "../cache/PartitionedRelayStorage.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
 import { TracingService } from "../tracing/TracingService.js"
+import { TracerHealthSignal } from "../observability/tracer-health.js"
 import { UdpTransport } from "../sip/UdpTransport.js"
 import { SignalingNetwork } from "../sip/SignalingNetwork.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
@@ -58,6 +59,8 @@ export const defaultEmbeddedAppConfig: AppConfigData = {
   callControlNewCallTimeoutMs: 5000,
   callControlFailureTimeoutMs: 5000,
   callControlReferTimeoutMs: 5000,
+  eventHandlerTimeoutMs: 10_000,
+  timerHandlerTimeoutMs: 5_000,
   redisFlushIdleMs: 2000,
   traceSampleRate: 0,
   otelTracesUrl: "http://unused",
@@ -161,8 +164,13 @@ export const b2buaEmbeddedLayer = (opts: B2buaEmbeddedOptions): B2buaLayer => {
     Layer.provide(AppConfigL),
   )
   const CdrL = opts.cdr ?? CdrWriter.testLayer
+  // Slice 5.3 — TracingService consults the kill-switch on every
+  // span. Embedded callers don't run a BSP supervisor, so wire the
+  // always-healthy noop signal so the per-request hot path stays a
+  // single boolean check that always returns false.
   const TracingL = (opts.tracing ?? TracingService.layer).pipe(
     Layer.provide(AppConfigL),
+    Layer.provide(TracerHealthSignal.noop),
   )
 
   const OverloadL = OverloadController.layer.pipe(
@@ -194,5 +202,11 @@ export const b2buaEmbeddedLayer = (opts: B2buaEmbeddedOptions): B2buaLayer => {
     Layer.provide(CdrL),
     Layer.provide(DrainingState.test),
     Layer.provide(WorkerReadiness.test(true)),
+    // Slice 4: TransactionLayer / TimerService / CallState now publish
+    // metrics back to the registry (event queue depth, drop counters,
+    // active timers, terminating-call buckets). Provide MetricsL here
+    // so the embedded layer keeps the same `Out` shape (no requirement
+    // bubbles up to the caller).
+    Layer.provide(MetricsL),
   )
 }

@@ -36,6 +36,21 @@ export const AppConfigData = Schema.Struct({
   callControlNewCallTimeoutMs: Schema.Int,
   callControlFailureTimeoutMs: Schema.Int,
   callControlReferTimeoutMs: Schema.Int,
+  /**
+   * Per-event safety timeout applied to every `withCall` invocation in the
+   * `SipRouter` consumer loop. Catches handler hangs that would otherwise
+   * stall the event pump without surfacing in metrics. Must be greater
+   * than the largest legitimate handler latency (the call-control HTTP
+   * client timeouts above), so 10 s is the conservative default.
+   */
+  eventHandlerTimeoutMs: Schema.Int,
+  /**
+   * Per-timer safety timeout for the body of every fired timer. Timers
+   * never call into the controller adapter, so a tighter bound is fine.
+   * Tripping this counter ≠ a bug per se, but a sustained non-zero rate
+   * means rule-chain handlers are doing more work than expected.
+   */
+  timerHandlerTimeoutMs: Schema.Int,
   redisFlushIdleMs: Schema.Int,
   traceSampleRate: Schema.Number,
   otelTracesUrl: Schema.String,
@@ -217,7 +232,7 @@ function readConfigFromEnv(): AppConfigData {
     limiterActiveWindows: parseInt(envOrDefault("LIMITER_ACTIVE_WINDOWS", "3"), 10),
     limiterTtlSeconds: parseInt(envOrDefault("LIMITER_TTL_SECONDS", "1200"), 10),
     noAnswerTimeoutSec: parseInt(envOrDefault("NO_ANSWER_TIMEOUT_SEC", "30"), 10),
-    keepaliveIntervalSec: parseInt(envOrDefault("KEEPALIVE_INTERVAL_SEC", "900"), 10),
+    keepaliveIntervalSec: parseInt(envOrDefault("KEEPALIVE_INTERVAL_SEC", "300"), 10),
     keepaliveTimeoutSec: parseInt(envOrDefault("KEEPALIVE_TIMEOUT_SEC", "10"), 10),
     callMaxDurationSec: parseInt(envOrDefault("CALL_MAX_DURATION_SEC", "7200"), 10),
     cdrFilePath: envOrDefault("CDR_FILE_PATH", "/tmp/cdr.jsonl"),
@@ -226,12 +241,14 @@ function readConfigFromEnv(): AppConfigData {
     callControlNewCallTimeoutMs: parseInt(envOrDefault("CALL_CONTROL_NEW_CALL_TIMEOUT_MS", "5000"), 10),
     callControlFailureTimeoutMs: parseInt(envOrDefault("CALL_CONTROL_FAILURE_TIMEOUT_MS", "5000"), 10),
     callControlReferTimeoutMs: parseInt(envOrDefault("CALL_CONTROL_REFER_TIMEOUT_MS", "5000"), 10),
+    eventHandlerTimeoutMs: parseInt(envOrDefault("EVENT_HANDLER_TIMEOUT_MS", "10000"), 10),
+    timerHandlerTimeoutMs: parseInt(envOrDefault("TIMER_HANDLER_TIMEOUT_MS", "5000"), 10),
     redisFlushIdleMs: parseInt(envOrDefault("REDIS_FLUSH_IDLE_MS", "2000"), 10),
     traceSampleRate: parseFloat(envOrDefault("TRACE_SAMPLE_RATE", "1.0")),
     otelTracesUrl: envOrDefault("OTEL_TRACES_URL", "http://localhost:4318/v1/traces"),
     clusterWorkers: parseInt(envOrDefault("CLUSTER_WORKERS", "0"), 10),
     workerIndex: parseInt(envOrDefault("WORKER_INDEX", "-1"), 10),
-    callContextTtlSec: parseInt(envOrDefault("KEEPALIVE_INTERVAL_SEC", "900"), 10) * 2,
+    callContextTtlSec: parseInt(envOrDefault("KEEPALIVE_INTERVAL_SEC", "300"), 10) * 2,
     callCleanupDelaySec: 32,
     udpQueueMax: parseInt(envOrDefault("UDP_QUEUE_MAX", "100"), 10),
     udpQueueTier1ThresholdPct: parseInt(envOrDefault("UDP_QUEUE_TIER1_THRESHOLD_PCT", "70"), 10),

@@ -60,17 +60,55 @@ re-run from scratch to get a clean PASS/FAIL.
 --chaos-min-interval <N>                        (default 5m)
 --chaos-max-interval <N>                        (default 15m)
 --seed <N>                 deterministic chaos  (default = now-ms)
---reuse-cluster            skip BRINGUP
+--reuse-cluster            skip BRINGUP — DEV ONLY, see warning below
 --smoke                    10-min self-test mode
 --run-id <name>            artifact dir name    (default timestamp)
 --no-analyze               skip ANALYZE phase
 ```
 
+### ⚠️ Rule: do NOT use `--reuse-cluster` for verdict-bearing runs
+
+**Default policy: every endurance run — smoke or full — must start
+from a freshly destroyed and recreated kind cluster.** The runner
+already does this on the default path; `--reuse-cluster` is the only
+way to bypass it and exists *exclusively* for inner-loop development
+where you accept that cluster state is whatever the last run left
+behind.
+
+It must NEVER be used in any of these situations, all of which
+produce silent verdict-corrupting contamination:
+
+- **Chaining independent runs** (e.g. smoke → 1h, or run #1 → run
+  #2). The earlier run's long-stream calls and limiter-probe state
+  remain in worker memory and sidecar Redis. The follow-on run's
+  orphan sweeper cannot drain it fast enough; ~5–10 min into SOAK
+  the worker chokes, `currentCall` accumulates, successes go to 0
+  before any chaos has fired, and per-event "during/after" buckets
+  attribute the collapse to whichever chaos event happens to fire
+  next. Confirmed in run
+  `endurance-2026-05-09t18-38-55-758z` (post-replication-fix 1h
+  reusing a smoke cluster: 64% STEADY failure caused entirely by
+  contamination, not by the system under test).
+- **Investigating a regression or chasing a verdict.** If you don't
+  know whether the last run left dirty state, the only safe answer
+  is to recreate.
+- **Comparing two runs / reproducing a result.** Different leftover
+  state from each prior run = different baselines.
+
+Acceptable uses (narrow):
+- Iterating on the orchestrator code itself when you've just
+  observed a clean exit and want to skip the ~2–3 min BRINGUP cost.
+- Re-running ANALYZE alone on a cluster you control (see
+  `--no-analyze` + the `analyze-endurance.ts` recipes below).
+
+When in doubt, run without the flag. The 2–3 minute BRINGUP cost is
+cheap insurance; a corrupted 1-hour or 6-hour verdict is not.
+
 ## What the run does
 
 | # | Phase | Default | Purpose |
 |---|-------|---------|---------|
-| 1 | BRINGUP | ~3 min | Tear down + recreate kind cluster, install all charts. Skipped under `--reuse-cluster`. |
+| 1 | BRINGUP | ~3 min | Tear down + recreate kind cluster, install all charts. **Always run on the default path.** Skipped only under `--reuse-cluster` (DEV-ONLY — see warning under "CLI flags"). |
 | 2 | WARMUP | 5 min | Sipp streams start, no chaos. Verifies steady state before chaos. |
 | 3 | SOAK-START SANITY GATE | 60 s | Confirms each sipp stream has ≥1 successful call. Aborts early if not. |
 | 4 | SOAK | `--duration` | Chaos schedule active. |
@@ -287,6 +325,8 @@ differ by seconds; the schedule itself is exact.
      "redis-cli --scan --pattern 'sipas:limiter:*' | xargs -r redis-cli del"
    ```
 
-   Alternative: run without `--reuse-cluster` so BRINGUP recreates
-   the kind cluster from scratch. Costs ~2–3 min more per attempt
-   but guarantees clean state.
+   Alternative — and the only correct answer for any verdict-bearing
+   run: drop `--reuse-cluster` entirely so BRINGUP recreates the
+   kind cluster from scratch. Costs ~2–3 min more per attempt but
+   guarantees clean state. See the rule under "CLI flags" above —
+   `--reuse-cluster` exists only for inner-loop dev iteration.

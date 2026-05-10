@@ -639,6 +639,73 @@ describe("begin-termination reach (composite)", () => {
     // Call still transitions to "terminating".
     expect(result.call.state).toBe("terminating")
   })
+
+  // Endurance hardening — Slice 1.2 of
+  // docs/plan/endurance-stuck-terminating-and-overload-hardening.md.
+  // The historical bug: a late `keepalive_timeout` event firing while a
+  // call is in `terminating` re-invoked `begin-termination`, which
+  // re-issued cancel-all-timers + appended a fresh safety timer 64s
+  // further out. As long as a stray timeout fired every 60s, the safety
+  // net never expired and the call drifted indefinitely inside
+  // `terminating`, only ever cleaned up by the 60-s orphan sweep.
+  test("idempotency: re-entering while already 'terminating' with safety timer present is a no-op", () => {
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA")), state: "confirmed" }
+    const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")), state: "confirmed" }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const first = executeActions([{ type: "begin-termination" }], ctx, "test-rule")
+
+    // Sanity: first invocation transitioned + scheduled the safety timer.
+    expect(first.call.state).toBe("terminating")
+    expect(first.call.timers.filter((t) => t.type === "terminating_timeout").length).toBe(1)
+
+    // Re-invoke begin-termination on the already-terminating call — same
+    // path the keepalive_timeout loop used to take. Output must be inert:
+    // no new outbound, no new effects, no fresh timer.
+    const ctx2 = makeCtx(first.call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"), 1_700_000_060_000)
+    const second = executeActions([{ type: "begin-termination" }], ctx2, "test-rule")
+
+    expect(second.outbound.length).toBe(0)
+    expect(second.effects.length).toBe(0)
+    // Safety timer count unchanged (fireAt of the existing entry MUST NOT be pushed out).
+    const safetyTimers = second.call.timers.filter((t) => t.type === "terminating_timeout")
+    expect(safetyTimers.length).toBe(1)
+    expect(safetyTimers[0]!.fireAt).toBe(first.call.timers.find((t) => t.type === "terminating_timeout")!.fireAt)
+  })
+
+  // The replace-by-id helper drops any prior entry with the same id
+  // before appending. Without it, repeated scheduling of any recurring
+  // timer (keepalive, safety, …) would balloon `state.call.timers` and
+  // — on rehydration — respawn every stale entry, each of which re-arms
+  // the next cycle's timeout.
+  test("schedule-timer: re-scheduling the same id replaces (does not append) the persisted entry", () => {
+    const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA")), state: "confirmed" }
+    const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")), state: "confirmed" }
+    const call = makeCall(aLeg, bLeg)
+
+    const ctx1 = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const r1 = executeActions(
+      [{ type: "schedule-timer", timerType: "keepalive", delaySec: 30 }],
+      ctx1,
+      "test-rule",
+    )
+    expect(r1.call.timers.length).toBe(1)
+    const t1 = r1.call.timers[0]!
+    expect(t1.type).toBe("keepalive")
+
+    // Reschedule with the same id (same timerType + same callRef + no legId).
+    const ctx2 = makeCtx(r1.call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"), 1_700_000_010_000)
+    const r2 = executeActions(
+      [{ type: "schedule-timer", timerType: "keepalive", delaySec: 30 }],
+      ctx2,
+      "test-rule",
+    )
+    expect(r2.call.timers.length).toBe(1)
+    expect(r2.call.timers[0]!.id).toBe(t1.id)
+    // fireAt advanced — the entry was replaced, not duplicated.
+    expect(r2.call.timers[0]!.fireAt).toBeGreaterThan(t1.fireAt)
+  })
 })
 
 // ── terminate-call (composite — intentional scope) ─────────────────────────

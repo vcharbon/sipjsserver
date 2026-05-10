@@ -1,0 +1,64 @@
+# Endurance-only overlay layered on top of
+# `tests/k8s/values/b2bua-worker.yaml`.
+#
+# `run-endurance.ts` applies both files when installing the
+# b2bua-worker chart. The base file stays neutral so the memleak
+# harness (`sippperftest/memleak-test-k8s.sh`, which has its own
+# overlay `sippperftest/values-memleak-worker.yaml`) is not affected.
+#
+# Why this overlay exists: run
+# `endurance-2026-05-09t20-26-22-853z` showed workers freezing
+# ~15 min after pod start with no diagnostic data captured. The heap
+# was 1.2 GB with `concurrent=0` calls, and the only signal was a
+# proxy probe-miss → declared dead. Without the flags below the next
+# endurance run reproduces the same opaque collapse.
+#
+# The memleak overlay deliberately fully replaces `extraEnv` (chart
+# helpers do shallow array merge — we don't fight that). This file
+# follows the same convention: it appends to extraEnv by repeating
+# the upstream entries plus the diagnostic NODE_OPTIONS.
+
+extraEnv:
+  - name: REDIS_URL
+    value: "redis://localhost:6379"
+  - name: LIMITER_REDIS_URL
+    value: "redis://redis:6379"
+  - name: SIP_LOCAL_IP
+    value: "$(POD_IP)"
+  - name: CALL_CONTROL_URL
+    value: "http://call-control:8080"
+  - name: B2B_OUTBOUND_PROXY
+    value: "172.20.255.250:5060"
+  # Endurance leak diagnostics:
+  # - `--heapsnapshot-signal=SIGUSR2` lets `kill -USR2 1` (or the
+  #   orchestrator) trigger a v8 heap snapshot to the worker's CWD.
+  #   `/debug/heap-snapshot` HTTP endpoint already works without this
+  #   flag; the signal route is the fallback when the event loop is
+  #   stuck and HTTP routing is unresponsive.
+  # - `--max-old-space-size=400` keeps V8's old space below the
+  #   container `resources.limits.memory` cap (512Mi). When the leak
+  #   crosses 400Mi the JS layer triggers a heap-OOM with a stack
+  #   trace, before the kernel OOMKill removes the pod silently.
+  # - `--heapsnapshot-near-heap-limit=2` auto-dumps two heap snapshots
+  #   the first two times the heap approaches the V8 limit, so even
+  #   an unattended run captures the leaking heap before crash. Files
+  #   land at `/app/Heap.<pid>.<seq>.heapsnapshot`.
+  - name: NODE_OPTIONS
+    value: "--heapsnapshot-signal=SIGUSR2 --max-old-space-size=400 --heapsnapshot-near-heap-limit=2"
+
+# Cap worker app container memory so unreclaimable heap growth
+# becomes a deterministic OOMKilled at 512Mi instead of slow CPU
+# saturation at 1.2 GB+ (the post-run idle state observed in
+# endurance-2026-05-09t20-26-22-853z). The production helm values
+# leave `resources: {}` — this cap is test-environment only.
+#
+# 512Mi vs --max-old-space-size=400: the 112Mi gap covers V8 young
+# generation + native heap + page tables (the run that left us a
+# heap dump showed VmRSS=1.23 GB with VmData=1.27 GB; only ~1.19 GB
+# was the V8 old space proper, the rest is non-heap).
+resources:
+  limits:
+    memory: 512Mi
+  requests:
+    cpu: 25m
+    memory: 100Mi

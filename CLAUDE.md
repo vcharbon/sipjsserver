@@ -4,6 +4,8 @@ SIP B2BUA (Back-to-Back User Agent) that listens on incoming UDP SIP packets, ca
 
 Always reply and write in English, even when the user writes in French.
 
+When adding comments be brief, only comment non obvious behavior. Do not reference slice or plan number.
+
 ## Commands
 
 ```bash
@@ -54,11 +56,6 @@ On complex multi slice tasks with on line comment the intermediate slice.
 ## test strategy
 
 Never deactivate failing test without proper investigation first and explicit confirmation. If the test cannot be fixed in the scope create a dedicated precursor plan.
-
-## File creation
-
-- Use the `Write` tool to create files. Never use `cat`, `echo`, heredoc (`<< EOF`), or shell redirection.
-- Use the `Edit` tool to modify existing files.
 
 ## Test structure (fake vs live)
 

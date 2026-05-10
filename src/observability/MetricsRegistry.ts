@@ -19,6 +19,7 @@
 import { Layer, ServiceMap } from "effect"
 import type { UdpTransportMetrics } from "../sip/UdpTransport.js"
 import type { OverloadControllerMetrics } from "../b2bua/OverloadController.js"
+import type { TransactionLayerMetrics } from "../sip/TransactionLayer.js"
 
 // ---------------------------------------------------------------------------
 // Legacy cluster IPC types (inlined from the retired `src/cluster/IpcProtocol.ts`).
@@ -157,10 +158,91 @@ export interface AdapterErrorMetrics {
   permanent: { newCall: number; callFailure: number; callRefer: number }
 }
 
+/**
+ * Buckets exposed by `b2bua_worker_terminating_calls{age_bucket}`. Age
+ * is measured from the moment the call entered `terminating` (derived
+ * from the safety-net `terminating_timeout` timer's fireAt minus its
+ * 64-s window, falling back to `createdAt` for crash-recovered calls
+ * that lack the timer entry). The `gte300s` bucket should always read
+ * zero — non-zero is the canary for the stuck-`terminating` defect
+ * class hardened in
+ * docs/plan/endurance-stuck-terminating-and-overload-hardening.md.
+ */
+export interface TerminatingCallsByBucket {
+  readonly lt10s: number
+  readonly lt60s: number
+  readonly lt300s: number
+  readonly gte300s: number
+}
+
+/**
+ * Optional CallState-side metrics surface. CallState assigns a getter
+ * here at layer init so the Prometheus renderer (and any future
+ * /debug/memory caller) reads instantaneous bucket counts without
+ * round-tripping through Effect.
+ */
+export interface CallStateMetrics {
+  readonly terminatingByBucket: () => TerminatingCallsByBucket
+}
+
+/**
+ * Optional TimerService surface — exposes the live count of running
+ * timer fibers. Surfaced as `b2bua_worker_active_timers`.
+ *
+ * `handlerTimeoutTotal` counts every timer body that exceeded its
+ * `timerHandlerTimeoutMs` budget. Sustained non-zero indicates a hung
+ * rule chain or an outbound effect (HTTP, Redis) that does not respect
+ * its own timeout. Surfaced as `b2bua_worker_timer_handler_timeouts_total`.
+ */
+export interface TimerServiceMetrics {
+  readonly activeCount: () => number
+  readonly handlerTimeoutTotal: () => number
+}
+
+/**
+ * Optional SipRouter consumer surface — counters for the per-event
+ * safety wrap added on top of the inbound `Stream.runForEach`. Both
+ * counters should stay at zero in healthy systems.
+ *
+ * - `eventHandlerTimeoutTotal` — `withCall` did not return inside
+ *   `eventHandlerTimeoutMs`. The first such hit identifies the event
+ *   class (sip:METHOD / timer:type / internal-event topic) that hung.
+ * - `forcePurgeTotal` — the safety-net `terminating_timeout` timer
+ *   fired and its handler errored or hung; SipRouter ran the in-memory
+ *   force-purge to remove the call without waiting for the orphan
+ *   sweep.
+ */
+export interface SipRouterMetrics {
+  readonly eventHandlerTimeoutTotal: () => number
+  readonly forcePurgeTotal: () => number
+}
+
+/**
+ * Optional OTel pipeline surface — populated by the BSP wrapper
+ * introduced in Slice 5. Holds queue-depth and drop counters that
+ * the upstream `BatchSpanProcessor` does not expose publicly.
+ */
+export interface OtelPipelineMetrics {
+  readonly bspQueueDepth: () => number
+  readonly bspQueueCapacity: number
+  readonly bspDroppedTotal: () => number
+  readonly tracerDisabledTotal: () => Record<string, number>
+}
+
 export interface MetricsRegistryState {
   udp: UdpTransportMetrics | undefined
   overload: OverloadControllerMetrics | undefined
   dispatcher: DispatcherMetrics | undefined
+  /** Inbound TransactionLayer event queue + drop counters (Slice 2). */
+  transactionLayer: TransactionLayerMetrics | undefined
+  /** Live count of timer fibers (Slice 4 — TimerService.activeCountSync). */
+  timers: TimerServiceMetrics | undefined
+  /** Live `terminating`-state bucket counts (Slice 4 canary for stuck calls). */
+  callState: CallStateMetrics | undefined
+  /** SipRouter consumer-loop safety counters (Slice 1.4/event-timeout). */
+  sipRouter: SipRouterMetrics | undefined
+  /** OTel BSP queue depth / drop counters (Slice 5). */
+  otelPipeline: OtelPipelineMetrics | undefined
   /** Per-worker metrics snapshots, indexed by worker index. */
   workers: WorkerMetricsSnapshot[]
   /** Broadcast an IPC message to all workers (set by Dispatcher in cluster mode). */
@@ -176,6 +258,11 @@ export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, Metrics
     udp: undefined,
     overload: undefined,
     dispatcher: undefined,
+    transactionLayer: undefined,
+    timers: undefined,
+    callState: undefined,
+    sipRouter: undefined,
+    otelPipeline: undefined,
     workers: [],
     broadcastToWorkers: undefined,
     adapterErrors: {

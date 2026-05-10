@@ -64,10 +64,10 @@ Quick start:
 WARMUP_CALLS=1000 STRESS_CALLS=8000 RATE=80 ./sippperftest/memleak-test.sh
 
 # Full LB + workers via kind k8s
-WARMUP_CALLS=200 STRESS_CALLS=2000 RATE=50  ./sippperftest/memleak-test.sh --mode k8s
+WARMUP_CALLS=200 STRESS_CALLS=2000 RATE=40  ./sippperftest/memleak-test.sh --mode k8s
 
 # Iterate without rebuilding/reinstalling
-WARMUP_CALLS=200 STRESS_CALLS=2000 RATE=50 ./sippperftest/memleak-test.sh --mode k8s --skip-install --keep
+WARMUP_CALLS=200 STRESS_CALLS=2000 RATE=40 ./sippperftest/memleak-test.sh --mode k8s --skip-install --keep
 
 
 # Examples

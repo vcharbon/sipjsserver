@@ -153,6 +153,8 @@ function defaultHybridAppConfig(): AppConfigData {
     callControlNewCallTimeoutMs: 5000,
     callControlFailureTimeoutMs: 5000,
     callControlReferTimeoutMs: 5000,
+    eventHandlerTimeoutMs: 10_000,
+    timerHandlerTimeoutMs: 5_000,
     redisFlushIdleMs: 2000,
     traceSampleRate: 0,
     otelTracesUrl: "http://unused",

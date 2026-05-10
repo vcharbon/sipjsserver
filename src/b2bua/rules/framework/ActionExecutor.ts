@@ -75,6 +75,40 @@ interface ExecutionState {
   spanEvents: Array<{ name: string; attributes?: Record<string, unknown> }>
 }
 
+/**
+ * Append `entry` to `existing`, dropping any prior entry with the same id.
+ * Mirrors `MutableHashMap.set` semantics for `TimerService.fibersMap`, so
+ * the persisted `call.timers` list never grows unbounded under repeated
+ * scheduling of the same timer id (keepalive, terminating-timeout, etc.).
+ *
+ * Slice 6 of the endurance hardening plan: in non-production builds also
+ * assert the post-condition invariant — at most one entry per `(type,
+ * legId)` tuple. The id format is
+ * `${timerType}-${callRef}[-${legId}]`, so this collapses to "at most
+ * one entry per id" once a callRef is fixed. A duplicate slipping in
+ * means some upstream code path appended directly instead of going
+ * through this helper — that's the very leak we are guarding against.
+ */
+function replaceTimerById(
+  existing: ReadonlyArray<TimerEntry>,
+  entry: TimerEntry,
+): TimerEntry[] {
+  const next = [...existing.filter((t) => t.id !== entry.id), entry]
+  if (process.env.NODE_ENV !== "production") {
+    const seen = new Set<string>()
+    for (const t of next) {
+      if (seen.has(t.id)) {
+        throw new Error(
+          `replaceTimerById invariant violated: duplicate timer id ${t.id} in ` +
+            `[${next.map((x) => x.id).join(", ")}] — some call site is bypassing replaceTimerById`,
+        )
+      }
+      seen.add(t.id)
+    }
+  }
+  return next
+}
+
 // ── Leg target resolution ──────────────────────────────────────────────────
 
 /** Resolve destination host:port for a leg (from dialog contact or source). */
@@ -1387,10 +1421,9 @@ function executeSendRequestToLeg(
     dialog.sip,
     { via, contact, requestUri, ...(body !== undefined ? { body } : {}) },
   )
-  // eslint-disable-next-line no-console
-  console.log(
-    `[diag] send-request-to-leg ${method} leg=${legId} pre.localCSeq=${dialog.sip.localCSeq} post.localCSeq=${newSip.localCSeq}`
-  )
+  // Slice 6: removed the bare `[diag] send-request-to-leg` console.log.
+  // It bypassed structured logging (no timestamps in pod logs) and the
+  // CSeq deltas are recoverable from per-call OTel spans when needed.
   state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
     ...d,
     sip: newSip,
@@ -1698,13 +1731,7 @@ function executeScheduleTimer(
   // already elapsed, which fires duplicate handlers and (for keepalive)
   // re-arms the keepalive_timeout that the in-flight 200 OK already
   // cancelled, blocking the next keepalive cycle.
-  state.call = {
-    ...state.call,
-    timers: [
-      ...state.call.timers.filter((t) => t.id !== timerId),
-      timer,
-    ],
-  }
+  state.call = { ...state.call, timers: replaceTimerById(state.call.timers, timer) }
   state.effects.push({ type: "schedule-timer", timer })
 }
 
@@ -1805,6 +1832,19 @@ function executeBeginTermination(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
+  // Idempotency: a re-entry while already terminating must not re-issue
+  // cancel-all-timers + reschedule the safety net (the historical bug
+  // that drifted calls indefinitely inside `terminating` whenever a
+  // late keepalive_timeout fired). If the safety timer is still on the
+  // persisted list, the teardown is in flight — nothing to redo.
+  const safetyTimerId = `terminating-timeout-${ctx.callRef}`
+  if (
+    state.call.state === "terminating" &&
+    state.call.timers.some((t) => t.id === safetyTimerId)
+  ) {
+    return
+  }
+
   for (const leg of [state.call.aLeg, ...state.call.bLegs]) {
     // Skip legs already handled by the rule or already resolved
     if (leg.state === "terminated") continue
@@ -1855,14 +1895,17 @@ function executeBeginTermination(
   // Cancel all active timers (keepalive, duration, etc.)
   state.effects.push({ type: "cancel-all-timers" })
 
-  // Schedule 64s safety timer (2x RFC 3261 Timer B/F)
+  // Schedule 64s safety timer (2x RFC 3261 Timer B/F). Use the
+  // replace-by-id helper even though the idempotency guard above
+  // normally short-circuits a second entry — defensive against future
+  // call sites that bypass `begin-termination` and invoke this directly.
   const TERMINATING_TIMEOUT_MS = 64_000
   const safetyTimer: TimerEntry = {
-    id: `terminating-timeout-${ctx.callRef}`,
+    id: safetyTimerId,
     type: "terminating_timeout",
     fireAt: ctx.nowMs + TERMINATING_TIMEOUT_MS,
   }
-  state.call = { ...state.call, timers: [...state.call.timers, safetyTimer] }
+  state.call = { ...state.call, timers: replaceTimerById(state.call.timers, safetyTimer) }
   state.effects.push({ type: "schedule-timer", timer: safetyTimer })
 
   // Persist mid-teardown state for crash recovery. CDR is written exactly
