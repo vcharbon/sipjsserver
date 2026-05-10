@@ -83,6 +83,14 @@ export const captureSnapshot = (
       proxyPods.filter((p) => p.oomKilledHistorical).length +
       workerPods.filter((p) => p.oomKilledHistorical).length +
       limiterRedisPods.filter((p) => p.oomKilledHistorical).length
+
+    // Pull any heap snapshots written by the worker (V8 auto-snapshot
+    // via --heapsnapshot-near-heap-limit, or the recorder's RSS
+    // watchdog via /debug/heap-snapshot / SIGUSR2). Best-effort; if
+    // /heapdumps isn't mounted (production-style helm values), the
+    // copy is a no-op.
+    yield* collectHeapdumps(opts.namespace, opts.artifactDir, workerPods)
+
     const snap: Snapshot = {
       tCaptured,
       proxyPods,
@@ -103,6 +111,66 @@ export const captureSnapshot = (
       ),
     )
     return snap
+  })
+
+/**
+ * For each worker pod, pull the contents of `/heapdumps/` (if any)
+ * into `<artifactDir>/heapdumps/<pod>/`. Failures are swallowed —
+ * worth a missing-snapshot footgun in the analyzer rather than
+ * derailing the whole SNAPSHOT phase.
+ */
+const collectHeapdumps = (
+  namespace: string,
+  artifactDir: string,
+  workerPods: ReadonlyArray<PodSnapshot>,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const dest = path.join(artifactDir, "heapdumps")
+    yield* Effect.tryPromise(() => fs.mkdir(dest, { recursive: true })).pipe(
+      Effect.ignore,
+    )
+    for (const pod of workerPods) {
+      const podDir = path.join(dest, pod.name)
+      yield* Effect.tryPromise(() => fs.mkdir(podDir, { recursive: true })).pipe(
+        Effect.ignore,
+      )
+      // List first so we can no-op cleanly when /heapdumps is empty
+      // or absent. `ls -1` exits non-zero on missing dir, which the
+      // ignore swallows.
+      const listed = yield* exec("kubectl", [
+        "-n",
+        namespace,
+        "exec",
+        pod.name,
+        "-c",
+        "worker",
+        "--",
+        "sh",
+        "-c",
+        "ls -1 /heapdumps 2>/dev/null || true",
+      ]).pipe(
+        Effect.matchEffect({
+          onSuccess: (r) => Effect.succeed(r.stdout),
+          onFailure: () => Effect.succeed(""),
+        }),
+      )
+      const files = listed
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && s.endsWith(".heapsnapshot"))
+      if (files.length === 0) continue
+      // `kubectl cp <pod>:<src> <dst>` copies the directory contents
+      // recursively when the source ends in `/.`.
+      yield* exec("kubectl", [
+        "-n",
+        namespace,
+        "cp",
+        "-c",
+        "worker",
+        `${pod.name}:/heapdumps/.`,
+        podDir,
+      ]).pipe(Effect.ignore)
+    }
   })
 
 const snapshotPods = (

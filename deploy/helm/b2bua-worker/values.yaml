@@ -74,6 +74,17 @@ persistence:
   size: 1Gi
   mountPath: /data
 
+# Heap-snapshot capture volume (test/debug only).
+# When `enabled`, mounts an emptyDir at /heapdumps and sets the
+# container's workingDir there so V8's --heapsnapshot-near-heap-limit
+# auto-snapshot AND the StatusServer's /debug/heap-snapshot endpoint
+# both write to a path that survives container restart. The endurance
+# orchestrator copies the directory contents into the artifact dir
+# during the SNAPSHOT phase. Production charts should leave this off.
+heapdumps:
+  enabled: false
+  sizeLimit: 2Gi
+
 extraEnv: []
 
 nodeSelector: {}

@@ -60,6 +60,11 @@ export interface ReplicationSupervisorApi {
   readonly observe: Effect.Effect<SupervisorState>
 }
 
+export interface SeedWatermarkArgs {
+  readonly peer: WorkerOrdinal
+  readonly watermark: { readonly gen: number; readonly counter: number }
+}
+
 export interface SuperviseReplicationParams {
   readonly enumerator: PeerEnumeratorApi
   /**
@@ -109,6 +114,21 @@ export const makeReplicationSupervisor = (
 ): {
   readonly run: Effect.Effect<never>
   readonly observe: Effect.Effect<SupervisorState>
+  /**
+   * Plant a starting watermark for `peer` before its puller fiber is
+   * forked. Used by peer-scan-bootstrap (echo-removal slice) so the
+   * puller resumes from the head bookmarked just before the scan,
+   * rather than re-pulling channel entries from `(0,0)`.
+   *
+   * MUST be called before `run` begins ticking — internally it
+   * allocates the per-peer slot's `viewRef` so the very first
+   * `forkPullerFiber` call sees the seeded watermark. Calling
+   * `seedWatermark` after `run` has started is a programming error
+   * (the supervisor may have already forked a puller at `(0,0)`); the
+   * implementation tolerates it (overwrites the watermark) but the
+   * race is the caller's problem.
+   */
+  readonly seedWatermark: (args: SeedWatermarkArgs) => Effect.Effect<void>
 } => {
   const slots = MutableHashMap.empty<WorkerOrdinal, PeerSlot>()
 
@@ -186,5 +206,23 @@ export const makeReplicationSupervisor = (
     return { alivePeers, perPeer }
   })
 
-  return { run, observe }
+  const seedWatermark = (args: SeedWatermarkArgs): Effect.Effect<void> =>
+    Effect.sync(() => {
+      const slotOpt = MutableHashMap.get(slots, args.peer)
+      if (Option.isNone(slotOpt)) {
+        const slot: PeerSlot = {
+          fiber: null,
+          viewRef: MutableRef.make(
+            initialPeerView(args.peer, args.watermark)
+          ),
+        }
+        MutableHashMap.set(slots, args.peer, slot)
+        return
+      }
+      const slot = slotOpt.value
+      const cur = MutableRef.get(slot.viewRef)
+      MutableRef.set(slot.viewRef, { ...cur, watermark: args.watermark })
+    })
+
+  return { run, observe, seedWatermark }
 }

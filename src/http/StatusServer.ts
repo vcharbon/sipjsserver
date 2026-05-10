@@ -6,7 +6,7 @@ import { NodeHttpServer } from "@effect/platform-node"
 import { Clock, Effect, Layer } from "effect"
 import { HttpRouter, HttpServerResponse } from "effect/unstable/http"
 import { createServer } from "node:http"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { writeHeapSnapshot } from "node:v8"
 import { CallState } from "../call/CallState.js"
 import { WorkerReadiness } from "../cache/WorkerReadiness.js"
@@ -349,6 +349,19 @@ function renderPrometheus(
       "Calls force-purged after the safety-net terminating_timeout handler errored or hung.",
     )
     m("b2bua_worker_call_force_purge_total", r.forcePurgeTotal())
+
+    header(
+      "b2bua_stale_response_dropped_total",
+      "counter",
+      "Inbound SIP responses dropped because the call no longer exists. Per RFC 3261 §17.1.1.2 these MUST be silently dropped; non-zero indicates teardown-racing in-flight transactions (typically OPTIONS keepalive 200 OKs).",
+    )
+    const stale = r.staleResponseDroppedTotal()
+    for (const key of Object.keys(stale)) {
+      const sep = key.indexOf("|")
+      const method = sep > 0 ? key.slice(0, sep) : key
+      const status = sep > 0 ? key.slice(sep + 1) : "0"
+      m("b2bua_stale_response_dropped_total", stale[key] ?? 0, { method, status })
+    }
   }
 
   // ── Calls in 'terminating' state, bucketed by age (Slice 4 canary) ─
@@ -363,6 +376,54 @@ function renderPrometheus(
     m("b2bua_worker_terminating_calls", buckets.lt60s, { age_bucket: "lt60s" })
     m("b2bua_worker_terminating_calls", buckets.lt300s, { age_bucket: "lt300s" })
     m("b2bua_worker_terminating_calls", buckets.gte300s, { age_bucket: "gte300s" })
+  }
+
+  // ── Peer-scan-bootstrap (echo-removal slice) ───────────────────────
+  if (reg.replicationBootstrap) {
+    const b = reg.replicationBootstrap
+    header(
+      "b2bua_replication_bootstrap_started_total",
+      "counter",
+      "Worker-boot peer-scan-bootstrap attempts started. One per worker incarnation.",
+    )
+    m("b2bua_replication_bootstrap_started_total", b.startedTotal())
+
+    header(
+      "b2bua_replication_bootstrap_completed_total",
+      "counter",
+      "Per-peer bootstrap outcomes — ok / timeout / error. Sum across labels equals the count of peers seen at boot.",
+    )
+    const outcomes = b.completedTotal()
+    for (const key of Object.keys(outcomes)) {
+      const sep = key.indexOf("|")
+      const peer = sep > 0 ? key.slice(0, sep) : key
+      const outcome = sep > 0 ? key.slice(sep + 1) : "unknown"
+      m("b2bua_replication_bootstrap_completed_total", outcomes[key] ?? 0, {
+        peer,
+        outcome,
+      })
+    }
+
+    header(
+      "b2bua_replication_bootstrap_entries_imported_total",
+      "counter",
+      "Scan entries imported into local `pri:{self}:*` per source peer.",
+    )
+    const imported = b.entriesImportedTotal()
+    for (const [peer, value] of Object.entries(imported)) {
+      m("b2bua_replication_bootstrap_entries_imported_total", value, { peer })
+    }
+
+    header(
+      "b2bua_replication_bootstrap_duration_ms",
+      "gauge",
+      "Per-peer bootstrap wall-time (last sample). Exposed as a gauge to keep scrape cardinality low; promote to a histogram if distribution becomes load-bearing.",
+    )
+    const durations = b.durationMs()
+    for (const [peer, samples] of Object.entries(durations)) {
+      const last = samples.length > 0 ? samples[samples.length - 1]! : 0
+      m("b2bua_replication_bootstrap_duration_ms", last, { peer })
+    }
   }
 
   // ── OTel pipeline (Slice 5) ────────────────────────────────────────
@@ -559,7 +620,13 @@ export const StatusServerLayer: Layer.Layer<
           "POST",
           "/debug/heap-snapshot",
           Effect.sync(() => {
-            const dir = "/tmp/heapdumps"
+            // Prefer /heapdumps when its emptyDir is mounted (helm
+            // values `heapdumps.enabled: true`) — survives container
+            // restart so the orchestrator can still copy the file out
+            // after an OOM. Falls back to /tmp/heapdumps when the
+            // volume isn't mounted (writable container layer, lost on
+            // restart) so the endpoint stays usable in dev shells.
+            const dir = existsSync("/heapdumps") ? "/heapdumps" : "/tmp/heapdumps"
             try {
               mkdirSync(dir, { recursive: true })
             } catch { /* ignore */ }

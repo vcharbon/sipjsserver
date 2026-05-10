@@ -1,31 +1,30 @@
 /**
- * NS3 — Delete propagation + TTL-driven tombstone cleanup.
+ * NS3 — Delete propagation: hard-DEL body + emit D-member.
  *
  * Scenario:
  *   1. Worker A writes call X with two secondary indexes.
  *   2. Worker A tombstones X (with the same indexes named for removal).
  *   3. The channel has both U-member (score 1) and D-member (score 2);
- *      the body is now a tombstone marker; secondary indexes are gone.
- *   4. Wall-clock advances past the tombstone TTL (~3 min).
- *   5. The tombstone body has TTL'd to null; the D-member is still in
- *      the channel (the design accepts orphan D-members within the
- *      ~30K-active-call ceiling).
+ *      the body slot is empty (hard-DEL'd); secondary indexes are gone.
+ *   4. The D-member's body resolves to null on every pull — the
+ *      puller's apply path uses the "D:" prefix as the wire signal,
+ *      not a body-shape inspection.
  *
- * Variant covered: in-memory `KvBackend` + fake clock. The Redis +
- * hybrid-clock variant lands when the hybrid pump arrives.
+ * Per docs/plan/lets-plan-a-proper-crystalline-emerson.md, body slots
+ * are either a real Call JSON or empty. No tombstone payload ever
+ * lives in a body slot.
  */
 
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, MutableHashMap } from "effect"
-import { TestClock } from "effect/testing"
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
 import {
   KvBackend,
   type MemoryStoreEntry,
 } from "../../src/storage/KvBackend.js"
 
-describe("NS3 — delete-and-tombstone-ttl", () => {
-  it.effect("tombstone replaces body, removes indexes, then body TTLs out leaving D-member orphan", () =>
+describe("NS3 — delete-and-hard-DEL", () => {
+  it.effect("tombstone hard-DELs body + indexes; D-member's pulled body is null", () =>
     Effect.gen(function* () {
       const store = MutableHashMap.empty<string, MemoryStoreEntry>()
       const kv = KvBackend.makeMemoryUnsafe(store)
@@ -47,7 +46,7 @@ describe("NS3 — delete-and-tombstone-ttl", () => {
         ],
       })
 
-      // Sanity: body and indexes are present, channel head = 1.
+      // Sanity: body and indexes are present.
       expect(yield* kv.bodyGet("pri:worker-A:call:X")).toBe(
         '{"gen":1,"state":"active"}'
       )
@@ -57,36 +56,25 @@ describe("NS3 — delete-and-tombstone-ttl", () => {
       // Step 2: tombstone with the indexes named for removal.
       yield* chan.tombstone({
         entryGen: chan.gen,
-        callGen: 1,
         partition: "pri",
         callRef: "X",
         indexesToRemove: ["idx:leg:CID-100", "idx:leg:CID-101"],
       })
 
-      // Step 3: body is now the tombstone marker; indexes gone; channel
-      // has both U and D members.
-      expect(yield* kv.bodyGet("pri:worker-A:call:X")).toBe(
-        '{"tombstone":true,"callGen":1}'
-      )
+      // Step 3: body slot empty; indexes gone; channel has both U
+      // and D members.
+      expect(yield* kv.bodyGet("pri:worker-A:call:X")).toBeNull()
       expect(yield* kv.bodyGet("idx:leg:CID-100")).toBeNull()
       expect(yield* kv.bodyGet("idx:leg:CID-101")).toBeNull()
 
+      // Step 4: pull resolves D-member's body as null — the wire signal
+      // is the "D:" member prefix. The puller treats null-body-on-D as
+      // delete.
       const afterTombstone = yield* chan.pullBatch({ gen: 0, counter: 0 }, 10)
       expect(afterTombstone.entries.length).toBe(2)
       expect(afterTombstone.entries[0]?.member).toBe("U:pri:worker-A:call:X")
       expect(afterTombstone.entries[1]?.member).toBe("D:pri:worker-A:call:X")
-
-      // Step 4: advance past the 180-second tombstone TTL.
-      yield* TestClock.adjust("181 seconds")
-
-      // Step 5: body has TTL'd → null. D-member is still in the channel
-      // (orphan-D entries are accepted; cleanup is "next-write sweeps").
-      const afterTtl = yield* chan.pullBatch({ gen: 0, counter: 0 }, 10)
-      expect(afterTtl.entries.length).toBe(2)
-      // Both U-member and D-member are still indexed but the body is
-      // gone — the puller treats null-body-on-D as "DEL anyway".
-      expect(afterTtl.entries[1]?.member).toBe("D:pri:worker-A:call:X")
-      expect(afterTtl.entries[1]?.body).toBeNull()
+      expect(afterTombstone.entries[1]?.body).toBeNull()
     })
   )
 })

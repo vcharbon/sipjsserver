@@ -174,6 +174,15 @@ export const AppConfigData = Schema.Struct({
     host: Schema.String,
     port: Schema.Int,
   })),
+
+  /**
+   * Overall budget for peer-scan-bootstrap at worker boot. Counts wall
+   * time across all parallel per-peer scans; once exhausted, remaining
+   * peers' bootstrap attempts are abandoned and the worker proceeds to
+   * start its puller fibers. See
+   * docs/plan/echo-removal-grill-me-smooth-parasol.md §3.
+   */
+  replicationBootstrapTimeoutMs: Schema.Int,
 })
 
 export type AppConfigData = typeof AppConfigData.Type
@@ -282,6 +291,10 @@ function readConfigFromEnv(): AppConfigData {
       ? { k8sNamespace: namespace }
       : {}),
     workerServiceName: envOrDefault("WORKER_SERVICE_NAME", "b2bua-worker"),
+    replicationBootstrapTimeoutMs: parseInt(
+      envOrDefault("REPLICATION_BOOTSTRAP_TIMEOUT_MS", "30000"),
+      10
+    ),
   }
 }
 

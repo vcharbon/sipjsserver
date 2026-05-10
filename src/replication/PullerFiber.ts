@@ -54,11 +54,11 @@ import {
 } from "effect"
 import {
   compareGenCounter,
-  decodeFrame,
   ProtocolError,
   type DataFrame,
   type PullFrame,
 } from "./ReplicationProtocol.js"
+import { streamNdjsonLines } from "./NdjsonStream.js"
 
 // Re-export DataFrame so callers wiring `applyFrame` only need to
 // import from PullerFiber. (Slice 7c regression: tests previously
@@ -273,50 +273,20 @@ const consumeStream = (
   stream: Stream.Stream<Uint8Array, PullerTransportError>,
   config: PullerFiberConfig
 ): Effect.Effect<void, PullerTransportError | ProtocolError> =>
-  Effect.gen(function* () {
-    const decoder = new TextDecoder()
-    let buffer = ""
-    yield* stream.pipe(
-      Stream.runForEach((chunk: Uint8Array) =>
-        Effect.gen(function* () {
-          // Update bytes-received counter eagerly, even before frames
-          // parse — observability of the byte stream itself.
-          const cur = MutableRef.get(config.viewRef)
-          patchView(config.viewRef, {
-            bytesReceivedTotal: cur.bytesReceivedTotal + chunk.length,
-          })
-
-          buffer += decoder.decode(chunk, { stream: true })
-          let nl = buffer.indexOf("\n")
-          while (nl !== -1) {
-            const line = buffer.slice(0, nl)
-            buffer = buffer.slice(nl + 1)
-            if (line.length > 0) {
-              const frame = yield* tryDecodeFrame(line)
-              if (frame !== null) {
-                yield* applyOne(frame, config)
-              }
-            }
-            nl = buffer.indexOf("\n")
-          }
+  stream.pipe(
+    Stream.tap((chunk: Uint8Array) =>
+      Effect.sync(() => {
+        // Update bytes-received counter eagerly, even before frames
+        // parse — observability of the byte stream itself.
+        const cur = MutableRef.get(config.viewRef)
+        patchView(config.viewRef, {
+          bytesReceivedTotal: cur.bytesReceivedTotal + chunk.length,
         })
-      )
-    )
-  })
-
-const tryDecodeFrame = (
-  line: string
-): Effect.Effect<PullFrame | null, ProtocolError> =>
-  Effect.try({
-    try: () => decodeFrame(line),
-    catch: (err) =>
-      err instanceof ProtocolError
-        ? err
-        : new ProtocolError({
-            reason: err instanceof Error ? err.message : String(err),
-            raw: line,
-          }),
-  })
+      })
+    ),
+    streamNdjsonLines,
+    Stream.runForEach((frame) => applyOne(frame, config))
+  )
 
 const applyOne = (
   frame: PullFrame,

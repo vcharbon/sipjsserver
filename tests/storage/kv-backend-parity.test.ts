@@ -160,8 +160,6 @@ const runOp = (
           entryGen,
           member: memberOf("D", bodyKey(op.callRef!)),
           bodyKey: bodyKey(op.callRef!),
-          tombstoneValue: '{"tombstone":true}',
-          tombstoneTtlSec: 180,
           indexesToRemove: op.indexesToRemove ?? [],
         })
         .pipe(Effect.orDie)

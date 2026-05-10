@@ -289,9 +289,21 @@ export class SipRouter extends ServiceMap.Service<
       // at zero in a healthy run.
       let eventHandlerTimeoutTotal = 0
       let forcePurgeTotal = 0
+      // `b2bua_stale_response_dropped_total{method, status}` — keyed
+      // by the bucket label `${method}|${status}`. Incremented when
+      // an inbound response resolves to a missing call (either via
+      // top-Via cr/lg pointing at a vanished callRef, or via
+      // resolveFromSipKey miss). The SipRouter already drops these
+      // silently; the counter surfaces visibility.
+      const staleResponseDroppedTotal: Record<string, number> = {}
+      const bumpStaleResponse = (method: string, status: number): void => {
+        const key = `${method}|${status}`
+        staleResponseDroppedTotal[key] = (staleResponseDroppedTotal[key] ?? 0) + 1
+      }
       registry.sipRouter = {
         eventHandlerTimeoutTotal: () => eventHandlerTimeoutTotal,
         forcePurgeTotal: () => forcePurgeTotal,
+        staleResponseDroppedTotal: () => ({ ...staleResponseDroppedTotal }),
       }
       // Bind background forks to the layer's scope so they die when
       // the worker scope closes. Required for the simulated cluster's
@@ -674,6 +686,16 @@ export class SipRouter extends ServiceMap.Service<
               yield* tracing.withErrorSpan("sip.unroutable", attrs,
                 Effect.logWarning(`Unroutable ${summary} from ${event.rinfo.address}:${event.rinfo.port} Call-ID=${callId} fromTag=${fromTag} toTag=${toTag} [${resolveDetail}] — rejecting`)
               )
+              // Stale-response anomaly counter — bumped per RFC 3261
+              // §17.1.1.2 silent-drop path so operators can see the
+              // teardown-race rate (typically OPTIONS keepalive 200 OKs
+              // arriving after the call was deleted).
+              if (msg.type === "response") {
+                bumpStaleResponse(
+                  String(msg.parsed?.cseq?.method ?? "?"),
+                  msg.status,
+                )
+              }
               // RFC 3261 §12.2.2 — reject unmatched in-dialog requests with 481
               // (ACK never gets a response; responses are silently dropped)
               if (msg.type === "request" && msg.method !== "ACK") {
@@ -708,6 +730,16 @@ export class SipRouter extends ServiceMap.Service<
                   : event.type
                 const legInfo = legHint ? ` leg=${legHint}` : ""
                 yield* Effect.logWarning(`Call ${callRef} not found on checkout for ${summary}${legInfo} — rejecting`)
+                // Late response on a deleted call (the teardown-race
+                // surface that motivated the tombstone redesign):
+                // RFC 3261 §17.1.1.2 silent drop, observable via the
+                // stale-response counter.
+                if (event.type === "sip" && event.message.type === "response") {
+                  bumpStaleResponse(
+                    String(event.message.parsed?.cseq?.method ?? "?"),
+                    (event.message as SipResponse).status,
+                  )
+                }
                 // RFC 3261 §12.2.2 — reject requests for vanished calls with 481
                 if (event.type === "sip" && event.message.type === "request" && event.message.method !== "ACK") {
                   const rejectMsg = generateResponse(event.message as SipRequest, 481, "Call/Transaction Does Not Exist", {

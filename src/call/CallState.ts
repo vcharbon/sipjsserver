@@ -91,42 +91,6 @@ const logEncodeFailure = (source: string, call: Call) =>
   })
 
 // ---------------------------------------------------------------------------
-// Replication-tombstone detection
-// ---------------------------------------------------------------------------
-//
-// `src/replication/ChannelIndex.ts:encodeTombstone` stamps the body
-// slot with `{tombstone: true, callGen: N}` when a call is deleted, so
-// peers' open long-poll observes the deletion on the same channel that
-// carries normal call writes. The tombstone has its own TTL and lives
-// in the cache slot for that grace window.
-//
-// `checkout` must recognise this wire format *before* attempting to
-// schema-decode the body as a Call — otherwise every late retransmit
-// for a deleted call (e.g. a BYE 200 OK arriving after the call was
-// already removed) feeds the tombstone to `JsonCallSchema`, the decode
-// fails on the missing `callRef` field, and the SchemaError defect
-// propagates to the SipRouter consumer's catchCause as "Unhandled
-// error processing event [sip:200]". Endurance run
-// post-fix-validation-5-20260510-1617 measured 4-13/min of these.
-//
-// Cheap `includes("\"tombstone\"")` prefix test before `JSON.parse`
-// keeps the hot path (a real Call body) unparsed-twice; only payloads
-// that already look like tombstones pay the parse cost.
-const isReplicationTombstone = (json: string): boolean => {
-  if (!json.includes('"tombstone"')) return false
-  try {
-    const obj = JSON.parse(json) as unknown
-    return (
-      obj !== null &&
-      typeof obj === "object" &&
-      (obj as { tombstone?: unknown }).tombstone === true
-    )
-  } catch {
-    return false
-  }
-}
-
-// ---------------------------------------------------------------------------
 // SIP key helpers (used both for in-memory sipIndex and cache index keys)
 // ---------------------------------------------------------------------------
 
@@ -389,8 +353,11 @@ export class CallState extends ServiceMap.Service<
       // terminated-or-terminating-state. Holds no semaphore by itself —
       // it must run inside a `sem.withPermits(1)(...)` block (see
       // `withCall` below) so concurrent events for the same callRef are
-      // serialised. Tombstone / decode-failure rationale: see
-      // `isReplicationTombstone` and `logDecodeFailure` above.
+      // serialised. Decode-failure rationale: see `logDecodeFailure`
+      // above. Deleted calls produce `json === null` (the body slot is
+      // hard-DEL'd by `storage.deleteCall` per
+      // docs/plan/lets-plan-a-proper-crystalline-emerson.md), which
+      // already maps to `undefined` here.
       const loadCall = Effect.fnUntraced(function* (callRef: string) {
         const inMemory = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
         if (inMemory !== undefined) return inMemory
@@ -401,16 +368,6 @@ export class CallState extends ServiceMap.Service<
           .pipe(Effect.mapError(toRedisErr))
 
         if (json === null) return undefined
-
-        if (isReplicationTombstone(json)) {
-          // Late retransmit on a deleted call — RFC 3261 §12.2.2 says
-          // the worker should reply 481 anyway, which the SipRouter
-          // caller does on `withCall`-body `call === undefined`.
-          yield* Effect.logDebug(
-            `[CallState] loadCall saw replication tombstone for ${callRef} — treating as no-call`,
-          )
-          return undefined
-        }
 
         const decodedOpt = yield* Schema.decodeUnknownEffect(JsonCallSchema)(json).pipe(
           Effect.tapErrorTag("SchemaError", logDecodeFailure("loadCall", callRef, json)),

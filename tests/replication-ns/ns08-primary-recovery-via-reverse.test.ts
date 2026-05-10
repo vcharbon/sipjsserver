@@ -1,22 +1,22 @@
 /**
- * NS8 — primary recovery via reverse path.
+ * NS8 — primary recovery via reverse-path originating writes.
  *
- * Scenario (per docs/plan/grill-me-on-the-spicy-lark.md §D9-NS):
- *   1. A writes X. B's puller catches up; B's bak:{A}:call:X exists
- *      AND B's outgoing channel-to-A has the echoed entry.
+ * Scenario:
+ *   1. A writes X. B's puller catches up: B's bak:{A}:call:X exists.
+ *      The puller's apply path is local-only (no echo to channelBtoA).
  *   2. A is killed: storage wiped, gen bumps via simulated restartCount.
  *   3. While A is rebooting, B receives an in-dialog request for X
- *      (modeled here by writing X into B's bak:{A}: with a NEW counter
- *      via channelBtoA.write — i.e. B is acting on A's behalf).
- *   4. A starts up with a higher gen and pulls from B's channel-to-A
- *      since=(0,0). The echoed entries are tagged partition="bak"
- *      because that's where B wrote them; A's apply rule routes them
- *      via the reverse path → A's pri:{A}:call:X is reconstructed.
+ *      (modeled by writing X into B's bak:{A}: via
+ *      `channelBtoA.write(entryGen=channelBtoA.gen, partition="bak", ...)`
+ *      — B as a writer-on-A's-behalf, an ORIGINATING entry on B's
+ *      outgoing-to-A channel).
+ *   4. A starts up with a higher gen and pulls from B's channel-to-A.
+ *      The reverse entry (partition="bak") routes via the apply
+ *      rule's partition flip into A's pri:{A}:call:X.
  *
- * Asserts:
- *   - Pre-recovery: A's storage is empty.
- *   - Post-recovery: A's pri:worker-A:call:X exists with the latest
- *     value (the one B wrote on A's behalf — overwriting the original).
+ * This is the **legitimate** reverse-direction recovery primitive.
+ * It does NOT depend on echo — B writes ON A's behalf at its own
+ * originating gen, and A's puller picks up that single entry.
  *
  * Variant: in-memory KvBackend + real (it.live) clock.
  */
@@ -67,9 +67,9 @@ describe("NS8 — primary recovery via reverse", () => {
           kvB
         )
 
-        // ---- Step 1: A writes X. B's puller drains; via EchoApply,
-        // B writes bak:{A}:call:X to its storage AND echoes to its
-        // channelBtoA.
+        // ---- Step 1: A writes X. B's puller drains; apply is local-
+        // only (no echo), so bak:{A}:call:X exists in kvB but
+        // channelBtoA stays untouched by the apply.
         yield* channelA0toB.write({
           entryGen: channelA0toB.gen,
           partition: "pri",
@@ -83,7 +83,6 @@ describe("NS8 — primary recovery via reverse", () => {
         const bApply = makeReplicationApply({
           self: "worker-B",
           source: "worker-A",
-          outgoingChannel: channelBtoA,
           localKv: kvB,
           bodyTtlSec: 60,
         })
@@ -115,11 +114,12 @@ describe("NS8 — primary recovery via reverse", () => {
           MutableRef.get(bView).entriesAppliedTotal >= 1
         )
 
-        // Sanity: B has the original X via the bak partition; channelBtoA
-        // has the echoed update at counter 1.
+        // Sanity: B has the original X via the bak partition; with
+        // echo killed, channelBtoA is empty until B writes on A's
+        // behalf in step 3.
         expect(yield* kvB.bodyGet("bak:worker-A:call:X")).not.toBeNull()
         const beforeBye = yield* channelBtoA.pullBatch({ gen: 0, counter: 0 }, 100)
-        expect(beforeBye.entries.length).toBe(1)
+        expect(beforeBye.entries.length).toBe(0)
 
         yield* Fiber.interrupt(bFiber)
 
@@ -146,16 +146,11 @@ describe("NS8 — primary recovery via reverse", () => {
         // ---- Step 4: A reboots with higher gen and pulls from B's
         // outgoing channel.
         const kvA1 = KvBackend.makeMemoryUnsafe(storeA)
-        const channelA1toB = ChannelIndex.make(
-          { self: "worker-A", peer: "worker-B", gen: A_GEN_AFTER_REBOOT },
-          kvA1
-        )
 
         const aView = MutableRef.make(initialPeerView("worker-B"))
         const aApply = makeReplicationApply({
           self: "worker-A",
           source: "worker-B",
-          outgoingChannel: channelA1toB,
           localKv: kvA1,
           bodyTtlSec: 60,
         })

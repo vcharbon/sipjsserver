@@ -222,21 +222,18 @@ describe("ChannelIndex — tombstone", () => {
         bodyTtlSec: 60,
         indexes: [{ key: "idx:leg:CID-1", value: "call-1", ttlSec: 60 }],
       })
-      // Then tombstone — PRS in production computes callGen via RMW
-      // on the existing local body; here we set 43 explicitly to
-      // simulate "current local _topology.gen=42 → tombstone callGen=43".
+      // Then tombstone — body slot is hard-DEL'd, indexes DEL'd,
+      // D-member added to the channel.
       yield* chan.tombstone({
         entryGen: chan.gen,
         partition: "pri",
         callRef: "call-1",
-        callGen: 43,
         indexesToRemove: ["idx:leg:CID-1"],
       })
-      // Body is now the tombstone marker, carrying callGen.
-      const bodyEntry = MutableHashMap.get(store, "pri:worker-A:call:call-1")
-      expect(Option.isSome(bodyEntry) ? bodyEntry.value.value : null).toBe(
-        '{"tombstone":true,"callGen":43}'
-      )
+      // Body slot is empty.
+      expect(
+        Option.isNone(MutableHashMap.get(store, "pri:worker-A:call:call-1"))
+      ).toBe(true)
       // Index entry is gone.
       expect(
         Option.isNone(MutableHashMap.get(store, "idx:leg:CID-1"))
@@ -246,38 +243,25 @@ describe("ChannelIndex — tombstone", () => {
       expect(pulled.entries.length).toBe(2)
       expect(pulled.entries[0]?.member).toBe("U:pri:worker-A:call:call-1")
       expect(pulled.entries[1]?.member).toBe("D:pri:worker-A:call:call-1")
+      // The D-member's body is null (hard-DEL'd).
+      expect(pulled.entries[1]?.body).toBeNull()
     })
   )
 
-  it("tombstone of a never-written callRef still bumps counter and stores tombstone marker", () =>
+  it("tombstone of a never-written callRef still bumps counter and emits a D-member with body=null", () =>
     Effect.gen(function* () {
       const { chan } = setup()
       const r = yield* chan.tombstone({
         entryGen: chan.gen,
         partition: "pri",
         callRef: "never-existed",
-        callGen: 1,
         indexesToRemove: [],
       })
       expect(r.counter).toBe(1)
       const pulled = yield* chan.pullBatch(SINCE_COLD, 10)
       expect(pulled.entries.length).toBe(1)
       expect(pulled.entries[0]?.member).toBe("D:pri:worker-A:call:never-existed")
-    })
-  )
-
-  it("tombstone embeds the per-call callGen for the receiver's content gate", () =>
-    Effect.gen(function* () {
-      const { chan } = setup()
-      yield* chan.tombstone({
-        entryGen: chan.gen,
-        partition: "pri",
-        callRef: "call-1",
-        callGen: 99,
-        indexesToRemove: [],
-      })
-      const pulled = yield* chan.pullBatch(SINCE_COLD, 10)
-      expect(pulled.entries[0]?.body).toBe('{"tombstone":true,"callGen":99}')
+      expect(pulled.entries[0]?.body).toBeNull()
     })
   )
 })

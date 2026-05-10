@@ -360,20 +360,19 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
           { key: "idx:leg:CID-2", value: "a", ttlSec: 60 },
         ],
       })
-      // Then tombstone it.
+      // Then tombstone it. Body slot is hard-DEL'd (no tombstone JSON
+      // payload) per docs/plan/lets-plan-a-proper-crystalline-emerson.md.
       const result = yield* kv.channelWriteTombstone({
         channel: CHANNEL,
         counterKey: COUNTER,
         entryGen: GEN,
         member: memberOf("D", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        tombstoneValue: '{"tombstone":true,"callGen":7}',
-        tombstoneTtlSec: 180,
         indexesToRemove: ["idx:leg:CID-1", "idx:leg:CID-2"],
       })
       expect(result.counter).toBe(2)
-      // Body is now the tombstone marker.
-      expect(yield* kv.bodyGet(bodyKey("a"))).toBe('{"tombstone":true,"callGen":7}')
+      // Body slot is now empty.
+      expect(yield* kv.bodyGet(bodyKey("a"))).toBeNull()
       // Secondary indexes are gone.
       expect(yield* kv.bodyGet("idx:leg:CID-1")).toBeNull()
       expect(yield* kv.bodyGet("idx:leg:CID-2")).toBeNull()
@@ -387,14 +386,14 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
       expect(pulled.entries.length).toBe(2)
       expect(pulled.entries[0]?.member).toBe(memberOf("U", bodyKey("a")))
       expect(pulled.entries[1]?.member).toBe(memberOf("D", bodyKey("a")))
-      // Both entries resolve to the same body — which is now the tombstone
-      // value. The puller distinguishes apply behavior by member's "U:"/"D:"
-      // prefix, NOT by body shape.
-      expect(pulled.entries[1]?.body).toBe('{"tombstone":true,"callGen":7}')
+      // The D-member's body is null (the slot was hard-DEL'd by the
+      // tombstone Lua). The puller distinguishes apply behavior by the
+      // member's "U:"/"D:" prefix.
+      expect(pulled.entries[1]?.body).toBeNull()
     })
   )
 
-  it.effect("tombstone TTL: body becomes null after expiry; index entry remains", () =>
+  it.effect("tombstone hard-DELs the body so the puller sees body=null immediately", () =>
     Effect.gen(function* () {
       const { kv } = setup()
       yield* kv.channelWriteTombstone({
@@ -403,24 +402,19 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
         entryGen: GEN,
         member: memberOf("D", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        tombstoneValue: "T",
-        tombstoneTtlSec: 180,
         indexesToRemove: [],
       })
-      yield* TestClock.adjust("181 seconds")
+      // No clock advance needed — the body slot is empty as soon as
+      // the tombstone is written.
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
         since: SINCE_COLD,
         limit: 10,
       })
-      // Index entry still present, body has TTL'd → null body. Per the
-      // design doc, the puller treats null-body-on-D as "tombstone already
-      // expired, apply DEL anyway".
       expect(pulled.entries.length).toBe(1)
       expect(pulled.entries[0]?.member).toBe(memberOf("D", bodyKey("a")))
       expect(pulled.entries[0]?.body).toBeNull()
-      // Expired body → 0 remaining.
       expect(pulled.entries[0]?.body_ttl_remaining_sec).toBe(0)
     })
   )

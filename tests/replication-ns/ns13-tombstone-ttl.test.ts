@@ -1,35 +1,26 @@
 /**
- * NS13 — Tombstone TTL across both ends.
+ * NS13 — Tombstone is hard-DEL on the body slot.
  *
- * Scenario:
- *   1. Worker A writes call X.
- *   2. Worker A tombstones X.
- *   3. Advance past tombstone TTL (180 s + headroom).
- *   4. Tombstone body is gone on A's side. The D-member is still
- *      indexed (orphan tolerated up to ~30K active calls).
- *   5. Subsequent pull on A returns D-member with null body — the
- *      puller's apply path treats null-body-on-D as "tombstone TTL'd,
- *      DEL anyway", so applying side converges with no further data.
+ * Per docs/plan/lets-plan-a-proper-crystalline-emerson.md, the
+ * tombstone primitive no longer writes a JSON marker into the body
+ * slot. Body slots are either a real Call JSON or absent. The wire
+ * signal of "delete" is the D-member in the channel sorted set;
+ * pullers fetching a D-member's body see `null` and apply an
+ * implicit DEL.
  *
- * Note: this test asserts only the SOURCE-side behavior (TTL'd
- * tombstone body, orphan member surface). The receiver-side apply
- * behavior under tombstone-TTL races is exercised in Slice 5+ with
- * a real puller fiber.
- *
- * Variant: in-memory `KvBackend` + fake clock.
+ * Variant: in-memory `KvBackend`.
  */
 
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, MutableHashMap } from "effect"
-import { TestClock } from "effect/testing"
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
 import {
   KvBackend,
   type MemoryStoreEntry,
 } from "../../src/storage/KvBackend.js"
 
-describe("NS13 — tombstone-ttl-cleanup", () => {
-  it.effect("tombstone body TTLs to null while D-member survives in the channel", () =>
+describe("NS13 — tombstone-hard-DEL", () => {
+  it.effect("tombstone leaves body slot empty; D-member's pulled body is null", () =>
     Effect.gen(function* () {
       const store = MutableHashMap.empty<string, MemoryStoreEntry>()
       const kv = KvBackend.makeMemoryUnsafe(store)
@@ -48,25 +39,16 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
       })
       yield* chan.tombstone({
         entryGen: chan.gen,
-        callGen: 1,
         partition: "pri",
         callRef: "X",
         indexesToRemove: [],
       })
 
-      // Sanity: tombstone is the current body before TTL.
-      expect(yield* kv.bodyGet("pri:worker-A:call:X")).toBe(
-        '{"tombstone":true,"callGen":1}'
-      )
-
-      // Advance just past the tombstone TTL (180 s default).
-      yield* TestClock.adjust("181 seconds")
-
-      // Tombstone body has TTL'd.
+      // Body slot is empty as soon as the tombstone is written.
       expect(yield* kv.bodyGet("pri:worker-A:call:X")).toBeNull()
 
-      // D-member is still in the channel — caller (the puller) sees
-      // null body and applies an implicit DEL.
+      // D-member is in the channel; its pulled body is null. The
+      // puller treats null-body-on-D as delete.
       const pulled = yield* chan.pullBatch({ gen: 0, counter: 0 }, 10)
       const dEntries = pulled.entries.filter((e) => e.member.startsWith("D:"))
       expect(dEntries.length).toBe(1)
@@ -74,7 +56,7 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
     })
   )
 
-  it.effect("multiple tombstones share the TTL window; all expire after 180 s", () =>
+  it.effect("multiple tombstones — all bodies absent; all pulled D-bodies null", () =>
     Effect.gen(function* () {
       const store = MutableHashMap.empty<string, MemoryStoreEntry>()
       const kv = KvBackend.makeMemoryUnsafe(store)
@@ -94,22 +76,19 @@ describe("NS13 — tombstone-ttl-cleanup", () => {
         })
         yield* chan.tombstone({
           entryGen: chan.gen,
-          callGen: 1,
           partition: "pri",
           callRef: ref,
           indexesToRemove: [],
         })
       }
 
-      yield* TestClock.adjust("181 seconds")
-
-      // All three tombstone bodies have TTL'd.
+      // All three body slots are empty.
       for (const ref of ["a", "b", "c"]) {
         expect(yield* kv.bodyGet(`pri:worker-A:call:${ref}`)).toBeNull()
       }
 
-      // Channel still carries the U+D pairs (six members total) but
-      // every body resolves to null.
+      // Channel still carries U+D pairs (six members total). Every
+      // body resolves to null — every U was overwritten by its D.
       const pulled = yield* chan.pullBatch({ gen: 0, counter: 0 }, 100)
       expect(pulled.entries.length).toBe(6)
       expect(pulled.entries.every((e) => e.body === null)).toBe(true)

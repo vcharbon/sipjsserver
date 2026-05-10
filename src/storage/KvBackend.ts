@@ -121,8 +121,6 @@ export interface ChannelWriteTombstoneArgs {
   readonly entryGen: number
   readonly member: string
   readonly bodyKey: string
-  readonly tombstoneValue: string
-  readonly tombstoneTtlSec: number
   readonly indexesToRemove: ReadonlyArray<string>
 }
 
@@ -170,6 +168,41 @@ export interface KvBackendApi {
     keys: ReadonlyArray<string>
   ) => Effect.Effect<ReadonlyArray<string | null>, KvError>
 
+  /**
+   * Atomic local apply for the replication puller — SET body + SET
+   * each index in a SINGLE exclusive section. The hot path on the
+   * peer side (`resolveFromSipKey` → `storage.getIndex`) needs body
+   * and indexes to either both exist or neither exist. Two separate
+   * `bodySet` calls cycle the per-store mutex twice, opening a window
+   * where a SIP fiber observes a body present but indexes absent
+   * (or vice-versa) and 481s an in-flight call.
+   *
+   * Does NOT touch any propagate channel — that is the whole point of
+   * `EchoApply` being one-way local. The originator's own write paths
+   * (PRS.putCall with a peer) use `channelWriteUpdate`, which does
+   * the same SET-body + SET-indexes atomically AND bumps the
+   * originator's outgoing channel.
+   */
+  readonly applyReplicaUpdate: (args: {
+    readonly bodyKey: string
+    readonly bodyValue: string
+    readonly bodyTtlSec: number
+    readonly indexes: ReadonlyArray<IndexWrite>
+  }) => Effect.Effect<void, KvError>
+
+  /**
+   * Atomic local delete for the replication puller — DEL body + DEL
+   * each named index in a SINGLE exclusive section. Same atomicity
+   * concern as `applyReplicaUpdate`: a half-deleted state (body gone,
+   * indexes lingering) would make `resolveFromSipKey` return a stale
+   * callRef pointing at a missing body, exactly the failure shape the
+   * tombstone redesign was meant to close.
+   */
+  readonly applyReplicaDelete: (args: {
+    readonly bodyKey: string
+    readonly indexKeys: ReadonlyArray<string>
+  }) => Effect.Effect<void, KvError>
+
   // ---- Counter -----------------------------------------------------------
 
   readonly counterRead: (key: string) => Effect.Effect<number, KvError>
@@ -195,16 +228,19 @@ export interface KvBackendApi {
   ) => Effect.Effect<{ readonly counter: number }, KvError>
 
   /**
-   * Atomic tombstone: SET body to a tombstone marker with a SHORT TTL
-   * (typically ~3 min), INCR bucket counter, ZADD member (with the "D:"
-   * prefix) into the bucket-scoped sorted set, DEL each named secondary
-   * index — all in one transaction. Same bucket semantics as
-   * `channelWriteUpdate`.
+   * Atomic tombstone: DEL the body key, INCR bucket counter, ZADD member
+   * (with the "D:" prefix) into the bucket-scoped sorted set, DEL each
+   * named secondary index — all in one transaction. Same bucket
+   * semantics as `channelWriteUpdate`.
    *
-   * The tombstone body is what the puller fetches via `channelPullBatch` to
-   * learn that the call was deleted. After the tombstone TTL expires, the
-   * body is GC'd; any peer pulling the index entry after that point gets
-   * `body=null` and treats it as an implicit DEL.
+   * The wire-level signal of "this call was deleted" is the "D:" member
+   * in the channel sorted-set — NOT a tombstone-shaped body. Pullers
+   * that fetch via `channelPullBatch` see `body: null` for any D-member
+   * (the body was DEL'd here) and treat it as an implicit DELETE in
+   * `EchoApply`. This matches the policy in
+   * docs/plan/lets-plan-a-proper-crystalline-emerson.md: a body slot
+   * holds either a real Call JSON or nothing — never a "deletion
+   * marker" payload.
    */
   readonly channelWriteTombstone: (
     args: ChannelWriteTombstoneArgs
@@ -328,22 +364,57 @@ return counter
 `
 
   /**
-   * Atomic tombstone write (counter+1, tombstone body w/ short TTL,
-   * remove indexes, ZADD D-member). Same per-bucket derivation as
+   * Atomic tombstone write (counter+1, hard-DEL body, remove indexes,
+   * ZADD D-member). Same per-bucket derivation as
    * CHANNEL_WRITE_UPDATE_LUA.
    *
    * KEYS = [counterKeyBase, channelBase, bucketsSetKey, bodyKey, idxToRemove1, idxToRemove2, ...]
-   * ARGV = [entryGen, member, tombstoneValue, tombstoneTtlSec, idxRemoveCount]
+   * ARGV = [entryGen, member, idxRemoveCount]
    * Returns: counter (integer) — within the entryGen bucket
    */
+  /**
+   * Atomic local apply for the replication puller — SETEX body +
+   * SETEX each index, no channel side effect. Matches the in-memory
+   * backend's `applyReplicaUpdate` exclusive() block.
+   *
+   * KEYS = [bodyKey, idx1, idx2, ...]
+   * ARGV = [bodyValue, bodyTtlSec, idxCount, idxVal1, idxTtl1, idxVal2, idxTtl2, ...]
+   * Returns: nothing meaningful.
+   */
+  static readonly APPLY_REPLICA_UPDATE_LUA = `
+redis.call("SETEX", KEYS[1], tonumber(ARGV[2]), ARGV[1])
+local idxCount = tonumber(ARGV[3])
+for i = 1, idxCount do
+  local k = KEYS[1 + i]
+  local v = ARGV[3 + (i - 1) * 2 + 1]
+  local t = tonumber(ARGV[3 + (i - 1) * 2 + 2])
+  redis.call("SETEX", k, t, v)
+end
+return 1
+`
+
+  /**
+   * Atomic local delete for the replication puller — DEL body + DEL
+   * each named index.
+   *
+   * KEYS = [bodyKey, idx1, idx2, ...]
+   * ARGV = []
+   */
+  static readonly APPLY_REPLICA_DELETE_LUA = `
+for i = 1, #KEYS do
+  redis.call("DEL", KEYS[i])
+end
+return 1
+`
+
   static readonly CHANNEL_WRITE_TOMBSTONE_LUA = `
 local entryGen = tonumber(ARGV[1])
 local bucketCounterKey = KEYS[1] .. ":gen:" .. entryGen
 local bucketChannelKey = KEYS[2] .. ":gen:" .. entryGen
 local counter = redis.call("INCR", bucketCounterKey)
 redis.call("SADD", KEYS[3], entryGen)
-redis.call("SETEX", KEYS[4], tonumber(ARGV[4]), ARGV[3])
-local removeCount = tonumber(ARGV[5])
+redis.call("DEL", KEYS[4])
+local removeCount = tonumber(ARGV[3])
 for i = 1, removeCount do
   redis.call("DEL", KEYS[4 + i])
 end
@@ -701,6 +772,29 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
       })
     )
 
+  const applyReplicaUpdate: KvBackendApi["applyReplicaUpdate"] = (args) =>
+    exclusive(
+      Effect.gen(function* () {
+        const ms = yield* nowMs
+        yield* Effect.sync(() => {
+          setEntry(store, args.bodyKey, args.bodyValue, ms + args.bodyTtlSec * 1000)
+          for (const idx of args.indexes) {
+            setEntry(store, idx.key, idx.value, ms + idx.ttlSec * 1000)
+          }
+        })
+      })
+    )
+
+  const applyReplicaDelete: KvBackendApi["applyReplicaDelete"] = (args) =>
+    exclusive(
+      Effect.sync(() => {
+        removeEntry(store, args.bodyKey)
+        for (const idx of args.indexKeys) {
+          removeEntry(store, idx)
+        }
+      })
+    )
+
   const counterRead: KvBackendApi["counterRead"] = (key) =>
     exclusive(
       Effect.gen(function* () {
@@ -748,12 +842,12 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
             bucketCounterKeyOf(args.counterKey, args.entryGen),
             ms
           )
-          setEntry(
-            store,
-            args.bodyKey,
-            args.tombstoneValue,
-            ms + args.tombstoneTtlSec * 1000
-          )
+          // Hard-DEL the body slot: a deleted call must not leave a
+          // "deletion marker" payload behind. Pullers see the body as
+          // null when fetching this entry's bodyKey via
+          // `channelPullBatch`; that maps cleanly to "delete" in
+          // `EchoApply` without any tombstone-aware decode.
+          removeEntry(store, args.bodyKey)
           for (const idxKey of args.indexesToRemove) {
             removeEntry(store, idxKey)
           }
@@ -831,6 +925,8 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
     bodySet,
     bodyDel,
     bodyMget,
+    applyReplicaUpdate,
+    applyReplicaDelete,
     counterRead,
     channelWriteUpdate,
     channelWriteTombstone,
@@ -937,6 +1033,30 @@ const makeRedisKv = (
       return out
     })
 
+  const applyReplicaUpdate: KvBackendApi["applyReplicaUpdate"] = (args) => {
+    const keys: Array<string> = [args.bodyKey]
+    for (const idx of args.indexes) keys.push(idx.key)
+    const argv: Array<string | number> = [
+      args.bodyValue,
+      args.bodyTtlSec,
+      args.indexes.length,
+    ]
+    for (const idx of args.indexes) {
+      argv.push(idx.value)
+      argv.push(idx.ttlSec)
+    }
+    return redis
+      .eval(KvBackend.APPLY_REPLICA_UPDATE_LUA, keys, argv)
+      .pipe(Effect.mapError(wrapRedisErr), Effect.asVoid)
+  }
+
+  const applyReplicaDelete: KvBackendApi["applyReplicaDelete"] = (args) => {
+    const keys: Array<string> = [args.bodyKey, ...args.indexKeys]
+    return redis
+      .eval(KvBackend.APPLY_REPLICA_DELETE_LUA, keys, [])
+      .pipe(Effect.mapError(wrapRedisErr), Effect.asVoid)
+  }
+
   const counterRead: KvBackendApi["counterRead"] = (key) =>
     redis.get(key).pipe(
       Effect.mapError(wrapRedisErr),
@@ -994,8 +1114,6 @@ const makeRedisKv = (
     const argv: Array<string | number> = [
       args.entryGen,
       args.member,
-      args.tombstoneValue,
-      args.tombstoneTtlSec,
       args.indexesToRemove.length,
     ]
     return redis
@@ -1031,6 +1149,8 @@ const makeRedisKv = (
     bodySet,
     bodyDel,
     bodyMget,
+    applyReplicaUpdate,
+    applyReplicaDelete,
     counterRead,
     channelWriteUpdate,
     channelWriteTombstone,

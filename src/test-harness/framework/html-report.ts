@@ -42,7 +42,8 @@ export function writeScenarioReport(
   mkdirSync(outputDir, { recursive: true })
 
   const sortedTrace = [...result.trace].sort((a, b) => a.timestamp - b.timestamp)
-  const svg = renderSequenceDiagram(sortedTrace, result.participants)
+  const replicationEntries = result.replicationTrace ?? []
+  const svg = renderSequenceDiagram(sortedTrace, result.participants, replicationEntries)
 
   // Build message data for the click handler. Key is the entry's index
   // in `sortedTrace` — `stepIndex` would collide for internal hops
@@ -90,6 +91,16 @@ export function writeScenarioReport(
         </ul>
       </div>`
     : ""
+
+  // Replication-frame click-target payloads. The frames themselves are
+  // rendered inline in the SVG sequence diagram above, interleaved with
+  // SIP arrows by timestamp. Each replication arrow carries
+  // `data-repl-index` that maps into this dictionary so the click
+  // handler shows the full decoded JSON in the detail panel.
+  const replicationJson: Record<number, string> = {}
+  for (let i = 0; i < replicationEntries.length; i++) {
+    replicationJson[i] = JSON.stringify(replicationEntries[i]!, null, 2)
+  }
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -254,6 +265,9 @@ export function writeScenarioReport(
       background: #fef2f2;
       border-radius: 2px;
     }
+    .repl-arrow:hover line { stroke-width: 3 !important; }
+    .repl-arrow:hover rect { fill: rgba(79, 70, 229, 0.08) !important; }
+    .repl-arrow.selected rect { fill: rgba(79, 70, 229, 0.18) !important; }
   </style>
 </head>
 <body>
@@ -279,7 +293,7 @@ export function writeScenarioReport(
     <div class="detail-panel">
       <div class="detail-header">Message Detail</div>
       <div class="detail-body">
-        <div class="detail-placeholder">Click an arrow to inspect the full SIP message</div>
+        <div class="detail-placeholder">Click an arrow or a replication row to inspect</div>
       </div>
     </div>
   </div>
@@ -287,8 +301,12 @@ export function writeScenarioReport(
     const messages = {
       ${messageData.map((m) => `${m.traceIndex}: '${escapeJs(m.raw)}'`).join(",\n      ")}
     };
+    const replicationFrames = {
+      ${Object.entries(replicationJson).map(([i, j]) => `${i}: '${escapeJs(j)}'`).join(",\n      ")}
+    };
 
     let selectedArrow = null;
+    let selectedReplRow = null;
 
     document.querySelectorAll('.trace-arrow').forEach(g => {
       g.addEventListener('click', () => {
@@ -298,12 +316,32 @@ export function writeScenarioReport(
         if (selectedArrow) selectedArrow.classList.remove('selected');
         g.classList.add('selected');
         selectedArrow = g;
+        if (selectedReplRow) { selectedReplRow.classList.remove('selected'); selectedReplRow = null; }
 
         const body = document.querySelector('.detail-body');
         if (raw) {
           body.innerHTML = '<pre>' + raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
         } else {
           body.innerHTML = '<div class="detail-placeholder">No message data for trace entry #' + (idx + 1) + '</div>';
+        }
+      });
+    });
+
+    document.querySelectorAll('.repl-arrow').forEach(g => {
+      g.addEventListener('click', () => {
+        const idx = parseInt(g.dataset.replIndex, 10);
+        const raw = replicationFrames[idx];
+
+        if (selectedReplRow) selectedReplRow.classList.remove('selected');
+        g.classList.add('selected');
+        selectedReplRow = g;
+        if (selectedArrow) { selectedArrow.classList.remove('selected'); selectedArrow = null; }
+
+        const body = document.querySelector('.detail-body');
+        if (raw) {
+          body.innerHTML = '<pre>' + raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
+        } else {
+          body.innerHTML = '<div class="detail-placeholder">No JSON for replication entry #' + (idx + 1) + '</div>';
         }
       });
     });

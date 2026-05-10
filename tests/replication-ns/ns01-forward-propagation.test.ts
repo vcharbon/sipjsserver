@@ -61,10 +61,10 @@ describe("NS1 — forward propagation", () => {
         counter: 1,
       })
 
-      // Echo: B's outgoing channel-to-A holds the propagated entry.
+      // No echo: with echo killed, B's outgoing channel-to-A is
+      // untouched by the apply path.
       const echoBatch = yield* B.outgoing.pullBatch({ gen: 0, counter: 0 }, 100)
-      expect(echoBatch.entries.length).toBe(1)
-      expect(echoBatch.entries[0]!.member).toBe("U:bak:worker-A:call:X")
+      expect(echoBatch.entries.length).toBe(0)
 
       yield* puller.stop
     })

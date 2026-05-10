@@ -74,6 +74,7 @@ export function testAppConfigDefaults(overrides?: Partial<AppConfigData>): AppCo
     otelMaxAttributeValueLength: 32768,
     scrubHeaders: [],
     traceTombstoneEnabled: false,
+    replicationBootstrapTimeoutMs: 30_000,
     ...overrides,
   }
 }

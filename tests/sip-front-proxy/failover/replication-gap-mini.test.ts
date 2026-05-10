@@ -174,10 +174,14 @@ describe("sip-front-proxy/failover — replication-gap-mini", () => {
     outputDir: OUTPUT_DIR,
     sut: "k8sFailover",
   })
-  // Strict acceptance gate: "zero 481 on BYE for any call established
-  // before the kill". Phase 7's quiet-call recovery flows through the
-  // ReclaimRunner safety net wired in on respawn — without it those
-  // 20 BYEs would all return 481 (the bug Slice B′ originally surfaced).
+  // Phase 7's "quiet-call recovery on respawn" is satisfied by the
+  // peer-scan-bootstrap path landed in
+  // docs/plan/echo-removal-grill-me-smooth-parasol.md: on b2b-1's
+  // respawn, k8sFakeStack.buildWorker now scans b2b-2's
+  // `bak:b2b-1:*` partition into b2b-1's `pri:b2b-1:*` before its
+  // puller starts. Calls b2b-2 never modified during b2b-1's outage
+  // (the "quiet" subset) are recovered through that scan path,
+  // restoring the BYE-routability assertion this scenario checks.
   it.effect(
     "40 calls × kill + respawn — zero 481 on BYE, lag_seq=0 at settle",
     () => run(replicationGapMini.toScenario()),

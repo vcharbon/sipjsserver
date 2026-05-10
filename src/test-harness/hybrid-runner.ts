@@ -185,6 +185,7 @@ function defaultHybridAppConfig(): AppConfigData {
     scrubHeaders: [],
     otelMaxAttributeValueLength: 32_768,
     traceTombstoneEnabled: false,
+    replicationBootstrapTimeoutMs: 30_000,
   }
 }
 

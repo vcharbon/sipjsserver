@@ -548,6 +548,27 @@ export interface StepResult {
   readonly assertionErrors?: string[]
 }
 
+/**
+ * One observation in the replication-frame trace: a decoded NDJSON
+ * frame the consumer worker received from the source worker over the
+ * simulated `/replog` HTTP transport. Carried alongside the SIP trace
+ * in `ScenarioResult.replicationTrace` and rendered as a separate
+ * lane in the HTML report so cross-worker state-mutation flow is
+ * visually correlated with SIP message flow.
+ *
+ * `frame` is left as the structural decoded object — the renderer
+ * stringifies it into the click-to-inspect JSON panel without further
+ * decoration.
+ */
+export interface ReplicationTraceEntry {
+  readonly timestamp: number
+  /** Source peer ordinal (the worker whose `/replog` produced the frame). */
+  readonly from: string
+  /** Consumer peer ordinal (the worker pulling from `from`). */
+  readonly to: string
+  readonly frame: unknown
+}
+
 export interface TraceEntry {
   /**
    * Primary timestamp used for ordering/display. For send entries this is
@@ -591,6 +612,13 @@ export interface ScenarioResult {
   readonly scenarioDescription?: string | undefined
   readonly stepResults: readonly StepResult[]
   readonly trace: readonly TraceEntry[]
+  /**
+   * Replication frames captured during the scenario. Present when the
+   * SUT wires the simulated `/replog` HTTP transport (currently only
+   * `sipproxyHA`); empty / undefined for SUTs without replication.
+   * The HTML / text reports render this as a distinct lane.
+   */
+  readonly replicationTrace?: readonly ReplicationTraceEntry[]
   /**
    * Ordered participant list for the sequence-diagram lifelines. Each
    * entry carries its `network` so the HTML renderer can group / colour
@@ -664,6 +692,16 @@ export interface TestTransport {
    * returns `undefined` (no tap).
    */
   readonly drainNetworkTrace?: () => Effect.Effect<ReadonlyArray<NetworkTraceEntry>>
+  /**
+   * Optional: drain the simulated replication-HTTP trace at the end of
+   * the scenario. Non-empty only for SUTs that wire per-worker pullers
+   * through the simulated `/replog` transport (currently `sipproxyHA`
+   * via `proxyB2bFakeStack.makeReplicationTraceRecorder`). Each event
+   * is one decoded NDJSON frame the consumer received from the source
+   * peer; the renderer emits these as a separate replication lane in
+   * the HTML report alongside the SIP timeline.
+   */
+  readonly drainReplicationTrace?: () => ReadonlyArray<ReplicationTraceEntry>
   /**
    * Optional post-scenario verification: asserts that all internal state
    * (callsMap, limiter counters, timer fibers) is fully empty after the

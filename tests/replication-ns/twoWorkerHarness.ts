@@ -99,8 +99,7 @@ export interface PullerHandle {
 
 /**
  * Fork a puller fiber on `consumer` that pulls from `source`. Apply
- * is wired through `makeEchoApply` so received frames write to local
- * storage AND echo to `consumer`'s outgoing channel-to-source.
+ * is local-only — no mirror echo is written.
  *
  * `capture` accumulates every applied DataFrame for assertion.
  */
@@ -115,7 +114,6 @@ export const forkPuller = (args: {
     const viewRef = MutableRef.make(initialPeerView(args.source.self))
     const captureBuf: Array<DataFrame> = []
     const echo = makeReplicationApply({
-      outgoingChannel: args.consumer.outgoing,
       bodyTtlSec: args.bodyTtlSec ?? 60,
       localKv: args.consumer.kv,
       self: args.consumer.self,

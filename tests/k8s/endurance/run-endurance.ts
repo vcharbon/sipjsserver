@@ -328,10 +328,16 @@ const main = (argv: ReadonlyArray<string>) =>
     }
 
     /* ----- start recorders ---------------------------------------- */
+    // 512Mi mirrors `tests/k8s/values/b2bua-worker.endurance.yaml`'s
+    // `resources.limits.memory`. The recorder uses this to fire the
+    // RSS watchdog (heap-snapshot at 75% / 90%) so we capture the
+    // leaking heap before the cgroup OOM-killer destroys it.
+    const WORKER_MEM_LIMIT_BYTES = 512 * 1024 * 1024
     const recorder = yield* startRecorder({
       namespace: NAMESPACE,
       artifactDir,
       limiterProbeId: LIMITER_PROBE_ID,
+      workerMemLimitBytes: WORKER_MEM_LIMIT_BYTES,
     })
 
     /* ----- launch sipp streams ------------------------------------ */

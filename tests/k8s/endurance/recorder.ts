@@ -46,6 +46,16 @@ export interface RecorderOpts {
   readonly limiterProbeId: string
   /** Override the default 10s scrape cadence. */
   readonly scrapeIntervalMs?: number
+  /**
+   * When set, the metrics fiber compares each worker's VmRSS against
+   * this byte limit on every scrape and triggers a heap snapshot
+   * (kill -USR2 1) at 50% and 65% — once per (pod, container
+   * incarnation). Intended to capture the leaking heap before the
+   * cgroup OOM-killer fires. Helm overlay's `heapdumps.enabled: true`
+   * mounts the destination emptyDir; without it the snapshot file
+   * lands on the writable container layer and is lost on restart.
+   */
+  readonly workerMemLimitBytes?: number
 }
 
 export interface RecorderHandle {
@@ -68,7 +78,7 @@ export const startRecorder = (
       streamK8sEvents(opts.namespace, opts.artifactDir),
     )
     const metricsFiber = yield* Effect.forkChild(
-      pollMetrics(opts.namespace, opts.artifactDir, scrapeMs),
+      pollMetrics(opts.namespace, opts.artifactDir, scrapeMs, opts.workerMemLimitBytes),
     )
     const limiterFiber = yield* Effect.forkChild(
       pollLimiter(opts.namespace, opts.artifactDir, opts.limiterProbeId, scrapeMs),
@@ -176,10 +186,65 @@ interface MetricRow {
   readonly value: number
 }
 
+/**
+ * Watchdog state per worker pod. Keyed by pod name; each entry tracks
+ * the highest threshold already triggered for the *current* container
+ * incarnation, plus a coarse incarnation marker (the most recent VmRSS
+ * we observed below 50 MB — i.e., a fresh start). When the marker
+ * changes we reset the level so the new incarnation gets fresh
+ * snapshots before its own OOM.
+ */
+type WatchdogLevel = "none" | "level1" | "level2"
+interface WatchdogEntry {
+  level: WatchdogLevel
+  /** Last VmRSS (bytes) below the 50% reset floor; bumps on restart. */
+  lastResetRss: number
+}
+const watchdogState = new Map<string, WatchdogEntry>()
+// Thresholds chosen so V8 has room to actually write the snapshot
+// before the cgroup OOM-killer fires. Run oom-investigation-20260510
+// proved 75%/90% is too late: at 384Mi (75% of 512Mi) the snapshot
+// writer's transient allocations pushed RSS past the 512Mi cap within
+// seconds, leaving 0-byte snapshot files. 50%/65% gives ≥180Mi of
+// headroom for V8 to traverse the heap and flush the file before OOM.
+const WATCHDOG_LEVEL1 = 0.50
+const WATCHDOG_LEVEL2 = 0.65
+// Reset floor must stay strictly below LEVEL1; otherwise a freshly
+// started container (which boots well below LEVEL1) inherits the prior
+// incarnation's `level1` state and never re-snapshots.
+const WATCHDOG_RESET = 0.30
+
+/** Trigger a heap snapshot inside the worker via SIGUSR2. */
+const triggerHeapSnapshot = (
+  namespace: string,
+  podName: string,
+  artifactDir: string,
+  reason: string,
+): Effect.Effect<void, never> =>
+  Effect.gen(function* () {
+    yield* execInPod(namespace, podName, "worker", [
+      "sh",
+      "-c",
+      "kill -USR2 1",
+    ]).pipe(Effect.ignore)
+    // Append a row so the analyzer / reader can correlate snapshots
+    // back to the moment they were triggered (a freshly created
+    // .heapsnapshot file picks up the wall-clock from kubectl cp's
+    // mtime, not from the trigger).
+    yield* appendNdjsonRows(path.join(artifactDir, "heapdump-triggers.ndjson"), [
+      {
+        tTriggered: new Date().toISOString(),
+        pod: podName,
+        reason,
+      },
+    ])
+  })
+
 const pollMetrics = (
   namespace: string,
   artifactDir: string,
   intervalMs: number,
+  workerMemLimitBytes: number | undefined,
 ): Effect.Effect<void, never> =>
   Effect.gen(function* () {
     while (true) {
@@ -268,6 +333,51 @@ const pollMetrics = (
             path.join(artifactDir, "metrics", `${pod.name}.proc.ndjson`),
             [procRow],
           )
+
+          // RSS-watchdog: only for worker pods, only when the
+          // orchestrator passed a memory limit (helm enforces 512Mi
+          // in the endurance overlay; production charts leave
+          // resources empty so this stays disabled).
+          if (
+            workerMemLimitBytes !== undefined &&
+            pod.name.startsWith("b2bua-worker-") &&
+            typeof procRow["VmRSS"] === "number"
+          ) {
+            const rssBytes = (procRow["VmRSS"] as number) * 1024
+            const ratio = rssBytes / workerMemLimitBytes
+            const entry = watchdogState.get(pod.name) ?? {
+              level: "none" as WatchdogLevel,
+              lastResetRss: 0,
+            }
+            // Detect a container restart (VmRSS dropped well below
+            // half the limit). When the new incarnation climbs again
+            // we want a fresh snapshot, so reset the level.
+            if (ratio < WATCHDOG_RESET) {
+              entry.level = "none"
+              entry.lastResetRss = rssBytes
+            }
+            if (ratio >= WATCHDOG_LEVEL2 && entry.level !== "level2") {
+              yield* triggerHeapSnapshot(
+                namespace,
+                pod.name,
+                artifactDir,
+                `rss>=${Math.round(WATCHDOG_LEVEL2 * 100)}pct (${Math.round(rssBytes / 1024 / 1024)}MB / ${Math.round(workerMemLimitBytes / 1024 / 1024)}MB)`,
+              )
+              entry.level = "level2"
+            } else if (
+              ratio >= WATCHDOG_LEVEL1 &&
+              entry.level === "none"
+            ) {
+              yield* triggerHeapSnapshot(
+                namespace,
+                pod.name,
+                artifactDir,
+                `rss>=${Math.round(WATCHDOG_LEVEL1 * 100)}pct (${Math.round(rssBytes / 1024 / 1024)}MB / ${Math.round(workerMemLimitBytes / 1024 / 1024)}MB)`,
+              )
+              entry.level = "level1"
+            }
+            watchdogState.set(pod.name, entry)
+          }
         }
       }
       yield* Effect.sleep(`${intervalMs} millis`)

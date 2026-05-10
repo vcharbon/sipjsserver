@@ -50,6 +50,7 @@ import {
   KvBackend,
   type MemoryStoreEntry,
 } from "../../src/storage/KvBackend.js"
+import { makeKvBackedMemoryUnsafe } from "../../src/cache/PartitionedRelayStorageKvBacked.js"
 import {
   FakeHttpClientLayer,
   FakeHttpFabric,
@@ -74,7 +75,11 @@ describe("PullerHttpTransport — end-to-end via FakeHttpFabric", () => {
           { self: A_ORD, peer: B_ORD, gen: A_GEN },
           kvA
         )
-        const replServer = ReplLogServer.makeUnsafe(kvA, {
+        const storageA = makeKvBackedMemoryUnsafe(storeA, {
+          self: A_ORD,
+          gen: A_GEN,
+        })
+        const replServer = ReplLogServer.makeUnsafe(kvA, storageA, {
           self: A_ORD,
           gen: A_GEN,
           // Tighter idle interval keeps the test fast; production default

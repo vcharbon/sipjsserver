@@ -479,6 +479,55 @@ If `epoch:N` doesn't exist (first sidecar boot ever), it is initialised to 1 by 
 
 The gate does not require N to push anything outbound. It is purely "drain peers' propagate:N streams." The reason: peers that were serving requests for N's primary calls during N's downtime wrote into their own `bak:N:` partitions and announced those writes on their own `propagate:N` (reverse-propagate, see §0 and §10.3). When N drains those, it picks up the back-edits. There is no asymmetry between "calls I owned" and "calls I held as backup" — both flow over the same propagate streams.
 
+### 8.6 Peer-scan-bootstrap (post echo-removal)
+
+The boot sequence in §8.1 assumed quiet-call recovery worked by cold-pulling `propagate:Pi->N` from `since=(0,0)` and replaying the gen=0 mirror entries that Pi's puller had previously echoed. Echo was removed in the slice tracked at [docs/plan/lets-plan-a-proper-crystalline-emerson.md](../plan/lets-plan-a-proper-crystalline-emerson.md) — it was both wire noise (warm pullers skip gen=0 by lex order) and a correctness bug (the update/delete crossing scenario could resurrect deleted calls). With echo gone, the channel no longer carries any history for calls Pi merely held as backup; only calls Pi originated for N during N's outage show up on the reverse channel.
+
+The replacement is **peer-scan-bootstrap** (see [docs/plan/echo-removal-grill-me-smooth-parasol.md](../plan/echo-removal-grill-me-smooth-parasol.md)): on worker boot, before the puller fibers start, N scans each peer's `bak:N:call:*` partition directly via a streaming `GET /bootstrap?caller=N` endpoint and replays each entry into local `pri:N:call:*`. The bootstrap is a one-shot phase that runs once per worker incarnation against the K8s-Ready peer set at boot time; peers that appear later are picked up by the steady-state puller, not re-bootstrapped.
+
+Updated boot sequence (replaces §8.1 for the steps marked NEW):
+
+```
+1. EpochCounter:    INCR epoch:N
+2. PeerEnumerator:  resolve DNS SRV → [P1, P2, …] (frozen snapshot)
+3. NEW: For each Pi in parallel, with an overall 30 s budget:
+       GET http://{Pi}/bootstrap?caller=N
+       Server reads `propagate:{Pi}->{N}.head` BEFORE its scan, then
+       streams one Data frame per entry in its `bak:N:call:*` partition,
+       then one terminal Noop carrying the recorded head.
+       N replays each Data into local `pri:N:call:*` via the same
+       atomic `applyReplicaUpdate` primitive the steady-state puller
+       uses, then plants Noop.{gen,counter} as the per-peer puller's
+       starting watermark.
+       Per-peer transport-class failures retry once after a short
+       backoff, then surface as outcome="error"; total wall time is
+       capped by the 30 s overall budget.
+4. Start the supervisor: per-peer puller fibers fork from their seeded
+   watermarks (NOT from `(0,0)`), pulling deltas Pi has emitted since
+   the bootstrap snapshot was taken.
+5. ReadinessController flips WorkerReadiness once T_min has elapsed
+   and every alive peer reports `everCaughtUp` (or T_max ceiling fires).
+```
+
+Key properties:
+
+- **Bootstrap is one-way.** It is a pure read against each peer's bak partition; it does NOT write to N's outgoing propagate channel. The "no echo writes" invariant survives — verified by the lock-in test at [tests/replication/peer-scan-bootstrap.test.ts](../../tests/replication/peer-scan-bootstrap.test.ts).
+- **Bootstrap is idempotent.** Re-running against unchanged peer state is a no-op: `applyReplicaUpdate` overwrites byte-identical content; no channel writes occur.
+- **Head consistency.** Bootstrap captures the peer's channel head BEFORE scanning. Any write Pi emits during the scan window lands at a counter strictly greater than the recorded head; the puller picks it up post-bootstrap. Idempotent apply makes any double-cover (entry present in both scan and post-bootstrap delta) harmless.
+- **Failure isolation.** Per-peer scan errors do not fail the boot effect; the bootstrap orchestrator emits per-peer `BootstrapResult` records and logs each outcome. Operators read `b2bua_replication_bootstrap_completed_total{peer,outcome=ok|timeout|error}` to spot peers that failed bootstrap.
+- **Boot snapshot freeze.** The peer set used for bootstrap is the K8s-Ready snapshot at boot. Peers that flip alive AFTER the snapshot are not retroactively bootstrapped from; the puller's normal delta pull handles them. This matches the operator expectation that "boot finishes deterministically" — late-arriving peers can't extend the readiness window.
+
+Observability counters (exposed via `/metrics` on the worker's status port):
+
+```
+b2bua_replication_bootstrap_started_total
+b2bua_replication_bootstrap_completed_total{peer, outcome}
+b2bua_replication_bootstrap_entries_imported_total{peer}
+b2bua_replication_bootstrap_duration_ms{peer}
+```
+
+Configuration: `REPLICATION_BOOTSTRAP_TIMEOUT_MS` (default 30000) controls the overall budget.
+
 ---
 
 ## 9. Primary-side signaling walk-through
@@ -660,31 +709,36 @@ Key points:
 
 ### 11.2 Worker pod restart with Redis sidecar wiped
 
-Less common but expected (full pod replace, sidecar pod also recreated, `emptyDir` volume cleared).
+Less common but expected (full pod replace, sidecar pod also recreated, `emptyDir` volume cleared). Post echo-removal, this scenario relies on peer-scan-bootstrap (§8.6) — `propagate:Pi->N` no longer carries gen=0 mirrors for calls Pi merely held, so a cold-pull from `since=(0,0)` would miss the quiet ones.
 
 ```
-Before: N had pri:N:call:*, epoch:N=42, replpos:* entries.
+Before: N had pri:N:call:*, epoch:N=42.
 Pod replaced. Sidecar fresh, no keys.
   ↓
 Process boot:
-  EpochCounter: epoch:N missing → set to 1 (or to a UUID; equivalent for our purposes).
-                Anyway: NEW epoch.
-  ReadyGate runs:
-    PeerEnumerator finds Pi peers.
-    replpos:Pi entries are absent (sidecar fresh). Treat as {epoch:0, lastSeq:0}.
-    For each Pi:
-      GET /replog?caller=N&epoch=0&since=0
-      Pi's hello: epoch=Pi's_epoch, head_at_open=...
-        (Note: from Pi's perspective, N is asking for ALL state. This is correct.)
-      Drain ALL members of Pi's propagate:N (this includes any of N's pre-crash
-        primary calls Pi was holding as bak:N:, plus any backup-served writes Pi
-        made on N's behalf while N was down).
-    all synced or 30 s → ready=true.
+  EpochCounter: epoch:N missing → set to 1. NEW epoch.
+  Peer-scan-bootstrap (§8.6):
+    PeerEnumerator finds Pi peers — frozen at boot snapshot.
+    For each Pi in parallel (30 s overall budget):
+      GET /bootstrap?caller=N
+      Server records `propagate:Pi->N.head` AT scan start, then
+      streams every entry from `bak:N:call:*`, then terminal Noop.
+      N applies each Data into local `pri:N:call:*` via
+      applyReplicaUpdate; plants the Noop head as Pi's puller
+      watermark.
+  Steady-state pullers fork at the seeded heads.
+  ReadinessController flips ready=true once T_min elapsed +
+    every alive Pi reports everCaughtUp.
   ↓
 N's pri:N:call:* is repopulated from peers' bak: copies.
 ```
 
-The crucial property: even with a wiped sidecar, the *active* calls survive because peers held them. The wiped-sidecar scenario degrades to "full resync from peers."
+Two failure modes worth calling out explicitly:
+
+1. **Quiet calls owned by a peer that fails bootstrap** stay missing until that peer's puller catches up to a write Pi emits FOR those calls — for genuinely quiet calls (no further activity), this means they remain absent in N's `pri:N:` and a BYE arriving on one of them returns 481 until Pi recovers. This is the same loss class as the previous design's "unreconciled peer at ready-gate completion."
+2. **Bootstrap timeout** (peer unresponsive past the 30 s budget) — the worker proceeds to ready=true with the partial state imported so far. Operators monitor `b2bua_replication_bootstrap_completed_total{outcome=timeout}` to size the budget against the largest expected `bak:N:` partition.
+
+The crucial property is unchanged: even with a wiped sidecar, the *active* calls survive because peers held them. The mechanism that retrieves them is now the explicit `/bootstrap` scan rather than the deprecated reverse-channel cold-pull.
 
 ### 11.3 Long downtime (hours)
 

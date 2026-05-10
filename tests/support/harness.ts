@@ -76,7 +76,38 @@ export function expectNoCdr(scenarioName: string): void {
 
 const assertCleanCallTermination = (scenarioName: string) =>
   Effect.gen(function* () {
-    if (cdrCheckSkippedScenarios.has(scenarioName)) return
+    if (cdrCheckSkippedScenarios.has(scenarioName)) {
+      // Diagnostic mode: dump the CDR breakdown so an investigator can
+      // attribute records to the worker that wrote them. The callRef's
+      // first `|`-segment is the call's primary worker (set at
+      // INVITE time and never changes). One CDR per distinct callRef
+      // → one writer per call (the architecturally expected shape;
+      // backups receive replicated body state but never run rule
+      // chains and so cannot fire `write-cdr`). Duplicate callRefs →
+      // two workers wrote the same call's CDR (a bug).
+      if (process.env.DEBUG_CDR === "1") {
+        const cdr = yield* CdrWriter
+        const records = yield* cdr.readAll
+        const lines = records.map((r, i) => {
+          const primary = r.callRef.split("|")[0] ?? "?"
+          return `  #${i + 1}: callRef=${r.callRef} (primary=${primary}) bLegs=${r.bLegs.length}`
+        })
+        const counts = new Map<string, number>()
+        for (const r of records) counts.set(r.callRef, (counts.get(r.callRef) ?? 0) + 1)
+        const dups = [...counts.entries()].filter(([, n]) => n > 1)
+        const dupSummary = dups.length > 0
+          ? `DUPLICATES: ${dups.map(([k, n]) => `${k}×${n}`).join(", ")}`
+          : `all callRefs unique → 1 CDR per call`
+        // Direct stdout — `Effect.log` is filtered out by the test
+        // harness's logger config and would never reach the developer.
+        // eslint-disable-next-line no-console
+        console.log(
+          `[CDR-DUMP ${scenarioName}] total=${records.length} ${dupSummary}\n` +
+          lines.join("\n"),
+        )
+      }
+      return
+    }
     const cdr = yield* CdrWriter
     const records = yield* cdr.readAll
     const explicitExpected = expectedCdrCounts.get(scenarioName)
@@ -215,7 +246,6 @@ export function createSimulatedRunner(opts?: {
     opts?.configOverrides !== undefined
       ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep, realClock, sut, simulateMissingOutboundProxy }
       : { sipPort, httpPort, clockSleep, realClock, sut, simulateMissingOutboundProxy }
-  const transport = createSimulatedTransport(transportOpts)
   // SUT ingress address — used by scenario steps that send their
   // initial INVITE without specifying a destination explicitly. The
   // sipproxyHA SUT exposes its proxy on a non-loopback subnet IP; the
@@ -231,6 +261,18 @@ export function createSimulatedRunner(opts?: {
           : { host: "127.0.0.1", port: sipPort }
 
   return (scenario: Scenario): Effect.Effect<void> => {
+    // Build a fresh transport per scenario. Multi-worker SUTs
+    // (`sipproxyHA`, `k8sFailover`) close over per-runner state
+    // (`PeerFabric`'s KV stores, the shared `cdrBuffer`, the call
+    // limiter store, the replication-frame recorder) at construction
+    // time. Reusing a single transport across `it.effect`s in the same
+    // describe block leaks every prior test's calls into the next
+    // test's puller cold-start (visible as a tombstone burst at the
+    // top of the report) and makes the cumulative CDR count brittle.
+    // Per-test construction is cheap — no fibers spin until the layer
+    // materializes inside `Effect.provide`.
+    const transport = createSimulatedTransport(transportOpts)
+
     // Provide the simulated stack at the *outer* runScoped scope — NOT
     // inside `transport.setup`. UdpTransport's `bindUdp` is a scoped
     // resource; if we provided the layer only around setup, its scope

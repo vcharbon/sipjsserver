@@ -42,7 +42,9 @@ extraEnv:
   # - `--heapsnapshot-near-heap-limit=2` auto-dumps two heap snapshots
   #   the first two times the heap approaches the V8 limit, so even
   #   an unattended run captures the leaking heap before crash. Files
-  #   land at `/app/Heap.<pid>.<seq>.heapsnapshot`.
+  #   land in the container's CWD — with `heapdumps.enabled` below,
+  #   that's `/heapdumps` (an emptyDir that survives container
+  #   restart) instead of `/app` (writable layer, lost on OOM-kill).
   - name: NODE_OPTIONS
     value: "--heapsnapshot-signal=SIGUSR2 --max-old-space-size=400 --heapsnapshot-near-heap-limit=2"
 
@@ -62,3 +64,14 @@ resources:
   requests:
     cpu: 25m
     memory: 100Mi
+
+# Mount /heapdumps emptyDir + set workingDir there so V8's auto
+# snapshot (via --heapsnapshot-near-heap-limit / SIGUSR2) lands on a
+# volume that survives container restart, and the StatusServer's
+# /debug/heap-snapshot endpoint writes there too. The orchestrator's
+# RSS watchdog triggers /debug/heap-snapshot at ~75% and ~90% of the
+# memory limit above (≈ 384 MB / 461 MB at 512Mi); the SNAPSHOT phase
+# `kubectl cp`s the directory into `<artifactDir>/heapdumps/<pod>/`.
+heapdumps:
+  enabled: true
+  sizeLimit: 2Gi

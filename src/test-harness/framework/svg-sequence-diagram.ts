@@ -7,7 +7,12 @@
  */
 
 import type { SipMessage } from "../../sip/types.js"
-import type { NetworkTag, Participant, TraceEntry } from "./types.js"
+import type {
+  NetworkTag,
+  Participant,
+  ReplicationTraceEntry,
+  TraceEntry,
+} from "./types.js"
 
 // ---------------------------------------------------------------------------
 // Layout constants
@@ -143,6 +148,76 @@ function escapeXml(str: string): string {
     .replace(/'/g, "&apos;")
 }
 
+/**
+ * Render one replication-frame row inside the same SVG sequence diagram
+ * as the SIP arrows. The row uses a dashed indigo arrow with a
+ * one-line summary so the cause→effect ordering against the SIP
+ * messages above and below it is visually obvious. Click target
+ * carries `data-repl-index` for the html-report handler to map to the
+ * full decoded JSON frame.
+ */
+function renderReplicationRow(args: {
+  readonly svgParts: string[]
+  readonly repl: ReplicationTraceEntry
+  readonly index: number
+  readonly y: number
+  readonly baseTs: number
+  readonly participantX: Map<string, number>
+}): void {
+  const { svgParts, repl, index, y, baseTs, participantX } = args
+  const fromX = participantX.get(repl.from)
+  const toX = participantX.get(repl.to)
+  if (fromX === undefined || toX === undefined) return
+
+  const isLeftToRight = fromX < toX
+  const lineColor = "#4f46e5" // indigo, distinct from SIP greys / call-id palette
+  const arrowFromX = isLeftToRight ? fromX + 5 : fromX - 5
+  const arrowToX = isLeftToRight ? toX - 5 : toX + 5
+
+  const summary = replicationSummary(repl.frame)
+
+  svgParts.push(
+    `<g class="repl-arrow" data-repl-index="${index}" style="cursor:pointer">`,
+  )
+  svgParts.push(
+    `<line x1="${arrowFromX}" y1="${y}" x2="${arrowToX}" y2="${y}" stroke="${lineColor}" stroke-width="1.5" stroke-dasharray="3,3" marker-end="url(#arrowhead-repl)"/>`,
+  )
+  const midX = (fromX + toX) / 2
+  svgParts.push(
+    `<text x="${midX}" y="${y - 14}" text-anchor="middle" font-family="monospace" font-size="${LABEL_FONT_SIZE}" fill="${lineColor}">${escapeXml("⇢ repl: " + summary)}</text>`,
+  )
+  // Receiver-side timing annotation, same as SIP rows.
+  const rcvdLabel = formatRelativeTimestamp(repl.timestamp - baseTs)
+  const receiverAnchor = isLeftToRight ? "start" : "end"
+  const receiverX = isLeftToRight ? toX + 8 : toX - 8
+  svgParts.push(
+    `<text x="${receiverX}" y="${y + 4}" text-anchor="${receiverAnchor}" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" fill="#4338ca">${rcvdLabel}</text>`,
+  )
+  // Click target.
+  svgParts.push(
+    `<rect x="${Math.min(fromX, toX)}" y="${y - 20}" width="${Math.abs(toX - fromX)}" height="30" fill="transparent"/>`,
+  )
+  svgParts.push(`</g>`)
+}
+
+/** One-line summary of a decoded replication frame for the SVG label. */
+function replicationSummary(frame: unknown): string {
+  if (typeof frame !== "object" || frame === null) return "?"
+  const obj = frame as Record<string, unknown>
+  const tag = typeof obj["_tag"] === "string" ? (obj["_tag"] as string) : ""
+  if (tag === "Noop") {
+    return `Noop g=${String(obj["gen"] ?? "")} c=${String(obj["counter"] ?? "")}`
+  }
+  if (tag === "Data") {
+    const op = String(obj["op"] ?? "")
+    const partition = String(obj["partition"] ?? "")
+    const callRef = String(obj["callRef"] ?? "")
+    const callRefShort = callRef.length > 22 ? callRef.slice(0, 22) + "…" : callRef
+    return `${op} ${partition} ${callRefShort}`
+  }
+  return tag || "?"
+}
+
 /** Serialize a SipMessage to a human-readable string for the detail panel. */
 export function serializeMessage(msg: SipMessage): string {
   const lines: string[] = []
@@ -184,9 +259,10 @@ const NETWORK_LANE_LABEL_COLORS: Record<NetworkTag, string> = {
 
 export function renderSequenceDiagram(
   trace: readonly TraceEntry[],
-  participants: readonly Participant[]
+  participants: readonly Participant[],
+  replicationTrace: readonly ReplicationTraceEntry[] = [],
 ): string {
-  if (participants.length === 0 || trace.length === 0) {
+  if (participants.length === 0 || (trace.length === 0 && replicationTrace.length === 0)) {
     return `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="100">
       <text x="200" y="50" text-anchor="middle" font-family="monospace" font-size="14" fill="#666">No messages to display</text>
     </svg>`
@@ -196,11 +272,6 @@ export function renderSequenceDiagram(
   const participantX = new Map<string, number>()
   const participantNetwork = new Map<string, NetworkTag>()
 
-  // Base timestamp for T+ annotations — the first trace entry's
-  // virtual-clock time. Everything downstream is rendered as an offset
-  // from this so the sequence diagram matches the text report.
-  const baseTs = trace[0]!.timestamp
-
   // Compute participant X positions
   for (let i = 0; i < participants.length; i++) {
     const p = participants[i]!
@@ -208,13 +279,45 @@ export function renderSequenceDiagram(
     participantNetwork.set(p.name, p.network)
   }
 
+  // Merge SIP and replication entries into a single timeline. SIP
+  // entries keep their `TraceEntry` shape; replication entries are
+  // wrapped with a discriminator so the row renderer can dispatch.
+  type Row =
+    | { readonly kind: "sip"; readonly index: number; readonly entry: TraceEntry }
+    | { readonly kind: "repl"; readonly index: number; readonly entry: ReplicationTraceEntry }
+  const rows: Row[] = []
+  for (let i = 0; i < trace.length; i++) {
+    rows.push({ kind: "sip", index: i, entry: trace[i]! })
+  }
+  for (let i = 0; i < replicationTrace.length; i++) {
+    rows.push({ kind: "repl", index: i, entry: replicationTrace[i]! })
+  }
+  // Stable order: by timestamp ascending, with replication AFTER SIP
+  // when timestamps tie. Tie-breaks matter because TestClock often
+  // hands the same virtual instant to a SIP final response and the
+  // replication write that response triggered (rule processing →
+  // flushToRedis → propagate-channel write → puller apply all happen
+  // inside a single Effect tick); rendering replication after the
+  // triggering SIP message makes the cause→effect sequence obvious.
+  rows.sort((a, b) => {
+    const dt = a.entry.timestamp - b.entry.timestamp
+    if (dt !== 0) return dt
+    if (a.kind === b.kind) return 0
+    return a.kind === "sip" ? -1 : 1
+  })
+
+  // Base timestamp for T+ annotations — the first row's virtual-clock
+  // time. Replication and SIP entries share the same TestClock so a
+  // single base is correct.
+  const baseTs = rows[0]!.entry.timestamp
+
   // Compute SVG dimensions
   const totalWidth = MARGIN_LEFT * 2 + (participants.length - 1) * PARTICIPANT_SPACING + PARTICIPANT_BOX_WIDTH
   let currentY = MARGIN_TOP + HEADER_HEIGHT
   const rowYs: number[] = []
 
   // Pre-compute row Y positions (account for pause gaps if we add them later)
-  for (let i = 0; i < trace.length; i++) {
+  for (let i = 0; i < rows.length; i++) {
     rowYs.push(currentY)
     currentY += ROW_HEIGHT
   }
@@ -236,6 +339,9 @@ export function renderSequenceDiagram(
     </marker>
     <marker id="arrowhead-unexpected" markerWidth="${ARROWHEAD_SIZE}" markerHeight="${ARROWHEAD_SIZE}" refX="${ARROWHEAD_SIZE}" refY="${ARROWHEAD_SIZE / 2}" orient="auto">
       <polygon points="0 0, ${ARROWHEAD_SIZE} ${ARROWHEAD_SIZE / 2}, 0 ${ARROWHEAD_SIZE}" fill="#d97706"/>
+    </marker>
+    <marker id="arrowhead-repl" markerWidth="${ARROWHEAD_SIZE}" markerHeight="${ARROWHEAD_SIZE}" refX="${ARROWHEAD_SIZE}" refY="${ARROWHEAD_SIZE / 2}" orient="auto">
+      <polygon points="0 0, ${ARROWHEAD_SIZE} ${ARROWHEAD_SIZE / 2}, 0 ${ARROWHEAD_SIZE}" fill="#4f46e5"/>
     </marker>
   </defs>`)
 
@@ -286,9 +392,27 @@ export function renderSequenceDiagram(
   }
 
   // --- Arrows ---
-  for (let i = 0; i < trace.length; i++) {
-    const entry = trace[i]!
-    const y = rowYs[i]!
+  for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+    const row = rows[rowIdx]!
+    const y = rowYs[rowIdx]!
+
+    // Replication frames render as a distinct dashed indigo arrow with
+    // a JSON-summary label. Their click target carries a
+    // `data-repl-index` attribute the HTML report's click handler uses
+    // to look up the full decoded frame.
+    if (row.kind === "repl") {
+      renderReplicationRow({
+        svgParts,
+        repl: row.entry,
+        index: row.index,
+        y,
+        baseTs,
+        participantX,
+      })
+      continue
+    }
+
+    const entry = row.entry
     const fromX = participantX.get(entry.from)
     const toX = participantX.get(entry.to)
 
@@ -318,7 +442,10 @@ export function renderSequenceDiagram(
     const arrowClasses = isOutOfDialogNonInvite(entry.message)
       ? "trace-arrow trace-arrow--out-of-dialog-non-invite"
       : "trace-arrow"
-    svgParts.push(`<g class="${arrowClasses}" data-step-index="${entry.stepIndex}" data-trace-index="${i}" style="cursor:pointer">`)
+    // `data-trace-index` keys the html-report click handler's
+    // `messages` map. Replication rows (rendered separately above)
+    // carry their own `data-repl-index` instead.
+    svgParts.push(`<g class="${arrowClasses}" data-step-index="${entry.stepIndex}" data-trace-index="${row.index}" style="cursor:pointer">`)
 
     // Arrow line
     const arrowFromX = isLeftToRight ? fromX + 5 : fromX - 5

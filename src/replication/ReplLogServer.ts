@@ -44,9 +44,15 @@ import {
 import {
   buildDataFrame,
   encodeFrame,
+  type DataFrame,
   type NoopFrame,
 } from "./ReplicationProtocol.js"
 import { KvBackend, type KvBackendApi } from "../storage/KvBackend.js"
+import {
+  PartitionedRelayStorage,
+  type PartitionedRelayStorageApi,
+  type ScanEntry,
+} from "../cache/PartitionedRelayStorage.js"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -83,6 +89,18 @@ export interface ReplLogServerApi {
     readonly sinceCounter: number
     readonly chunkSize: number
   }) => Stream.Stream<Uint8Array>
+
+  /**
+   * Build the NDJSON byte stream for one `/bootstrap` request. Same
+   * wire format as `/replog` (PullFrame Data + final Noop), but reads
+   * directly from `PartitionedRelayStorage.scanCalls("bak", caller)`
+   * — every emitted frame is a `Data{op:"create",partition:"pri"}`
+   * synthesized from a scan entry. Stream is finite: ends after the
+   * scan exhausts plus one terminal Noop.
+   */
+  readonly bootstrapStream: (args: {
+    readonly caller: string
+  }) => Stream.Stream<Uint8Array>
 }
 
 export class ReplLogServer extends ServiceMap.Service<
@@ -91,24 +109,27 @@ export class ReplLogServer extends ServiceMap.Service<
 >()("@sipjsserver/replication/ReplLogServer") {
   static readonly layer = (
     config: ReplLogServerConfig
-  ): Layer.Layer<ReplLogServer, never, KvBackend> =>
+  ): Layer.Layer<ReplLogServer, never, KvBackend | PartitionedRelayStorage> =>
     Layer.effect(
       ReplLogServer,
       Effect.gen(function* () {
         const kv = yield* KvBackend
-        return makeServer(kv, config)
+        const storage = yield* PartitionedRelayStorage
+        return makeServer(kv, storage, config)
       })
     )
 
   /** Synchronous factory for tests that wire a custom `KvBackend` instance. */
   static readonly makeUnsafe = (
     kv: KvBackendApi,
+    storage: PartitionedRelayStorageApi,
     config: ReplLogServerConfig
-  ): ReplLogServerApi => makeServer(kv, config)
+  ): ReplLogServerApi => makeServer(kv, storage, config)
 }
 
 const makeServer = (
   kv: KvBackendApi,
+  storage: PartitionedRelayStorageApi,
   config: ReplLogServerConfig
 ): ReplLogServerApi => {
   const noopMs = config.noopIntervalMs ?? REPLLOG_DEFAULT_NOOP_INTERVAL_MS
@@ -133,7 +154,19 @@ const makeServer = (
     })
   }
 
-  return { stream }
+  const bootstrapStream: ReplLogServerApi["bootstrapStream"] = ({ caller }) => {
+    // Channel from server (self) → caller — the channel the caller's
+    // puller will resume pulling after bootstrap. Recording the head
+    // here, before scan, ensures the terminal Noop carries a watermark
+    // the puller can seed without re-fetching the partition.
+    const channelIndex: ChannelIndexApi = ChannelIndex.make(
+      { self: config.self, peer: caller, gen: config.gen },
+      kv
+    )
+    return buildBootstrapStream(storage, channelIndex, caller)
+  }
+
+  return { stream, bootstrapStream }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +271,68 @@ const recurseTick = (
 const textEncoder = new TextEncoder()
 
 // ---------------------------------------------------------------------------
+// Bootstrap stream — one-shot scan of `bak:{caller}:*`, emitted as
+// `Data{op:"create",partition:"pri"}` frames followed by one terminal
+// `Noop`. Same NDJSON wire format as `/replog`; gen/counter are sentinel
+// `0`/`0` since bootstrap is outside the channel watermark space (the
+// client bypasses the watermark gate on this endpoint).
+// ---------------------------------------------------------------------------
+
+const buildBootstrapStream = (
+  storage: PartitionedRelayStorageApi,
+  channel: ChannelIndexApi,
+  caller: string
+): Stream.Stream<Uint8Array> =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      // Snapshot head BEFORE scan. Channel writes that race the scan
+      // window land at `(head.gen, head.counter+N)` — the puller picks
+      // them up via the seeded watermark; applyReplicaUpdate is
+      // idempotent so any double-applies are no-ops.
+      const headBatch = yield* channel.pullBatch({ gen: 0, counter: 0 }, 0).pipe(
+        Effect.orDie
+      )
+      const dataFrames = storage.scanCalls("bak", caller).pipe(
+        Stream.orDie,
+        Stream.map(encodeBootstrapEntry)
+      )
+      const terminalNoop: NoopFrame = {
+        _tag: "Noop",
+        gen: headBatch.head.gen,
+        counter: headBatch.head.counter,
+        latency_ms: 0,
+      }
+      return Stream.concat(
+        dataFrames,
+        Stream.succeed(textEncoder.encode(encodeFrame(terminalNoop)))
+      )
+    })
+  )
+
+const encodeBootstrapEntry = (entry: ScanEntry): Uint8Array => {
+  const frame: DataFrame = {
+    _tag: "Data",
+    gen: 0,
+    counter: 0,
+    op: "create",
+    partition: "pri",
+    callRef: entry.callRef,
+    body: safeParseJsonValue(entry.json),
+    body_ttl_remaining_sec: entry.ttlSec,
+    latency_ms: 0,
+  }
+  return textEncoder.encode(encodeFrame(frame))
+}
+
+const safeParseJsonValue = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw) as unknown
+  } catch {
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
 // HTTP route registration
 // ---------------------------------------------------------------------------
 
@@ -291,6 +386,33 @@ export const addReplLogRoutes = (
           sinceCounter,
           chunkSize,
         })
+        return HttpServerResponse.stream(body, {
+          contentType: "application/x-ndjson",
+          headers: { "cache-control": "no-store" },
+        })
+      })
+    )
+
+    // ── GET /bootstrap?caller={self} ────────────────────────────────────
+    // Peer-scan-bootstrap: stream every entry in this server's
+    // `bak:{caller}:*` partition as NDJSON DataFrames, then a terminal
+    // Noop, then close. The receiver applies into its local
+    // `pri:{caller}:*` partition. See
+    // docs/plan/echo-removal-grill-me-smooth-parasol.md §1.
+    yield* router.add(
+      "GET",
+      "/bootstrap",
+      Effect.gen(function* () {
+        const req = yield* HttpServerRequest.HttpServerRequest
+        const url = new URL(req.url, "http://localhost")
+        const caller = url.searchParams.get("caller")
+        if (caller === null || caller.length === 0) {
+          return HttpServerResponse.jsonUnsafe(
+            { error: "missing required query param: caller" },
+            { status: 400 }
+          )
+        }
+        const body = server.bootstrapStream({ caller })
         return HttpServerResponse.stream(body, {
           contentType: "application/x-ndjson",
           headers: { "cache-control": "no-store" },

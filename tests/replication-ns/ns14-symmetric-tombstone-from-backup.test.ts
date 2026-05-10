@@ -10,17 +10,17 @@
  *      its outgoing channel-to-A with a D-member tagged "bak".
  *   3. A's puller drains B's outgoing-to-A. The frame is `op=delete,
  *      partition=bak` — the apply rule routes it via the REVERSE path:
- *      tombstone applied to A's `pri:{A}:`.
+ *      hard-DEL applied to A's `pri:{A}:`.
  *
  * Asserts:
- *   - B's bak:{A}:call:X body is now the tombstone marker (not the
- *     original "X" content).
- *   - A's pri:{A}:call:X body is also the tombstone marker (recovered
- *     via reverse propagation).
+ *   - B's bak:{A}:call:X is empty (hard-DEL'd by B's tombstone).
+ *   - A's pri:{A}:call:X is empty (hard-DEL'd via reverse-direction
+ *     apply on the puller).
  *
  * The mechanism is symmetric: the puller does not care which side
  * wrote the tombstone — partition-tagged routing handles both
- * forward and reverse cleanup.
+ * forward and reverse cleanup. Body slots never hold a tombstone
+ * payload (see docs/plan/lets-plan-a-proper-crystalline-emerson.md).
  */
 
 import { describe, expect, it } from "@effect/vitest"
@@ -68,42 +68,31 @@ describe("NS14 — symmetric tombstone from backup", () => {
         // bak:{A}:call:X (peer is the owner under the bak partition).
         yield* B.outgoing.tombstone({
           entryGen: B.outgoing.gen,
-          callGen: 1,
           partition: "bak",
           callRef: "X",
           indexesToRemove: [],
         })
 
-        // B's bak:{A}:call:X is now the tombstone marker (not the
-        // original "X" content). Per Story 7d, the marker carries
-        // the per-call `callGen` (set by PRS via RMW; in this test
-        // we passed `callGen: 1` explicitly above).
-        const bAfterTomb = yield* B.kv.bodyGet("bak:worker-A:call:X")
-        expect(bAfterTomb).toBe('{"tombstone":true,"callGen":1}')
+        // B's bak:{A}:call:X is empty — body slot was hard-DEL'd.
+        expect(yield* B.kv.bodyGet("bak:worker-A:call:X")).toBeNull()
 
         // Step 3: A's puller drains B's outgoing-to-A. The reverse
-        // tombstone arrives and DELs A's pri:{A}:call:X (well — sets
-        // it to the tombstone marker; same observable result).
+        // tombstone arrives and hard-DELs A's pri:{A}:call:X via the
+        // reverse-direction apply rule.
         const aPuller = yield* forkPuller({ source: B, consumer: A })
 
-        // Wait for at least 2 frames applied: the original update
-        // echo (from step 1) AND the new tombstone.
+        // Wait for the tombstone frame to land. With echo killed,
+        // there is exactly one frame on B's outgoing channel-to-A
+        // — the tombstone B wrote in step 2 above. (Pre-echo-removal,
+        // a second frame existed — B's echo of A's original write —
+        // but that path is gone.)
         yield* waitFor(() =>
           MutableRef.get(aPuller.viewRef).everCaughtUp &&
-          MutableRef.get(aPuller.viewRef).entriesAppliedTotal >= 2
+          MutableRef.get(aPuller.viewRef).entriesAppliedTotal >= 1
         )
 
-        // A's pri:{A}:call:X is the tombstone marker (under the
-        // reverse-direction apply rule).
-        const aAfterTomb = yield* A.kv.bodyGet("pri:worker-A:call:X")
-        // Slice 7c: the puller writes the body verbatim from the
-        // wire (the body field on the data frame), preserving the
-        // original writer's gen. Here the source is B (gen=52), so
-        // A's local pri tombstone marker carries gen=52, NOT A's
-        // local gen. This is correct: the marker tracks the writer
-        // who originally tombstoned the call, which matters for
-        // gen-monotonicity assertions across cluster respawns.
-        expect(aAfterTomb).toBe('{"tombstone":true,"callGen":1}')
+        // A's pri:{A}:call:X is empty.
+        expect(yield* A.kv.bodyGet("pri:worker-A:call:X")).toBeNull()
 
         yield* aPuller.stop
       })

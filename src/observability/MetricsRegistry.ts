@@ -215,6 +215,34 @@ export interface TimerServiceMetrics {
 export interface SipRouterMetrics {
   readonly eventHandlerTimeoutTotal: () => number
   readonly forcePurgeTotal: () => number
+  /**
+   * `b2bua_stale_response_dropped_total{method, status}` — incoming
+   * SIP responses that resolved to an unknown call (vanished or
+   * never-existed). RFC 3261 §17.1.1.2 says these MUST be silently
+   * dropped, which the SipRouter does today; this counter only
+   * surfaces visibility. Sustained non-zero on a particular method
+   * (typically OPTIONS keepalive) indicates the call lifecycle is
+   * teardown-racing with in-flight transactions — the symptom that
+   * motivated the tombstone redesign in
+   * docs/plan/lets-plan-a-proper-crystalline-emerson.md.
+   */
+  readonly staleResponseDroppedTotal: () => Record<string, number>
+}
+
+/**
+ * Peer-scan-bootstrap counters. Populated by the bootstrap orchestrator
+ * during worker boot, surfaced for the Prometheus scrape so operators
+ * can correlate pod-restart counts with bootstrap success rate. See
+ * docs/plan/echo-removal-grill-me-smooth-parasol.md §5.
+ *
+ * `outcome` is one of `"ok"`, `"timeout"`, `"error"` — populated as the
+ * per-peer attempts conclude.
+ */
+export interface ReplicationBootstrapMetrics {
+  readonly startedTotal: () => number
+  readonly completedTotal: () => Record<string, number>
+  readonly entriesImportedTotal: () => Record<string, number>
+  readonly durationMs: () => Record<string, ReadonlyArray<number>>
 }
 
 /**
@@ -241,6 +269,8 @@ export interface MetricsRegistryState {
   callState: CallStateMetrics | undefined
   /** SipRouter consumer-loop safety counters (Slice 1.4/event-timeout). */
   sipRouter: SipRouterMetrics | undefined
+  /** Peer-scan-bootstrap success / failure / duration counters. */
+  replicationBootstrap: ReplicationBootstrapMetrics | undefined
   /** OTel BSP queue depth / drop counters (Slice 5). */
   otelPipeline: OtelPipelineMetrics | undefined
   /** Per-worker metrics snapshots, indexed by worker index. */
@@ -262,6 +292,7 @@ export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, Metrics
     timers: undefined,
     callState: undefined,
     sipRouter: undefined,
+    replicationBootstrap: undefined,
     otelPipeline: undefined,
     workers: [],
     broadcastToWorkers: undefined,

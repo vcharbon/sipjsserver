@@ -34,7 +34,10 @@ import { makePullerOpenStream } from "./replication/PullerHttpTransport.js"
 import { makeReplicationSupervisor } from "./replication/ReplicationSupervisor.js"
 import { makeReadinessController } from "./replication/ReadinessController.js"
 import { makeReplicationApply } from "./replication/EchoApply.js"
-import { ChannelIndex } from "./replication/ChannelIndex.js"
+import {
+  makeBootstrapMetricsState,
+  runPeerScanBootstrap,
+} from "./replication/PeerScanBootstrap.js"
 import { KvBackend } from "./storage/KvBackend.js"
 import { CdrWriter } from "./cdr/CdrWriter.js"
 import { RedisClient } from "./redis/RedisClient.js"
@@ -285,6 +288,7 @@ const ReplLogServerLayer = Layer.unwrap(
   })
 ).pipe(
   Layer.provide(KvBackendLayer),
+  Layer.provide(CallStateCacheLayer),
   Layer.provide(AppConfigLayer),
   Layer.provide(EpochCounterLayer)
 )
@@ -368,6 +372,8 @@ const runReplicationConsumer = (
     const enumerator = yield* PeerEnumerator
     const kv = yield* KvBackend
     const readiness = yield* WorkerReadiness
+    const appConfig = yield* AppConfig
+    const metricsRegistry = yield* MetricsRegistry
     // FetchHttpClient-backed client used by every per-peer puller's
     // openStream below. Resolved once here so the puller fork closure
     // can capture it.
@@ -389,21 +395,13 @@ const runReplicationConsumer = (
       watchIntervalMs: 2_000,
       forkPullerFiber: (peer, viewRef) => {
         const sourceId = peer as unknown as string
-        // Outgoing channel binding `propagate:{self}->{source}` — the
-        // puller writes mirror entries (entryGen=0) here so the source
-        // can later cold-pull them back during recovery.
-        const outgoingChannel = ChannelIndex.make(
-          { self, peer: sourceId, gen },
-          kv
-        )
-        // Closure over the apply factory: the per-puller index cache
-        // (used by the DELETE path to remove `idx:*` entries) lives
-        // inside this closure for the lifetime of the puller fiber.
+        // Apply path is local-only — no mirror echo to the outgoing
+        // channel. See src/replication/EchoApply.ts header for the
+        // update/delete crossing bug the echo created.
         const replicationApply = makeReplicationApply({
           self,
           source: sourceId,
           localKv: kv,
-          outgoingChannel,
           bodyTtlSec: 600,
         })
         const openStream = makePullerOpenStream({
@@ -435,6 +433,39 @@ const runReplicationConsumer = (
       observeState: supervisor.observe,
       markReady: (ready) => readiness.markReady(ready),
     })
+
+    // Peer-scan-bootstrap (echo-removal slice §3). Snapshot the peer
+    // set, scan each peer's `bak:{self}:*` partition over `/bootstrap`,
+    // replay into local `pri:{self}:*`, and plant per-peer watermarks
+    // so the supervisor's first puller-fork resumes at the recorded
+    // head — not `(0,0)`. Runs before `supervisor.run` so readiness
+    // does not flip on a worker that has not yet imported quiet calls.
+    const peersAtBoot = yield* enumerator.currentPeers
+    if (peersAtBoot.length > 0) {
+      yield* Effect.logInfo(
+        `replication: bootstrap starting against ${peersAtBoot.length} peer(s) (timeoutMs=${appConfig.replicationBootstrapTimeoutMs})`
+      )
+      const { hooks, registry } = makeBootstrapMetricsState()
+      metricsRegistry.replicationBootstrap = registry
+      const results = yield* runPeerScanBootstrap({
+        self,
+        peers: peersAtBoot,
+        kv,
+        httpClient,
+        resolver,
+        seedWatermark: supervisor.seedWatermark,
+        overallTimeoutMs: appConfig.replicationBootstrapTimeoutMs,
+        perPeerRetryDelayMs: 1_000,
+        metrics: hooks,
+      })
+      for (const r of results) {
+        yield* Effect.logInfo(
+          `replication: bootstrap result peer=${r.peer} outcome=${r.outcome} imported=${r.entriesImported} durationMs=${r.durationMs}${r.error !== null ? ` error=${r.error}` : ""}`
+        )
+      }
+    } else {
+      yield* Effect.logInfo("replication: bootstrap skipped (no peers at boot)")
+    }
 
     yield* Effect.forkDetach(supervisor.run)
     yield* Effect.forkDetach(controller.run)

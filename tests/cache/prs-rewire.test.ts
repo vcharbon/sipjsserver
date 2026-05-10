@@ -238,7 +238,7 @@ const scenarios: ReadonlyArray<{
 // ---------------------------------------------------------------------------
 
 const kvBackedTestLayer: Layer.Layer<PartitionedRelayStorage> =
-  kvBackedMemoryLayer({ self: "worker-A", gen: 1, tombstoneTtlSec: 180 })
+  kvBackedMemoryLayer({ self: "worker-A", gen: 1 })
 
 describe("PartitionedRelayStorage — kvBackedMemoryLayer (Slice 7b cutover candidate)", () => {
   for (const scn of scenarios) {

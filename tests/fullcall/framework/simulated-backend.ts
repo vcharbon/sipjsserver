@@ -42,6 +42,11 @@ import {
   sipproxyHAFakeStackLayer,
 } from "../../support/proxyB2bFakeStack.js"
 import {
+  makeReplicationTraceRecorder,
+  type ReplicationTraceEvent,
+  type ReplicationTraceRecorder,
+} from "../../support/ReplicationTraceRecorder.js"
+import {
   CORE_INGRESS as REGISTRAR_CORE_INGRESS,
   EXT_INGRESS as REGISTRAR_EXT_INGRESS,
   registrarFrontProxyFakeStackLayer,
@@ -185,9 +190,25 @@ export function createSimulatedTransport(opts?: {
   const simulateMissingOutboundProxy = opts?.simulateMissingOutboundProxy === true
 
   const config = testAppConfig(sipPort, httpPort, opts?.configOverrides)
+
+  // Replication-frame recorder: captures every NDJSON frame the
+  // simulated `/replog` HTTP transport emits between b2b-1 and b2b-2.
+  // Currently wired only for `sipproxyHA` (the only SUT in the file
+  // that runs replication via a per-worker puller fiber). Drained at
+  // scenario end and rendered alongside the SIP trace in the report.
+  const replicationTraceRecorder: ReplicationTraceRecorder | undefined =
+    sut === "sipproxyHA" ? makeReplicationTraceRecorder() : undefined
+
   const StackLayer =
     sut === "sipproxyHA"
-      ? sipproxyHAFakeStackLayer({ config, handlers: buildTestHandlers(), simulateMissingOutboundProxy })
+      ? sipproxyHAFakeStackLayer({
+          config,
+          handlers: buildTestHandlers(),
+          simulateMissingOutboundProxy,
+          ...(replicationTraceRecorder !== undefined
+            ? { replicationTraceRecorder }
+            : {}),
+        })
       : sut === "k8sFailover"
         ? k8sFakeStackLayer({ config, handlers: buildTestHandlers(), simulateMissingOutboundProxy })
         : sut === "proxy+b2b"
@@ -456,6 +477,9 @@ export function createSimulatedTransport(opts?: {
         }
         return out
       }),
+
+    drainReplicationTrace: (): ReadonlyArray<ReplicationTraceEvent> =>
+      replicationTraceRecorder?.drain() ?? [],
 
     settle: () =>
       // End-of-scenario sweep — replaces the hand-tuned `20×yieldNow →

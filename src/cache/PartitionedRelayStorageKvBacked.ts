@@ -89,14 +89,10 @@ import {
  * at boot. Channel writes carry this gen so peers can resolve
  * `(gen, counter)` ordering correctly across restarts.
  *
- * `tombstoneTtlSec` is the TTL applied to tombstone bodies via
- * `ChannelIndex.tombstone`. Defaults to `DEFAULT_TOMBSTONE_TTL_SEC`
- * (180s) per design doc §D2.
  */
 export interface KvBackedPrsConfig {
   readonly self: string
   readonly gen: number
-  readonly tombstoneTtlSec?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -323,42 +319,6 @@ const stampWrittenAtMs = (json: string, nowMs: number): string => {
   return json
 }
 
-/**
- * Read the per-call content version from an existing body's JSON. Used
- * by `deleteCall`'s RMW to stamp a strictly-greater `callGen` on the
- * tombstone (per Story 7d's content-gate invariant).
- *
- * Looks for `_topology.gen` (set by `CallState.flushToRedis` for full
- * Call bodies) first, then top-level `callGen` (set by a prior
- * tombstone written via `deleteCall`). Returns `0` for missing /
- * malformed bodies — the caller adds 1, so a fresh delete starts at
- * `callGen=1`. Pure helper outside Effect.gen for the Effect plugin's
- * `preferSchemaOverJson` rule (the body is opaque pass-through state).
- */
-const parseCallGen = (raw: string | null): number => {
-  if (raw === null) return 0
-  try {
-    const decoded = JSON.parse(raw) as unknown
-    if (decoded === null || typeof decoded !== "object") return 0
-    const obj = decoded as Record<string, unknown>
-    let max = 0
-    const topology = obj["_topology"]
-    if (topology !== null && typeof topology === "object") {
-      const tgen = (topology as Record<string, unknown>)["gen"]
-      if (typeof tgen === "number" && Number.isFinite(tgen) && tgen > max) {
-        max = tgen
-      }
-    }
-    const top = obj["callGen"]
-    if (typeof top === "number" && Number.isFinite(top) && top > max) {
-      max = top
-    }
-    return max
-  } catch {
-    return 0
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
@@ -514,36 +474,24 @@ const makeKvBackedExplicit = (
     Effect.gen(function* () {
       const peer = opts?.peer
       if (peer === undefined || peer.length === 0) {
-        // No-peer delete: hard-delete body + indexes (no tombstone —
-        // no consumer needs the deletion notification).
+        // No-peer delete: hard-delete body + indexes (no consumer
+        // needs the deletion notification).
         yield* kv.bodyDel(callBodyKey(role, owner, callRef))
         for (const idx of indexes) {
           yield* kv.bodyDel(indexStorageKey(idx))
         }
         return
       }
-      // Peer delete: write a tombstone via the channel. The
-      // tombstone body has its own short TTL; the peer's puller
-      // observes the D-member and applies the local DEL.
-      //
-      // Per Story 7d, stamp the tombstone with a callGen STRICTLY
-      // GREATER than the local body's existing callGen via RMW:
-      // read the existing body, parse its `_topology.gen` (or
-      // top-level `callGen` for already-tombstoned local), increment.
-      // The receiver's content gate uses this to ensure the
-      // tombstone supersedes any older mirror that arrives later.
-      // Missing local body → start at callGen=1.
-      const localBodyKey = callBodyKey(role, owner, callRef)
-      const existingBody = yield* kv.bodyGet(localBodyKey)
-      const existingCallGen = parseCallGen(existingBody)
-      const tombstoneCallGen = existingCallGen + 1
+      // Peer delete: hard-DEL body + indexes via the channel and emit
+      // a D-member so the peer's puller observes the deletion. Body
+      // slot is empty after this — no tombstone JSON ever lives in a
+      // call body slot (see docs/plan/lets-plan-a-proper-crystalline-emerson.md).
       const channel = channels.forPeer(peer)
       yield* channel
         .tombstone({
           entryGen: channel.gen,
           partition: partitionOf(role),
           callRef,
-          callGen: tombstoneCallGen,
           indexesToRemove: indexes.map(indexStorageKey),
         })
         .pipe(Effect.asVoid)

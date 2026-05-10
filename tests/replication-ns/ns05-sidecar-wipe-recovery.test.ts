@@ -1,25 +1,19 @@
 /**
- * NS5 — sidecar wipe recovery.
+ * NS5 — sidecar wipe recovery via peer-scan-bootstrap.
  *
- * Scenario (per docs/plan/grill-me-on-the-spicy-lark.md §D9-NS):
- *   1. Worker A writes call X. A's outgoing channel-to-B carries an
- *      entry; the puller on B drains it via the real `buildPullStream`.
- *   2. The puller's applyFrame is wired through `makeReplicationApply`, so
- *      after apply B's bak:{A}: contains X AND B's outgoing channel-to-A
- *      carries an echoed entry stamped with B's gen.
- *   3. A's sidecar Redis is wiped (clear all keys). A's process
- *      "restarts" with a higher gen via `EpochCounter.fixedForTesting`.
- *   4. A's NEW incarnation runs a puller against B's outgoing
- *      channel-to-A starting at since=(0,0).
- *   5. B's stream replays the echoed entry to A. A's applyFrame routes
- *      the partition="bak" frame to its OWN pri:{A}: (reverse-direction
- *      apply) — A reacquires X without any explicit bootstrap.
+ * The original NS5 scenario relied on the now-removed mirror-echo
+ * path: A wrote X, B's puller echoed it back into `propagate:B->A` at
+ * `entryGen=0`, and A — after a sidecar wipe — cold-pulled that
+ * reverse channel to recover X. Echo was removed in
+ * docs/plan/lets-plan-a-proper-crystalline-emerson.md because it was
+ * both wire noise (warm pullers skip gen=0) and a correctness bug
+ * (update/delete crossing could resurrect deleted calls).
  *
- * Asserts: A's `pri:worker-A:call:X` body exists after recovery, AND
- * the new gen is strictly greater than the pre-wipe gen.
- *
- * Variant: in-memory KvBackend + real (it.live) clock — the server
- * emission loop's noop sleep is real-time.
+ * The replacement is peer-scan-bootstrap
+ * (docs/plan/echo-removal-grill-me-smooth-parasol.md): on respawn the
+ * worker scans the peer's `bak:{self}:*` partition directly and
+ * replays each entry into local `pri:{self}:*`. This NS5 rewrite
+ * exercises that lifecycle end-to-end without echo.
  */
 
 import { describe, expect, it } from "@effect/vitest"
@@ -39,20 +33,26 @@ import {
 } from "../../src/replication/PullerFiber.js"
 import { buildPullStream } from "../../src/replication/ReplLogServer.js"
 import {
+  makeDirectBootstrapStream,
+  runPeerScanBootstrap,
+} from "../../src/replication/PeerScanBootstrap.js"
+import { makeKvBackedMemoryUnsafe } from "../../src/cache/PartitionedRelayStorageKvBacked.js"
+import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
+import {
   KvBackend,
   type MemoryStoreEntry,
 } from "../../src/storage/KvBackend.js"
 
 const A_GEN_INITIAL = 1
-const A_GEN_AFTER_WIPE = 100 // simulates a higher restartCount
+const A_GEN_AFTER_WIPE = 100
 const B_GEN = 2
 
-describe("NS5 — sidecar wipe recovery", () => {
+describe("NS5 — sidecar wipe recovery via peer-scan-bootstrap", () => {
   it.live(
-    "primary's sidecar wipe + restart recovers state via reverse-direction echo",
+    "primary's sidecar wipe + respawn recovers state by scanning peer's bak partition",
     () =>
       Effect.gen(function* () {
-        // ---- Setup A's storage + channel-to-B (initial incarnation).
+        // ---- A's initial incarnation: storage + outgoing channel to B.
         const storeA = MutableHashMap.empty<string, MemoryStoreEntry>()
         const kvA0 = KvBackend.makeMemoryUnsafe(storeA)
         const channelA0toB = ChannelIndex.make(
@@ -60,33 +60,31 @@ describe("NS5 — sidecar wipe recovery", () => {
           kvA0
         )
 
-        // ---- Setup B's storage + channel-to-A.
+        // ---- B's storage + storage api + channel to A.
         const storeB = MutableHashMap.empty<string, MemoryStoreEntry>()
         const kvB = KvBackend.makeMemoryUnsafe(storeB)
-        const channelBtoA = ChannelIndex.make(
-          { self: "worker-B", peer: "worker-A", gen: B_GEN },
-          kvB
-        )
+        const storageB = makeKvBackedMemoryUnsafe(storeB, {
+          self: "worker-B",
+          gen: B_GEN,
+        })
 
-        // ---- A writes X. Body lives in A's storage; A's channel-to-B
-        //      now has the U-member at counter 1.
+        // ---- A writes X — body on A, U-member on A's outgoing channel.
         yield* channelA0toB.write({
           entryGen: channelA0toB.gen,
           partition: "pri",
           callRef: "X",
-          bodyValue: '{"gen":1,"name":"X"}',
+          bodyValue: '{"_topology":{"gen":1},"name":"X"}',
           bodyTtlSec: 60,
           indexes: [],
         })
 
-        // ---- Fork B's puller against A's channel-to-B; apply via
-        //      EchoApply so writes to bak:{A}: also bump B's
-        //      outgoing channel-to-A.
+        // ---- B's puller pulls from A's channel; apply via
+        //      makeReplicationApply (local-only, no echo). After this
+        //      fiber catches up, B has `bak:worker-A:call:X`.
         const bView = MutableRef.make(initialPeerView("worker-A"))
         const bApply = makeReplicationApply({
           self: "worker-B",
           source: "worker-A",
-          outgoingChannel: channelBtoA,
           localKv: kvB,
           bodyTtlSec: 60,
         })
@@ -113,29 +111,27 @@ describe("NS5 — sidecar wipe recovery", () => {
           })
         )
 
-        // Wait for B to apply X.
-        yield* waitFor(() => MutableRef.get(bView).everCaughtUp &&
-          MutableRef.get(bView).entriesAppliedTotal >= 1)
+        yield* waitFor(
+          () =>
+            MutableRef.get(bView).everCaughtUp &&
+            MutableRef.get(bView).entriesAppliedTotal >= 1
+        )
 
-        // Verify B's bak:{A}:call:X exists AND B's channel-to-A has
-        // the echoed entry.
+        // B's bak:worker-A:call:X is now populated (the bedrock the
+        // bootstrap will scan after A's wipe).
         expect(yield* kvB.bodyGet("bak:worker-A:call:X")).not.toBeNull()
-        const bToAEntries = yield* channelBtoA.pullBatch({ gen: 0, counter: 0 }, 100)
-        expect(bToAEntries.entries.length).toBe(1)
-        expect(bToAEntries.entries[0]!.member).toBe("U:bak:worker-A:call:X")
 
         yield* Fiber.interrupt(bFiber)
 
-        // ---- Step 3: wipe A's sidecar. The MutableHashMap is shared
-        //      between any KvBackend instance using `storeA` — clear it.
+        // ---- Wipe A's sidecar. Shared `storeA` is the only state A's
+        //      KvBackend holds; clear it to simulate the pod restart.
         yield* Effect.sync(() => {
           for (const [k] of storeA) MutableHashMap.remove(storeA, k)
         })
-
-        // Sanity: A's body for X is gone after wipe.
         expect(yield* kvA0.bodyGet("pri:worker-A:call:X")).toBeNull()
 
-        // ---- Step 4: A's new incarnation. Higher gen.
+        // ---- A's new incarnation: fresh KvBackend over the wiped
+        //      store, bumped gen, run bootstrap against B.
         expect(A_GEN_AFTER_WIPE).toBeGreaterThan(A_GEN_INITIAL)
         const kvA1 = KvBackend.makeMemoryUnsafe(storeA)
         const channelA1toB = ChannelIndex.make(
@@ -143,47 +139,36 @@ describe("NS5 — sidecar wipe recovery", () => {
           kvA1
         )
 
-        // A's puller against B's channel-to-A; apply via EchoApply so
-        // the recovered state lands in pri:{A}: AND echos onward.
-        const aView = MutableRef.make(initialPeerView("worker-B"))
-        const aApply = makeReplicationApply({
+        const results = yield* runPeerScanBootstrap({
           self: "worker-A",
-          source: "worker-B",
-          outgoingChannel: channelA1toB,
-          localKv: kvA1,
-          bodyTtlSec: 60,
+          peers: [WorkerOrdinal("worker-B")],
+          kv: kvA1,
+          seedWatermark: () => Effect.void,
+          overallTimeoutMs: 5_000,
+          perPeerRetryDelayMs: 100,
+          streamFactory: (peer) =>
+            makeDirectBootstrapStream({
+              self: "worker-A",
+              source: peer as unknown as string,
+              sourceGen: B_GEN,
+              peerKv: kvB,
+              peerStorage: storageB,
+            }),
         })
-        const openFromB = (args: {
-          readonly sinceGen: number
-          readonly sinceCounter: number
-          readonly chunkSize: number
-        }): Stream.Stream<Uint8Array, PullerTransportError> =>
-          buildPullStream({
-            channel: channelBtoA,
-            serverGen: B_GEN,
-            initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
-            chunkSize: args.chunkSize,
-            noopIntervalMs: 5,
-          })
-        const aFiber = yield* Effect.forkChild(
-          runPullerFiber({
-            peer: "worker-B",
-            viewRef: aView,
-            openStream: openFromB,
-            applyFrame: (f) => aApply(f).pipe(Effect.orDie),
-            chunkSize: 100,
-            initialBackoffMs: 50,
-          })
-        )
 
-        // ---- Step 5: wait for A to apply the reverse frame.
-        yield* waitFor(() => MutableRef.get(aView).everCaughtUp &&
-          MutableRef.get(aView).entriesAppliedTotal >= 1)
+        expect(results[0]!.outcome).toBe("ok")
+        expect(results[0]!.entriesImported).toBe(1)
 
-        // A's pri:{A}:call:X exists — recovered via reverse path.
+        // ---- A's pri:worker-A:call:X is back — scanned from B's
+        //      bak partition, no echo, no reverse cold-pull.
         expect(yield* kvA1.bodyGet("pri:worker-A:call:X")).not.toBeNull()
 
-        yield* Fiber.interrupt(aFiber)
+        // ---- Bootstrap is one-way: A's outgoing channel is empty.
+        const outBatch = yield* channelA1toB.pullBatch(
+          { gen: 0, counter: 0 },
+          1024
+        )
+        expect(outBatch.entries.length).toBe(0)
       })
   )
 })

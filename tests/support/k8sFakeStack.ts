@@ -49,8 +49,13 @@ import {
   initialPeerView,
   PullerTransportError,
   runPullerFiber,
+  type PeerView,
 } from "../../src/replication/PullerFiber.js"
 import { buildPullStream } from "../../src/replication/ReplLogServer.js"
+import {
+  makeDirectBootstrapStream,
+  runPeerScanBootstrap,
+} from "../../src/replication/PeerScanBootstrap.js"
 import type { KvBackendApi } from "../../src/storage/KvBackend.js"
 import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
 import { CdrWriter, makeCdrRecordsBuffer } from "../../src/cdr/CdrWriter.js"
@@ -380,10 +385,79 @@ function buildClusterWithWorkersLayer(
         const selfOrdStr = w.ordinal as unknown as string
         const localKv = fabric.storageOf(w.ordinal).kv
 
+        // Allocate viewRefs up-front so peer-scan-bootstrap can seed
+        // the watermark BEFORE the puller forks (echo-removal slice
+        // §3 — bootstrap is one-shot per worker boot, NOT per peer
+        // reappear, so we seed the existing ref rather than going
+        // through a supervisor.seedWatermark indirection).
+        const peerViewRefs = new Map<
+          string,
+          MutableRef.MutableRef<PeerView>
+        >()
         for (const peer of clusterWorkers) {
           if (peer.ordinal === w.ordinal) continue
           const peerOrdStr = peer.ordinal as unknown as string
-          const viewRef = MutableRef.make(initialPeerView(peerOrdStr))
+          peerViewRefs.set(
+            peerOrdStr,
+            MutableRef.make(initialPeerView(peerOrdStr))
+          )
+        }
+
+        // Peer-scan-bootstrap: scan each peer's `bak:{self}:*` and
+        // replay into local `pri:{self}:*` before forking pullers.
+        // Direct in-process stream — bypasses the fake HTTP fabric.
+        const peerOrdinals = Array.from(peerViewRefs.keys()).map(
+          (s) => WorkerOrdinal(s)
+        )
+        if (peerOrdinals.length > 0) {
+          const bootstrapResults = yield* runPeerScanBootstrap({
+            self: selfOrdStr,
+            peers: peerOrdinals,
+            kv: localKv,
+            seedWatermark: ({ peer, watermark }) =>
+              Effect.sync(() => {
+                const ref = peerViewRefs.get(peer as unknown as string)
+                if (ref !== undefined) {
+                  const cur = MutableRef.get(ref)
+                  MutableRef.set(ref, { ...cur, watermark })
+                }
+              }),
+            overallTimeoutMs: 5_000,
+            perPeerRetryDelayMs: 250,
+            streamFactory: (peer) => {
+              const peerOrdStr = peer as unknown as string
+              const peerKv = peerKvs.get(peerOrdStr)
+              const peerGen = peerGens.get(peerOrdStr) ?? 1
+              if (peerKv === undefined) {
+                return Stream.fail(
+                  new PullerTransportError({
+                    reason: `no peerKv for ${peerOrdStr}`,
+                  })
+                )
+              }
+              const peerStorage = fabric.storageOf(peer).api
+              return makeDirectBootstrapStream({
+                self: selfOrdStr,
+                source: peerOrdStr,
+                sourceGen: peerGen,
+                peerKv,
+                peerStorage,
+              })
+            },
+          })
+          for (const r of bootstrapResults) {
+            yield* Effect.logInfo(
+              `[${selfOrdStr}] bootstrap peer=${r.peer} outcome=${r.outcome} imported=${r.entriesImported} head=${
+                r.head !== null ? `${r.head.gen}:${r.head.counter}` : "null"
+              }`
+            )
+          }
+        }
+
+        for (const peer of clusterWorkers) {
+          if (peer.ordinal === w.ordinal) continue
+          const peerOrdStr = peer.ordinal as unknown as string
+          const viewRef = peerViewRefs.get(peerOrdStr)!
 
           // Re-resolve peer.kv per-cycle so respawn (which swaps the
           // peer's KvBackend) picks up the fresh instance on the next
@@ -411,20 +485,8 @@ function buildClusterWithWorkersLayer(
             })
           }
 
-          // Replication-driven apply via the design's "echo everything"
-          // path. ⚠️ The cycle-break per design §D3 (body-gen
-          // comparison) is NOT IMPLEMENTED — see Story 7d in the
-          // plan-of-record. Tests with concurrent bidirectional
-          // pullers (e.g. `replication-gap-mini.test.ts`) WILL
-          // currently time out under this configuration. Revert
-          // intentional: keeping the architecturally clean shape so
-          // the gap is visible at the right layer.
-          const localOutgoingToPeer = ChannelIndex.make(
-            { self: selfOrdStr, peer: peerOrdStr, gen: 1 },
-            localKv
-          )
+          // Replication apply is local-only — no mirror echo.
           const apply = makeReplicationApply({
-            outgoingChannel: localOutgoingToPeer,
             localKv,
             self: selfOrdStr,
             source: peerOrdStr,

@@ -425,6 +425,8 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
   // Build ordered participant list: agents and SUT names by first appearance in trace
   const participants = buildParticipantList(state)
 
+  const replicationTrace = transport.drainReplicationTrace?.() ?? []
+
   const result: ScenarioResult = {
     scenarioName: scenario.name,
     scenarioDescription: scenario.description,
@@ -434,6 +436,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     passed,
     failed,
     skipped,
+    ...(replicationTrace.length > 0 ? { replicationTrace } : {}),
   }
 
   return result

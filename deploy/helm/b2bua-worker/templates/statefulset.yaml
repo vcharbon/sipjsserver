@@ -37,9 +37,21 @@ spec:
         - name: worker
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # When `heapdumps.enabled`, the workingDir is moved to the
+          # heapdumps emptyDir so V8's `--heapsnapshot-near-heap-limit`
+          # auto-snapshot lands on a volume that survives container
+          # restart (CWD = /heapdumps). The command uses an absolute
+          # path because the relative `dist/main.js` would not resolve
+          # from /heapdumps. With the flag off, the chart behaves
+          # identically to before.
+          {{- if .Values.heapdumps.enabled }}
+          workingDir: /heapdumps
+          command: ["node", "/app/dist/main.js"]
+          {{- else }}
           # Default CMD in the image (`node dist/main.js`) — explicit
           # here for clarity and to make per-pod overrides easy.
           command: ["node", "dist/main.js"]
+          {{- end }}
           ports:
             - name: sip-udp
               containerPort: {{ .Values.sipPort }}
@@ -130,10 +142,21 @@ spec:
             timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
             failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
           {{- end }}
-          {{- if .Values.persistence.enabled }}
+          {{- if or .Values.persistence.enabled .Values.heapdumps.enabled }}
           volumeMounts:
+            {{- if .Values.persistence.enabled }}
             - name: data
               mountPath: {{ .Values.persistence.mountPath }}
+            {{- end }}
+            {{- if .Values.heapdumps.enabled }}
+            # emptyDir-backed dir where V8 writes
+            # `Heap.<pid>.<seq>.heapsnapshot` (workingDir is set to
+            # this path) and the StatusServer writes its on-demand
+            # `/debug/heap-snapshot` files. Survives container restart
+            # so the orchestrator can copy snapshots out post-OOM.
+            - name: heapdumps
+              mountPath: /heapdumps
+            {{- end }}
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -170,11 +193,18 @@ spec:
           resources:
             {{- toYaml .Values.redis.resources | nindent 12 }}
         {{- end }}
-      {{- if .Values.redis.enabled }}
+      {{- if or .Values.redis.enabled .Values.heapdumps.enabled }}
       volumes:
+        {{- if .Values.redis.enabled }}
         - name: redis-data
           emptyDir:
             sizeLimit: {{ .Values.redis.emptyDir.sizeLimit }}
+        {{- end }}
+        {{- if .Values.heapdumps.enabled }}
+        - name: heapdumps
+          emptyDir:
+            sizeLimit: {{ .Values.heapdumps.sizeLimit }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

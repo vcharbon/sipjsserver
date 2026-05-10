@@ -36,8 +36,6 @@ import {
 } from "../../src/storage/KvBackend.js"
 
 const A_GEN = 5
-const B_GEN_INITIAL = 1
-const B_GEN_AFTER_WIPE = 50
 
 const N_CALLS = 50
 
@@ -69,16 +67,11 @@ describe("NS7 — backup re-bootstrap", () => {
         // ---- B (initial incarnation): puller drains A.
         const storeB0 = MutableHashMap.empty<string, MemoryStoreEntry>()
         const kvB0 = KvBackend.makeMemoryUnsafe(storeB0)
-        const channelB0toA = ChannelIndex.make(
-          { self: "worker-B", peer: "worker-A", gen: B_GEN_INITIAL },
-          kvB0
-        )
 
         const b0View = MutableRef.make(initialPeerView("worker-A"))
         const b0Apply = makeReplicationApply({
           self: "worker-B",
           source: "worker-A",
-          outgoingChannel: channelB0toA,
           localKv: kvB0,
           bodyTtlSec: 60,
         })
@@ -121,16 +114,11 @@ describe("NS7 — backup re-bootstrap", () => {
         // ---- Wipe B. New incarnation with fresh storage and higher gen.
         const storeB1 = MutableHashMap.empty<string, MemoryStoreEntry>()
         const kvB1 = KvBackend.makeMemoryUnsafe(storeB1)
-        const channelB1toA = ChannelIndex.make(
-          { self: "worker-B", peer: "worker-A", gen: B_GEN_AFTER_WIPE },
-          kvB1
-        )
 
         const b1View = MutableRef.make(initialPeerView("worker-A"))
         const b1Apply = makeReplicationApply({
           self: "worker-B",
           source: "worker-A",
-          outgoingChannel: channelB1toA,
           localKv: kvB1,
           bodyTtlSec: 60,
         })

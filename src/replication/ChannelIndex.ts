@@ -67,20 +67,6 @@ export interface ChannelTombstoneArgs {
   readonly entryGen: number
   readonly partition: Partition
   readonly callRef: string
-  /**
-   * Per-call content version stamped into the tombstone body. The
-   * receiver's apply path uses this in the `callGen` content gate
-   * (skip when `incoming.callGen ≤ local.callGen`). PRS computes it
-   * via read-modify-write: read the existing local body, parse its
-   * `_topology.gen` or `callGen`, increment by 1.
-   *
-   * Without this, a tombstone could be ignored by a receiver whose
-   * local copy is at a higher callGen, OR could be silently
-   * superseded by a stale earlier write that arrives out of order.
-   * See [docs/replication/architecture.md §"Why callGen is still
-   * needed"](../../docs/replication/architecture.md).
-   */
-  readonly callGen: number
   readonly indexesToRemove: ReadonlyArray<string>
 }
 
@@ -96,8 +82,11 @@ export interface ChannelIndexApi {
   ) => Effect.Effect<{ readonly counter: number }, KvError>
 
   /**
-   * Atomic tombstone in the `(channel, entryGen)` bucket: body→tombstone
-   * (~3 min TTL) + DEL indexes + bucket counter+1 + ZADD D-member.
+   * Atomic tombstone in the `(channel, entryGen)` bucket: hard-DEL
+   * body + DEL indexes + bucket counter+1 + ZADD D-member. The wire
+   * signal of "this call was deleted" is the D-member alone — pullers
+   * fetching the D-member's body see `null` (mapped to `op="delete"`
+   * in `EchoApply`).
    */
   readonly tombstone: (
     args: ChannelTombstoneArgs
@@ -112,9 +101,6 @@ export interface ChannelIndexApi {
   /** This worker's incarnation gen — used by callers as the originating `entryGen`. */
   readonly gen: number
 }
-
-/** Default tombstone body TTL — see D2. */
-export const DEFAULT_TOMBSTONE_TTL_SEC = 180
 
 export class ChannelIndex {
   static readonly channelKey = (self: string, peer: string): string =>
@@ -182,8 +168,6 @@ const make = (
       entryGen: args.entryGen,
       member: KvBackend.memberOf("D", bodyKey),
       bodyKey,
-      tombstoneValue: encodeTombstone(args.callGen),
-      tombstoneTtlSec: DEFAULT_TOMBSTONE_TTL_SEC,
       indexesToRemove: args.indexesToRemove,
     })
   }
@@ -193,11 +177,3 @@ const make = (
 
   return { write, tombstone, pullBatch, gen: config.gen }
 }
-
-// Pure helper outside Effect.gen so the Effect plugin's preferSchemaOverJson
-// rule does not fire — the tombstone payload is opaque pass-through.
-// `callGen` is the per-call content version: PRS computes it via RMW on
-// the local existing body before propagating the delete. Receivers use
-// it for the per-call content gate (skip when incoming ≤ local).
-const encodeTombstone = (callGen: number): string =>
-  JSON.stringify({ tombstone: true, callGen })

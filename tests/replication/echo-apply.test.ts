@@ -1,22 +1,27 @@
 /**
- * makeReplicationApply (was makeEchoApply) — Story 7d apply path.
+ * makeReplicationApply — local-only apply path.
  *
- * Pins the partition derivation rules from
- * docs/replication/architecture.md §"Cycle-break and recovery":
+ * After the echo redesign (docs/plan/lets-plan-a-proper-crystalline-emerson.md)
+ * the puller's apply path writes ONLY to local storage; no mirror is
+ * emitted onto the outgoing channel. These tests pin:
  *
- *   - frame.partition === "pri"  → write to bak:{source}: on me
- *   - frame.partition === "bak"  → write to pri:{me}:    on me
+ *   1. Partition flip:
+ *      frame.partition === "pri"  → writes to bak:{source}: on me
+ *      frame.partition === "bak"  → writes to pri:{me}: on me
  *
- * Every apply (regardless of partition) goes through ONE atomic
- * primitive: `channelWriteUpdate({ entryGen: 0, ... })`. The body
- * lands at the target bodyKey, the U-member lands in the gen=0 bucket
- * of the outgoing-to-source channel, and indexes derived from the
- * body via `callIndexKeysFromUnknown` are SETEX'd. Cycle-break is
- * structural (lex-ordering on `(entryGen, counter)`); the puller
- * always writes mirrors and warm pullers naturally skip them.
+ *   2. UPDATE: body + derived indexes are set locally.
  *
- * Tombstones (op=delete) follow the same partition-flip + bucket=0
- * rule via `tombstone({ entryGen: 0, callGen, ... })`.
+ *   3. DELETE: body and cached indexes are hard-DEL'd locally.
+ *
+ *   4. callGen content gate on UPDATE: incoming ≤ local skips; incoming
+ *      > local applies. The gate does NOT fire for DELETE — a delete
+ *      always supersedes (with echo killed there is exactly one D-frame
+ *      per call from the originator, so no crossing-tombstone scenario
+ *      to mediate).
+ *
+ *   5. No mirror writes are emitted on the outgoing channel by any
+ *      apply — independently constructed `outgoingToSource` channel
+ *      stays empty.
  */
 
 import { describe, expect, it } from "@effect/vitest"
@@ -38,12 +43,13 @@ const SINCE_COLD = { gen: 0, counter: 0 } as const
 const setup = () => {
   const store = MutableHashMap.empty<string, MemoryStoreEntry>()
   const kv = KvBackend.makeMemoryUnsafe(store)
+  // Independently constructed outgoing channel — used ONLY by the
+  // test to assert the apply path does NOT write to it.
   const outgoingToSource = ChannelIndex.make(
     { self: SELF, peer: SOURCE, gen: SELF_GEN },
-    kv
+    kv,
   )
   const apply = makeReplicationApply({
-    outgoingChannel: outgoingToSource,
     bodyTtlSec: 60,
     localKv: kv,
     self: SELF,
@@ -52,9 +58,9 @@ const setup = () => {
   return { kv, outgoingToSource, apply }
 }
 
-describe("makeReplicationApply — partition derivation", () => {
+describe("makeReplicationApply — partition derivation + no echo", () => {
   it.effect(
-    "frame.partition='pri' (forward) writes to bak:{source}: + adds gen=0 mirror entry to outgoing channel",
+    "frame.partition='pri' writes to bak:{source}: locally; outgoing channel stays empty",
     () =>
       Effect.gen(function* () {
         const { kv, outgoingToSource, apply } = setup()
@@ -71,20 +77,16 @@ describe("makeReplicationApply — partition derivation", () => {
         }
         yield* apply(frame)
 
-        // Body landed in bak:{source}:.
         expect(yield* kv.bodyGet(`bak:${SOURCE}:call:X`)).toBe(
-          '{"_topology":{"gen":1},"name":"X"}'
+          '{"_topology":{"gen":1},"name":"X"}',
         )
-        // Mirror entry in outgoing channel — entryGen=0 (sentinel).
         const batch = yield* outgoingToSource.pullBatch(SINCE_COLD, 100)
-        expect(batch.entries.length).toBe(1)
-        expect(batch.entries[0]!.member).toBe(`U:bak:${SOURCE}:call:X`)
-        expect(batch.entries[0]!.entryGen).toBe(0)
-      })
+        expect(batch.entries.length).toBe(0)
+      }),
   )
 
   it.effect(
-    "frame.partition='bak' (reverse) writes to pri:{self}: + adds gen=0 mirror entry to outgoing channel",
+    "frame.partition='bak' writes to pri:{self}: locally; outgoing channel stays empty",
     () =>
       Effect.gen(function* () {
         const { kv, outgoingToSource, apply } = setup()
@@ -101,42 +103,37 @@ describe("makeReplicationApply — partition derivation", () => {
         }
         yield* apply(frame)
 
-        // Reverse-tagged frame routes to local pri:{self}: per the
-        // partition flip. The mirror entry STILL lands on the
-        // outgoing channel under entryGen=0 — cycle-break is
-        // structural at the wire (lex-ordering excludes gen=0 from
-        // warm pullers), not at the local-write step.
         expect(yield* kv.bodyGet(`pri:${SELF}:call:Y`)).toBe(
-          '{"_topology":{"gen":1},"name":"Y"}'
+          '{"_topology":{"gen":1},"name":"Y"}',
         )
         const batch = yield* outgoingToSource.pullBatch(SINCE_COLD, 100)
-        expect(batch.entries.length).toBe(1)
-        expect(batch.entries[0]!.member).toBe(`U:pri:${SELF}:call:Y`)
-        expect(batch.entries[0]!.entryGen).toBe(0)
-      })
+        expect(batch.entries.length).toBe(0)
+      }),
   )
 
-  it.effect("frame.op='delete' writes a tombstone to the derived partition under entryGen=0", () =>
+  it.effect("frame.op='delete' hard-DELs body + cached indexes; outgoing channel stays empty", () =>
     Effect.gen(function* () {
       const { kv, outgoingToSource, apply } = setup()
-      // Seed an existing body via apply, so the puller's index cache
-      // captures its derived idx-list. Real flow is: source's PUT
-      // arrives first (with body), then source's DELETE arrives
-      // (body=null). The cache populated by step 1 supplies the
-      // index list to step 2's tombstone.
-      const initial: DataFrame = {
+      // Seed with a call that has at least one derivable index so the
+      // index cache captures something for the eventual DELETE to clear.
+      const seed: DataFrame = {
         _tag: "Data",
         gen: 1,
         counter: 1,
         op: "update",
         partition: "pri",
         callRef: "Z",
-        body: { _topology: { gen: 1 }, original: true },
+        body: {
+          _topology: { gen: 1 },
+          aLeg: { callId: "cid-z", fromTag: "ftag-z", dialogs: [] },
+          bLegs: [],
+        },
         body_ttl_remaining_sec: 60,
         latency_ms: 0,
       }
-      yield* apply(initial)
+      yield* apply(seed)
       expect(yield* kv.bodyGet(`bak:${SOURCE}:call:Z`)).not.toBeNull()
+      expect(yield* kv.bodyGet("idx:leg:cid-z|ftag-z")).toBe("Z")
 
       const tomb: DataFrame = {
         _tag: "Data",
@@ -145,33 +142,22 @@ describe("makeReplicationApply — partition derivation", () => {
         op: "delete",
         partition: "pri",
         callRef: "Z",
-        body: { tombstone: true, callGen: 2 },
-        body_ttl_remaining_sec: 180,
+        body: null,
+        body_ttl_remaining_sec: 0,
         latency_ms: 0,
       }
       yield* apply(tomb)
 
-      // Body is now the tombstone marker — not null and not the
-      // original value.
-      const after = yield* kv.bodyGet(`bak:${SOURCE}:call:Z`)
-      expect(after).not.toBe('{"_topology":{"gen":1},"original":true}')
-      expect(after).not.toBeNull()
-
-      // Channel has both U-member (counter 1) and D-member (counter 2)
-      // in the gen=0 bucket — lex-ordered by counter within the bucket.
+      expect(yield* kv.bodyGet(`bak:${SOURCE}:call:Z`)).toBeNull()
+      expect(yield* kv.bodyGet("idx:leg:cid-z|ftag-z")).toBeNull()
       const batch = yield* outgoingToSource.pullBatch(SINCE_COLD, 100)
-      expect(batch.entries.length).toBe(2)
-      expect(batch.entries[0]!.member).toBe(`U:bak:${SOURCE}:call:Z`)
-      expect(batch.entries[0]!.entryGen).toBe(0)
-      expect(batch.entries[1]!.member).toBe(`D:bak:${SOURCE}:call:Z`)
-      expect(batch.entries[1]!.entryGen).toBe(0)
-    })
+      expect(batch.entries.length).toBe(0)
+    }),
   )
 
-  it.effect("callGen content gate: incoming ≤ local skips the apply", () =>
+  it.effect("callGen content gate: incoming ≤ local skips the apply (UPDATE only)", () =>
     Effect.gen(function* () {
-      const { kv, outgoingToSource, apply } = setup()
-      // Apply once to populate local.
+      const { kv, apply } = setup()
       yield* apply({
         _tag: "Data",
         gen: 1,
@@ -183,9 +169,10 @@ describe("makeReplicationApply — partition derivation", () => {
         body_ttl_remaining_sec: 60,
         latency_ms: 0,
       })
-      const localAfterFirst = yield* kv.bodyGet(`bak:${SOURCE}:call:G`)
-      expect(localAfterFirst).toBe('{"_topology":{"gen":5},"v":5}')
-      // Apply a frame with EQUAL callGen (5 vs 5 — gate is strict >).
+      expect(yield* kv.bodyGet(`bak:${SOURCE}:call:G`)).toBe(
+        '{"_topology":{"gen":5},"v":5}',
+      )
+      // Equal callGen — gate is strict >, so this is skipped.
       yield* apply({
         _tag: "Data",
         gen: 1,
@@ -197,19 +184,15 @@ describe("makeReplicationApply — partition derivation", () => {
         body_ttl_remaining_sec: 60,
         latency_ms: 0,
       })
-      // Local body unchanged — equal callGen does not supersede.
       expect(yield* kv.bodyGet(`bak:${SOURCE}:call:G`)).toBe(
-        '{"_topology":{"gen":5},"v":5}'
+        '{"_topology":{"gen":5},"v":5}',
       )
-      // No second mirror entry on the channel either.
-      const batch = yield* outgoingToSource.pullBatch(SINCE_COLD, 100)
-      expect(batch.entries.length).toBe(1)
-    })
+    }),
   )
 
-  it.effect("callGen content gate: incoming > local applies and bumps the channel", () =>
+  it.effect("callGen content gate: incoming > local applies", () =>
     Effect.gen(function* () {
-      const { kv, outgoingToSource, apply } = setup()
+      const { kv, apply } = setup()
       yield* apply({
         _tag: "Data",
         gen: 1,
@@ -221,7 +204,6 @@ describe("makeReplicationApply — partition derivation", () => {
         body_ttl_remaining_sec: 60,
         latency_ms: 0,
       })
-      // Stricter callGen — apply lands.
       yield* apply({
         _tag: "Data",
         gen: 1,
@@ -234,13 +216,43 @@ describe("makeReplicationApply — partition derivation", () => {
         latency_ms: 0,
       })
       expect(yield* kv.bodyGet(`bak:${SOURCE}:call:H`)).toBe(
-        '{"_topology":{"gen":6},"v":6}'
+        '{"_topology":{"gen":6},"v":6}',
       )
-      // Channel: same member overwritten in the gen=0 bucket → score
-      // bumps to 2.
-      const batch = yield* outgoingToSource.pullBatch(SINCE_COLD, 100)
-      expect(batch.entries.length).toBe(1)
-      expect(batch.entries[0]!.score).toBe(2)
-    })
+    }),
+  )
+
+  it.effect(
+    "delete is NOT gated by callGen: a stale-callGen delete still supersedes a higher-callGen local body",
+    () =>
+      Effect.gen(function* () {
+        const { kv, apply } = setup()
+        // Seed at callGen=10.
+        yield* apply({
+          _tag: "Data",
+          gen: 1,
+          counter: 1,
+          op: "update",
+          partition: "pri",
+          callRef: "K",
+          body: { _topology: { gen: 10 }, v: 10 },
+          body_ttl_remaining_sec: 60,
+          latency_ms: 0,
+        })
+        // Delete frame: body=null (no callGen on the wire). Even if
+        // the apply could read a callGen, the DELETE path skips the
+        // gate. Body must end up DEL'd.
+        yield* apply({
+          _tag: "Data",
+          gen: 1,
+          counter: 2,
+          op: "delete",
+          partition: "pri",
+          callRef: "K",
+          body: null,
+          body_ttl_remaining_sec: 0,
+          latency_ms: 0,
+        })
+        expect(yield* kv.bodyGet(`bak:${SOURCE}:call:K`)).toBeNull()
+      }),
   )
 })

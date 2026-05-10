@@ -55,6 +55,8 @@ import {
   keepaliveMissingOutboundProxyRegressionGuard,
 } from "../scenarios/keepalive-via-proxy.js"
 import { twoCallsRoutedToTwoWorkers } from "../scenarios/ha/two-calls-routed-to-two-workers.js"
+import { haKeepaliveHappy } from "../scenarios/ha/keepalive-happy-ha.js"
+import { haKeepaliveTimeout } from "../scenarios/ha/keepalive-timeout-ha.js"
 import { registerHappyPath } from "../scenarios/registrar/register-happy-path.js"
 import { deregisterViaExpiresZero } from "../scenarios/registrar/deregister-via-expires-zero.js"
 import { ttlExpiryUnderTestClock } from "../scenarios/registrar/ttl-expiry-under-testclock.js"
@@ -86,6 +88,13 @@ expectCdrCount("suppress-18x-failover-reject", 1)
 // worker). Both go through full BYE round-trip → 2 CDR records aggregated
 // across both workers via `CdrWriter.sharedTestLayer(buffer)`.
 expectCdrCount("two-calls-routed-to-two-workers", 2)
+
+// HA keepalive scenarios — each runs 2 calls, each call's primary
+// emits one CDR → 2 records per scenario. Per-test fabric / buffer
+// isolation in `createSimulatedRunner` (harness.ts) keeps these
+// counts per-scenario rather than cumulative across the describe.
+expectCdrCount("ha-keepalive-happy", 2)
+expectCdrCount("ha-keepalive-timeout", 2)
 
 // registrarFrontProxy is a pure SIP proxy (no B2BUA, no CallState, no
 // CdrWriter in scope). Harness skip is the only sound option.
@@ -256,6 +265,28 @@ for (const sut of ALL_SUTS) {
         "HA: two calls routed to two workers (alice-BYE + bob-BYE)",
         () => run(twoCallsRoutedToTwoWorkers.toScenario()),
         { timeout: 60_000 },
+      )
+    }
+    if (haKeepaliveHappy.appliesTo(sut)) {
+      // sipproxyHA-only: two long calls (one per worker), each survives
+      // multiple successful B2BUA-keepalive cycles (15 min each, virtual)
+      // before BYE. Exercises tombstone propagation on a call that has
+      // accumulated several replicated `_topology.gen` bumps.
+      it.effect(
+        "HA: long call with successful keepalive cycles → BYE → tombstone",
+        () => run(haKeepaliveHappy.toScenario()),
+        { timeout: 120_000 },
+      )
+    }
+    if (haKeepaliveTimeout.appliesTo(sut)) {
+      // sipproxyHA-only: two long calls, each survives several successful
+      // keepalive cycles, then loses one leg (alice stops answering).
+      // `keepaliveTimeoutRule` fires and BYEs the responsive peer (bob).
+      // Exercises the bye_timeout disposition's tombstone path on HA.
+      it.effect(
+        "HA: long call with keepalive timeout → BYE to responsive peer",
+        () => run(haKeepaliveTimeout.toScenario()),
+        { timeout: 120_000 },
       )
     }
     if (registerHappyPath.appliesTo(sut)) {
