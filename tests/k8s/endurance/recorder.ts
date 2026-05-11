@@ -49,13 +49,20 @@ export interface RecorderOpts {
   /**
    * When set, the metrics fiber compares each worker's VmRSS against
    * this byte limit on every scrape and triggers a heap snapshot
-   * (kill -USR2 1) at 50% and 65% — once per (pod, container
-   * incarnation). Intended to capture the leaking heap before the
-   * cgroup OOM-killer fires. Helm overlay's `heapdumps.enabled: true`
-   * mounts the destination emptyDir; without it the snapshot file
+   * (POST /debug/heap-snapshot, synchronous) at 50% and 65% — once per
+   * (pod, container incarnation). Helm overlay's `heapdumps.enabled:
+   * true` mounts the destination emptyDir; without it the snapshot
    * lands on the writable container layer and is lost on restart.
    */
   readonly workerMemLimitBytes?: number
+  /**
+   * When set, a separate fiber triggers a heap snapshot on every
+   * worker pod every `periodicHeapSnapshotMs` ms regardless of RSS.
+   * Captures a time series of the leak (heap diffs between consecutive
+   * snapshots reveal the accumulating object types). Independent of
+   * the watchdog so we get coverage even if the watchdog never fires.
+   */
+  readonly periodicHeapSnapshotMs?: number
 }
 
 export interface RecorderHandle {
@@ -86,12 +93,24 @@ export const startRecorder = (
     const podLogsFiber = yield* Effect.forkChild(
       streamPodLogs(opts.namespace, opts.artifactDir),
     )
+    const periodicFiber = opts.periodicHeapSnapshotMs !== undefined
+      ? yield* Effect.forkChild(
+          periodicHeapSnapshots(
+            opts.namespace,
+            opts.artifactDir,
+            opts.periodicHeapSnapshotMs,
+          ),
+        )
+      : undefined
 
     const stop = Effect.gen(function* () {
       yield* Fiber.interrupt(eventsFiber).pipe(Effect.ignore)
       yield* Fiber.interrupt(metricsFiber).pipe(Effect.ignore)
       yield* Fiber.interrupt(limiterFiber).pipe(Effect.ignore)
       yield* Fiber.interrupt(podLogsFiber).pipe(Effect.ignore)
+      if (periodicFiber !== undefined) {
+        yield* Fiber.interrupt(periodicFiber).pipe(Effect.ignore)
+      }
     })
     return { stop }
   })
@@ -214,7 +233,17 @@ const WATCHDOG_LEVEL2 = 0.65
 // incarnation's `level1` state and never re-snapshots.
 const WATCHDOG_RESET = 0.30
 
-/** Trigger a heap snapshot inside the worker via SIGUSR2. */
+/**
+ * Trigger a heap snapshot via the StatusServer's synchronous
+ * /debug/heap-snapshot endpoint. The handler calls v8.writeHeapSnapshot
+ * which blocks until the file is fully flushed to /heapdumps — unlike
+ * the SIGUSR2 path which is asynchronous and routinely produces 0-byte
+ * files when OOM hits before V8's signal handler runs (proven by
+ * oom-investigation-20260510-215315 and -50pct-20260510-223300).
+ *
+ * `wget --tries=1 --timeout=30` gives the worker up to 30s to walk the
+ * heap; for ~300Mi RSS that's well under the budget.
+ */
 const triggerHeapSnapshot = (
   namespace: string,
   podName: string,
@@ -222,22 +251,61 @@ const triggerHeapSnapshot = (
   reason: string,
 ): Effect.Effect<void, never> =>
   Effect.gen(function* () {
-    yield* execInPod(namespace, podName, "worker", [
-      "sh",
-      "-c",
-      "kill -USR2 1",
-    ]).pipe(Effect.ignore)
-    // Append a row so the analyzer / reader can correlate snapshots
-    // back to the moment they were triggered (a freshly created
-    // .heapsnapshot file picks up the wall-clock from kubectl cp's
-    // mtime, not from the trigger).
+    const result = yield* execInPod(namespace, podName, "worker", [
+      "wget",
+      "--tries=1",
+      "--timeout=30",
+      "-q",
+      "-O-",
+      "--post-data=",
+      "http://localhost:3002/debug/heap-snapshot",
+    ]).pipe(
+      Effect.matchEffect({
+        onSuccess: (r) => Effect.succeed(r.stdout.trim()),
+        onFailure: () => Effect.succeed(""),
+      }),
+    )
     yield* appendNdjsonRows(path.join(artifactDir, "heapdump-triggers.ndjson"), [
       {
         tTriggered: new Date().toISOString(),
         pod: podName,
         reason,
+        // Truncated server response (file path JSON or empty on
+        // failure) — useful for post-hoc debugging when the
+        // /heapdumps directory comes back empty.
+        response: result.slice(0, 500),
       },
     ])
+  })
+
+/**
+ * Periodic snapshot fiber: trigger a heap snapshot on every worker
+ * pod every `intervalMs` ms regardless of RSS. Pairs with the
+ * RSS-watchdog (which fires once per incarnation) to give a
+ * time-series of the leak.
+ */
+const periodicHeapSnapshots = (
+  namespace: string,
+  artifactDir: string,
+  intervalMs: number,
+): Effect.Effect<void, never> =>
+  Effect.gen(function* () {
+    while (true) {
+      yield* Effect.sleep(`${intervalMs} millis`)
+      const workerPods = yield* listPods(
+        namespace,
+        "app.kubernetes.io/name=b2bua-worker",
+      ).pipe(Effect.orElseSucceed(() => []))
+      for (const pod of workerPods) {
+        if (!pod.ready) continue
+        yield* triggerHeapSnapshot(
+          namespace,
+          pod.name,
+          artifactDir,
+          `periodic@${Math.round(intervalMs / 1000)}s`,
+        )
+      }
+    }
   })
 
 const pollMetrics = (

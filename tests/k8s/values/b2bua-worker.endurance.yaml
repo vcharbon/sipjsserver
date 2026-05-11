@@ -49,18 +49,20 @@ extraEnv:
     value: "--heapsnapshot-signal=SIGUSR2 --max-old-space-size=400 --heapsnapshot-near-heap-limit=2"
 
 # Cap worker app container memory so unreclaimable heap growth
-# becomes a deterministic OOMKilled at 512Mi instead of slow CPU
+# becomes a deterministic OOMKilled at 1Gi instead of slow CPU
 # saturation at 1.2 GB+ (the post-run idle state observed in
 # endurance-2026-05-09t20-26-22-853z). The production helm values
 # leave `resources: {}` — this cap is test-environment only.
 #
-# 512Mi vs --max-old-space-size=400: the 112Mi gap covers V8 young
-# generation + native heap + page tables (the run that left us a
-# heap dump showed VmRSS=1.23 GB with VmData=1.27 GB; only ~1.19 GB
-# was the V8 old space proper, the rest is non-heap).
+# 1Gi vs --max-old-space-size=400: leaves ~624Mi of headroom above
+# V8's old-space cap. This is sized to let v8.writeHeapSnapshot
+# actually flush a complete snapshot before the cgroup OOM-killer
+# fires. Run oom-investigation-50pct-20260510-223300 proved a 512Mi
+# cap is too tight: the snapshot writer's transient allocations
+# pushed RSS past 512Mi within seconds and left 0-byte files.
 resources:
   limits:
-    memory: 512Mi
+    memory: 1Gi
   requests:
     cpu: 25m
     memory: 100Mi

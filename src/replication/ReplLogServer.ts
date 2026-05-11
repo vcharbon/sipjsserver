@@ -29,6 +29,7 @@ import {
   Duration,
   Effect,
   Layer,
+  Option,
   ServiceMap,
   Stream,
 } from "effect"
@@ -46,6 +47,7 @@ import {
   encodeFrame,
   type DataFrame,
   type NoopFrame,
+  type PullFrame,
 } from "./ReplicationProtocol.js"
 import { KvBackend, type KvBackendApi } from "../storage/KvBackend.js"
 import {
@@ -188,20 +190,20 @@ interface BuildPullStreamArgs {
 }
 
 /**
- * Construct the long-lived NDJSON stream for one /replog connection.
- * Internal helper exposed for the unit tests in
- * `tests/replication/server-emission-loop.test.ts`.
+ * Tick state threaded through `Stream.paginate`. Kept inside paginate's
+ * closure so the stream's pull is a single Suspend node — no recursive
+ * `Stream.concat` chain that would grow per-tick for the lifetime of
+ * the (long-lived) HTTP request.
  */
-export const buildPullStream = (
-  args: BuildPullStreamArgs
-): Stream.Stream<Uint8Array> => recurseTick(args, args.initialSince, false)
+interface TickState {
+  readonly since: { readonly gen: number; readonly counter: number }
+  readonly sleepFirst: boolean
+}
 
 /**
- * One iteration of the server-emission loop, lazily continued via
- * `Stream.concat` so that `Stream.take(N)` (and real client disconnects)
- * interrupt before the next tick's idle sleep is entered.
+ * Construct the long-lived NDJSON stream for one /replog connection.
  *
- * Order of operations within a tick:
+ * Order of operations within a tick (executed by paginate's loop body):
  *   1. (optional) sleep `noopIntervalMs` if the previous tick's batch was
  *      partial. We sleep at the START of the next tick — never at the
  *      end of the current one — so the noop frame the previous tick
@@ -214,59 +216,66 @@ export const buildPullStream = (
  *      next tick begins with a sleep.
  *   5. Advance the cursor to the LAST entry's `(entryGen, score)` —
  *      this is the strict lex-greater anchor for the next pull.
+ *
+ * Encoding to NDJSON bytes is pushed to a downstream `Stream.map` stage
+ * so the loop body deals only in typed `PullFrame` values.
  */
-const recurseTick = (
-  args: BuildPullStreamArgs,
-  since: { gen: number; counter: number },
-  sleepFirst: boolean
+export const buildPullStream = (
+  args: BuildPullStreamArgs
 ): Stream.Stream<Uint8Array> =>
-  Stream.unwrap(
-    Effect.gen(function* () {
-      if (sleepFirst) {
-        yield* Effect.sleep(Duration.millis(args.noopIntervalMs))
-      }
-      const batch = yield* args.channel
-        .pullBatch(since, args.chunkSize)
-        .pipe(Effect.orDie)
-      const nowMs = yield* Clock.currentTimeMillis
-      const frames: Array<Uint8Array> = []
-      for (const entry of batch.entries) {
-        const data = buildDataFrame(entry, nowMs)
-        if (data === null) continue
-        frames.push(textEncoder.encode(encodeFrame(data)))
-      }
-      const partial = batch.entries.length < args.chunkSize
-      if (partial) {
-        // Noop carries the actual head tuple `(head.gen, head.counter)`,
-        // not `(serverGen, head.counter)`. With per-`(channel, entryGen)`
-        // buckets (Story 7d), `head.gen` may differ from `serverGen` —
-        // e.g. a channel with gen=0 mirror entries but an empty
-        // gen=`serverGen` originating bucket has `head.gen=0`. Stamping
-        // `serverGen` with `head.counter` from a different bucket
-        // fabricates a tuple that no entry occupies; the puller
-        // advances watermark to it and then filters out future
-        // originating writes whose counter is ≤ that value.
-        const noop: NoopFrame = {
-          _tag: "Noop",
-          gen: batch.head.gen,
-          counter: batch.head.counter,
-          latency_ms: 0,
+  Stream.paginate<TickState, PullFrame>(
+    { since: args.initialSince, sleepFirst: false },
+    (state) =>
+      Effect.gen(function* () {
+        if (state.sleepFirst) {
+          yield* Effect.sleep(Duration.millis(args.noopIntervalMs))
         }
-        frames.push(textEncoder.encode(encodeFrame(noop)))
-      }
-      const nextSince =
-        batch.entries.length > 0
-          ? (() => {
-              const last = batch.entries[batch.entries.length - 1]!
-              return { gen: last.entryGen, counter: last.score }
-            })()
-          : since
-      return Stream.concat(
-        Stream.fromIterable(frames),
-        recurseTick(args, nextSince, partial)
-      )
-    })
-  )
+        const batch = yield* args.channel
+          .pullBatch(state.since, args.chunkSize)
+          .pipe(Effect.orDie)
+        const nowMs = yield* Clock.currentTimeMillis
+
+        const frames: Array<PullFrame> = []
+        for (const entry of batch.entries) {
+          const data = buildDataFrame(entry, nowMs)
+          if (data !== null) frames.push(data)
+        }
+        const partial = batch.entries.length < args.chunkSize
+        if (partial) {
+          // Noop carries the actual head tuple `(head.gen, head.counter)`,
+          // not `(serverGen, head.counter)`. With per-`(channel, entryGen)`
+          // buckets (Story 7d), `head.gen` may differ from `serverGen` —
+          // e.g. a channel with gen=0 mirror entries but an empty
+          // gen=`serverGen` originating bucket has `head.gen=0`. Stamping
+          // `serverGen` with `head.counter` from a different bucket
+          // fabricates a tuple that no entry occupies; the puller
+          // advances watermark to it and then filters out future
+          // originating writes whose counter is ≤ that value.
+          const noop: NoopFrame = {
+            _tag: "Noop",
+            gen: batch.head.gen,
+            counter: batch.head.counter,
+            latency_ms: 0,
+          }
+          frames.push(noop)
+        }
+        const nextSince =
+          batch.entries.length > 0
+            ? (() => {
+                const last = batch.entries[batch.entries.length - 1]!
+                return { gen: last.entryGen, counter: last.score }
+              })()
+            : state.since
+        // Infinite stream — always Some. The HTTP request scope bounds
+        // the stream's life; client disconnect closes the scope and
+        // interrupts the in-flight pull (including the idle sleep).
+        const nextState: TickState = {
+          since: nextSince,
+          sleepFirst: partial,
+        }
+        return [frames, Option.some(nextState)] as const
+      })
+  ).pipe(Stream.map((frame) => textEncoder.encode(encodeFrame(frame))))
 
 const textEncoder = new TextEncoder()
 
