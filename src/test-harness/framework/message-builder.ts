@@ -314,9 +314,9 @@ function extractLastInfo(msg: SipMessage): LastMessageInfo {
     from: getHeader(headers, "from") ?? "",
     to: getHeader(headers, "to") ?? "",
     via: getHeaders(headers, "via"),
-    cseq: msg.parsed.cseq.seq,
-    cseqMethod: msg.parsed.cseq.method,
-    callId: msg.parsed.callId,
+    cseq: msg.getHeader("cseq").seq,
+    cseqMethod: msg.getHeader("cseq").method,
+    callId: msg.getHeader("call-id"),
     headers,
     body: msg.body,
   }

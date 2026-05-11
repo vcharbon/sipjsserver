@@ -35,8 +35,8 @@ export const allowSupportedOnInviteRule: PerCallRule = {
         const msg = ev.msg
 
         if (msg.type === "request" && msg.method === "INVITE") {
-          const callId = msg.parsed.callId
-          const branch = msg.parsed.via.branch ?? ""
+          const callId = msg.getHeader("call-id")
+          const branch = msg.getHeader("via")[0].branch ?? ""
           const isInitial = !initialInviteBranchByCallId.has(callId)
           if (isInitial) {
             initialInviteBranchByCallId.set(callId, branch)
@@ -50,7 +50,7 @@ export const allowSupportedOnInviteRule: PerCallRule = {
         if (
           msg.type === "response" &&
           msg.status >= 200 && msg.status < 300 &&
-          msg.parsed.cseq.method === "INVITE"
+          msg.getHeader("cseq").method === "INVITE"
         ) {
           checkAllowSupported(violations, agent, ev.idx, `${msg.status} OK INVITE`, msg.headers)
         }

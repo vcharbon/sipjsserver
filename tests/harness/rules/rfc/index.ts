@@ -189,45 +189,45 @@ function trackSent(ds: AgentDialogState, msg: SipMessage): void {
     ds.sentRequests.push({
       msg,
       method: msg.method,
-      cseqNumber: msg.parsed.cseq.seq,
-      viaBranch: msg.parsed.via.branch ?? "",
+      cseqNumber: msg.getHeader("cseq").seq,
+      viaBranch: msg.getHeader("via")[0].branch ?? "",
     })
 
     // Capture local tag from outbound From-tag (UAC) so tag validation passes.
-    const fromTag = msg.parsed.from.tag
+    const fromTag = msg.getHeader("from").tag
     if (fromTag) ds.localTags.add(fromTag)
     return
   }
 
   // Response: capture local tag from outbound To-tag (UAS).
   // Mirrors interpreter.ts:399-405.
-  const toTag = msg.parsed.to.tag
+  const toTag = msg.getHeader("to").tag
   if (toTag) ds.localTags.add(toTag)
 }
 
 function trackReceived(ds: AgentDialogState, msg: SipMessage): void {
   // Mirror the most-load-bearing parts of interpreter.updateDialogState.
-  const callIdHeader = msg.parsed.callId
+  const callIdHeader = msg.getHeader("call-id")
 
   if (msg.type === "request" && msg.method === "INVITE") {
     ds.callId = callIdHeader
     ds.callIdConfirmed = true
     ds.receivedInviteUri = msg.uri
-    if (msg.parsed.via.branch) ds.receivedInviteBranch = msg.parsed.via.branch
-    if (!ds.dialogRemoteUri) ds.dialogRemoteUri = msg.parsed.from.uri
+    if (msg.getHeader("via")[0].branch) ds.receivedInviteBranch = msg.getHeader("via")[0].branch
+    if (!ds.dialogRemoteUri) ds.dialogRemoteUri = msg.getHeader("from").uri
   }
 
   if (msg.type === "response") {
-    const toTag = msg.parsed.to.tag
+    const toTag = msg.getHeader("to").tag
     if (toTag && !ds.remoteTag) ds.remoteTag = toTag
   } else {
-    const fromTag = msg.parsed.from.tag
+    const fromTag = msg.getHeader("from").tag
     if (fromTag && !ds.remoteTag) ds.remoteTag = fromTag
   }
 
   if (msg.type === "request" && msg.method !== "ACK") {
-    const cseqNum = msg.parsed.cseq.seq
-    const cseqMethod = msg.parsed.cseq.method
+    const cseqNum = msg.getHeader("cseq").seq
+    const cseqMethod = msg.getHeader("cseq").method
     ds.pendingRequests.push({
       refId: -1,
       msg,
@@ -250,8 +250,8 @@ function trackReceived(ds: AgentDialogState, msg: SipMessage): void {
     // Per-dialog CSeq counter — skip CANCEL (reuses INVITE CSeq) and
     // messages without a full tag pair (out-of-dialog).
     if (msg.method !== "CANCEL" && cseqMethod !== "ACK") {
-      const fromTag = msg.parsed.from.tag
-      const toTag = msg.parsed.to.tag
+      const fromTag = msg.getHeader("from").tag
+      const toTag = msg.getHeader("to").tag
       if (fromTag && toTag) {
         const key = `${callIdHeader}|${fromTag}|${toTag}`
         const prev = ds.remoteCSeqByDialog.get(key)

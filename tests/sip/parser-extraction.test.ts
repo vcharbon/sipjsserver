@@ -419,13 +419,12 @@ Content-Length: 0
   for (const [name, buf, expectedFromTag, expectedToTag] of injectionCases) {
     test(`${name} — parsed.from.tag is correct`, () => {
       const msg = customParser.parse(buf)
-      expect(msg.parsed).toBeDefined()
-      expect(msg.parsed!.from!.tag).toBe(expectedFromTag)
+      expect(msg.getHeader("from").tag).toBe(expectedFromTag)
     })
 
     test(`${name} — parsed.to.tag is correct`, () => {
       const msg = customParser.parse(buf)
-      expect(msg.parsed!.to!.tag).toBe(expectedToTag)
+      expect(msg.getHeader("to").tag).toBe(expectedToTag)
     })
 
     test(`${name} — extractTag is now quote-aware (fixed)`, () => {
@@ -445,66 +444,65 @@ Content-Length: 0
 describe("Custom parser — parsed fields (eager extraction)", () => {
   test("parsed.from — basic INVITE", () => {
     const msg = customParser.parse(basicInvite)
-    expect(msg.parsed).toBeDefined()
-    expect(msg.parsed!.from!.displayName).toBe("Alice Smith")
-    expect(msg.parsed!.from!.uri).toBe("sip:alice@example.com")
-    expect(msg.parsed!.from!.tag).toBe("from-tag-xyz")
+    expect(msg.getHeader("from").displayName).toBe("Alice Smith")
+    expect(msg.getHeader("from").uri).toBe("sip:alice@example.com")
+    expect(msg.getHeader("from").tag).toBe("from-tag-xyz")
   })
 
   test("parsed.to — no tag", () => {
     const msg = customParser.parse(basicInvite)
-    expect(msg.parsed!.to!.uri).toBe("sip:bob@example.com")
-    expect(msg.parsed!.to!.tag).toBeUndefined()
+    expect(msg.getHeader("to").uri).toBe("sip:bob@example.com")
+    expect(msg.getHeader("to").tag).toBeUndefined()
   })
 
   test("parsed.to — with tag (response)", () => {
     const msg = customParser.parse(responseWithTags)
-    expect(msg.parsed!.to!.tag).toBe("to-tag-2")
+    expect(msg.getHeader("to").tag).toBe("to-tag-2")
   })
 
   test("parsed.callId", () => {
     const msg = customParser.parse(basicInvite)
-    expect(msg.parsed!.callId).toBe("unique-call-id@10.0.0.1")
+    expect(msg.getHeader("call-id")).toBe("unique-call-id@10.0.0.1")
   })
 
   test("parsed.cseq", () => {
     const msg = customParser.parse(basicInvite)
-    expect(msg.parsed!.cseq!.seq).toBe(42)
-    expect(msg.parsed!.cseq!.method).toBe("INVITE")
+    expect(msg.getHeader("cseq").seq).toBe(42)
+    expect(msg.getHeader("cseq").method).toBe("INVITE")
   })
 
   test("parsed.via — top via", () => {
     const msg = customParser.parse(basicInvite)
-    expect(msg.parsed!.via!.transport).toBe("UDP")
-    expect(msg.parsed!.via!.host).toBe("10.0.0.1")
-    expect(msg.parsed!.via!.port).toBe(5060)
-    expect(msg.parsed!.via!.branch).toBe("z9hG4bK-abc123")
-    expect(msg.parsed!.via!.params["cr"]).toBe("call-ref-1")
-    expect(msg.parsed!.via!.params["lg"]).toBe("a")
+    expect(msg.getHeader("via")[0].transport).toBe("UDP")
+    expect(msg.getHeader("via")[0].host).toBe("10.0.0.1")
+    expect(msg.getHeader("via")[0].port).toBe(5060)
+    expect(msg.getHeader("via")[0].branch).toBe("z9hG4bK-abc123")
+    expect(msg.getHeader("via")[0].params["cr"]).toBe("call-ref-1")
+    expect(msg.getHeader("via")[0].params["lg"]).toBe("a")
   })
 
   test("parsed.vias — all vias", () => {
     const msg = customParser.parse(multiVia)
-    expect(msg.parsed!.vias).toHaveLength(3)
-    expect(msg.parsed!.vias[0]!.branch).toBe("z9hG4bK-hop3")
-    expect(msg.parsed!.vias[1]!.branch).toBe("z9hG4bK-hop2")
-    expect(msg.parsed!.vias[2]!.branch).toBe("z9hG4bK-hop1")
-    expect(msg.parsed!.vias[0]!.params["cr"]).toBe("ref")
-    expect(msg.parsed!.vias[0]!.params["lg"]).toBe("b-1")
+    expect(msg.getHeader("via")).toHaveLength(3)
+    expect(msg.getHeader("via")[0]!.branch).toBe("z9hG4bK-hop3")
+    expect(msg.getHeader("via")[1]!.branch).toBe("z9hG4bK-hop2")
+    expect(msg.getHeader("via")[2]!.branch).toBe("z9hG4bK-hop1")
+    expect(msg.getHeader("via")[0]!.params["cr"]).toBe("ref")
+    expect(msg.getHeader("via")[0]!.params["lg"]).toBe("b-1")
   })
 
   test("parsed.contact", () => {
     const msg = customParser.parse(basicInvite)
-    expect(msg.parsed!.contact!.uri).toBe("sip:alice@10.0.0.1:5060;callRef=call-ref-1;leg=a")
+    expect(msg.getHeader("contact")?.uri).toBe("sip:alice@10.0.0.1:5060;callRef=call-ref-1;leg=a")
   })
 
   test("parsed.requestUri", () => {
     const msg = customParser.parse(basicInvite)
     if (msg.type !== "request") throw new Error("expected request")
-    expect(msg.parsed.requestUri.scheme).toBe("sip")
-    expect(msg.parsed.requestUri.user).toBe("bob")
-    expect(msg.parsed.requestUri.host).toBe("example.com")
-    expect(msg.parsed.requestUri.params["transport"]).toBe("udp")
+    expect(msg.requestUri.scheme).toBe("sip")
+    expect(msg.requestUri.user).toBe("bob")
+    expect(msg.requestUri.host).toBe("example.com")
+    expect(msg.requestUri.params["transport"]).toBe("udp")
   })
 
   test("parsed has no requestUri for responses", () => {
@@ -514,18 +512,18 @@ describe("Custom parser — parsed fields (eager extraction)", () => {
 
   test("parsed fields work with compact forms", () => {
     const msg = customParser.parse(compactFormMsg)
-    expect(msg.parsed!.from!.tag).toBe("compact-tag")
-    expect(msg.parsed!.callId).toBe("compact-call-id")
-    expect(msg.parsed!.via!.branch).toBe("z9hG4bK-compact")
-    expect(msg.parsed!.contact!.uri).toBe("sip:alice@10.0.0.1:5060")
+    expect(msg.getHeader("from").tag).toBe("compact-tag")
+    expect(msg.getHeader("call-id")).toBe("compact-call-id")
+    expect(msg.getHeader("via")[0].branch).toBe("z9hG4bK-compact")
+    expect(msg.getHeader("contact")?.uri).toBe("sip:alice@10.0.0.1:5060")
   })
 
   test("parsed fields work with folded headers", () => {
     const msg = customParser.parse(foldedHeaders)
-    expect(msg.parsed!.from!.tag).toBe("folded-from-tag")
-    expect(msg.parsed!.via!.branch).toBe("z9hG4bK-fold")
-    expect(msg.parsed!.via!.params["cr"]).toBe("folded-ref")
-    expect(msg.parsed!.via!.params["lg"]).toBe("a")
-    expect(msg.parsed!.contact!.uri).toBe("sip:alice@10.0.0.1:5060;callRef=fold-ref;leg=a")
+    expect(msg.getHeader("from").tag).toBe("folded-from-tag")
+    expect(msg.getHeader("via")[0].branch).toBe("z9hG4bK-fold")
+    expect(msg.getHeader("via")[0].params["cr"]).toBe("folded-ref")
+    expect(msg.getHeader("via")[0].params["lg"]).toBe("a")
+    expect(msg.getHeader("contact")?.uri).toBe("sip:alice@10.0.0.1:5060;callRef=fold-ref;leg=a")
   })
 })

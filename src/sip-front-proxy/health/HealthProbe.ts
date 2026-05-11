@@ -298,8 +298,8 @@ export const optionsKeepaliveLayer = (
             if (parseResult._tag !== "Success") return
             const msg = parseResult.success
             if (msg.type !== "response") return
-            const callId = msg.parsed.callId
-            if (typeof callId !== "string" || callId.length === 0) return
+            const callId = msg.getHeader("call-id")
+            if (callId.length === 0) return
 
             // ── Identify the worker this reply is for ──────────────────
             // Fast path: the response's Call-ID is still in

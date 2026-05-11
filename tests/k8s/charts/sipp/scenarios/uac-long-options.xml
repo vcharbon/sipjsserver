@@ -1,30 +1,42 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!--
-  Long-call UAC for endurance: INVITE → 200 → ACK → 20-min hold → BYE.
+  Long-call UAC for endurance: INVITE → 200 → ACK → OPTIONS-driven hold → BYE.
 
-  The B2BUA's keepalive rule (TimerRules.keepaliveRule) fires in-dialog
-  OPTIONS to the UAC at intervals of `keepaliveIntervalSec` (default
-  900s). For a 20-min call this means ~1 OPTIONS arrival per call.
+  After ACK the scenario loops on in-dialog OPTIONS from the B2BUA's
+  keepaliveRule (TimerRules), replying 200 OK to each. The loop has no
+  fixed iteration count — the call holds for as long as keepalives are
+  flowing, regardless of how many that ends up being. When OPTIONS
+  stops arriving for `recv timeout` (the keepalive interval plus a
+  generous margin), the UAC assumes the dialog has been torn down (by
+  the B2BUA, a chaos event, or a network failure) and sends BYE to
+  complete the scenario.
 
-  We intentionally DO NOT add an explicit `<recv method="OPTIONS"
-  optional="true">` block here: sipp rejects an `optional=true` recv
-  followed by `<pause>` ("`<recv>` before `<pause>` sequence without a
-  mandatory message"). Instead we rely on sipp's default `pingreply`
-  behavior which auto-replies 200 OK to any unmatched in-dialog
-  request — exactly what the B2BUA's keepalive needs.
+  Earlier revisions used a flat `<pause milliseconds="1200000"/>` and
+  relied on sipp's "default `pingreply` behavior" to auto-200 in-dialog
+  OPTIONS during the pause. That was incorrect: sipp's `pingreply`
+  only handles the legacy literal PING method, not OPTIONS. Every
+  long-call therefore lost its A-leg keepalive, the B2BUA terminated
+  the call ~5 min in, and the scenario's BYE 15 min later hit a dead
+  dialog (481). See endurance run chaos-endurance-2h-20260511.
 
-  Hold is hardcoded to 1200000ms (20 min). Sipp's `[$variable]` macro
-  does NOT expand inside `<pause milliseconds="...">` attributes, only
-  in `<send>` CDATA bodies — so we keep the literal here.
+  Loop pattern mirrors `uas-basic.xml` (the B-leg UAS). 200 OK echoes
+  `[last_From:]` / `[last_To:]` / `[last_Call-ID:]` / `[last_CSeq:]` so
+  the response carries the dialog tags + CSeq from the request.
+
+  The recv timeout is sized for the env-driven default
+  `KEEPALIVE_INTERVAL_SEC=300s` (src/config/AppConfig.ts) — 350 s
+  gives 50 s headroom for jitter / proxy queueing. The embedded layer
+  default is 900 s; if a deployment uses the embedded layer with that
+  larger interval, raise this timeout accordingly.
 
   RFC 3261 conformance:
-    §11      In-dialog OPTIONS may be sent by either party; UAS responds
-             200 OK echoing dialog tags + CSeq.
-    §12.2.1.1 In-dialog request CSeq increments within the dialog; sipp's
-             auto-200 echoes the CSeq verbatim from the request.
+    §11      In-dialog OPTIONS may be sent by either party; UAS
+             responds 200 OK echoing dialog tags + CSeq.
+    §12.2.1.1 In-dialog request CSeq increments within the dialog;
+             sipp's 200 OK echoes the CSeq verbatim from the request.
 -->
-<scenario name="K8s UAC long-options — 20-min hold; B2BUA OPTIONS auto-handled by sipp pingreply">
+<scenario name="K8s UAC long-options — OPTIONS-driven hold; BYE on keepalive timeout">
 
   <send retrans="500">
     <![CDATA[
@@ -69,8 +81,31 @@
     ]]>
   </send>
 
-  <pause milliseconds="1200000"/>
+  <!-- OPTIONS-driven hold: reply to each keepalive then loop back. The
+       recv is MANDATORY (no optional=true) — sipp rejects an
+       `optional=true recv` immediately followed by a `<send>`. With
+       `ontimeout` set, mandatory recv jumps to the labeled step
+       instead of aborting on timeout — so when keepalives stop
+       arriving for `timeout` ms (B2BUA terminated the call, chaos
+       event, network failure) we exit to the BYE phase. -->
+  <label id="hold_loop"/>
+  <recv request="OPTIONS" crlf="true" timeout="350000" ontimeout="end_hold"/>
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_Record-Route:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Content-Length: 0
+    ]]>
+  </send>
+  <nop next="hold_loop"/>
 
+  <label id="end_hold"/>
   <send retrans="500">
     <![CDATA[
       BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0

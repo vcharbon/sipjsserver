@@ -31,11 +31,11 @@ export const proxy100TryingNotForwardedRule: PerCallRule = {
 
       for (const ev of events) {
         if (ev.kind === "sent" && ev.msg.type === "request" && ev.msg.method === "INVITE") {
-          const callId = ev.msg.parsed.callId
-          const cseq = ev.msg.parsed.cseq.seq
+          const callId = ev.msg.getHeader("call-id")
+          const cseq = ev.msg.getHeader("cseq").seq
           const key = `${callId}|${cseq}`
           if (!sentInviteKey.has(key)) {
-            sentInviteKey.set(key, { branch: ev.msg.parsed.via.branch ?? "", idx: ev.idx })
+            sentInviteKey.set(key, { branch: ev.msg.getHeader("via")[0].branch ?? "", idx: ev.idx })
           }
           continue
         }
@@ -43,10 +43,10 @@ export const proxy100TryingNotForwardedRule: PerCallRule = {
           ev.kind === "received" &&
           ev.msg.type === "response" &&
           ev.msg.status === 100 &&
-          ev.msg.parsed.cseq.method === "INVITE"
+          ev.msg.getHeader("cseq").method === "INVITE"
         ) {
-          const callId = ev.msg.parsed.callId
-          const cseq = ev.msg.parsed.cseq.seq
+          const callId = ev.msg.getHeader("call-id")
+          const cseq = ev.msg.getHeader("cseq").seq
           const key = `${callId}|${cseq}`
           if (!sentInviteKey.has(key)) continue
           const next = (tryingCountByKey.get(key) ?? 0) + 1

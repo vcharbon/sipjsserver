@@ -107,7 +107,7 @@ function validateTags(
 
   if (msg.type === "request") {
     if (dialogState.remoteTag) {
-      const toTag = msg.parsed.to.tag
+      const toTag = msg.getHeader("to").tag
       if (toTag && !dialogState.localTags.has(toTag)) {
         const expected = [...dialogState.localTags].join(" | ")
         errors.push(
@@ -116,7 +116,7 @@ function validateTags(
       }
     }
   } else {
-    const fromTag = msg.parsed.from.tag
+    const fromTag = msg.getHeader("from").tag
     if (fromTag !== undefined && !dialogState.localTags.has(fromTag)) {
       const expected = [...dialogState.localTags].join(" | ")
       errors.push(
@@ -141,10 +141,10 @@ function validateTags(
  * is skipped for those.
  */
 function dialogKey(msg: SipMessage): string | undefined {
-  const callId = msg.parsed.callId
+  const callId = msg.getHeader("call-id")
   if (!callId) return undefined
-  const fromTag = msg.parsed.from.tag
-  const toTag = msg.parsed.to.tag
+  const fromTag = msg.getHeader("from").tag
+  const toTag = msg.getHeader("to").tag
   if (!fromTag || !toTag) return undefined
   return `${callId}|${fromTag}|${toTag}`
 }
@@ -169,7 +169,7 @@ function validateCSeq(
   correlatedRequest: SipMessage | undefined
 ): string[] {
   const errors: string[] = []
-  const cseq = msg.parsed.cseq
+  const cseq = msg.getHeader("cseq")
 
   if (msg.type === "request") {
     // CSeq method must match the request method
@@ -196,7 +196,7 @@ function validateCSeq(
     } else {
       const key = dialogKey(msg)
       if (key !== undefined) {
-        const callId = msg.parsed.callId
+        const callId = msg.getHeader("call-id")
         const prior = dialogState.remoteCSeqByDialog.get(key)
         const baseline = dialogState.inviteCSeqByCallId.get(callId)
         const expected = prior !== undefined
@@ -225,7 +225,7 @@ function validateCSeq(
   } else {
     // Response: CSeq must match the sent request
     if (correlatedRequest) {
-      const sentCSeq = correlatedRequest.parsed.cseq
+      const sentCSeq = correlatedRequest.getHeader("cseq")
       if (cseq.seq !== sentCSeq.seq) {
         errors.push(
           `Response CSeq number ${cseq.seq} does not match sent request CSeq ${sentCSeq.seq}`
@@ -259,8 +259,8 @@ function validateVia(
   const errors: string[] = []
 
   if (correlatedRequest) {
-    const responseVias = msg.parsed.vias
-    const sentVias = correlatedRequest.parsed.vias
+    const responseVias = msg.getHeader("via")
+    const sentVias = correlatedRequest.getHeader("via")
 
     // Topmost Via branch must match
     const responseBranch = responseVias[0]?.branch
@@ -291,7 +291,7 @@ function validateCallId(
   dialogState: AgentDialogState,
   _correlatedRequest: SipMessage | undefined
 ): string[] {
-  const callId = msg.parsed.callId
+  const callId = msg.getHeader("call-id")
 
   // Only enforce consistency after Call-ID has been confirmed by a received message.
   // B-side agents have a locally generated Call-ID that gets replaced on first INVITE.
@@ -411,7 +411,7 @@ function validateToTagPresence(
   if (msg.type !== "response") return []
   if (msg.status <= 100) return []
 
-  const tag = msg.parsed.to.tag
+  const tag = msg.getHeader("to").tag
   if (!tag) {
     return [`Missing To-tag on ${msg.status} response (required for responses > 100 per RFC 3261 §8.2.6.2)`]
   }
@@ -430,7 +430,7 @@ function validateBranchPrefix(
 ): string[] {
   const errors: string[] = []
 
-  for (const via of msg.parsed.vias) {
+  for (const via of msg.getHeader("via")) {
     const branch = via.branch
     if (branch && !branch.startsWith("z9hG4bK")) {
       errors.push(
@@ -461,7 +461,7 @@ function validateDialogUri(
   if (msg.type !== "request") return []
 
   const errors: string[] = []
-  const fromUri = msg.parsed.from.uri
+  const fromUri = msg.getHeader("from").uri
 
   if (fromUri && fromUri !== dialogState.dialogRemoteUri) {
     errors.push(
@@ -535,7 +535,7 @@ function validateCancelViaBranch(
   if (msg.type !== "request" || msg.method !== "CANCEL") return []
   if (!dialogState.receivedInviteBranch) return []
 
-  const cancelBranch = msg.parsed.via.branch
+  const cancelBranch = msg.getHeader("via")[0].branch
   if (!cancelBranch) return []
 
   if (cancelBranch !== dialogState.receivedInviteBranch) {
@@ -561,7 +561,7 @@ function validateRackCorrelation(
 ): string[] {
   if (msg.type !== "request" || msg.method !== "PRACK") return []
 
-  const r = msg.lazy.rack()
+  const r = msg.getHeader("rack")
   if (Result.isFailure(r)) return [r.failure.reason]
   const rack = r.success
   if (rack === undefined) return []
@@ -605,7 +605,7 @@ function validateResponseCorrelation(
   if (msg.type !== "response") return []
   if (correlatedRequest !== undefined) return []
 
-  const cseq = msg.parsed.cseq
+  const cseq = msg.getHeader("cseq")
 
   // Only flag when we have sent at least one request with the same method.
   // Otherwise the response may be for a request we never tracked (rare; and
@@ -641,10 +641,10 @@ function validateTagConsistency(
   if (msg.type !== "response") return []
   if (msg.status < 200) return []
 
-  const myBranch = msg.parsed.via.branch
+  const myBranch = msg.getHeader("via")[0].branch
   if (!myBranch) return []
 
-  const myTag = msg.parsed.to.tag
+  const myTag = msg.getHeader("to").tag
   if (!myTag) return []
 
   const priorProvisionalTags: string[] = []
@@ -652,8 +652,8 @@ function validateTagConsistency(
     if (prior === msg) continue
     if (prior.type !== "response") continue
     if (prior.status <= 100 || prior.status >= 200) continue
-    if (prior.parsed.via.branch !== myBranch) continue
-    const priorTag = prior.parsed.to.tag
+    if (prior.getHeader("via")[0].branch !== myBranch) continue
+    const priorTag = prior.getHeader("to").tag
     if (priorTag) priorProvisionalTags.push(priorTag)
   }
 
@@ -820,7 +820,7 @@ export function correlateResponse(
 ): SipMessage | undefined {
   if (msg.type !== "response") return undefined
 
-  const cseq = msg.parsed.cseq
+  const cseq = msg.getHeader("cseq")
 
   // Reverse search — most recent sent request with matching CSeq
   for (let i = dialogState.sentRequests.length - 1; i >= 0; i--) {

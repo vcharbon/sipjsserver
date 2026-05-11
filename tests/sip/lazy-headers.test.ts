@@ -26,7 +26,7 @@ ${baseHeaders}
 Content-Length: 0
 
 `)
-    const r = msg.lazy.pAssertedIdentity()
+    const r = msg.getHeader("p-asserted-identity")
     expect(Result.isSuccess(r)).toBe(true)
     expect(Result.getOrThrow(r)).toEqual([])
   })
@@ -38,7 +38,7 @@ P-Asserted-Identity: "Cullen Jennings" <sip:fluffy@cisco.com>
 Content-Length: 0
 
 `)
-    const r = msg.lazy.pAssertedIdentity()
+    const r = msg.getHeader("p-asserted-identity")
     const list = Result.getOrThrow(r)
     expect(list.length).toBe(1)
     expect(list[0]!.displayName).toBe("Cullen Jennings")
@@ -52,7 +52,7 @@ P-Asserted-Identity: <sip:fluffy@cisco.com>, <tel:+14085551212>
 Content-Length: 0
 
 `)
-    const list = Result.getOrThrow(msg.lazy.pAssertedIdentity())
+    const list = Result.getOrThrow(msg.getHeader("p-asserted-identity"))
     expect(list.length).toBe(2)
     expect(list[0]!.uri).toBe("sip:fluffy@cisco.com")
     expect(list[1]!.uri).toBe("tel:+14085551212")
@@ -66,7 +66,7 @@ P-Asserted-Identity: <tel:+14085551212>
 Content-Length: 0
 
 `)
-    const list = Result.getOrThrow(msg.lazy.pAssertedIdentity())
+    const list = Result.getOrThrow(msg.getHeader("p-asserted-identity"))
     expect(list.length).toBe(2)
   })
 
@@ -77,8 +77,8 @@ P-Asserted-Identity: <sip:fluffy@cisco.com>
 Content-Length: 0
 
 `)
-    const a = msg.lazy.pAssertedIdentity()
-    const b = msg.lazy.pAssertedIdentity()
+    const a = msg.getHeader("p-asserted-identity")
+    const b = msg.getHeader("p-asserted-identity")
     expect(a).toBe(b)
   })
 
@@ -89,7 +89,7 @@ P-Asserted-Identity: "Smith, John" <sip:js@example.com>, <sip:jane@example.com>
 Content-Length: 0
 
 `)
-    const list = Result.getOrThrow(msg.lazy.pAssertedIdentity())
+    const list = Result.getOrThrow(msg.getHeader("p-asserted-identity"))
     expect(list.length).toBe(2)
     expect(list[0]!.displayName).toBe("Smith, John")
     expect(list[0]!.uri).toBe("sip:js@example.com")
@@ -105,7 +105,7 @@ Diversion: <sip:divert@example.com>;reason=user-busy;counter=2;privacy=full
 Content-Length: 0
 
 `)
-    const list = Result.getOrThrow(msg.lazy.diversion())
+    const list = Result.getOrThrow(msg.getHeader("diversion"))
     expect(list.length).toBe(1)
     expect(list[0]!.uri).toBe("sip:divert@example.com")
     expect(list[0]!.params["reason"]).toBe("user-busy")
@@ -123,7 +123,7 @@ History-Info: <sip:redirect@example.com>;index=1.1
 Content-Length: 0
 
 `)
-    const list = Result.getOrThrow(msg.lazy.historyInfo())
+    const list = Result.getOrThrow(msg.getHeader("history-info"))
     expect(list.length).toBe(2)
     expect(list[0]!.params["index"]).toBe("1")
     expect(list[1]!.params["index"]).toBe("1.1")
@@ -138,7 +138,7 @@ Geolocation: <https://ls.example.com/loc1>, <https://ls.example.com/loc2>
 Content-Length: 0
 
 `)
-    const list = Result.getOrThrow(msg.lazy.geolocation())
+    const list = Result.getOrThrow(msg.getHeader("geolocation"))
     expect(list.length).toBe(2)
     expect(list[0]!.uri).toBe("https://ls.example.com/loc1")
     expect(list[1]!.uri).toBe("https://ls.example.com/loc2")
@@ -151,7 +151,7 @@ Geolocation-Routing: yes
 Content-Length: 0
 
 `)
-    expect(Result.getOrThrow(msg.lazy.geolocationRouting())).toBe(true)
+    expect(Result.getOrThrow(msg.getHeader("geolocation-routing"))).toBe(true)
   })
 
   test("Geolocation-Routing no (case-insensitive)", () => {
@@ -161,7 +161,7 @@ Geolocation-Routing: NO
 Content-Length: 0
 
 `)
-    expect(Result.getOrThrow(msg.lazy.geolocationRouting())).toBe(false)
+    expect(Result.getOrThrow(msg.getHeader("geolocation-routing"))).toBe(false)
   })
 
   test("Geolocation-Routing absent → undefined", () => {
@@ -170,7 +170,7 @@ ${baseHeaders}
 Content-Length: 0
 
 `)
-    expect(Result.getOrThrow(msg.lazy.geolocationRouting())).toBeUndefined()
+    expect(Result.getOrThrow(msg.getHeader("geolocation-routing"))).toBeUndefined()
   })
 
   test("Geolocation-Routing invalid value → failure", () => {
@@ -180,7 +180,7 @@ Geolocation-Routing: maybe
 Content-Length: 0
 
 `)
-    const r = msg.lazy.geolocationRouting()
+    const r = msg.getHeader("geolocation-routing")
     expect(Result.isFailure(r)).toBe(true)
   })
 
@@ -191,7 +191,7 @@ Geolocation-Error: <sip:locinfo@example.com>;code=200
 Content-Length: 0
 
 `)
-    const list = Result.getOrThrow(msg.lazy.geolocationError())
+    const list = Result.getOrThrow(msg.getHeader("geolocation-error"))
     expect(list.length).toBe(1)
     expect(list[0]!.params["code"]).toBe("200")
   })
@@ -216,7 +216,7 @@ ${baseHeaders}
 Content-Length: 0
 
 `)
-    expect(Result.getOrThrow(msg.lazy.rack())).toBeUndefined()
+    expect(Result.getOrThrow(msg.getHeader("rack"))).toBeUndefined()
   })
 
   test("well-formed PRACK RAck", () => {
@@ -226,7 +226,7 @@ RAck: 776656 1 INVITE
 Content-Length: 0
 
 `)
-    const rack = Result.getOrThrow(msg.lazy.rack())
+    const rack = Result.getOrThrow(msg.getHeader("rack"))
     expect(rack).toBeDefined()
     expect(rack!.rseq).toBe(776656)
     expect(rack!.seq).toBe(1)
@@ -240,7 +240,7 @@ RAck:    42   7   INVITE
 Content-Length: 0
 
 `)
-    const rack = Result.getOrThrow(msg.lazy.rack())
+    const rack = Result.getOrThrow(msg.getHeader("rack"))
     expect(rack!.rseq).toBe(42)
     expect(rack!.seq).toBe(7)
     expect(rack!.method).toBe("INVITE")
@@ -253,7 +253,7 @@ RAck: 1 2
 Content-Length: 0
 
 `)
-    expect(Result.isFailure(msg.lazy.rack())).toBe(true)
+    expect(Result.isFailure(msg.getHeader("rack"))).toBe(true)
   })
 
   test("non-numeric rseq → failure", () => {
@@ -263,7 +263,7 @@ RAck: foo 2 INVITE
 Content-Length: 0
 
 `)
-    expect(Result.isFailure(msg.lazy.rack())).toBe(true)
+    expect(Result.isFailure(msg.getHeader("rack"))).toBe(true)
   })
 
   test("memoization — second call returns same Result reference", () => {
@@ -273,8 +273,8 @@ RAck: 1 1 INVITE
 Content-Length: 0
 
 `)
-    const a = msg.lazy.rack()
-    const b = msg.lazy.rack()
+    const a = msg.getHeader("rack")
+    const b = msg.getHeader("rack")
     expect(a).toBe(b)
   })
 })
@@ -286,7 +286,7 @@ ${baseHeaders}
 Content-Length: 0
 
 `)
-    expect(Result.getOrThrow(msg.lazy.referTo())).toBeUndefined()
+    expect(Result.getOrThrow(msg.getHeader("refer-to"))).toBeUndefined()
   })
 
   test("blind transfer (no Replaces)", () => {
@@ -296,7 +296,7 @@ Refer-To: <sip:carol@example.com>
 Content-Length: 0
 
 `)
-    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    const refer = Result.getOrThrow(msg.getHeader("refer-to"))!
     expect(refer.uri).toBe("sip:carol@example.com")
     expect(refer.replaces).toBeUndefined()
     expect(refer.embeddedHeaders).toEqual({})
@@ -312,7 +312,7 @@ Refer-To: <sip:carol@example.com?Replaces=abc-call-id%3Bto-tag%3Dt1%3Bfrom-tag%3
 Content-Length: 0
 
 `)
-    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    const refer = Result.getOrThrow(msg.getHeader("refer-to"))!
     expect(refer.parsedUri?.user).toBe("carol")
     expect(refer.replaces).toBeDefined()
     expect(refer.replaces!.callId).toBe("abc-call-id")
@@ -328,7 +328,7 @@ Refer-To: <sip:carol@example.com?Replaces=cid%3Bto-tag%3Dx%3Bfrom-tag%3Dy%3Bearl
 Content-Length: 0
 
 `)
-    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    const refer = Result.getOrThrow(msg.getHeader("refer-to"))!
     expect(refer.replaces!.earlyOnly).toBe(true)
   })
 
@@ -341,7 +341,7 @@ Refer-To: "Replaces?replaces=foo" <sip:carol@example.com>
 Content-Length: 0
 
 `)
-    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    const refer = Result.getOrThrow(msg.getHeader("refer-to"))!
     expect(refer.displayName).toBe("Replaces?replaces=foo")
     expect(refer.replaces).toBeUndefined()
     expect(refer.embeddedHeaders).toEqual({})
@@ -354,7 +354,7 @@ Refer-To: <sip:carol@example.com?Replaces=just-callid>
 Content-Length: 0
 
 `)
-    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    const refer = Result.getOrThrow(msg.getHeader("refer-to"))!
     // Refer-To itself parses; the embedded Replaces is malformed (no to-tag/from-tag),
     // so refer.replaces is undefined while embeddedHeaders.Replaces still holds the raw value.
     expect(refer.replaces).toBeUndefined()
@@ -368,7 +368,7 @@ Refer-To: <sip:carol@example.com>;method=INVITE
 Content-Length: 0
 
 `)
-    const refer = Result.getOrThrow(msg.lazy.referTo())!
+    const refer = Result.getOrThrow(msg.getHeader("refer-to"))!
     expect(refer.params["method"]).toBe("INVITE")
     expect(refer.replaces).toBeUndefined()
   })
@@ -380,8 +380,8 @@ Refer-To: <sip:carol@example.com>
 Content-Length: 0
 
 `)
-    const a = msg.lazy.referTo()
-    const b = msg.lazy.referTo()
+    const a = msg.getHeader("refer-to")
+    const b = msg.getHeader("refer-to")
     expect(a).toBe(b)
   })
 })
@@ -394,7 +394,7 @@ Remote-Party-ID: "Alice" <sip:alice@example.com>;party=calling;id-type=subscribe
 Content-Length: 0
 
 `)
-    const list = Result.getOrThrow(msg.lazy.remotePartyId())
+    const list = Result.getOrThrow(msg.getHeader("remote-party-id"))
     expect(list.length).toBe(1)
     expect(list[0]!.params["party"]).toBe("calling")
     expect(list[0]!.params["id-type"]).toBe("subscriber")
@@ -408,7 +408,7 @@ P-Preferred-Identity: <sip:alice@example.com>
 Content-Length: 0
 
 `)
-    const list = Result.getOrThrow(msg.lazy.pPreferredIdentity())
+    const list = Result.getOrThrow(msg.getHeader("p-preferred-identity"))
     expect(list.length).toBe(1)
     expect(list[0]!.uri).toBe("sip:alice@example.com")
   })

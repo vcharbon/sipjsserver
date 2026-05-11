@@ -7,11 +7,15 @@
 
 import { createRequire } from "node:module"
 import { Result } from "effect"
-import type { SipHeader, SipMessage, SipRequest, SipResponse } from "../types.js"
+import type { SipHeader, SipMessage } from "../types.js"
 import type { SipParserImpl } from "./interface.js"
 import { SipParseError } from "./errors.js"
-import { extractResponseFields, extractRequestFields } from "./extract-fields.js"
-import { LazyHeaders } from "./custom/lazy-headers.js"
+import {
+  extractResponseFields,
+  extractRequestFields,
+  finalizeRequest,
+  finalizeResponse,
+} from "./extract-fields.js"
 import { expandCompactForm } from "./custom/compact-forms.js"
 
 const require = createRequire(import.meta.url)
@@ -57,40 +61,33 @@ function adaptMessage(
 ): Result.Result<SipMessage, SipParseError> {
   const headers = adaptHeaders(msg.headers)
   const body = msg.body ? Buffer.from(msg.body, "utf-8") : new Uint8Array(0)
-  const lazy = new LazyHeaders(headers)
 
   if (msg.status_code !== undefined) {
     const fields = extractResponseFields(headers, msg.status_code)
     if (Result.isFailure(fields)) return Result.fail(fields.failure)
-    const response: SipResponse = {
-      type: "response",
+    return Result.succeed(finalizeResponse({
       version: "SIP/2.0",
       status: msg.status_code,
       reason: msg.reason_phrase ?? "",
       headers,
       body,
       raw,
-      parsed: fields.success,
-      lazy,
-    }
-    return Result.succeed(response)
+      eager: fields.success,
+    }))
   }
 
   const requestUri = msg.ruri?.toString() ?? ""
   const fields = extractRequestFields(headers, requestUri)
   if (Result.isFailure(fields)) return Result.fail(fields.failure)
-  const request: SipRequest = {
-    type: "request",
+  return Result.succeed(finalizeRequest({
     method: (msg.method ?? "").toUpperCase(),
     uri: requestUri,
     version: "SIP/2.0",
     headers,
     body,
     raw,
-    parsed: fields.success,
-    lazy,
-  }
-  return Result.succeed(request)
+    eager: fields.success,
+  }))
 }
 
 // ---------------------------------------------------------------------------

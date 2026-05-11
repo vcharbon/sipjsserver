@@ -67,7 +67,7 @@ function extractSipHeaders(req: SipRequest): Record<string, string> {
 
 /** Refer-To contains a Replaces= header parameter in its embedded URI headers. */
 function referToHasReplaces(ctx: RuleContext<RequestMatch>): boolean {
-  const r = ctx.event.message.lazy.referTo()
+  const r = ctx.event.message.getHeader("refer-to")
   return Result.isSuccess(r) && r.success?.replaces !== undefined
 }
 
@@ -254,7 +254,7 @@ export const transferInterceptReferRule = defineRule({
             phase: "refer-authorizing" as const,
             referrerLegId: legId,
             referToUri: referTo,
-            referCSeq: req.parsed.cseq.seq,
+            referCSeq: req.getHeader("cseq").seq,
             startedAtMs: ctx.nowMs,
           },
         },

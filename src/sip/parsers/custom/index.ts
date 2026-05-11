@@ -8,14 +8,18 @@
  */
 
 import { Result } from "effect"
-import type { SipMessage, SipRequest, SipResponse, SipHeader } from "../../types.js"
+import type { SipMessage, SipHeader } from "../../types.js"
 import type { SipParserImpl } from "../interface.js"
 import { SipParseError } from "../errors.js"
-import { extractResponseFields, extractRequestFields } from "../extract-fields.js"
+import {
+  extractResponseFields,
+  extractRequestFields,
+  finalizeRequest,
+  finalizeResponse,
+} from "../extract-fields.js"
 import { Scanner } from "./scanner.js"
 import { parseStartLine } from "./start-line.js"
 import { parseHeaders } from "./headers.js"
-import { LazyHeaders } from "./lazy-headers.js"
 
 /** Extract the method from a CSeq header value like "1 INVITE". No regex. */
 function extractCSeqMethod(value: string): string | undefined {
@@ -79,33 +83,27 @@ export const customParser: SipParserImpl = {
     if (startLine.type === "request") {
       const fields = extractRequestFields(headers, startLine.uri)
       if (Result.isFailure(fields)) return Result.fail(fields.failure)
-      const request: SipRequest = {
-        type: "request",
+      return Result.succeed(finalizeRequest({
         method: startLine.method,
         uri: startLine.uri,
         version: startLine.version,
         headers,
         body,
         raw,
-        parsed: fields.success,
-        lazy: new LazyHeaders(headers),
-      }
-      return Result.succeed(request)
+        eager: fields.success,
+      }))
     }
 
     const fields = extractResponseFields(headers, startLine.status)
     if (Result.isFailure(fields)) return Result.fail(fields.failure)
-    const response: SipResponse = {
-      type: "response",
+    return Result.succeed(finalizeResponse({
       version: startLine.version,
       status: startLine.status,
       reason: startLine.reason,
       headers,
       body,
       raw,
-      parsed: fields.success,
-      lazy: new LazyHeaders(headers),
-    }
-    return Result.succeed(response)
+      eager: fields.success,
+    }))
   },
 }

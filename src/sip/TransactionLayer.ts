@@ -26,7 +26,6 @@ import {
 } from "./MessageHelpers.js"
 import { _generateAckForNon2xx, generateResponse } from "./generators.js"
 import { OverloadController } from "../b2bua/OverloadController.js"
-import { parseVia, parseNameAddr } from "./parsers/custom/structured-headers.js"
 import { AppConfig } from "../config/AppConfig.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
 
@@ -117,56 +116,33 @@ interface Transaction {
 // Outbound messages built by the stack generators do NOT — they need header string
 // parsing as a fallback.
 
-function getHeaderValue(msg: SipMessage, name: string): string | undefined {
-  const lower = name.toLowerCase()
-  return msg.headers.find((h) => h.name.toLowerCase() === lower)?.value
-}
-
-/** Extract Via branch from a message, using parsed fields or header fallback. */
+/** Extract Via branch from a message. */
 function extractBranch(msg: SipMessage): string | undefined {
-  if (msg.parsed?.via?.branch) return msg.parsed.via.branch
-  const via = getHeaderValue(msg, "via")
-  if (!via) return undefined
-  return parseVia(via).branch
+  return msg.getHeader("via")[0].branch
 }
 
 /** Extract Via custom params (cr/lg) from a message. */
 function extractViaCustomParams(msg: SipMessage): { cr: string | undefined; lg: string | undefined } {
-  const params = msg.parsed?.via?.params
-  if (params) {
-    return {
-      cr: typeof params.cr === "string" ? params.cr : undefined,
-      lg: typeof params.lg === "string" ? params.lg : undefined,
-    }
-  }
-  const via = getHeaderValue(msg, "via")
-  if (!via) return { cr: undefined, lg: undefined }
-  const parsed = parseVia(via)
+  const params = msg.getHeader("via")[0].params
   return {
-    cr: typeof parsed.params.cr === "string" ? parsed.params.cr : undefined,
-    lg: typeof parsed.params.lg === "string" ? parsed.params.lg : undefined,
+    cr: typeof params.cr === "string" ? params.cr : undefined,
+    lg: typeof params.lg === "string" ? params.lg : undefined,
   }
 }
 
 /** Extract Call-ID from a message. */
 function extractCallId(msg: SipMessage): string {
-  return msg.parsed?.callId ?? getHeaderValue(msg, "call-id") ?? ""
+  return msg.getHeader("call-id")
 }
 
 /** Extract From tag from a message. */
 function extractFromTag(msg: SipMessage): string {
-  if (msg.parsed?.from?.tag) return msg.parsed.from.tag
-  const from = getHeaderValue(msg, "from")
-  if (!from) return ""
-  return parseNameAddr(from).tag ?? ""
+  return msg.getHeader("from").tag ?? ""
 }
 
 /** Extract To tag from a message. */
 function extractToTag(msg: SipMessage): string | undefined {
-  if (msg.parsed?.to?.tag) return msg.parsed.to.tag
-  const to = getHeaderValue(msg, "to")
-  if (!to) return undefined
-  return parseNameAddr(to).tag
+  return msg.getHeader("to").tag
 }
 
 // ---------------------------------------------------------------------------
@@ -434,7 +410,7 @@ export class TransactionLayer extends ServiceMap.Service<
 
       const handleInboundRequest = Effect.fnUntraced(
         function* (req: SipRequest, rinfo: RemoteInfo) {
-          const branch = req.parsed?.via?.branch ?? ""
+          const branch = req.getHeader("via")[0].branch ?? ""
 
           if (!branch) {
             // No branch — pass through (pre-RFC 3261 UA)
@@ -473,7 +449,7 @@ export class TransactionLayer extends ServiceMap.Service<
             //
             // Legitimate end-to-end 2xx ACKs always carry a To-tag (set by
             // the 200 OK responder), so they continue to pass through.
-            const ackToTag = req.parsed?.to?.tag
+            const ackToTag = req.getHeader("to").tag
             if (!ackToTag) {
               yield* Effect.logDebug(`Orphan ACK with no To-tag absorbed branch=${branch}`)
               return
@@ -485,8 +461,8 @@ export class TransactionLayer extends ServiceMap.Service<
           if (req.method === "CANCEL") {
             // Find the INVITE server transaction by matching callId + fromTag
             // (CANCEL shares the same branch as the original INVITE per RFC 3261)
-            const callId = req.parsed?.callId ?? ""
-            const fromTag = req.parsed?.from?.tag ?? ""
+            const callId = req.getHeader("call-id")
+            const fromTag = req.getHeader("from").tag ?? ""
 
             // Find the matching INVITE transaction first — we need its UAS
             // To-tag so the 200 OK (CANCEL) and 487 (INVITE) echo the same
@@ -567,7 +543,7 @@ export class TransactionLayer extends ServiceMap.Service<
           // carry a To-tag and are part of an existing call, so they bypass
           // the gate. Non-INVITE requests are also bypassed (they ride on
           // existing calls or are CANCEL/etc, handled above).
-          if (req.method === "INVITE" && !req.parsed?.to?.tag) {
+          if (req.method === "INVITE" && !req.getHeader("to").tag) {
             const isEmergency = isEmergencyRequest(req)
             const decision = overload.shouldAdmit({ isEmergency })
             if (!decision.admit) {
@@ -583,8 +559,8 @@ export class TransactionLayer extends ServiceMap.Service<
           }
 
           // New server transaction
-          const callId = req.parsed?.callId ?? ""
-          const fromTag = req.parsed?.from?.tag ?? ""
+          const callId = req.getHeader("call-id")
+          const fromTag = req.getHeader("from").tag ?? ""
           const kind: TxnKind = req.method === "INVITE" ? "invite" : "non-invite"
 
           const txn: Transaction = {
@@ -627,14 +603,14 @@ export class TransactionLayer extends ServiceMap.Service<
 
       const handleInboundResponse = Effect.fnUntraced(
         function* (resp: SipResponse, rinfo: RemoteInfo) {
-          const branch = resp.parsed?.via?.branch ?? ""
+          const branch = resp.getHeader("via")[0].branch ?? ""
 
           // RFC 3261 §17 / §8.1.3.4: 100 Trying is a hop-by-hop progress
           // indicator only — it never carries a To-tag (and per §8.1.3.4 SHOULD
           // not be forwarded by an upstream UAC). Absorb it here regardless of
           // CSeq method, after updating the matching client transaction's
           // retransmit/state machine. The application never sees a 100, which
-          // is what lets `SipResponseTagged.parsed.to.tag` be `string` (not
+          // is what lets `SipResponseTagged.getHeader("to").tag` be `string` (not
           // `string | undefined`) for everything that does reach the rule chain.
           if (resp.status === 100) {
             if (branch) {
@@ -652,7 +628,7 @@ export class TransactionLayer extends ServiceMap.Service<
             return
           }
 
-          const respCSeqMethod = resp.parsed?.cseq?.method?.toUpperCase()
+          const respCSeqMethod = resp.getHeader("cseq").method.toUpperCase()
 
           // The parser rejects non-100 responses missing a To-tag (see
           // extractResponseFields), and we just absorbed every 100 above.

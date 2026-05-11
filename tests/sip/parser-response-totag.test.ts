@@ -7,7 +7,7 @@
  * layer before reaching the rule chain).
  *
  * These tests pin both behaviors so the conditional types that depend on
- * `SipResponseTagged.parsed.to.tag: string` stay sound.
+ * `SipResponseTagged.getHeader("to").tag: string` stay sound.
  */
 
 import { describe, test, expect } from "vitest"
@@ -77,7 +77,7 @@ describe("Parser — non-100 responses must carry To-tag", () => {
       expect(Result.isSuccess(r)).toBe(true)
       if (Result.isSuccess(r)) {
         if (r.success.type !== "response") throw new Error("expected response")
-        expect(r.success.parsed.to.tag).toBe("to-tag-2")
+        expect(r.success.getHeader("to").tag).toBe("to-tag-2")
       }
     })
   }
@@ -90,7 +90,7 @@ describe("Parser — 100 Trying may omit To-tag", () => {
     if (Result.isSuccess(r)) {
       if (r.success.type !== "response") throw new Error("expected response")
       expect(r.success.status).toBe(100)
-      expect(r.success.parsed.to.tag).toBeUndefined()
+      expect(r.success.getHeader("to").tag).toBeUndefined()
     }
   })
 

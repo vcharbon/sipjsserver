@@ -36,7 +36,7 @@ import { confirmBridgedCall } from "../framework/actions/composites.js"
  *   ack-leg        → ACK the 2xx end-to-end.
  *   destroy-leg    → BYE (state is now "confirmed", so destroy-leg BYEs).
  *
- * Narrowed: response → SipResponseTagged → `resp.parsed.to.tag` is `string`.
+ * Narrowed: response → SipResponseTagged → `resp.getHeader("to").tag` is `string`.
  */
 export const cancel200CrossingRule = defineRule({
   id: "cancel-200-crossing",
@@ -58,7 +58,7 @@ export const cancel200CrossingRule = defineRule({
   handle: (ctx) => {
     const resp = ctx.event.message
     const bLeg = ctx.sourceLeg
-    const bTag = resp.parsed.to.tag
+    const bTag = resp.getHeader("to").tag
     const existingMapping = findByBTag(ctx.call, bLeg.legId, bTag)
     const aFacingTag = existingMapping?.aTag ?? newTag()
 
@@ -103,7 +103,7 @@ export const retransmit200Rule = defineRule({
     direction: "from-b",
     filter: (ctx) => {
       if (ctx.sourceDialog === undefined) return false
-      return findPendingRequest(ctx.sourceDialog, ctx.event.message.parsed.cseq.seq) === undefined
+      return findPendingRequest(ctx.sourceDialog, ctx.event.message.getHeader("cseq").seq) === undefined
     },
   },
 
@@ -177,7 +177,7 @@ export const relayReinviteResponseRule = defineRule({
     cseqMethod: "INVITE",
     filter: (ctx) => {
       if (ctx.sourceDialog === undefined) return false
-      return findPendingRequest(ctx.sourceDialog, ctx.event.message.parsed.cseq.seq) !== undefined
+      return findPendingRequest(ctx.sourceDialog, ctx.event.message.getHeader("cseq").seq) !== undefined
     },
   },
 

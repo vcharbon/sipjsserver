@@ -52,11 +52,13 @@
   <recv request="ACK" rtd="true" crlf="true"/>
 
   <!-- Tolerant of in-dialog OPTIONS sent by the B2BUA's keepalive rule
-       (TimerRules.keepaliveRule, default 900s interval). Short calls
-       complete well before the keepalive timer fires so the optional
-       recv is simply skipped; long endurance calls (20-min holds) see
-       at least one OPTIONS and answer with 200 OK before looping back
-       to wait for either another OPTIONS or the eventual BYE. -->
+       (TimerRules.keepaliveRule). The interval is `keepaliveIntervalSec`
+       — env-driven default is 300s (src/config/AppConfig.ts); embedded
+       layer default is 900s. Short calls complete well before the
+       keepalive timer fires so the optional recv is simply skipped;
+       long endurance calls (20-min holds) see ~4 OPTIONS at 300s
+       spacing and answer each with 200 OK before looping back to wait
+       for either another OPTIONS or the eventual BYE. -->
   <label id="wait_terminator"/>
   <recv request="OPTIONS" optional="true" crlf="true" next="answer_options"/>
   <recv request="BYE" crlf="true"/>

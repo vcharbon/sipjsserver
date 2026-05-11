@@ -102,8 +102,8 @@ describe("sip-front-proxy/transit-only — in-dialog re-INVITE Route stripping",
       expect(parsed.headers.find((h) => h.name.toLowerCase() === "route")).toBeUndefined()
 
       // Proxy's Via still on top.
-      expect(parsed.parsed.vias[0]!.host).toBe(PROXY.host)
-      expect(parsed.parsed.vias[1]!.branch).toBe("z9hG4bK-alice-reinv")
+      expect(parsed.getHeader("via")[0]!.host).toBe(PROXY.host)
+      expect(parsed.getHeader("via")[1]!.branch).toBe("z9hG4bK-alice-reinv")
 
       // re-INVITE is still dialog-creating per §16.6.5 list, so the proxy
       // inserts another Record-Route. Verify the cookie carries the

@@ -54,9 +54,9 @@ export class OfferAnswerTracker {
     const sdp = classifySdp(body)
     if (sdp.kind === "unclassified") return []
 
-    const callId = msg.parsed.callId
-    const cseqNum = msg.parsed.cseq.seq
-    const cseqMethod = msg.parsed.cseq.method.toUpperCase()
+    const callId = msg.getHeader("call-id")
+    const cseqNum = msg.getHeader("cseq").seq
+    const cseqMethod = msg.getHeader("cseq").method.toUpperCase()
     const is2xxInvite =
       msg.type === "response" &&
       msg.status >= 200 &&

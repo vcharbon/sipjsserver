@@ -75,19 +75,19 @@ function formatRelativeTimestamp(ms: number): string {
 // ---------------------------------------------------------------------------
 
 function getCallId(msg: SipMessage): string {
-  return msg.parsed.callId
+  return msg.getHeader("call-id")
 }
 
 function getFromTag(msg: SipMessage): string {
-  return msg.parsed.from.tag ?? ""
+  return msg.getHeader("from").tag ?? ""
 }
 
 function getToTag(msg: SipMessage): string {
-  return msg.parsed.to.tag ?? ""
+  return msg.getHeader("to").tag ?? ""
 }
 
 function getCSeqMethod(msg: SipMessage): string {
-  return msg.parsed.cseq.method
+  return msg.getHeader("cseq").method
 }
 
 function hasSdp(msg: SipMessage): boolean {

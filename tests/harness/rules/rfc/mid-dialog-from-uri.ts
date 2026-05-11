@@ -48,24 +48,24 @@ export const midDialogFromUriRule: PerCallRule = {
             advanceDialogModel(m, ev)
             continue
           }
-          if (m.dialogLocalUri && msg.parsed.from.uri !== m.dialogLocalUri) {
+          if (m.dialogLocalUri && msg.getHeader("from").uri !== m.dialogLocalUri) {
             violations.push({
               message:
                 `[rfc.midDialogFromUri] agent=${agent}: in-dialog ${msg.method} ` +
-                `From URI "${msg.parsed.from.uri}" differs from dialog local URI ` +
+                `From URI "${msg.getHeader("from").uri}" differs from dialog local URI ` +
                 `"${m.dialogLocalUri}" — RFC 3261 §12.2.1.1`,
               entryIndex: ev.idx,
-              details: { agent, method: msg.method, fromUri: msg.parsed.from.uri, dialogLocalUri: m.dialogLocalUri },
+              details: { agent, method: msg.method, fromUri: msg.getHeader("from").uri, dialogLocalUri: m.dialogLocalUri },
             })
           }
-          if (m.dialogRemoteUri && msg.parsed.to.uri !== m.dialogRemoteUri) {
+          if (m.dialogRemoteUri && msg.getHeader("to").uri !== m.dialogRemoteUri) {
             violations.push({
               message:
                 `[rfc.midDialogFromUri] agent=${agent}: in-dialog ${msg.method} ` +
-                `To URI "${msg.parsed.to.uri}" differs from dialog remote URI ` +
+                `To URI "${msg.getHeader("to").uri}" differs from dialog remote URI ` +
                 `"${m.dialogRemoteUri}" — RFC 3261 §12.2.1.1`,
               entryIndex: ev.idx,
-              details: { agent, method: msg.method, toUri: msg.parsed.to.uri, dialogRemoteUri: m.dialogRemoteUri },
+              details: { agent, method: msg.method, toUri: msg.getHeader("to").uri, dialogRemoteUri: m.dialogRemoteUri },
             })
           }
         }

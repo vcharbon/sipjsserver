@@ -66,7 +66,7 @@ export function statusClassFor(status: number): StatusClass {
 
 /** Extract CSeq method from a response's CSeq header. */
 export function cseqMethodOf(resp: SipResponse): string {
-  const method = resp.parsed.cseq.method
+  const method = resp.getHeader("cseq").method
   return method.length > 0 ? method.toUpperCase() : "INVITE"
 }
 

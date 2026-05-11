@@ -106,12 +106,12 @@ describe("sip-front-proxy/transit-only — INVITE / 200 / ACK / BYE", () => {
       expect(inviteParsed.method).toBe("INVITE")
 
       // Top Via must be the proxy's, second Via Alice's (RFC 3261 §16.6.4).
-      expect(inviteParsed.parsed.vias.length).toBe(2)
-      expect(inviteParsed.parsed.vias[0]!.host).toBe(PROXY.host)
-      expect(inviteParsed.parsed.vias[0]!.port).toBe(PROXY.port)
-      expect(inviteParsed.parsed.vias[0]!.branch).toMatch(/^z9hG4bK/)
-      expect(inviteParsed.parsed.vias[1]!.host).toBe(ALICE.host)
-      expect(inviteParsed.parsed.vias[1]!.branch).toBe("z9hG4bK-alice-1")
+      expect(inviteParsed.getHeader("via").length).toBe(2)
+      expect(inviteParsed.getHeader("via")[0]!.host).toBe(PROXY.host)
+      expect(inviteParsed.getHeader("via")[0]!.port).toBe(PROXY.port)
+      expect(inviteParsed.getHeader("via")[0]!.branch).toMatch(/^z9hG4bK/)
+      expect(inviteParsed.getHeader("via")[1]!.host).toBe(ALICE.host)
+      expect(inviteParsed.getHeader("via")[1]!.branch).toBe("z9hG4bK-alice-1")
 
       // Record-Route inserted (RFC 3261 §16.6.5) — must point at proxy and
       // carry both `;lr` and the ForwardAll stickiness `target=` cookie.
@@ -126,7 +126,7 @@ describe("sip-front-proxy/transit-only — INVITE / 200 / ACK / BYE", () => {
         "69"
       )
 
-      const proxyVia = inviteParsed.parsed.vias[0]!
+      const proxyVia = inviteParsed.getHeader("via")[0]!
       const proxyBranch = proxyVia.branch!
 
       // ── 2. Bob → Proxy: 200 OK ──────────────────────────────────────
@@ -162,9 +162,9 @@ describe("sip-front-proxy/transit-only — INVITE / 200 / ACK / BYE", () => {
       expect(okParsed.status).toBe(200)
 
       // Proxy popped its own top Via — Alice sees only her own.
-      expect(okParsed.parsed.vias.length).toBe(1)
-      expect(okParsed.parsed.vias[0]!.host).toBe(ALICE.host)
-      expect(okParsed.parsed.vias[0]!.branch).toBe("z9hG4bK-alice-1")
+      expect(okParsed.getHeader("via").length).toBe(1)
+      expect(okParsed.getHeader("via")[0]!.host).toBe(ALICE.host)
+      expect(okParsed.getHeader("via")[0]!.branch).toBe("z9hG4bK-alice-1")
 
       // ── 3. Alice → Proxy: ACK (with Route per Record-Route) ─────────
       // Per RFC 3261 §12.1.2 / §12.2.1.1 the route set is the reverse of
@@ -227,7 +227,7 @@ describe("sip-front-proxy/transit-only — INVITE / 200 / ACK / BYE", () => {
       expect(
         byeParsed.headers.find((h) => h.name.toLowerCase() === "route")
       ).toBeUndefined()
-      expect(byeParsed.parsed.vias[0]!.host).toBe(PROXY.host)
+      expect(byeParsed.getHeader("via")[0]!.host).toBe(PROXY.host)
 
       // ── 5. Bob → Proxy: 200 OK to BYE → Alice ──────────────────────
       const byeOkBuf = Buffer.from(
@@ -254,8 +254,8 @@ describe("sip-front-proxy/transit-only — INVITE / 200 / ACK / BYE", () => {
       const byeOkParsed = parse(byeOkAtAlice!.raw)
       if (byeOkParsed.type !== "response") throw new Error("byeOk should be response")
       expect(byeOkParsed.status).toBe(200)
-      expect(byeOkParsed.parsed.vias.length).toBe(1)
-      expect(byeOkParsed.parsed.vias[0]!.host).toBe(ALICE.host)
+      expect(byeOkParsed.getHeader("via").length).toBe(1)
+      expect(byeOkParsed.getHeader("via")[0]!.host).toBe(ALICE.host)
 
       // Sanity: branch the proxy minted is in the LRU and stable.
       expect(proxyBranch.startsWith("z9hG4bK")).toBe(true)

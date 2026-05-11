@@ -544,7 +544,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
 
     const startMs = yield* Clock.currentTimeMillis
     const method = req.method.toUpperCase()
-    const callId = req.parsed.callId
+    const callId = req.getHeader("call-id")
     yield* metrics.recordMessage({
       direction: "inbound",
       methodOrStatus: method,
@@ -684,7 +684,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
             .join(",")
           yield* Effect.logWarning(
             `[ProxyCore] worker-outbound classification miss: ` +
-              `method=${method} callId=${req.parsed.callId} ` +
+              `method=${method} callId=${req.getHeader("call-id")} ` +
               `src=${src.address}:${src.port} registrySize=${snapshot.length} ` +
               `knownWorkers=[${knownAddresses}] ` +
               `cookieParams={${cookieParamsStr}}. ` +
@@ -714,7 +714,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         // hop regardless of what the upstream UAC chose for the top-Via
         // branch on the CANCEL — and crucially without re-sharding to a
         // different worker under `LoadBalancer`.
-        const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+        const key = callIdCseqKey(req.getHeader("call-id"), req.getHeader("cseq").seq)
         const found = yield* cancelLru.lookup(key)
         if (Option.isSome(found)) {
           target = found.value.target
@@ -860,7 +860,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       // the same top-Via branch as the INVITE we forwarded — required for
       // the downstream's transaction matching (§9.1, §17).
       if (method === "INVITE") {
-        const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+        const key = callIdCseqKey(req.getHeader("call-id"), req.getHeader("cseq").seq)
         yield* cancelLru.remember(key, { target, branch: ourBranch })
         // Update active-dialog estimate from LRU size (best-effort, see
         // Metrics.ts header comment).
@@ -958,7 +958,7 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
     // sent-by host:port matches our advertised address on EITHER fabric).
     // Forward to the *next* Via's address on the egress endpoint indicated
     // by the popped Via's `;net=` tag (or fall back to the ingress fabric).
-    const vias = msg.parsed.vias
+    const vias = msg.getHeader("via")
     if (vias.length < 2) {
       counters.responseDroppedNoVia++
       yield* Effect.logWarning(
@@ -1128,7 +1128,7 @@ const handleRequestRegistrarMode = (
     let ruriOverride: string | undefined
 
     if (method === "CANCEL") {
-      const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+      const key = callIdCseqKey(req.getHeader("call-id"), req.getHeader("cseq").seq)
       const found = yield* cancelLru.lookup(key)
       if (Option.isSome(found)) {
         target = found.value.target
@@ -1228,7 +1228,7 @@ const handleRequestRegistrarMode = (
     nextHeaders = prependHeader(nextHeaders, "Via", viaValue)
 
     if (method === "INVITE") {
-      const key = callIdCseqKey(req.parsed.callId, req.parsed.cseq.seq)
+      const key = callIdCseqKey(req.getHeader("call-id"), req.getHeader("cseq").seq)
       yield* cancelLru.remember(key, { target, branch: ourBranch })
     }
 

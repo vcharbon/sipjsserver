@@ -97,9 +97,9 @@ topologyTest(
 
       if (topology.kind === "withProxy") {
         // RFC 3261 §16.6.4: proxy pushed its Via on top.
-        expect(inviteParsed.parsed.vias.length).toBe(2)
-        expect(inviteParsed.parsed.vias[0]!.host).toBe(PROXY.host)
-        expect(inviteParsed.parsed.vias[1]!.host).toBe(ALICE.host)
+        expect(inviteParsed.getHeader("via").length).toBe(2)
+        expect(inviteParsed.getHeader("via")[0]!.host).toBe(PROXY.host)
+        expect(inviteParsed.getHeader("via")[1]!.host).toBe(ALICE.host)
         // RFC 3261 §16.6.5: Record-Route inserted, points at proxy,
         // carries `;lr` and the LoadBalancer stickiness cookie.
         const rr = inviteParsed.headers.find(
@@ -112,8 +112,8 @@ topologyTest(
         expect(rr!.value).toContain(";w_bak=") // load-balancer v2 cookie backup (D8)
       } else {
         // Direct: only Alice's Via.
-        expect(inviteParsed.parsed.vias.length).toBe(1)
-        expect(inviteParsed.parsed.vias[0]!.host).toBe(ALICE.host)
+        expect(inviteParsed.getHeader("via").length).toBe(1)
+        expect(inviteParsed.getHeader("via")[0]!.host).toBe(ALICE.host)
         expect(
           inviteParsed.headers.find((h) => h.name.toLowerCase() === "record-route")
         ).toBeUndefined()
@@ -153,8 +153,8 @@ topologyTest(
       if (okParsed.type !== "response") throw new Error("expected response")
       expect(okParsed.status).toBe(200)
       // Alice always sees only her own Via after pop.
-      expect(okParsed.parsed.vias.length).toBe(1)
-      expect(okParsed.parsed.vias[0]!.host).toBe(ALICE.host)
+      expect(okParsed.getHeader("via").length).toBe(1)
+      expect(okParsed.getHeader("via")[0]!.host).toBe(ALICE.host)
 
       // ── 3. Alice → ACK ──────────────────────────────────────────
       // Build the ACK; in withProxy include Route header per

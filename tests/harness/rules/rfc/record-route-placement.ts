@@ -36,9 +36,9 @@ export const recordRoutePlacementRule: PerCallRule = {
 
       for (const ev of events) {
         if (ev.kind === "sent" && ev.msg.type === "request") {
-          const branch = ev.msg.parsed.via.branch
+          const branch = ev.msg.getHeader("via")[0].branch
           if (branch) {
-            const hasToTag = ev.msg.parsed.to.tag !== undefined
+            const hasToTag = ev.msg.getHeader("to").tag !== undefined
             sentByBranch.set(branch, {
               method: ev.msg.method,
               isInDialog: hasToTag,
@@ -66,7 +66,7 @@ export const recordRoutePlacementRule: PerCallRule = {
         }
 
         // (b) Mid-dialog response with Record-Route.
-        const branch = ev.msg.parsed.via.branch
+        const branch = ev.msg.getHeader("via")[0].branch
         const sent = branch ? sentByBranch.get(branch) : undefined
         if (sent && sent.isInDialog) {
           violations.push({

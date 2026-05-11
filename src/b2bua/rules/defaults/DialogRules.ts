@@ -50,7 +50,7 @@ export const relayProvisionalRule = defineRule({
  * cancel other pending b-legs, schedule keepalive/duration/limiter-refresh
  * timers.
  *
- * Narrowed: response → SipResponseTagged → `resp.parsed.to.tag` is `string`
+ * Narrowed: response → SipResponseTagged → `resp.getHeader("to").tag` is `string`
  * (not `string | undefined`) because the parser rejects non-100 responses
  * missing a To-tag.
  */
@@ -78,7 +78,7 @@ export const confirmDialogRule = defineRule({
   handle: (ctx) => {
     const resp = ctx.event.message
     const bLeg = ctx.sourceLeg
-    const bTag = resp.parsed.to.tag
+    const bTag = resp.getHeader("to").tag
 
     // Resolve or create the a-facing tag for this (bLeg, bTag). Policy
     // modules such as relayFirst18xTo180 pre-seed the mapping via the
@@ -191,7 +191,7 @@ export const absorbOptions200Rule = defineRule({
     cseqMethod: "OPTIONS",
     statusClass: "2xx",
     filter: (ctx) => {
-      const cseqNum = ctx.event.message.parsed.cseq.seq
+      const cseqNum = ctx.event.message.getHeader("cseq").seq
       return ctx.sourceDialog !== undefined &&
         findPendingRequest(ctx.sourceDialog, cseqNum) === undefined
     },

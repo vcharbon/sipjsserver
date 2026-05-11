@@ -1,26 +1,36 @@
 /**
  * Core SIP message types for the B2BUA.
- * Headers are stored as an ordered array to preserve multiplicity and order
- * (multiple Via headers, etc.).
+ *
+ * Headers are stored as an ordered array to preserve multiplicity and
+ * order (multiple Via headers, etc.). The user-facing access pattern is
+ * `msg.getHeader<K>(name)` — see `SipHeaderTypes` for the typed registry
+ * and `header-registry.ts` for the runtime side.
  *
  * Mandatory header fields (From, To, Call-ID, CSeq, top Via, plus
- * Request-URI on requests) are eagerly parsed and guaranteed present on
- * every well-formed message — the parser rejects messages that lack them.
- *
- * Optional structured headers (P-Asserted-Identity, Diversion, History-Info,
- * Geolocation, …) are exposed via the lazy `lazy` accessor and parsed on
- * first access only.
+ * Request-URI on requests) are eagerly parsed by the parser pipeline;
+ * the parser rejects messages that lack them. Optional structured
+ * headers (P-Asserted-Identity, Diversion, History-Info, Geolocation,
+ * …) are parsed lazily on first `getHeader` access and memoized.
  */
 
-import type { LazyHeaders } from "./parsers/custom/lazy-headers.js"
+import type { Result } from "effect"
+import type {
+  ParsedNameAddr,
+  ParsedRack,
+  ParsedReferTo,
+} from "./parsers/custom/structured-headers.js"
+import type { SipParseError } from "./parsers/errors.js"
 
 export interface SipHeader {
   readonly name: string   // original case
   readonly value: string  // trimmed value
 }
 
+/** Non-empty readonly array — `[0]` is `T`, not `T | undefined`. */
+export type NonEmptyReadonlyArray<T> = readonly [T, ...T[]]
+
 // ---------------------------------------------------------------------------
-// Eagerly-parsed structured fields
+// Parsed structured fields — exposed as registry value types
 // ---------------------------------------------------------------------------
 
 export interface ParsedNameAddrField {
@@ -57,41 +67,78 @@ export interface ParsedRequestUriField {
   readonly params: Record<string, string>
 }
 
-/** Common mandatory parsed fields shared by requests and responses. */
-export interface ParsedFieldsCommon {
-  /** From — RFC 3261 §8.1.1.3 mandates presence; tag is independently optional on initial requests. */
-  readonly from: ParsedNameAddrField
-  /** To — mandatory; tag is absent on initial requests, present on responses and in-dialog requests. */
-  readonly to: ParsedNameAddrField
-  /** Call-ID — mandatory. */
-  readonly callId: string
-  /** CSeq — mandatory. */
-  readonly cseq: ParsedCSeqField
-  /** Top Via — mandatory. `branch` is independently optional (legacy non-3261 hops). */
-  readonly via: ParsedViaField
-  /** All Via headers, in received order. Always at least one entry. */
-  readonly vias: ReadonlyArray<ParsedViaField>
-  /** Contact — optional (mandatory on INVITE / 200 OK / REGISTER, absent elsewhere). */
-  readonly contact: ParsedContactField | undefined
+// ---------------------------------------------------------------------------
+// Header-access registry — typed map of canonical names → parsed value type
+// ---------------------------------------------------------------------------
+
+/**
+ * Typed registry consulted by `SipMessage.getHeader`. Each key is the
+ * canonical lowercase long-form header name. The value type encodes both
+ * the parsed shape and any error/multiplicity semantics:
+ *   - guaranteed single: `T`
+ *   - guaranteed non-empty multi: `NonEmptyReadonlyArray<T>`
+ *   - optional single: `T | undefined`
+ *   - lazy / can-fail: `Result.Result<T, SipParseError>`
+ *
+ * Third parties extend the registry via TypeScript declaration merging
+ * (`declare module "..."`) and the runtime via
+ * `SipHeaderRegistry.register(...)`. See header-registry.ts.
+ */
+export interface SipHeaderTypes {
+  // Mandatory single-valued — parser rejects messages that omit these.
+  "from": ParsedNameAddrField
+  "to": ParsedNameAddrField
+  "call-id": string
+  "cseq": ParsedCSeqField
+
+  // Mandatory multi-valued — `[0]` is the top Via (response-routing hop).
+  "via": NonEmptyReadonlyArray<ParsedViaField>
+
+  // Optional single-valued.
+  "contact": ParsedContactField | undefined
+
+  // Lazy single-valued — parse can fail without invalidating the message.
+  "geolocation-routing": Result.Result<boolean | undefined, SipParseError>
+  "rack": Result.Result<ParsedRack | undefined, SipParseError>
+  "refer-to": Result.Result<ParsedReferTo | undefined, SipParseError>
+
+  // Lazy multi-valued — parse can fail without invalidating the message.
+  "p-asserted-identity": Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>
+  "p-preferred-identity": Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>
+  "diversion": Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>
+  "history-info": Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>
+  "remote-party-id": Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>
+  "geolocation": Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>
+  "geolocation-error": Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>
 }
 
-export interface RequestParsedFields extends ParsedFieldsCommon {
-  /** Request-URI — required on every request. */
-  readonly requestUri: ParsedRequestUriField
-}
-
-export type ResponseParsedFields = ParsedFieldsCommon
+// ---------------------------------------------------------------------------
+// Message shape
+// ---------------------------------------------------------------------------
 
 export interface SipRequest {
   readonly type: "request"
   readonly method: string        // INVITE, ACK, BYE, CANCEL, OPTIONS…
-  readonly uri: string           // Request-URI (raw string)
+  readonly uri: string           // Request-URI (raw string, on the wire)
+  /** Request-URI parsed into its constituent parts. */
+  readonly requestUri: ParsedRequestUriField
   readonly version: string       // SIP/2.0
   readonly headers: ReadonlyArray<SipHeader>
   readonly body: Uint8Array      // raw bytes — opaque to B2BUA
   readonly raw: Buffer           // original packet bytes
-  readonly parsed: RequestParsedFields
-  readonly lazy: LazyHeaders
+  /**
+   * Typed header access. Registered keys return their `SipHeaderTypes[K]`
+   * value; unknown names fall back to a raw `ReadonlyArray<string>`.
+   *
+   * NOTE on union access: when the receiver is a *union* of message types
+   * (e.g. `B2BUAMessage = SipRequest | SipResponseTagged`), TypeScript's
+   * overload resolution doesn't pick the best per-branch signature — it
+   * picks the *last* compatible signature, which is the raw-string
+   * fallback. Narrow the receiver with `msg.type === "request"` (or
+   * `"response"`) before calling `getHeader("from")` etc. on a union.
+   */
+  getHeader<K extends keyof SipHeaderTypes>(name: K): SipHeaderTypes[K]
+  getHeader(name: string): ReadonlyArray<string>
 }
 
 export interface SipResponse {
@@ -102,8 +149,9 @@ export interface SipResponse {
   readonly headers: ReadonlyArray<SipHeader>
   readonly body: Uint8Array      // raw bytes — opaque to B2BUA
   readonly raw: Buffer           // original packet bytes
-  readonly parsed: ResponseParsedFields
-  readonly lazy: LazyHeaders
+  /** Typed header access — see `SipRequest.getHeader` for the union-access caveat. */
+  getHeader<K extends keyof SipHeaderTypes>(name: K): SipHeaderTypes[K]
+  getHeader(name: string): ReadonlyArray<string>
 }
 
 export type SipMessage = SipRequest | SipResponse
@@ -114,12 +162,7 @@ export type SipMessage = SipRequest | SipResponse
 //
 // These interfaces describe the SAME runtime objects as `SipRequest` /
 // `SipResponse` but carry stronger compile-time guarantees the dispatcher
-// (and parser) enforces at runtime. Code paths that have already established
-// the runtime invariants cast their `SipRequest` / `SipResponse` references
-// to the narrower view; no allocation, no copy.
-//
-// See docs/AdvancedCallModel.md for the dispatch-time invariants and
-// docs/typescript-effect.md for the projection rationale.
+// (and parser) enforces at runtime.
 
 /** Tag-bearing parsed name-addr — `tag` is guaranteed present. */
 export interface TaggedNameAddrField extends ParsedNameAddrField {
@@ -138,12 +181,16 @@ export interface TaggedNameAddrField extends ParsedNameAddrField {
  * tags match a confirmed dialog, so by the time a rule sees it gated by
  * `legState: "confirmed"` (or any in-dialog-implying match), this is the
  * runtime-true type.
+ *
+ * `getHeader` overloads tighten the return for `'from'` / `'to'` so
+ * callers see `TaggedNameAddrField` (with `tag: string`) instead of the
+ * unrefined `ParsedNameAddrField` (with `tag: string | undefined`).
  */
 export interface InDialogRequest extends SipRequest {
-  readonly parsed: RequestParsedFields & {
-    readonly from: TaggedNameAddrField
-    readonly to: TaggedNameAddrField
-  }
+  getHeader(name: "from"): TaggedNameAddrField
+  getHeader(name: "to"): TaggedNameAddrField
+  getHeader<K extends keyof SipHeaderTypes>(name: K): SipHeaderTypes[K]
+  getHeader(name: string): ReadonlyArray<string>
 }
 
 /** Request whose `method` is the literal type `M` (matches a `RequestMatch.method` gate). */
@@ -167,9 +214,9 @@ export type InDialogMethodRequest<M extends string> = InDialogRequest & MethodRe
  * non-empty To-tag, so this view is the runtime truth.
  */
 export interface SipResponseTagged extends SipResponse {
-  readonly parsed: ResponseParsedFields & {
-    readonly to: TaggedNameAddrField
-  }
+  getHeader(name: "to"): TaggedNameAddrField
+  getHeader<K extends keyof SipHeaderTypes>(name: K): SipHeaderTypes[K]
+  getHeader(name: string): ReadonlyArray<string>
 }
 
 /** Message that may be surfaced to the B2BUA application layer (post-txn-layer). */

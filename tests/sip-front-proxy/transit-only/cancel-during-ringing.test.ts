@@ -97,7 +97,7 @@ describe("sip-front-proxy/transit-only — CANCEL during ringing", () => {
       expect(inviteAtBob).not.toBeNull()
       const inviteParsed = parse(inviteAtBob!.raw)
       if (inviteParsed.type !== "request") throw new Error("expected request")
-      const proxyBranchInv = inviteParsed.parsed.vias[0]!.branch!
+      const proxyBranchInv = inviteParsed.getHeader("via")[0]!.branch!
       expect(proxyBranchInv).toMatch(/^z9hG4bK/)
 
       // The proxy must have remembered branch → Bob in CancelBranchLru.
@@ -161,9 +161,9 @@ describe("sip-front-proxy/transit-only — CANCEL during ringing", () => {
       if (cancelParsed.type !== "request") throw new Error("expected request")
       expect(cancelParsed.method).toBe("CANCEL")
       // Proxy stamped its own Via on top.
-      expect(cancelParsed.parsed.vias[0]!.host).toBe(PROXY.host)
+      expect(cancelParsed.getHeader("via")[0]!.host).toBe(PROXY.host)
       // Alice's Via preserved underneath.
-      expect(cancelParsed.parsed.vias[1]!.branch).toBe(aliceBranch)
+      expect(cancelParsed.getHeader("via")[1]!.branch).toBe(aliceBranch)
 
       // ── 4. Bob → Proxy → Alice: 487 Request Terminated ─────────────
       const r487 = Buffer.from(

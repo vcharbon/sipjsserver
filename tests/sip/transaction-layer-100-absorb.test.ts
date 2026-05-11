@@ -108,7 +108,7 @@ describe("TransactionLayer — absorbs 100 Trying", () => {
         if (first.message.type !== "response") return
         expect(first.message.status).toBe(180)
         // The parser+absorption pair guarantees a non-empty To-tag here.
-        expect(first.message.parsed.to.tag).toBe("peer-tag")
+        expect(first.message.getHeader("to").tag).toBe("peer-tag")
       }).pipe(Effect.provide(stackLayer)),
     )
   }

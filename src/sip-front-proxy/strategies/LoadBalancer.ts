@@ -54,7 +54,6 @@
  */
 
 import { Clock, Effect, Layer, Option, ServiceMap } from "effect"
-import { getHeader } from "../../sip/MessageHelpers.js"
 import type { SipMessage } from "../../sip/types.js"
 import { ProxyMetrics } from "../observability/Metrics.js"
 import {
@@ -172,16 +171,11 @@ const base64urlDecode = (s: string): Uint8Array | undefined => {
 /**
  * Pull the Call-ID off a parsed message. The parser guarantees it on every
  * well-formed packet (see `RequestParsedFields` / `ResponseParsedFields`),
- * so this is normally a single property read — we keep the raw-header
- * fallback for the defensive case where a caller hands us a synthesised
- * message that bypassed the parser.
+ * so this is normally a single property read.
  */
 const callIdOf = (msg: SipMessage): string | undefined => {
-  const id = msg.parsed.callId
-  if (typeof id === "string" && id.length > 0) return id
-  const raw = getHeader(msg.headers, "call-id")
-  if (typeof raw !== "string" || raw.length === 0) return undefined
-  return raw
+  const id = msg.getHeader("call-id")
+  return id.length > 0 ? id : undefined
 }
 
 const sameAddr = (a: SocketAddr, b: SocketAddr): boolean =>

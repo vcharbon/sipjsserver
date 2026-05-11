@@ -113,7 +113,7 @@ describe("sip-front-proxy/transit-only — malformed-message handling", () => {
       if (reply.type !== "response") throw new Error("expected response")
       expect(reply.status).toBe(483)
       // Source got back her own Via.
-      expect(reply.parsed.vias[0]!.host).toBe(ALICE.host)
+      expect(reply.getHeader("via")[0]!.host).toBe(ALICE.host)
       })
     ).pipe(Effect.provide(layer))
   )

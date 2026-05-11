@@ -38,7 +38,7 @@ export const sdpOriginContinuityRule: PerCallRule = {
         if (ev.msg.body.byteLength === 0) continue
         const origin = parseSdpOrigin(ev.msg.body)
         if (!origin) continue
-        const callId = ev.msg.parsed.callId
+        const callId = ev.msg.getHeader("call-id")
         if (!callId) continue
         const prior = history.get(callId)
         if (!prior) {

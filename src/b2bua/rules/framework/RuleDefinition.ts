@@ -14,7 +14,6 @@ import type {
   InDialogMethodRequest,
   MethodRequest,
   SipResponseTagged,
-  ResponseParsedFields,
   ParsedCSeqField,
 } from "../../../sip/types.js"
 import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType, TransferPhase, TransferState } from "../../../call/CallModel.js"
@@ -208,9 +207,7 @@ type RequestMessageFor<M extends RequestMatch> =
 type ResponseMessageFor<M extends ResponseMatch> =
   CseqMethodFor<M> extends infer Mt extends SipMethod
     ? SipResponseTagged & {
-        readonly parsed: ResponseParsedFields & {
-          readonly cseq: ParsedCSeqField & { readonly method: Mt }
-        }
+        getHeader(name: "cseq"): ParsedCSeqField & { readonly method: Mt }
       }
     : SipResponseTagged
 

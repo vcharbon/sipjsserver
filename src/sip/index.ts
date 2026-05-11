@@ -19,18 +19,17 @@ export { serialize, sipSummary, messageSummary } from "./Serializer.js"
 // Core message types
 export type {
   SipHeader,
+  SipHeaderTypes,
   SipMessage,
   SipRequest,
   SipResponse,
   SipResponseTagged,
+  NonEmptyReadonlyArray,
   ParsedNameAddrField,
   ParsedViaField,
   ParsedContactField,
   ParsedCSeqField,
   ParsedRequestUriField,
-  ParsedFieldsCommon,
-  RequestParsedFields,
-  ResponseParsedFields,
   TaggedNameAddrField,
   InDialogRequest,
   MethodRequest,
@@ -39,6 +38,10 @@ export type {
   RemoteInfo,
   CallRecord,
 } from "./types.js"
+
+// Header registry — runtime extension entry point
+export { SipHeaderRegistry, defaultRegistry } from "./header-registry.js"
+export type { HeaderDescriptor } from "./header-registry.js"
 
 // Header / URI helpers
 export {

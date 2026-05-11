@@ -97,12 +97,12 @@ type Trigger =
 
 function classifyByeResolutionEvent(event: CallEvent): Trigger | null {
   if (event.type === "sip" && event.message.type === "response") {
-    const cseq = event.message.parsed.cseq
+    const cseq = event.message.getHeader("cseq")
     const status = event.message.status
     if (cseq.method === "BYE" && status >= 200) {
       // Via params stamped by outbound BYE generators carry `lg`; if
       // missing we fall back to scanning all bye_sent legs.
-      const viaParams = event.message.parsed.via?.params
+      const viaParams = event.message.getHeader("via")[0]?.params
       const lg = typeof viaParams?.lg === "string" ? decodeURIComponent(viaParams.lg) : undefined
       return { kind: "response", legId: lg, forced: "bye_confirmed" }
     }

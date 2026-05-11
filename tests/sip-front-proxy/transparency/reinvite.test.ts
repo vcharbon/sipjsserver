@@ -149,7 +149,7 @@ topologyTest(
       if (reinviteParsed.type !== "request") throw new Error("expected re-INVITE")
       expect(reinviteParsed.method).toBe("INVITE")
       // To-tag preserved end-to-end.
-      expect(reinviteParsed.parsed.to.tag).toBe("bob-tag")
+      expect(reinviteParsed.getHeader("to").tag).toBe("bob-tag")
 
       // ── 3. Bob → 200 OK ─────────────────────────────────────────
       const reok = Buffer.from(

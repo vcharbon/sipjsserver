@@ -99,8 +99,8 @@ describe("b2bua/DrainingState — OPTIONS keepalive", () => {
       if (respServing.type !== "response") throw new Error("unreachable")
       expect(respServing.status).toBe(200)
       // Echoed Vias / From / Call-ID / CSeq per RFC 3261 §8.2.6.2.
-      expect(respServing.parsed.callId).toBe("opts-serving@probe")
-      expect(respServing.parsed.cseq.method).toBe("OPTIONS")
+      expect(respServing.getHeader("call-id")).toBe("opts-serving@probe")
+      expect(respServing.getHeader("cseq").method).toBe("OPTIONS")
       // No Retry-After in the serving branch.
       expect(
         respServing.headers.find((h) => h.name.toLowerCase() === "retry-after")

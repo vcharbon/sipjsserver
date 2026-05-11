@@ -159,8 +159,8 @@ export class RegisterStrategy extends ServiceMap.Service<
  * the caller surfaces as 400 Bad Request.
  */
 function extractAorUserpart(req: SipRequest): string | undefined {
-  const toUri = req.parsed.to.uri
-  if (toUri === undefined || toUri.length === 0) return undefined
+  const toUri = req.getHeader("to").uri
+  if (toUri.length === 0) return undefined
   const parsed = parseSipUri(toUri)
   if (parsed?.user === undefined || parsed.user.length === 0) return undefined
   return parsed.user.toLowerCase()

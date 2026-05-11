@@ -7,11 +7,15 @@
 
 import { Result } from "effect"
 import { parse as sipParserParse, types } from "sip-parser"
-import type { SipHeader, SipMessage, SipRequest, SipResponse } from "../types.js"
+import type { SipHeader, SipMessage } from "../types.js"
 import type { SipParserImpl } from "./interface.js"
 import { SipParseError } from "./errors.js"
-import { extractResponseFields, extractRequestFields } from "./extract-fields.js"
-import { LazyHeaders } from "./custom/lazy-headers.js"
+import {
+  extractResponseFields,
+  extractRequestFields,
+  finalizeRequest,
+  finalizeResponse,
+} from "./extract-fields.js"
 import { expandCompactForm } from "./custom/compact-forms.js"
 
 // ---------------------------------------------------------------------------
@@ -32,40 +36,33 @@ function adaptMessage(
 ): Result.Result<SipMessage, SipParseError> {
   const headers = adaptHeaders(msg.headers)
   const body = msg.content ? Buffer.from(msg.content, "utf-8") : new Uint8Array(0)
-  const lazy = new LazyHeaders(headers)
 
   if (isResponse(msg)) {
     const fields = extractResponseFields(headers, msg.statusCode)
     if (Result.isFailure(fields)) return Result.fail(fields.failure)
-    const response: SipResponse = {
-      type: "response",
+    return Result.succeed(finalizeResponse({
       version: msg.version,
       status: msg.statusCode,
       reason: msg.reason,
       headers,
       body,
       raw,
-      parsed: fields.success,
-      lazy,
-    }
-    return Result.succeed(response)
+      eager: fields.success,
+    }))
   }
 
   const requestUri = stringifyUri(msg.requestUri)
   const fields = extractRequestFields(headers, requestUri)
   if (Result.isFailure(fields)) return Result.fail(fields.failure)
-  const request: SipRequest = {
-    type: "request",
+  return Result.succeed(finalizeRequest({
     method: msg.method.toUpperCase(),
     uri: requestUri,
     version: msg.version,
     headers,
     body,
     raw,
-    parsed: fields.success,
-    lazy,
-  }
-  return Result.succeed(request)
+    eager: fields.success,
+  }))
 }
 
 /** Reconstruct the Request-URI string from the parsed SipUri object. */

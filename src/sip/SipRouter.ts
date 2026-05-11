@@ -111,7 +111,7 @@ export function describeEventDetail(event: CallEvent): string {
   switch (event.type) {
     case "sip": {
       const msg = event.message
-      const callId = msg.parsed?.callId ?? "?"
+      const callId = msg.getHeader("call-id")
       if (msg.type === "request") {
         return `event=sip method=${msg.method} call-id=${callId} from=${event.rinfo.address}:${event.rinfo.port}`
       }
@@ -204,8 +204,8 @@ interface ResolvedKey {
 
 /** Resolve callRef+leg from an inbound SIP request (Contact URI params in Request-URI). */
 function resolveFromRequest(req: SipRequest): ResolvedKey | undefined {
-  const uriParams = req.parsed?.requestUri?.params
-  if (uriParams?.callref && uriParams.leg) {
+  const uriParams = req.requestUri.params
+  if (uriParams.callref && uriParams.leg) {
     return { callRef: decodeParam(uriParams.callref), leg: decodeParam(uriParams.leg) }
   }
   return undefined
@@ -213,9 +213,9 @@ function resolveFromRequest(req: SipRequest): ResolvedKey | undefined {
 
 /** Resolve callRef+leg from an inbound SIP response (cr/lg in top Via). */
 function resolveFromResponse(resp: SipResponse): ResolvedKey | undefined {
-  const viaParams = resp.parsed?.via?.params
-  const cr = typeof viaParams?.cr === "string" ? viaParams.cr : undefined
-  const lg = typeof viaParams?.lg === "string" ? viaParams.lg : undefined
+  const viaParams = resp.getHeader("via")[0].params
+  const cr = typeof viaParams.cr === "string" ? viaParams.cr : undefined
+  const lg = typeof viaParams.lg === "string" ? viaParams.lg : undefined
   if (cr && lg) {
     return { callRef: decodeParam(cr), leg: decodeParam(lg) }
   }
@@ -528,7 +528,7 @@ export class SipRouter extends ServiceMap.Service<
               // (in-dialog). Without URI params we cannot resolve the call,
               // so fall through to the normal in-dialog resolution which
               // will try callId+fromTag fallback and 481 on miss.
-              const toTag = event.message.parsed?.to?.tag
+              const toTag = event.message.getHeader("to").tag
               if (!toTag) {
                 // Initial INVITE — create skeleton call
                 yield* handleInitialInvite(handlers, event.message, event.rinfo)
@@ -568,7 +568,7 @@ export class SipRouter extends ServiceMap.Service<
             event.type === "sip" &&
             event.message.type === "request" &&
             event.message.method === "OPTIONS" &&
-            !event.message.parsed?.to?.tag
+            !event.message.getHeader("to").tag
           ) {
             const mode = yield* draining.mode
             const ready = yield* readiness.currentReady
@@ -630,8 +630,8 @@ export class SipRouter extends ServiceMap.Service<
                 legHint = resolved.leg
                 resolveMethod = "uri-params"
               } else {
-                const callId = event.message.parsed?.callId ?? ""
-                const fromTag = event.message.parsed?.from?.tag ?? ""
+                const callId = event.message.getHeader("call-id")
+                const fromTag = event.message.getHeader("from").tag ?? ""
                 callRef = yield* callState.resolveFromSipKey(callId, fromTag)
                 resolveMethod = `callId+fromTag fallback (${callId}/${fromTag})`
               }
@@ -642,8 +642,8 @@ export class SipRouter extends ServiceMap.Service<
                 legHint = resolved.leg
                 resolveMethod = "via-params"
               } else {
-                const callId = event.message.parsed?.callId ?? ""
-                const fromTag = event.message.parsed?.from?.tag ?? ""
+                const callId = event.message.getHeader("call-id")
+                const fromTag = event.message.getHeader("from").tag ?? ""
                 callRef = yield* callState.resolveFromSipKey(callId, fromTag)
                 resolveMethod = `callId+fromTag fallback (${callId}/${fromTag})`
               }
@@ -658,22 +658,31 @@ export class SipRouter extends ServiceMap.Service<
             // Unroutable — error span
             if (event.type === "sip") {
               const msg = event.message
-              const summary = msg.type === "request"
-                ? `${msg.method} ${msg.uri}`
-                : `${msg.status} ${msg.reason}`
-              const callId = msg.parsed?.callId ?? "?"
-              const fromTag = msg.parsed?.from?.tag ?? "?"
-              const toTag = msg.parsed?.to?.tag ?? "?"
-              // Show resolution-relevant params
+              // Narrow once so getHeader resolves on a single concrete type
+              // (overload resolution on union types picks the raw-string
+              // fallback — see SipRequest.getHeader doc).
+              let summary: string
+              let callId: string
+              let fromTag: string
+              let toTag: string
               let resolveDetail: string
               if (msg.type === "request") {
-                const uriParams = msg.parsed?.requestUri?.params
-                resolveDetail = uriParams?.callref
+                summary = `${msg.method} ${msg.uri}`
+                callId = msg.getHeader("call-id")
+                fromTag = msg.getHeader("from").tag ?? "?"
+                toTag = msg.getHeader("to").tag ?? "?"
+                const uriParams = msg.requestUri.params
+                resolveDetail = uriParams.callref
                   ? `uri-params: callRef=${uriParams.callref} leg=${uriParams.leg ?? "?"}`
                   : `no callRef in URI, fallback: callId=${callId} fromTag=${fromTag}`
               } else {
-                const cr = typeof msg.parsed?.via?.params?.cr === "string" ? msg.parsed.via.params.cr : undefined
-                const lg = typeof msg.parsed?.via?.params?.lg === "string" ? msg.parsed.via.params.lg : undefined
+                summary = `${msg.status} ${msg.reason}`
+                callId = msg.getHeader("call-id")
+                fromTag = msg.getHeader("from").tag ?? "?"
+                toTag = msg.getHeader("to").tag ?? "?"
+                const viaParams = msg.getHeader("via")[0].params
+                const cr = typeof viaParams.cr === "string" ? viaParams.cr : undefined
+                const lg = typeof viaParams.lg === "string" ? viaParams.lg : undefined
                 resolveDetail = cr
                   ? `via-params: cr=${cr} lg=${lg ?? "?"}`
                   : `no cr in Via, fallback: callId=${callId} fromTag=${fromTag}`
@@ -691,10 +700,7 @@ export class SipRouter extends ServiceMap.Service<
               // teardown-race rate (typically OPTIONS keepalive 200 OKs
               // arriving after the call was deleted).
               if (msg.type === "response") {
-                bumpStaleResponse(
-                  String(msg.parsed?.cseq?.method ?? "?"),
-                  msg.status,
-                )
+                bumpStaleResponse(msg.getHeader("cseq").method, msg.status)
               }
               // RFC 3261 §12.2.2 — reject unmatched in-dialog requests with 481
               // (ACK never gets a response; responses are silently dropped)
@@ -736,8 +742,8 @@ export class SipRouter extends ServiceMap.Service<
                 // stale-response counter.
                 if (event.type === "sip" && event.message.type === "response") {
                   bumpStaleResponse(
-                    String(event.message.parsed?.cseq?.method ?? "?"),
-                    (event.message as SipResponse).status,
+                    event.message.getHeader("cseq").method,
+                    event.message.status,
                   )
                 }
                 // RFC 3261 §12.2.2 — reject requests for vanished calls with 481
@@ -817,11 +823,11 @@ export class SipRouter extends ServiceMap.Service<
 
       const handleInitialInvite = Effect.fnUntraced(
         function* (handlers: HandlerRegistry, req: SipRequest, rinfo: RemoteInfo) {
-          const callId = req.parsed?.callId
+          const callId = req.getHeader("call-id")
           const fromHeader = getHeader(req.headers, "from")
-          const fromTag = req.parsed?.from?.tag
+          const fromTag = req.getHeader("from").tag
 
-          if (callId === undefined || fromTag === undefined) {
+          if (fromTag === undefined) {
             yield* Effect.logWarning("INVITE missing required headers — dropping")
             return
           }
@@ -916,7 +922,7 @@ export class SipRouter extends ServiceMap.Service<
             "sip.method": "INVITE",
             "sip.direction": "inbound",
             "sip.call_id.a_leg": callId,
-            "sip.from_uri": req.parsed?.from?.uri ?? "",
+            "sip.from_uri": req.getHeader("from").uri,
             "sip.request_uri": req.uri,
             "net.peer.addr": `${rinfo.address}:${rinfo.port}`,
           }

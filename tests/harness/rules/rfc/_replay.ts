@@ -230,18 +230,18 @@ export function advanceDialogModel(m: DialogModel, ev: AgentEvent): void {
     if (msg.type === "request") {
       if (msg.method === "INVITE" && !m.initialInviteSentBranch) {
         m.isUac = true
-        m.initialInviteSentBranch = msg.parsed.via.branch ?? ""
-        m.callId ||= msg.parsed.callId
-        const fromTag = msg.parsed.from.tag
+        m.initialInviteSentBranch = msg.getHeader("via")[0].branch ?? ""
+        m.callId ||= msg.getHeader("call-id")
+        const fromTag = msg.getHeader("from").tag
         if (fromTag) m.localTag ||= fromTag
-        m.dialogLocalUri ||= msg.parsed.from.uri
-        m.dialogRemoteUri ||= msg.parsed.to.uri
+        m.dialogLocalUri ||= msg.getHeader("from").uri
+        m.dialogRemoteUri ||= msg.getHeader("to").uri
       }
       return
     }
     // Sent response — UAS path. Local tag is the To-tag we stamped.
-    if (msg.parsed.cseq.method === "INVITE" && msg.status > 100 && !m.localTag) {
-      const toTag = msg.parsed.to.tag
+    if (msg.getHeader("cseq").method === "INVITE" && msg.status > 100 && !m.localTag) {
+      const toTag = msg.getHeader("to").tag
       if (toTag) m.localTag = toTag
     }
     return
@@ -251,13 +251,13 @@ export function advanceDialogModel(m: DialogModel, ev: AgentEvent): void {
   if (msg.type === "request") {
     if (msg.method === "INVITE" && !m.initialInviteReceivedBranch) {
       m.isUas = true
-      m.initialInviteReceivedBranch = msg.parsed.via.branch ?? ""
-      m.callId ||= msg.parsed.callId
+      m.initialInviteReceivedBranch = msg.getHeader("via")[0].branch ?? ""
+      m.callId ||= msg.getHeader("call-id")
       // UAS: dialog-local URI is the To URI of the received INVITE,
       // dialog-remote URI is the From URI.
-      m.dialogLocalUri ||= msg.parsed.to.uri
-      m.dialogRemoteUri ||= msg.parsed.from.uri
-      const fromTag = msg.parsed.from.tag
+      m.dialogLocalUri ||= msg.getHeader("to").uri
+      m.dialogRemoteUri ||= msg.getHeader("from").uri
+      const fromTag = msg.getHeader("from").tag
       if (fromTag) m.remoteTag ||= fromTag
       // UAS route set: keep Record-Route in received order (RFC 3261 §12.1.1).
       if (m.routeSet.length === 0) {
@@ -269,8 +269,8 @@ export function advanceDialogModel(m: DialogModel, ev: AgentEvent): void {
   }
 
   // Received response — UAC path.
-  if (msg.parsed.cseq.method === "INVITE" && msg.status > 100) {
-    const toTag = msg.parsed.to.tag
+  if (msg.getHeader("cseq").method === "INVITE" && msg.status > 100) {
+    const toTag = msg.getHeader("to").tag
     if (toTag) m.remoteTag ||= toTag
   }
   // UAC route set established from the FIRST dialog-creating response —
@@ -279,8 +279,8 @@ export function advanceDialogModel(m: DialogModel, ev: AgentEvent): void {
   if (m.isUac && m.routeSet.length === 0) {
     const isDialogCreating =
       (msg.status >= 200 && msg.status < 300) ||
-      (msg.status > 100 && msg.status < 200 && msg.parsed.to.tag !== undefined)
-    if (isDialogCreating && msg.parsed.cseq.method === "INVITE") {
+      (msg.status > 100 && msg.status < 200 && msg.getHeader("to").tag !== undefined)
+    if (isDialogCreating && msg.getHeader("cseq").method === "INVITE") {
       const rr = getAllHeaderValues(msg.headers, "record-route")
       if (rr.length > 0) m.routeSet = [...rr].reverse()
     }
@@ -296,15 +296,15 @@ export function advanceDialogModel(m: DialogModel, ev: AgentEvent): void {
  * and it's not the initial INVITE on this dialog.
  */
 export function isInDialogRequest(msg: SipRequest, m: DialogModel): boolean {
-  const fromTag = msg.parsed.from.tag
-  const toTag = msg.parsed.to.tag
+  const fromTag = msg.getHeader("from").tag
+  const toTag = msg.getHeader("to").tag
   if (!fromTag || !toTag) return false
   // CSeq matches the agent's initial-INVITE branch (UAC view) or
   // the received-INVITE branch (UAS view) — but at sender side we don't
   // have correlated branches. Use heuristic: if it's INVITE and matches
   // the initial branch, treat as initial; otherwise in-dialog.
   if (msg.method === "INVITE") {
-    const branch = msg.parsed.via.branch ?? ""
+    const branch = msg.getHeader("via")[0].branch ?? ""
     if (branch && branch === m.initialInviteSentBranch) return false
   }
   return true

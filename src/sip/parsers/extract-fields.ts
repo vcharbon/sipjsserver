@@ -1,8 +1,8 @@
 /**
  * Shared mandatory-header extraction. Every parser adapter (custom,
  * jssip, sip-parser) feeds its decoded `headers` array through these
- * helpers to produce the eagerly-parsed `parsed` block on every
- * `SipMessage`.
+ * helpers to produce an `EagerHeaderSlots` record that backs the
+ * `msg.getHeader()` fast path.
  *
  * RFC 3261 §8.1.1 — From, To, Call-ID, CSeq, and at least one Via are
  * mandatory in every SIP message; requests additionally carry a
@@ -14,11 +14,10 @@ import type {
   SipHeader,
   SipRequest,
   SipResponse,
-  RequestParsedFields,
-  ResponseParsedFields,
+  ParsedRequestUriField,
 } from "../types.js"
 import { SipParseError } from "./errors.js"
-import { LazyHeaders } from "./custom/lazy-headers.js"
+import { makeGetHeader, type EagerHeaderSlots } from "../header-registry.js"
 import {
   parseNameAddr,
   parseVia,
@@ -27,6 +26,11 @@ import {
   parseSipUriString,
   splitTopLevelCommas,
 } from "./custom/structured-headers.js"
+
+/** Eager slots plus a parsed Request-URI for requests. */
+interface RequestEager extends EagerHeaderSlots {
+  readonly requestUri: ParsedRequestUriField
+}
 
 function getHeaderValue(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {
   const lower = name.toLowerCase()
@@ -39,8 +43,8 @@ function getHeaderValues(headers: ReadonlyArray<SipHeader>, name: string): strin
 }
 
 export function extractCommonFields(
-  headers: ReadonlyArray<SipHeader>
-): Result.Result<ResponseParsedFields, SipParseError> {
+  headers: ReadonlyArray<SipHeader>,
+): Result.Result<EagerHeaderSlots, SipParseError> {
   // Mandatory headers — presence is enforced; internal field parsing is
   // best-effort. Empty `uri` / `host` slots are surfaced as-is so the
   // parser stays tolerant of partially-malformed but routable peers.
@@ -83,7 +87,13 @@ export function extractCommonFields(
   const viasParsed = viaValues.flatMap((v) =>
     splitTopLevelCommas(v).map(parseVia),
   )
-  const topVia = viasParsed[0]!
+  const vias = viasParsed.map((v) => ({
+    transport: v.transport,
+    host: v.host,
+    port: v.port,
+    branch: v.branch,
+    params: v.params,
+  }))
 
   const contactVal = getHeaderValue(headers, "Contact")
   const contactParsed = contactVal ? parseContact(contactVal) : undefined
@@ -103,105 +113,36 @@ export function extractCommonFields(
     },
     callId,
     cseq: cseqParsed,
-    via: {
-      transport: topVia.transport,
-      host: topVia.host,
-      port: topVia.port,
-      branch: topVia.branch,
-      params: topVia.params,
-    },
-    vias: viasParsed.map((v) => ({
-      transport: v.transport,
-      host: v.host,
-      port: v.port,
-      branch: v.branch,
-      params: v.params,
-    })),
+    vias,
     contact: contactParsed,
   })
 }
 
 /**
- * Hydrate a `SipRequest` from raw fields (used by generators and by call
- * sites that reconstruct a request from a snapshot). The headers are
- * assumed to be well-formed; on extraction failure this throws since the
- * caller is responsible for producing valid headers.
+ * Extract request-specific parsed fields (common + Request-URI).
  */
-export function hydrateRequest(args: {
-  readonly method: string
-  readonly uri: string
-  readonly version?: string
-  readonly headers: SipHeader[]
-  readonly body: Uint8Array
-  readonly raw: Buffer
-}): SipRequest {
-  const fields = extractRequestFields(args.headers, args.uri)
-  if (Result.isFailure(fields)) {
-    throw new Error(`hydrateRequest: malformed headers — ${fields.failure.reason}`)
-  }
-  return {
-    type: "request",
-    method: args.method,
-    uri: args.uri,
-    version: args.version ?? "SIP/2.0",
-    headers: args.headers,
-    body: args.body,
-    raw: args.raw,
-    parsed: fields.success,
-    lazy: new LazyHeaders(args.headers),
-  }
-}
-
-/**
- * Hydrate a `SipResponse` from raw fields. Same contract as
- * `hydrateRequest` — throws on malformed headers.
- */
-export function hydrateResponse(args: {
-  readonly status: number
-  readonly reason: string
-  readonly version?: string
-  readonly headers: SipHeader[]
-  readonly body: Uint8Array
-  readonly raw: Buffer
-}): SipResponse {
-  const fields = extractCommonFields(args.headers)
-  if (Result.isFailure(fields)) {
-    throw new Error(`hydrateResponse: malformed headers — ${fields.failure.reason}`)
-  }
-  return {
-    type: "response",
-    version: args.version ?? "SIP/2.0",
-    status: args.status,
-    reason: args.reason,
-    headers: args.headers,
-    body: args.body,
-    raw: args.raw,
-    parsed: fields.success,
-    lazy: new LazyHeaders(args.headers),
-  }
-}
-
 export function extractRequestFields(
   headers: ReadonlyArray<SipHeader>,
-  requestUri: string
-): Result.Result<RequestParsedFields, SipParseError> {
+  requestUri: string,
+): Result.Result<RequestEager, SipParseError> {
   const common = extractCommonFields(headers)
   if (Result.isFailure(common)) return Result.fail(common.failure)
   const requestUriParsed = parseSipUriString(requestUri)
   if (requestUriParsed === undefined) {
     return Result.fail(
-      new SipParseError({ reason: `Malformed Request-URI: "${requestUri}"` })
+      new SipParseError({ reason: `Malformed Request-URI: "${requestUri}"` }),
     )
+  }
+  const parsedRequestUri: ParsedRequestUriField = {
+    scheme: requestUriParsed.scheme,
+    user: requestUriParsed.user,
+    host: requestUriParsed.host,
+    port: requestUriParsed.port,
+    params: requestUriParsed.params,
   }
   return Result.succeed({
     ...common.success,
-    requestUri: {
-      scheme: requestUriParsed.scheme,
-      user: requestUriParsed.user,
-      host: requestUriParsed.host,
-      port: requestUriParsed.port,
-      params: requestUriParsed.params,
-    },
+    requestUri: parsedRequestUri,
   })
 }
 
@@ -220,15 +161,118 @@ export function extractRequestFields(
 export function extractResponseFields(
   headers: ReadonlyArray<SipHeader>,
   status: number,
-): Result.Result<ResponseParsedFields, SipParseError> {
+): Result.Result<EagerHeaderSlots, SipParseError> {
   const common = extractCommonFields(headers)
   if (Result.isFailure(common)) return common
   if (status > 100 && common.success.to.tag === undefined) {
     return Result.fail(
       new SipParseError({
         reason: `Non-100 response (status=${status}) missing mandatory To-tag`,
-      })
+      }),
     )
   }
   return common
+}
+
+/**
+ * Construct a finalized `SipRequest` from parsed pieces. Attaches the
+ * top-level `requestUri` and the `getHeader` accessor.
+ */
+export function finalizeRequest(args: {
+  readonly method: string
+  readonly uri: string
+  readonly version: string
+  readonly headers: ReadonlyArray<SipHeader>
+  readonly body: Uint8Array
+  readonly raw: Buffer
+  readonly eager: RequestEager
+}): SipRequest {
+  const getHeader = makeGetHeader(args.headers, args.eager) as
+    SipRequest["getHeader"]
+  return {
+    type: "request",
+    method: args.method,
+    uri: args.uri,
+    requestUri: args.eager.requestUri,
+    version: args.version,
+    headers: args.headers,
+    body: args.body,
+    raw: args.raw,
+    getHeader,
+  }
+}
+
+/** Construct a finalized `SipResponse` from parsed pieces. */
+export function finalizeResponse(args: {
+  readonly status: number
+  readonly reason: string
+  readonly version: string
+  readonly headers: ReadonlyArray<SipHeader>
+  readonly body: Uint8Array
+  readonly raw: Buffer
+  readonly eager: EagerHeaderSlots
+}): SipResponse {
+  const getHeader = makeGetHeader(args.headers, args.eager) as
+    SipResponse["getHeader"]
+  return {
+    type: "response",
+    version: args.version,
+    status: args.status,
+    reason: args.reason,
+    headers: args.headers,
+    body: args.body,
+    raw: args.raw,
+    getHeader,
+  }
+}
+
+/**
+ * Hydrate a `SipRequest` from raw fields. Throws on malformed headers —
+ * callers must produce a well-formed envelope.
+ */
+export function hydrateRequest(args: {
+  readonly method: string
+  readonly uri: string
+  readonly version?: string
+  readonly headers: SipHeader[]
+  readonly body: Uint8Array
+  readonly raw: Buffer
+}): SipRequest {
+  const fields = extractRequestFields(args.headers, args.uri)
+  if (Result.isFailure(fields)) {
+    throw new Error(`hydrateRequest: malformed headers — ${fields.failure.reason}`)
+  }
+  return finalizeRequest({
+    method: args.method,
+    uri: args.uri,
+    version: args.version ?? "SIP/2.0",
+    headers: args.headers,
+    body: args.body,
+    raw: args.raw,
+    eager: fields.success,
+  })
+}
+
+/** Hydrate a `SipResponse` from raw fields. Throws on malformed headers. */
+export function hydrateResponse(args: {
+  readonly status: number
+  readonly reason: string
+  readonly version?: string
+  readonly headers: SipHeader[]
+  readonly body: Uint8Array
+  readonly raw: Buffer
+}): SipResponse {
+  const fields = extractCommonFields(args.headers)
+  if (Result.isFailure(fields)) {
+    throw new Error(`hydrateResponse: malformed headers — ${fields.failure.reason}`)
+  }
+  return finalizeResponse({
+    status: args.status,
+    reason: args.reason,
+    version: args.version ?? "SIP/2.0",
+    headers: args.headers,
+    body: args.body,
+    raw: args.raw,
+    eager: fields.success,
+  })
 }

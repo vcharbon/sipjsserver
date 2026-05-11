@@ -541,7 +541,10 @@ function executeRelayToPeer(
   // (important for forking — multiple early dialogs on one b-leg).
   let targetToTag: string | undefined
   if (peerLegId === undefined && ctx.sourceLeg.legId === "a" && ctx.event.type === "sip") {
-    const toTag = ctx.event.message.parsed?.to?.tag
+    const msg = ctx.event.message
+    const toTag = msg.type === "request"
+      ? msg.getHeader("to").tag
+      : msg.getHeader("to").tag
     if (toTag) {
       const mapping = findByATag(state.call, toTag)
       if (mapping) {
@@ -733,7 +736,7 @@ function relayRequest(
       // "<RSeq> <CSeq> <Method>" to the target dialog's INVITE CSeq, sourced
       // from `pendingInviteTxn`.
       const rackIn = getHeader(req.headers, "rack") ?? ""
-      const rackResult = req.lazy.rack()
+      const rackResult = req.getHeader("rack")
       const parsedRack = Result.isSuccess(rackResult) ? rackResult.success : undefined
       const targetInviteCSeq = inviteCSeqFromHandle(targetLeg, targetDialog) ?? targetDialog.sip.localCSeq
       const rack = parsedRack !== undefined
@@ -853,7 +856,7 @@ function relayResponseMsg(
   const effectiveReason = transform?.reason ?? resp.reason
 
   // Build the relayed response with target leg's identifiers
-  const toTag = resp.parsed?.to?.tag ?? ""
+  const toTag = resp.getHeader("to").tag ?? ""
 
   // ── Detect pending transparent-relay response correlation ──
   // If the source dialog has a pending relayed request matching this
@@ -863,8 +866,8 @@ function relayResponseMsg(
   // addPendingRequest() in relayRequest above. Covers re-INVITE as well as
   // any transparent in-dialog method (OPTIONS, INFO, UPDATE, MESSAGE,
   // PRACK, …). See AdvancedCallModel.md §"Limitations" for context.
-  const cseqMethod = resp.parsed.cseq.method.length > 0 ? resp.parsed.cseq.method.toUpperCase() : "INVITE"
-  const cseqNum = resp.parsed.cseq.seq
+  const cseqMethod = resp.getHeader("cseq").method.length > 0 ? resp.getHeader("cseq").method.toUpperCase() : "INVITE"
+  const cseqNum = resp.getHeader("cseq").seq
   const pending = ctx.sourceDialog !== undefined
     ? findPendingRequest(ctx.sourceDialog, cseqNum)
     : undefined
@@ -1001,7 +1004,7 @@ function relayResponseMsg(
     if (resp.status >= 100 && resp.status < 200 && toTag && ctx.sourceLeg.legId !== "a") {
       const sourceLeg = ctx.sourceLeg
       if (!sourceLeg.dialogs.some((d) => d.sip.remoteTag === toTag)) {
-        const contact = resp.parsed?.contact?.uri ?? ""
+        const contact = resp.getHeader("contact")?.uri ?? ""
         // The response's CSeq number equals the INVITE's CSeq (responses
         // echo the request's CSeq — RFC 3261 §8.1.3.3). Seed this new
         // forked dialog independently from any sibling fork's counter.
@@ -1135,7 +1138,7 @@ function relayResponseMsg(
   if (pending !== undefined && resp.status >= 200 && ctx.sourceDialog !== undefined) {
     const sourceIdTag = dialogIdentityTag(ctx.sourceLeg.legId, ctx.sourceDialog)
     if (resp.status < 300) {
-      const newContact = resp.parsed?.contact?.uri ?? ""
+      const newContact = resp.getHeader("contact")?.uri ?? ""
       if (newContact) {
         state.call = updateDialog(state.call, ctx.sourceLeg.legId, sourceIdTag, (d) => ({
           ...d, sip: { ...d.sip, remoteTarget: newContact },
@@ -1181,8 +1184,8 @@ function executeConfirmDialog(
   const leg = findLeg(state.call, legId)
   if (leg === undefined) return
 
-  const toTag = resp.parsed?.to?.tag ?? ""
-  const legContact = resp.parsed?.contact?.uri ?? ""
+  const toTag = resp.getHeader("to").tag ?? ""
+  const legContact = resp.getHeader("contact")?.uri ?? ""
 
   // RFC 3261 §12.1.2: capture the route set from the response's Record-Route
   // headers, in reverse order. The B2BUA is the UAC on the b-leg, so Bob's

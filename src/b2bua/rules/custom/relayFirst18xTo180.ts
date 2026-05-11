@@ -95,9 +95,9 @@ const suppress18x = defineRule({
 
   handle: (ctx, state) => {
     const resp = ctx.event.message
-    const bTag = resp.parsed.to.tag
+    const bTag = resp.getHeader("to").tag
     const rseq = reliableRseq(resp)
-    const inviteCSeq = resp.parsed.cseq.seq
+    const inviteCSeq = resp.getHeader("cseq").seq
     const strategy = ctx.call.features?.relayFirst18xTo180?.strategy
 
     // Reliable 1xx → B2BUA must PRACK the b-leg itself (RFC 3262 §3-4).
@@ -192,7 +192,7 @@ const forceTagConsistency = defineRule({
 
   handle: (ctx, state) => {
     const resp = ctx.event.message
-    const bTag = resp.parsed.to.tag
+    const bTag = resp.getHeader("to").tag
     const strategy = ctx.call.features?.relayFirst18xTo180?.strategy
 
     const actions: RuleAction[] = []
@@ -302,7 +302,7 @@ const fakePrackHandleUpdateFromB = defineRule({
   handle: (ctx, state) => {
     const req = ctx.event.message
     const updateBody = req.body
-    const bTag = req.parsed?.from?.tag ?? ""
+    const bTag = req.getHeader("from").tag ?? ""
 
     // UPDATE with no body: just respond 200 OK locally, nothing to cache.
     if (updateBody.byteLength === 0) {

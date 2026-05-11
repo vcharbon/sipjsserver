@@ -29,7 +29,7 @@ export const rportEchoRule: PerCallRule = {
 
       for (const ev of events) {
         if (ev.kind === "sent" && ev.msg.type === "request") {
-          const topVia = ev.msg.parsed.via
+          const topVia = ev.msg.getHeader("via")[0]
           const info = readRport(topVia.params)
           if (info.present && info.value === undefined) {
             const branch = topVia.branch
@@ -38,11 +38,11 @@ export const rportEchoRule: PerCallRule = {
           continue
         }
         if (ev.kind !== "received" || ev.msg.type !== "response") continue
-        const branch = ev.msg.parsed.via.branch
+        const branch = ev.msg.getHeader("via")[0].branch
         if (!branch) continue
         const sent = sentRportByBranch.get(branch)
         if (!sent) continue
-        const respRport = readRport(ev.msg.parsed.via.params)
+        const respRport = readRport(ev.msg.getHeader("via")[0].params)
         if (!respRport.present) {
           violations.push({
             message:

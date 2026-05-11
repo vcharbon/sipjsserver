@@ -964,7 +964,7 @@ function executeSend(
         const src = state.resolvedSources.get(resolvedInResponseTo.id)
         if (src !== undefined) return { host: src.ip, port: src.port }
       }
-      const top = reqMsg.parsed.via
+      const top = reqMsg.getHeader("via")[0]
       if (top === undefined) return baseTgt
       const receivedRaw = top.params?.["received"]
       const rportRaw = top.params?.["rport"]
@@ -1037,7 +1037,7 @@ function executeSend(
 
     // Track To-tags used in sent responses (for forking scenarios with custom tags)
     if (msg.type === "response") {
-      const sentToTag = msg.parsed.to.tag
+      const sentToTag = msg.getHeader("to").tag
       if (sentToTag) {
         dialogState.localTags.add(sentToTag)
       }
@@ -1062,9 +1062,9 @@ function executeSend(
         if (hasRel && Number.isFinite(rseqNum)) {
           dialogState.pendingReliableProvisionals.push({
             rseq: rseqNum,
-            inviteCSeq: msg.parsed.cseq.seq,
+            inviteCSeq: msg.getHeader("cseq").seq,
             statusCode: step.statusCode,
-            branch: msg.parsed.via.branch ?? "",
+            branch: msg.getHeader("via")[0].branch ?? "",
           })
         }
       }
@@ -1086,10 +1086,10 @@ function executeSend(
     // Track the dialog URIs from the sent INVITE (UAC side).
     // RFC 3261 §12.1.2: remote URI = To, local URI = From of the initial request.
     if (msg.type === "request" && msg.method === "INVITE" && !dialogState.dialogRemoteUri) {
-      dialogState.dialogRemoteUri = msg.parsed.to.uri
+      dialogState.dialogRemoteUri = msg.getHeader("to").uri
     }
     if (msg.type === "request" && msg.method === "INVITE" && !dialogState.dialogLocalUri) {
-      dialogState.dialogLocalUri = msg.parsed.from.uri
+      dialogState.dialogLocalUri = msg.getHeader("from").uri
     }
 
     // Track sent requests for response correlation
@@ -1097,8 +1097,8 @@ function executeSend(
       dialogState.sentRequests.push({
         msg,
         method: msg.method,
-        cseqNumber: msg.parsed.cseq.seq,
-        viaBranch: msg.parsed.via.branch ?? "",
+        cseqNumber: msg.getHeader("cseq").seq,
+        viaBranch: msg.getHeader("via")[0].branch ?? "",
       })
     }
 
@@ -1209,7 +1209,7 @@ function executeExpect(
         // Regardless of whether the PRACK is "expected" by a step, RFC 3262 §3-4
         // reliability tracking still credits the ack — clear the pending entry.
         if (msg.type === "request" && msg.method === "PRACK") {
-          const rackResult = msg.lazy.rack()
+          const rackResult = msg.getHeader("rack")
           const rack = Result.isSuccess(rackResult) ? rackResult.success : undefined
           if (rack !== undefined) {
             const idx = dialogState.pendingReliableProvisionals.findIndex(
@@ -1312,8 +1312,8 @@ function executeExpect(
       matched.type === "response" &&
       matched.status >= 200 && matched.status < 300
     ) {
-      if (matched.parsed.cseq.method.toUpperCase() === "INVITE") {
-        state.offerAnswer.markConnected(matched.parsed.callId)
+      if (matched.getHeader("cseq").method.toUpperCase() === "INVITE") {
+        state.offerAnswer.markConnected(matched.getHeader("call-id"))
       }
     }
 
@@ -1326,7 +1326,7 @@ function executeExpect(
         refId: step.ref.id,
         msg: matched,
         method: matched.method,
-        cseqNumber: matched.parsed.cseq.seq,
+        cseqNumber: matched.getHeader("cseq").seq,
         finalResponseSent: false,
       })
     }
@@ -1334,7 +1334,7 @@ function executeExpect(
     // Clear any pending reliable provisional whose RAck matches an incoming PRACK.
     // RFC 3262 §7.2: PRACK's RAck is "<response-num> <cseq-num> <method>".
     if (matched.type === "request" && matched.method === "PRACK") {
-      const rackResult = matched.lazy.rack()
+      const rackResult = matched.getHeader("rack")
       const rack = Result.isSuccess(rackResult) ? rackResult.success : undefined
       if (rack !== undefined) {
         const idx = dialogState.pendingReliableProvisionals.findIndex(
@@ -1443,7 +1443,7 @@ function matchesExpect(step: ExpectStep, msg: SipMessage): boolean {
 // ---------------------------------------------------------------------------
 
 function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
-  const callIdHeader = msg.parsed.callId
+  const callIdHeader = msg.getHeader("call-id")
 
   // For received INVITE: adopt the incoming Call-ID as our dialog's Call-ID
   // This is critical for B-side agents who need to reply with the B2BUA's Call-ID
@@ -1452,28 +1452,29 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
     ds.callIdConfirmed = true
     // Capture INVITE Request-URI and Via branch for CANCEL validation (RFC 3261 §9.1)
     ds.receivedInviteUri = msg.uri
-    if (msg.parsed.via.branch) {
-      ds.receivedInviteBranch = msg.parsed.via.branch
+    const branch = msg.getHeader("via")[0].branch
+    if (branch) {
+      ds.receivedInviteBranch = branch
     }
   }
 
   // Track the dialog URIs from received INVITE (UAS side).
   // RFC 3261 §12.1.2: remote URI = From, local URI = To of the initial request.
   if (msg.type === "request" && msg.method === "INVITE" && !ds.dialogRemoteUri) {
-    ds.dialogRemoteUri = msg.parsed.from.uri
+    ds.dialogRemoteUri = msg.getHeader("from").uri
   }
   if (msg.type === "request" && msg.method === "INVITE" && !ds.dialogLocalUri) {
-    ds.dialogLocalUri = msg.parsed.to.uri
+    ds.dialogLocalUri = msg.getHeader("to").uri
   }
 
   if (msg.type === "response") {
-    const toTag = msg.parsed.to.tag
+    const toTag = msg.getHeader("to").tag
     // Only adopt remoteTag from responses to dialog-establishing requests
     // (RFC 3261 §12.1: INVITE establishes a dialog; REGISTER/OPTIONS/MESSAGE
     // do not). Without this guard the To-tag stamped by a registrar on the
     // 200 OK to REGISTER would leak into a subsequent out-of-dialog INVITE
     // sent by the same agent.
-    const cseqMethod = msg.parsed.cseq.method
+    const cseqMethod = msg.getHeader("cseq").method
     if (toTag && !ds.remoteTag && cseqMethod === "INVITE") {
       ds.remoteTag = toTag
     }
@@ -1481,7 +1482,7 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
     // For the A-side: responses come back with the A-leg Call-ID we sent
     // No need to change — we keep our own Call-ID
   } else {
-    const fromTag = msg.parsed.from.tag
+    const fromTag = msg.getHeader("from").tag
     // UAS side: only adopt remoteTag when receiving a dialog-establishing
     // INVITE. A prior out-of-dialog REGISTER/OPTIONS round-trip on the same
     // agent would otherwise have already populated `remoteTag` and the
@@ -1492,8 +1493,8 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
   }
 
   if (msg.type === "request") {
-    const cseqNum = msg.parsed.cseq.seq
-    const cseqMethod = msg.parsed.cseq.method
+    const cseqNum = msg.getHeader("cseq").seq
+    const cseqMethod = msg.getHeader("cseq").method
     if (ds.remoteCSeq === undefined || cseqNum > ds.remoteCSeq) {
       ds.remoteCSeq = cseqNum
     }
@@ -1509,8 +1510,8 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
     // Per-dialog CSeq tracking — skip CANCEL/ACK (they reuse INVITE CSeq)
     // and messages without a full tag pair (out-of-dialog).
     if (msg.method !== "CANCEL" && cseqMethod !== "ACK") {
-      const fromTag = msg.parsed.from.tag
-      const toTag = msg.parsed.to.tag
+      const fromTag = msg.getHeader("from").tag
+      const toTag = msg.getHeader("to").tag
       if (fromTag && toTag) {
         const key = `${callIdHeader}|${fromTag}|${toTag}`
         const prev = ds.remoteCSeqByDialog.get(key)
@@ -1537,8 +1538,8 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
   // captures both flows. Important for failover scenarios where a re-INVITE
   // 200 OK from a backup-promoted worker carries that worker's contact, and
   // the subsequent ACK MUST target that contact, not the original primary's.
-  const contactUri = msg.parsed.contact?.uri
-  const cseqForContact = msg.type === "response" ? msg.parsed.cseq.method : undefined
+  const contactUri = msg.getHeader("contact")?.uri
+  const cseqForContact = msg.type === "response" ? msg.getHeader("cseq").method : undefined
   const isDialogEstablishingRequest =
     msg.type === "request" && msg.method === "INVITE"
   const isInviteOrUpdate2xx =
@@ -1565,7 +1566,7 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
   // Gate on dialog-establishing methods so a Record-Route reflected on a
   // REGISTER/OPTIONS response can't seed an unrelated dialog's route set.
   if (ds.routeSet.length === 0) {
-    if (msg.type === "response" && msg.parsed.cseq.method === "INVITE") {
+    if (msg.type === "response" && msg.getHeader("cseq").method === "INVITE") {
       // UAC side: reverse received order so routeSet[0] is the UAC's first
       // hop downstream (the proxy that should be the top Route on outgoing
       // in-dialog requests).
