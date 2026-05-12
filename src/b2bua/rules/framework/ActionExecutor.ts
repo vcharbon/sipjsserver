@@ -453,7 +453,7 @@ function executeAction(
       executeTerminateCall(ctx, state)
       break
     case "begin-termination":
-      executeBeginTermination(ctx, state)
+      executeBeginTermination(action, ctx, state)
       break
     case "terminate-leg":
       executeTerminateLeg(action, state)
@@ -1838,6 +1838,7 @@ function executeTerminateCall(
  * correctly. Peering is cleared naturally as legs reach terminal state.
  */
 function executeBeginTermination(
+  action: Extract<RuleAction, { type: "begin-termination" }>,
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
@@ -1853,6 +1854,14 @@ function executeBeginTermination(
   ) {
     return
   }
+
+  // RFC 3326 Reason header — verbatim from the action when present.
+  // Stamped on every BYE this composite emits so upstream UAs can log
+  // the upstream cause that drove the teardown.
+  const extraByeHeaders: SipHeader[] | undefined =
+    action.reason !== undefined
+      ? [{ name: "Reason", value: action.reason }]
+      : undefined
 
   for (const leg of [state.call.aLeg, ...state.call.bLegs]) {
     // Skip legs already handled by the rule or already resolved
@@ -1870,7 +1879,10 @@ function executeBeginTermination(
         const target = legTarget(leg)
         const requestUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
         const { via, contact } = legStackIdentity(state.call, leg.legId, ctx.config)
-        const { request, dialog: newSip } = generateInDialogRequest("BYE", dialog.sip, { via, contact, requestUri })
+        const { request, dialog: newSip } = generateInDialogRequest("BYE", dialog.sip, {
+          via, contact, requestUri,
+          ...(extraByeHeaders !== undefined ? { extraHeaders: extraByeHeaders } : {}),
+        })
         state.call = updateDialog(state.call, leg.legId, dialogIdentityTag(leg.legId, dialog), (d) => ({
           ...d,
           sip: newSip,

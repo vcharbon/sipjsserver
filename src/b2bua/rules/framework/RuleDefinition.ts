@@ -583,8 +583,16 @@ export type RuleAction =
        * "terminating" phase. Framework (InvariantEnforcer) handles cleanup
        * only after all legs reach a terminal byeDisposition and the call
        * transitions to "terminated".
+       *
+       * `reason` (optional) — RFC 3326 Reason header value stamped on every
+       * BYE this composite emits. Pass it when the teardown carries a
+       * meaningful upstream cause (e.g. `SIP;cause=503;text="..."` after
+       * b's failure post-promote, or `SIP;cause=488;text="resync-failed"`
+       * after the resync re-INVITE was rejected). The value is forwarded
+       * verbatim — callers must format it per RFC 3326.
        */
       readonly type: "begin-termination"
+      readonly reason?: string
     }
   | {
       /**

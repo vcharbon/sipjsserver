@@ -41,7 +41,7 @@ import { definePolicyModule } from "../framework/PolicyModule.js"
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader, getHeaders, newTag } from "../../../sip/MessageHelpers.js"
 import { splitTopLevelCommas } from "../../../sip/parsers/custom/structured-headers.js"
-import { H, removeH, custom as customH } from "../framework/actions/factories.js"
+import { H, replaceH, removeH, custom as customH } from "../framework/actions/factories.js"
 import type { HeaderName, HeaderUpdate } from "../framework/actions/types.js"
 import { findByBTag } from "../../../call/CallModel.js"
 import { sdpMediaEquivalent } from "./_shared/sdpDiff.js"
@@ -49,6 +49,25 @@ import { sdpMediaEquivalent } from "./_shared/sdpDiff.js"
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 const STATE_KEY = "promote_18x_pem_to_200"
+
+/**
+ * RFC 3261 §13.3.1 / §20.5: 2xx responses to INVITE (and B2BUA-originated
+ * re-INVITEs) SHOULD declare which methods the UA accepts. Bob's 183 may
+ * not advertise these — we synthesize a 200 OK ourselves, so we own
+ * the Allow header on the wire toward alice. The set mirrors the methods
+ * the B2BUA actually relays end-to-end (cf. RelayRules.ts) so an alice
+ * stack inspecting Allow can trust what it sees.
+ */
+const B2BUA_ALLOW = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, PRACK, MESSAGE, NOTIFY"
+
+/**
+ * RFC 3261 §20.37: Supported lists the option-tags the UA understands.
+ * Mirrors the B2BUA's relayable feature set (timer per RFC 4028, replaces
+ * per RFC 3891). 100rel is intentionally OMITTED on the synthetic 200 OK —
+ * alice never saw a reliable provisional from us; advertising 100rel
+ * post-confirmation would let her inject a PRACK with no matching RSeq.
+ */
+const B2BUA_SUPPORTED_NO_100REL = "timer, replaces"
 
 /**
  * RFC 3262: a reliable 1xx carries `Require: 100rel` and a numeric `RSeq`.
@@ -132,6 +151,12 @@ const promote183PemRule = defineRule({
         [H.Require, removeH()],
         [H.RSeq, removeH()],
         [customH("p-early-media"), removeH()],
+        // RFC 3261 §13.3.1 / §20.5 / §20.37: stamp Allow + Supported on
+        // the synthetic 200 OK. `replace` (not `inherit`) — bob's 183
+        // values, if any, were tailored for the early-media exchange and
+        // shouldn't leak into a confirmed-call advertisement.
+        [H.Allow, replaceH(B2BUA_ALLOW)],
+        [H.Supported, replaceH(B2BUA_SUPPORTED_NO_100REL)],
       ])
 
       const actions: RuleAction[] = [
@@ -342,8 +367,17 @@ const confirmAfterPromoteRule = defineRule({
         // the resync-response filter can correlate the response.
         const aLegDialog = ctx.call.aLeg.dialogs[0]
         const nextCSeq = (aLegDialog?.sip.localCSeq ?? 0) + 1
+        // RFC 3261 §13.3.1 / §20.5 / §20.37: even though this is a
+        // re-INVITE within an established dialog, alice's stack may
+        // re-evaluate Allow/Supported on every offer. Stamp explicit
+        // values so we don't fall to a header-less request.
+        const reinviteHeaders = new Map<HeaderName, HeaderUpdate>([
+          [H.Allow, replaceH(B2BUA_ALLOW)],
+          [H.Supported, replaceH(B2BUA_SUPPORTED_NO_100REL)],
+        ])
         actions.push({ type: "send-reinvite", legId: "a",
-          bodyUpdate: { kind: "set", value: resp.body } })
+          bodyUpdate: { kind: "set", value: resp.body },
+          headerUpdates: reinviteHeaders })
         actions.push({ type: "set-early-promote", update: {
           resyncReinviteCSeq: nextCSeq,
         }})
@@ -408,17 +442,14 @@ const resyncReinviteResponseRule = defineRule({
       }
 
       // 3xx/4xx/5xx/6xx — alice and bob now disagree on SDP. BYE both.
+      // The Reason rides on every BYE begin-termination emits so both
+      // alice and bob can log the upstream resync failure.
       const reason = reasonHeader(resp.status, resp.reason)
       const actions: RuleAction[] = [
-        // Layer the diagnostic Reason on every BYE the framework emits as
-        // part of begin-termination. The default `relay-bye`-style begin
-        // path doesn't accept per-leg headers, so we apply update-headers
-        // generically: emit BYEs by destroying both legs explicitly to
-        // ensure the Reason header is attached.
         { type: "add-cdr-event", eventType: "reject", legId: "a",
           statusCode: resp.status, reason: `promote-pem-to-200:resync-failed:${reason}` },
         { type: "clear-early-promote" },
-        { type: "begin-termination" },
+        { type: "begin-termination", reason },
       ]
       return { actions, state: undefined }
     }),
@@ -580,8 +611,9 @@ const bFailsPostPromoteRule = defineRule({
         // Mark the failed b-leg so begin-termination skips re-BYEing it.
         { type: "terminate-leg", legId: bLeg.legId, byeDisposition: "rejected" as const },
         { type: "clear-early-promote" },
-        // begin-termination BYEs the (still-confirmed) a-leg.
-        { type: "begin-termination" },
+        // begin-termination BYEs the (still-confirmed) a-leg with the
+        // upstream cause — the BYE carries `Reason: SIP;cause=<status>;…`.
+        { type: "begin-termination", reason },
       ]
 
       // Suppress unused warnings on the helper if pendingBLegId is unused.

@@ -101,15 +101,20 @@ export const promotePemHappyNoResync = scenario("promote-pem-happy-no-resync", (
     },
   })
 
-  // Alice sees a 200 OK carrying bob's 183 SDP, with P-Early-Media stripped.
+  // Alice sees a 200 OK carrying bob's 183 SDP, with P-Early-Media stripped
+  // and explicit Allow + Supported (RFC 3261 §13.3.1 / §20.5 / §20.37).
   aliceInviteTxn.expect(200, {
     predicate: (msg) => {
       if (msg.type !== "response" || msg.status !== 200) return false
       if (!hasBody(msg)) return false
-      // 183 body forwarded as-is.
       if (!bytesEqual(msg.body, bobSdp)) return false
-      // P-Early-Media must not leak into the 2xx.
       if (headerValue(msg, "p-early-media") !== undefined) return false
+      const allow = headerValue(msg, "allow") ?? ""
+      if (!/\bINVITE\b/i.test(allow) || !/\bBYE\b/i.test(allow)) return false
+      const supported = headerValue(msg, "supported") ?? ""
+      // 100rel intentionally absent on the synthetic 200 OK — alice
+      // never saw a reliable provisional from us.
+      if (/\b100rel\b/i.test(supported)) return false
       return true
     },
   })
@@ -175,16 +180,17 @@ export const promotePemResyncSdpChanged = scenario(
     bobInviteTxn.reply(200, { body: finalSdp, skipValidation: ["offerAnswer"] })
     bobDialog.expect("ACK")
 
-    // Alice receives the resync re-INVITE carrying bob's new SDP.
-    // Predicate matches by port substring rather than byte-exact equality —
-    // the wire roundtrip is byte-preserving but Content-Length re-fitting
-    // and the framework's local body buffer can produce a representation
-    // that differs in trailing bytes.
+    // Alice receives the resync re-INVITE carrying bob's new SDP, plus
+    // Allow + Supported (RFC 3261 §13.3.1 / §20.5 / §20.37).
     const aliceResyncTxn = aliceDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
       predicate: (msg) => {
         if (msg.type !== "request") return false
-        return new TextDecoder().decode(msg.body).includes("m=audio 30000")
+        if (!new TextDecoder().decode(msg.body).includes("m=audio 30000")) return false
+        const allow = headerValue(msg, "allow") ?? ""
+        if (!/\bINVITE\b/i.test(allow)) return false
+        const supported = headerValue(msg, "supported") ?? ""
+        return /\btimer\b/i.test(supported) || supported.length > 0
       },
     })
     aliceResyncTxn.reply(200, {
@@ -244,14 +250,19 @@ export const promotePemBFailsPostPromote = scenario(
     aliceInviteTxn.expect(200)
     aliceDialog.ack()
 
-    // Bob fails — alice already saw 200 OK so the failure cannot be relayed
-    // as a routing failure. begin-termination BYEs the still-confirmed
-    // a-leg; the diagnostic Reason is captured in the CDR (the BYE itself
-    // is emitted by the generic teardown path which doesn't accept per-leg
-    // headers — wiring a Reason onto the wire is a follow-up).
+    // Bob fails — alice already saw 200 OK so the failure cannot be
+    // relayed as a routing failure. begin-termination BYEs the
+    // still-confirmed a-leg with `Reason: SIP;cause=503;…` so alice can
+    // log the upstream cause.
     bobInviteTxn.reply(503)
 
-    const aliceByeTxn = aliceDialog.expect("BYE")
+    const aliceByeTxn = aliceDialog.expect("BYE", {
+      predicate: (msg) => {
+        if (msg.type !== "request") return false
+        const reason = headerValue(msg, "reason") ?? ""
+        return /\bcause\s*=\s*503\b/i.test(reason)
+      },
+    })
     aliceByeTxn.reply(200)
   },
 )
@@ -295,10 +306,15 @@ export const promotePemResyncFailedByA = scenario(
     })
     aliceResyncTxn.reply(488, { reason: "Not Acceptable Here" })
 
-    // begin-termination BYEs both legs.
-    const aliceByeTxn = aliceDialog.expect("BYE")
+    // begin-termination BYEs both legs with `Reason: SIP;cause=488;…`.
+    const reasonHasCause488 = (msg: SipMessage): boolean => {
+      if (msg.type !== "request") return false
+      const reason = headerValue(msg, "reason") ?? ""
+      return /\bcause\s*=\s*488\b/i.test(reason)
+    }
+    const aliceByeTxn = aliceDialog.expect("BYE", { predicate: reasonHasCause488 })
     aliceByeTxn.reply(200)
-    const bobByeTxn = bobDialog.expect("BYE")
+    const bobByeTxn = bobDialog.expect("BYE", { predicate: reasonHasCause488 })
     bobByeTxn.reply(200)
   },
 )
@@ -391,12 +407,22 @@ export const promotePemNoPolicyControl = scenario(
 
 // ── Scenario 5: forking — promoting fork ≠ winning fork ──────────────────
 //
-// Bob's upstream forks. Dialog-1 (toTag t1) sends 183 + SDP_v1 + PEM →
-// promotion locks alice's identity to t1's view of the call. Dialog-2
-// (toTag t2) then sends the winning 200 OK with SDP_v2. The B2BUA must:
-//   - ACK t2 locally (RFC 3261 §13.2.2.4), with t2 in dialog identity,
-//   - re-INVITE alice with SDP_v2,
-//   - send subsequent in-dialog from alice (here a BYE) on the t2 dialog.
+// Bob's upstream forks. The 183 + PEM is delivered with To-tag t1 (which
+// the B2BUA uses to seed alice's a-facing identity). The eventual 200 OK
+// is delivered with a DIFFERENT To-tag (t2) — modelling an upstream
+// forking proxy that picked another downstream branch as the winner.
+// The B2BUA's confirm-after-promote rule must:
+//   - re-seed the (bLegId, t2) → aFacingTag mapping using the same
+//     a-facing tag it pinned at promote time (so alice's dialog identity
+//     stays stable across the fork swap),
+//   - confirm dialog t2 (NOT t1) and emit a local ACK toward bob with t2
+//     in the To header,
+//   - re-INVITE alice with the SDP from the t2 200 OK,
+//   - route subsequent in-dialog requests from alice via dialog t2.
+//
+// The harness's bob agent only tracks one local tag, so we override the
+// To header on the 18x and the 200 OK to inject explicit fork tags and
+// skip the tag-consistency check on those steps.
 
 export const promotePemForkingResync = scenario(
   "promote-pem-forking-resync",
@@ -408,6 +434,9 @@ export const promotePemForkingResync = scenario(
     const earlySdp = sdpAnswer(aliceSdp)
     const finalSdp = sdpAnswer(aliceSdp, { port: 30000 })
 
+    const FORK_T1 = "fork-tag-promoting-1"
+    const FORK_T2 = "fork-tag-winning-2"
+
     const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite(
       "sip:+1234@127.0.0.1:15060",
       { body: aliceSdp, headers: { "X-Api-Call": promoteInstruction } },
@@ -416,10 +445,12 @@ export const promotePemForkingResync = scenario(
 
     const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite()
 
-    // Fork dialog-1: 183 + PEM with SDP_v1. Bob's framework picks the
-    // To-tag t1 implicitly via the response's normal path.
+    // 183 + PEM with To-tag = FORK_T1.
     bobInviteTxn.reply(183, {
-      overrides: { headers: { "P-Early-Media": PEM_HEADER }, body: earlySdp },
+      overrides: { headers: { "P-Early-Media": PEM_HEADER } },
+      body: earlySdp,
+      build: (ctx) => ({ to: `${ctx.last.to};tag=${FORK_T1}` }),
+      skipValidation: ["tagConsistency"],
     })
 
     aliceInviteTxn.expect(200, {
@@ -428,12 +459,23 @@ export const promotePemForkingResync = scenario(
     })
     aliceDialog.ack()
 
-    // The "winning" fork in this fake-stack model is the same INVITE
-    // server transaction sending its eventual 200 OK with a different SDP
-    // — the B2BUA's confirm-after-promote rule treats this as the bridged
-    // dialog and emits a re-INVITE to alice with the new SDP.
-    bobInviteTxn.reply(200, { body: finalSdp, skipValidation: ["offerAnswer"] })
-    bobDialog.expect("ACK")
+    // Winning fork: 200 OK with To-tag = FORK_T2 ≠ FORK_T1, different SDP.
+    bobInviteTxn.reply(200, {
+      body: finalSdp,
+      build: (ctx) => ({ to: `${ctx.last.to};tag=${FORK_T2}` }),
+      skipValidation: ["offerAnswer", "tagConsistency"],
+    })
+
+    // The B2BUA-emitted local ACK toward bob must carry the WINNING fork's
+    // To-tag — proves confirm-after-promote re-seeded onto t2 rather than
+    // sticking with t1.
+    bobDialog.expect("ACK", {
+      skipValidation: ["tagConsistency"],
+      predicate: (msg) => {
+        if (msg.type !== "request") return false
+        return msg.getHeader("to").tag === FORK_T2
+      },
+    })
 
     const aliceResyncTxn = aliceDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
@@ -447,9 +489,15 @@ export const promotePemForkingResync = scenario(
     })
     aliceDialog.expect("ACK")
 
-    // Subsequent in-dialog from alice routes on the bridged dialog.
+    // Alice's BYE routes via the WINNING dialog — bob sees To-tag = FORK_T2.
     const aliceByeTxn = aliceDialog.bye()
-    const bobByeTxn = bobDialog.expect("BYE")
+    const bobByeTxn = bobDialog.expect("BYE", {
+      skipValidation: ["tagConsistency"],
+      predicate: (msg) => {
+        if (msg.type !== "request") return false
+        return msg.getHeader("to").tag === FORK_T2
+      },
+    })
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
