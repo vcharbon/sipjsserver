@@ -60,11 +60,19 @@ export const NewCallRouteResponse = Schema.Struct({
   no_answer_timeout_sec: Schema.optional(Schema.Int),
   call_limiter: Schema.optional(Schema.Array(CallLimiterEntry)),
   callback_context: Schema.optional(Schema.String),
-  /** When true, transform first 18x to bare 180, suppress subsequent, force tag consistency. */
+  /**
+   * Early-media handling strategy. Mutually-exclusive variants:
+   *   - `true` / `"drop-sdp"` — first 18x becomes a bare 180 (no SDP).
+   *   - `"keep-sdp"`         — first 18x preserves SDP; tags/forks still masked.
+   *   - `"fake-prack"`       — like `drop-sdp` plus B2BUA-originated PRACK + cached SDP injected at 200 OK.
+   *   - `"promote-pem-to-200"` — first 183 carrying SDP + P-Early-Media is
+   *     synthesized into a 200 OK toward Alice. Used for callers that cannot
+   *     send DTMF in early-dialog state.
+   */
   relay_first_18x_to_180: Schema.optional(
     Schema.Union([
       Schema.Boolean,
-      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack", "promote-pem-to-200"]),
     ]),
   ),
   /** Canonical feature activations. Adapter-synthesized; always present on success. */
@@ -158,7 +166,7 @@ export const CallFailureFailoverResponse = Schema.Struct({
   relay_first_18x_to_180: Schema.optional(
     Schema.Union([
       Schema.Boolean,
-      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack", "promote-pem-to-200"]),
     ]),
   ),
   /** Canonical feature activations active on the new (failover) leg. */
@@ -213,7 +221,7 @@ export const CallReferAllowResponse = Schema.Struct({
   relay_first_18x_to_180: Schema.optional(
     Schema.Union([
       Schema.Boolean,
-      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack", "promote-pem-to-200"]),
     ]),
   ),
   /** Canonical feature activations active on the C-leg. */

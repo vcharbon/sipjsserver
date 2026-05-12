@@ -43,6 +43,7 @@ import { createRuleRegistry, type RuleRegistry } from "./rules/framework/RuleReg
 import { executeRules } from "./rules/framework/RuleExecutor.js"
 import { defaultRules } from "./rules/defaults/index.js"
 import { relayFirst18xTo180 } from "./rules/custom/relayFirst18xTo180.js"
+import { promote18xPemTo200 } from "./rules/custom/promote18xPemTo200.js"
 
 // ---------------------------------------------------------------------------
 // Handler registry (single source of truth)
@@ -51,7 +52,7 @@ import { relayFirst18xTo180 } from "./rules/custom/relayFirst18xTo180.js"
 /** Canonical production rule registry. Exported so the e2e harness (coverage
  *  tracking) and the rule-kill mutation script can build wrapped variants.
  *  Production code paths MUST use {@link handlers} — not this directly. */
-export const ruleRegistry: RuleRegistry = createRuleRegistry(defaultRules, [relayFirst18xTo180])
+export const ruleRegistry: RuleRegistry = createRuleRegistry(defaultRules, [relayFirst18xTo180, promote18xPemTo200])
 
 /**
  * Default-deny fallback — runs when no rule matches.

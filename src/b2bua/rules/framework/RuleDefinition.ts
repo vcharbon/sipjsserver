@@ -659,6 +659,17 @@ export type RuleAction =
   | { readonly type: "update-transfer"; readonly update: Partial<TransferState> }
   | { readonly type: "clear-transfer" }
 
+  // ── Early-promote (promote-pem-to-200) state ──
+  //
+  // set-early-promote initializes (when call.earlyPromote is absent) or
+  // merges onto Call.earlyPromote. The promote-pem-to-200 policy module
+  // writes the SDP it sent to alice, the resync re-INVITE CSeq, and flips
+  // windowOpen as alice's gate transitions.
+  // clear-early-promote nulls Call.earlyPromote outright (final cleanup
+  // once normal in-dialog flow resumes).
+  | { readonly type: "set-early-promote"; readonly update: Partial<import("../../../call/CallModel.js").EarlyPromoteState> }
+  | { readonly type: "clear-early-promote" }
+
   // ── Fire /call/refer; the result re-enters withCall as an internal-event ──
   | { readonly type: "refer-async-http"; readonly request: CallReferRequestType }
 

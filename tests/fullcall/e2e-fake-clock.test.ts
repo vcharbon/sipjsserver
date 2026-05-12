@@ -43,6 +43,16 @@ import {
   fakePrackDelayedOfferFallback,
   fakePrackNoPolicyControl,
 } from "../scenarios/fake-prack.js"
+import {
+  promotePemHappyNoResync,
+  promotePemResyncSdpChanged,
+  promotePemBFailsPostPromote,
+  promotePemResyncFailedByA,
+  promotePemABYEDuringWindow,
+  promotePemNoPolicyControl,
+  promotePemForkingResync,
+  promotePemInDialogRejection,
+} from "../scenarios/promote-pem-to-200.js"
 import { unknownDialogReject } from "../scenarios/indialog-unknown-reject.js"
 import { indialogOptions } from "../scenarios/indialog-options.js"
 import { indialogInfo } from "../scenarios/indialog-info.js"
@@ -218,6 +228,30 @@ for (const sut of ALL_SUTS) {
     }
     if (fakePrackNoPolicyControl.appliesTo(sut)) {
       it.effect("fake-prack: no policy control (default end-to-end PRACK)", () => run(fakePrackNoPolicyControl.toScenario()), { timeout: 30_000 })
+    }
+    if (promotePemHappyNoResync.appliesTo(sut)) {
+      it.effect("promote-pem-to-200: happy (SDP unchanged → no resync)", () => run(promotePemHappyNoResync.toScenario()), { timeout: 30_000 })
+    }
+    if (promotePemResyncSdpChanged.appliesTo(sut)) {
+      it.effect("promote-pem-to-200: resync (SDP changed → re-INVITE A; in-dialog resumes)", () => run(promotePemResyncSdpChanged.toScenario()), { timeout: 30_000 })
+    }
+    if (promotePemBFailsPostPromote.appliesTo(sut)) {
+      it.effect("promote-pem-to-200: B fails post-promote (BYE A with Reason)", () => run(promotePemBFailsPostPromote.toScenario()), { timeout: 30_000 })
+    }
+    if (promotePemResyncFailedByA.appliesTo(sut)) {
+      it.effect("promote-pem-to-200: A 488s resync re-INVITE (BYE both legs)", () => run(promotePemResyncFailedByA.toScenario()), { timeout: 30_000 })
+    }
+    if (promotePemABYEDuringWindow.appliesTo(sut)) {
+      it.effect("promote-pem-to-200: A BYE during window (CANCEL B)", () => run(promotePemABYEDuringWindow.toScenario()), { timeout: 30_000 })
+    }
+    if (promotePemNoPolicyControl.appliesTo(sut)) {
+      it.effect("promote-pem-to-200: no policy control (default 18x relay)", () => run(promotePemNoPolicyControl.toScenario()), { timeout: 30_000 })
+    }
+    if (promotePemForkingResync.appliesTo(sut)) {
+      it.effect("promote-pem-to-200: forking — resync to winning fork", () => run(promotePemForkingResync.toScenario()), { timeout: 30_000 })
+    }
+    if (promotePemInDialogRejection.appliesTo(sut)) {
+      it.effect("promote-pem-to-200: in-dialog rejection (491/488) during window", () => run(promotePemInDialogRejection.toScenario()), { timeout: 30_000 })
     }
     if (unknownDialogReject.appliesTo(sut)) {
       it.effect("in-dialog unknown dialog → 481 reject", () => run(unknownDialogReject.toScenario()), { timeout: 30_000 })

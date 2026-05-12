@@ -14,7 +14,7 @@ import { applyBodyUpdate, applyHeaderUpdates } from "./actions/apply.js"
 import { hydrateRequest } from "../../../sip/parsers/extract-fields.js"
 import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
-import type { TimerEntry, Leg, Dialog, TransferState, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
+import type { TimerEntry, Leg, Dialog, TransferState, EarlyPromoteState, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
 import {
   type Call,
   addCdrEvent,
@@ -481,6 +481,12 @@ function executeAction(
       break
     case "clear-transfer":
       state.call = { ...state.call, transfer: null }
+      break
+    case "set-early-promote":
+      executeSetEarlyPromote(action, state)
+      break
+    case "clear-early-promote":
+      state.call = { ...state.call, earlyPromote: null }
       break
     case "refer-async-http":
       executeReferAsyncHttp(action, ctx, state)
@@ -2072,6 +2078,26 @@ function executeUpdateTransfer(
     ? (update as TransferState)
     : { ...existing, ...update }) satisfies TransferState
   state.call = { ...state.call, transfer: merged }
+}
+
+// ── set-early-promote ─────────────────────────────────────────────────────
+
+/**
+ * Merge a Partial<EarlyPromoteState> onto `call.earlyPromote`, or seed it
+ * when absent. When seeding from empty the caller must include every
+ * required field (`promotedSdp`, `windowOpen`); subsequent updates
+ * typically just flip `windowOpen` or stash/clear `resyncReinviteCSeq`.
+ */
+function executeSetEarlyPromote(
+  action: Extract<RuleAction, { type: "set-early-promote" }>,
+  state: ExecutionState,
+): void {
+  const { update } = action
+  const existing = state.call.earlyPromote ?? null
+  const merged = (existing === null
+    ? (update as EarlyPromoteState)
+    : { ...existing, ...update }) satisfies EarlyPromoteState
+  state.call = { ...state.call, earlyPromote: merged }
 }
 
 // ── merge / split (peering primitives) ────────────────────────────────────

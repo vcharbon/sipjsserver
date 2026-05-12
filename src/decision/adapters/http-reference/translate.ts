@@ -36,11 +36,17 @@ import type {
  * want leg-specific overrides must embed the values in their future
  * richer response shape — the canonical field exists for that purpose.
  */
-type RelayFirst18xWire = boolean | "drop-sdp" | "keep-sdp" | "fake-prack" | undefined
+type RelayFirst18xWire =
+  | boolean
+  | "drop-sdp"
+  | "keep-sdp"
+  | "fake-prack"
+  | "promote-pem-to-200"
+  | undefined
 
 function relayFirst18xStrategy(
   wire: RelayFirst18xWire,
-): "drop-sdp" | "keep-sdp" | "fake-prack" | undefined {
+): "drop-sdp" | "keep-sdp" | "fake-prack" | "promote-pem-to-200" | undefined {
   if (typeof wire === "string") return wire
   if (wire === true) return "drop-sdp"
   return undefined

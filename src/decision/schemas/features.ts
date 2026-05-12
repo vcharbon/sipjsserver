@@ -59,8 +59,15 @@ export const RelayFirst18xTo180Feature = Schema.Struct({
    *   originates PRACK locally toward Bob on every reliable 18x, caches
    *   Bob's SDP per b-leg dialog, locally answers any UPDATE Bob sends,
    *   and substitutes the cached SDP into the 200 OK relayed to Alice.
+   * `promote-pem-to-200` — the first 183 carrying SDP and a P-Early-Media
+   *   header is promoted into a synthetic 200 OK toward Alice. Used so that
+   *   constrained UACs (which only emit DTMF after their INVITE is
+   *   confirmed) can interact with Bob's already-running early-media leg.
+   *   When Bob finally answers, SDP is diff'd against what Alice received;
+   *   on mismatch a B2BUA-originated re-INVITE realigns Alice. Mutually
+   *   exclusive with the other strategies (single Schema variant).
    */
-  strategy: Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+  strategy: Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack", "promote-pem-to-200"]),
 })
 export type RelayFirst18xTo180Feature = typeof RelayFirst18xTo180Feature.Type
 

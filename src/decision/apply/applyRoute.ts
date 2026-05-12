@@ -106,12 +106,17 @@ export function applyRoute(
     // fake-prack with no Alice SDP (delayed offer): strip 100rel. The policy
     //   module self-disables in this case; falling back to standard relay
     //   without 100rel avoids us silently keeping a half-active state.
+    //
+    // promote-pem-to-200 with Alice SDP: keep 100rel — Bob may flag the
+    //   183+PEM as reliable, and the policy module originates PRACK locally
+    //   the same way fake-prack does.
     const strategy = routing.features.relayFirst18xTo180?.strategy
     if (strategy !== undefined) {
       const ct = getHeader(req.headers, "content-type") ?? ""
       const aliceHasSdp =
         req.body.byteLength > 0 && ct.toLowerCase().includes("application/sdp")
-      const keep100Rel = strategy === "fake-prack" && aliceHasSdp
+      const keep100Rel =
+        (strategy === "fake-prack" || strategy === "promote-pem-to-200") && aliceHasSdp
       if (!keep100Rel) {
         const supported = getHeader(req.headers, "supported")
         if (supported) {

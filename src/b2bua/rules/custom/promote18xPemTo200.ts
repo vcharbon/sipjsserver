@@ -1,0 +1,610 @@
+/**
+ * promote18xPemTo200 — PolicyModule for the `promote-pem-to-200` strategy.
+ *
+ * When activated by the HTTP routing response
+ * (`relay_first_18x_to_180: "promote-pem-to-200"`), this policy promotes
+ * the first `183 Session Progress + SDP + P-Early-Media` from any b-leg
+ * fork into a synthetic `200 OK INVITE` toward Alice. Used for callers
+ * (typically constrained handsets) that only emit DTMF after their INVITE
+ * is confirmed.
+ *
+ * Behavioural envelope (see docs/plan/18x-pem-to-200ok-glistening-biscuit.md):
+ *
+ *   1. First matching 183 — convert to 200 OK on the a-leg, mark a-leg
+ *      confirmed, locally PRACK b on reliable provisional, set
+ *      `call.earlyPromote = { promotedSdp, windowOpen: true }`.
+ *   2. Subsequent 18x from any b-leg fork — drop on the a-side; PRACK b
+ *      if reliable.
+ *   3. A's ACK to our promoted 200 OK — absorb (b is still in early
+ *      dialog; relaying the ACK would land on a phantom 2xx).
+ *   4. A's in-dialog requests during the window — re-INVITE/UPDATE → 491,
+ *      INFO/MESSAGE/NOTIFY/REFER → 488. BYE flows through the default
+ *      handler which CANCELs the early b-leg.
+ *   5. B's eventual 200 OK — confirm the b-leg, merge, suppress the
+ *      otherwise-default relay-to-peer (alice already saw 200 OK), and
+ *      diff b's SDP against `promotedSdp`. Equivalent → window closes
+ *      immediately. Different → emit a B2BUA-originated re-INVITE on the
+ *      a-leg with b's SDP and stash its CSeq in `resyncReinviteCSeq`.
+ *   6. B's failure post-promote — A is already confirmed, so a 4xx/5xx/6xx
+ *      from B cannot be relayed back as a routing failure. Send BYE to A
+ *      with `Reason: SIP;cause=<status>;text="<phrase>"` and tear down.
+ *   7. The resync re-INVITE response on the a-leg — 2xx → ACK A and clear
+ *      the window; 4xx/5xx/6xx → BYE both legs with a diagnostic Reason.
+ *
+ * Mutually exclusive with the other `relay_first_18x_to_180` strategies
+ * (single Schema variant).
+ */
+
+import { Effect, Schema } from "effect"
+import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
+import { definePolicyModule } from "../framework/PolicyModule.js"
+import type { SipResponse } from "../../../sip/types.js"
+import { getHeader, getHeaders, newTag } from "../../../sip/MessageHelpers.js"
+import { splitTopLevelCommas } from "../../../sip/parsers/custom/structured-headers.js"
+import { H, removeH, custom as customH } from "../framework/actions/factories.js"
+import type { HeaderName, HeaderUpdate } from "../framework/actions/types.js"
+import { findByBTag } from "../../../call/CallModel.js"
+import { sdpMediaEquivalent } from "./_shared/sdpDiff.js"
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+const STATE_KEY = "promote_18x_pem_to_200"
+
+/**
+ * RFC 3262: a reliable 1xx carries `Require: 100rel` and a numeric `RSeq`.
+ * Mirrors the helper in relayFirst18xTo180.ts — copy-pasted to keep that
+ * module self-contained; the helper is small and the duplication is intentional.
+ */
+function reliableRseq(resp: SipResponse): number | undefined {
+  const require = getHeaders(resp.headers, "require")
+  const has100rel = require.some((v) =>
+    splitTopLevelCommas(v).some((t) => t.toLowerCase() === "100rel"),
+  )
+  if (!has100rel) return undefined
+  const rseq = getHeader(resp.headers, "rseq")
+  if (rseq === undefined) return undefined
+  const n = parseInt(rseq.trim(), 10)
+  return Number.isFinite(n) ? n : undefined
+}
+
+/** True iff the response carries a P-Early-Media header (RFC 5009). */
+function hasPEarlyMedia(resp: SipResponse): boolean {
+  return getHeader(resp.headers, "p-early-media") !== undefined
+}
+
+/** Build a Reason header value from a SIP status (RFC 3326). */
+function reasonHeader(status: number, phrase: string | undefined): string {
+  const text = (phrase ?? "").replace(/"/g, "")
+  return `SIP ;cause=${status};text="${text || "Unspecified"}"`
+}
+
+/** Locate the b-leg id of the still-early b-leg the promotion was bound to. */
+function pendingBLegId(call: { readonly bLegs: ReadonlyArray<{ readonly legId: string; readonly state: string }> }): string | undefined {
+  for (const b of call.bLegs) {
+    if (b.state !== "terminated") return b.legId
+  }
+  return undefined
+}
+
+// ── Rule 1: promote-183-pem ──────────────────────────────────────────────
+//
+// Match: 183 + SDP + P-Early-Media from b-leg, before any earlier promotion.
+// Specificity (status:183 + filter) is the highest among any rule that could
+// claim a 1xx INVITE response, so this wins by ranking — no `overrides`.
+
+const promote183PemRule = defineRule({
+  id: "promote-183-pem",
+  name: "Promote 183+SDP+PEM to 200 OK on a-leg",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    status: 183,
+    direction: "from-b",
+    filter: (ctx) => {
+      const resp = ctx.event.message
+      if (resp.body.byteLength === 0) return false
+      if (!hasPEarlyMedia(resp)) return false
+      // Once promoted, subsequent 183s fall through to suppress-post-promote-18x.
+      return ctx.call.earlyPromote == null
+    },
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) =>
+    Effect.sync(() => {
+      const resp = ctx.event.message
+      const bTag = resp.getHeader("to").tag
+      const rseq = reliableRseq(resp)
+      const inviteCSeq = resp.getHeader("cseq").seq
+
+      // Pre-generate the a-facing tag and seed tagMap so the relayed 200 OK
+      // and any later in-dialog routing pin to one stable identity even if
+      // bob's upstream forks subsequently.
+      const aFacingTag = newTag()
+
+      const headerUpdates = new Map<HeaderName, HeaderUpdate>([
+        [H.Require, removeH()],
+        [H.RSeq, removeH()],
+        [customH("p-early-media"), removeH()],
+      ])
+
+      const actions: RuleAction[] = [
+        { type: "add-tag-mapping", aTag: aFacingTag, bLegId: ctx.sourceLeg.legId, bTag },
+        // Establish the a-leg dialog so alice's ACK + in-dialog flow sees a
+        // confirmed UAS dialog. Disposition stays at the leg's default —
+        // we are NOT bridged yet (b is still in early state) and must not
+        // claim "bridged" until the 200 OK from b arrives.
+        { type: "update-leg-state", legId: "a", state: "confirmed" },
+        { type: "stamp-dialog-to-tag", legId: "a", toTag: aFacingTag },
+        // 183 → 200 OK on the wire toward alice. SDP body passes through
+        // the existing relay path; only header manipulations are applied.
+        { type: "relay-to-peer", transform: {
+          status: 200,
+          reason: "OK",
+          headerUpdates,
+        }},
+        // Stash the SDP we just sent to alice so b's eventual 200 OK can
+        // be diffed against it.
+        { type: "set-early-promote", update: {
+          promotedSdp: resp.body,
+          windowOpen: true,
+        }},
+        { type: "add-cdr-event", eventType: "provisional",
+          legId: ctx.sourceLeg.legId, statusCode: 200,
+          reason: "promote-pem-to-200" },
+      ]
+
+      // Reliable 18x → B2BUA must PRACK b locally (RFC 3262 §3-4); alice
+      // never sees the reliable provisional and will never PRACK herself.
+      if (rseq !== undefined) {
+        actions.push({ type: "send-prack-to-leg", legId: ctx.sourceLeg.legId,
+          rseq, inviteCSeq, bTag })
+      }
+
+      return { actions, state: undefined }
+    }),
+})
+
+// ── Rule 2: suppress-post-promote-18x ────────────────────────────────────
+//
+// Once promoted, every subsequent 18x from b (any fork, any status) must
+// stay on the b-side. The default `relay-provisional` would otherwise
+// forward another 18x to alice — confusing because alice already saw 200 OK.
+//
+// Specificity is statusClass:1xx + filter (=5) which is one above
+// relay-provisional (no filter, =4) but below promote-183-pem (status:183 +
+// filter, =6). The `overrides` declaration on `suppress-18x` is needed so
+// the registry validator skips the equal-specificity column overlap with
+// the relayFirst18xTo180 module's `suppress-18x` rule (mutually exclusive
+// at the policy-guard level, but the validator works column-only).
+
+const suppressPostPromote18xRule = defineRule({
+  id: "suppress-post-promote-18x",
+  name: "Suppress 18x from b after promotion",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  overrides: "suppress-18x",
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "1xx",
+    direction: "from-b",
+    filter: (ctx) => ctx.call.earlyPromote != null,
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) =>
+    Effect.sync(() => {
+      const resp = ctx.event.message
+      const bTag = resp.getHeader("to").tag
+      const rseq = reliableRseq(resp)
+      const inviteCSeq = resp.getHeader("cseq").seq
+
+      const actions: RuleAction[] = [
+        { type: "add-cdr-event", eventType: "provisional",
+          legId: ctx.sourceLeg.legId, statusCode: resp.status,
+          reason: "promote-pem-to-200:suppressed" },
+      ]
+      if (rseq !== undefined) {
+        actions.push({ type: "send-prack-to-leg", legId: ctx.sourceLeg.legId,
+          rseq, inviteCSeq, bTag })
+      }
+      return { actions, state: undefined }
+    }),
+})
+
+// ── Rule 3: confirm-after-promote ────────────────────────────────────────
+//
+// On the eventual 200 OK from a b-leg fork, replicate the structural pieces
+// of the default `confirm-dialog` rule (b-leg confirmation, merge, destroy
+// other forks, schedule keepalive/duration timers, CDR) — but DO NOT relay
+// 200 OK to alice (already sent during promotion) and instead diff b's SDP
+// against `promotedSdp`. On mismatch, emit a B2BUA-originated re-INVITE on
+// the a-leg.
+//
+// Specificity adds `legState:[trying,early]` so the registry validator does
+// not flag a same-specificity overlap with relayFirst18xTo180's
+// `force-tag-consistency` rule (mutually exclusive at the policy-guard
+// level).
+
+const confirmAfterPromoteRule = defineRule({
+  id: "confirm-after-promote",
+  name: "Confirm b after promote (no relay; SDP diff; maybe re-INVITE A)",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  // Override confirm-dialog so it doesn't run alongside us — we re-emit the
+  // pieces we still want and intentionally skip relay-to-peer.
+  overrides: "confirm-dialog",
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: "2xx",
+    legState: ["trying", "early"],
+    // Excluding `cancelling` keeps cancel-200-crossing as the strict
+    // winner when alice's BYE arrived before b's 200 OK (the b-leg
+    // disposition flips to `cancelling` then). Excluding `rejected`
+    // is equally important — by the time we see a 2xx the leg cannot
+    // be `rejected`, but the column narrows specificity above the
+    // default confirm-dialog and ahead of cancel-200-crossing.
+    legDisposition: ["pending", "bridged"],
+    direction: "from-b",
+    // `transferPhase: null` carves out the REFER lifecycle (c-ringing /
+    // c-realigning / a-realigning) — the dedicated transfer rules own
+    // 2xx INVITE responses during those phases.
+    transferPhase: null,
+    filter: (ctx) => ctx.call.earlyPromote != null,
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) =>
+    Effect.sync(() => {
+      const resp = ctx.event.message
+      const bLeg = ctx.sourceLeg
+      const bTag = resp.getHeader("to").tag
+      const promotedSdp = ctx.call.earlyPromote!.promotedSdp
+
+      // Reuse the a-facing tag we pinned at promotion time. The mapping was
+      // pre-seeded in promote-183-pem; on the typical case (winning fork
+      // sends 200 OK from the same dialog as the promoting 183) the bTag
+      // matches the seeded mapping. On forking (different bTag wins),
+      // `findByBTag` returns undefined for the winning bTag — re-seed under
+      // the winning bTag using the SAME aTag so alice's identity stays put.
+      const existingMapping = findByBTag(ctx.call, bLeg.legId, bTag)
+      const seededMapping = ctx.call.tagMap.find((m) => m.bLegId === bLeg.legId)
+      const aFacingTag = existingMapping?.aTag ?? seededMapping?.aTag ?? newTag()
+
+      const actions: RuleAction[] = []
+
+      // Confirm b-leg dialog — adopt §12 dialog from the 200 OK + flip
+      // leg.state to confirmed/bridged.
+      actions.push({ type: "update-leg-state", legId: bLeg.legId,
+        state: "confirmed", disposition: "bridged" })
+      actions.push({ type: "confirm-dialog", legId: bLeg.legId })
+
+      // Pin the b→a tag mapping (idempotent on duplicate seed).
+      if (existingMapping === undefined) {
+        actions.push({ type: "add-tag-mapping", aTag: aFacingTag,
+          bLegId: bLeg.legId, bTag })
+      }
+
+      // Generate ACK to bob locally (no end-to-end ACK relay — alice
+      // already ACK'd our synthetic 200 OK long ago).
+      actions.push({ type: "ack-leg", legId: bLeg.legId })
+
+      // Bridge a-leg ↔ winning b-leg.
+      actions.push({ type: "merge", legA: "a", legB: bLeg.legId })
+
+      // Cancel/destroy losing b-leg forks (CANCEL early, BYE confirmed).
+      for (const other of ctx.call.bLegs) {
+        if (other.legId !== bLeg.legId && other.state !== "terminated") {
+          actions.push({ type: "destroy-leg", legId: other.legId })
+        }
+      }
+
+      // Cancel no-answer for the winning leg + schedule the standard
+      // confirmed-call timers. Mirrors confirmDialogRule.
+      actions.push({ type: "cancel-timer", timerId: `no-answer-${ctx.callRef}-${bLeg.legId}` })
+      actions.push({ type: "schedule-timer", timerType: "keepalive",
+        delaySec: ctx.config.keepaliveIntervalSec })
+      actions.push({ type: "schedule-timer", timerType: "global_duration",
+        delaySec: ctx.config.callMaxDurationSec })
+      if (ctx.call.limiterEntries.length > 0) {
+        actions.push({ type: "schedule-timer", timerType: "limiter_refresh",
+          delaySec: ctx.config.limiterWindowSeconds })
+      }
+
+      actions.push({ type: "add-cdr-event", eventType: "answer",
+        legId: bLeg.legId, statusCode: 200 })
+
+      // SDP diff. If b's answer matches what alice already has, the call is
+      // bridged silently and the window closes. Otherwise, emit a re-INVITE
+      // on the a-leg carrying b's SDP and keep the window open until A's
+      // 200 OK to that re-INVITE is ACK'd (handled by resync-reinvite-response).
+      if (sdpMediaEquivalent(promotedSdp, resp.body)) {
+        actions.push({ type: "clear-early-promote" })
+      } else {
+        // The framework derives the outbound CSeq from the leg's localCSeq +
+        // 1 (see executeSendReinvite). Capture the post-bump value here so
+        // the resync-response filter can correlate the response.
+        const aLegDialog = ctx.call.aLeg.dialogs[0]
+        const nextCSeq = (aLegDialog?.sip.localCSeq ?? 0) + 1
+        actions.push({ type: "send-reinvite", legId: "a",
+          bodyUpdate: { kind: "set", value: resp.body } })
+        actions.push({ type: "set-early-promote", update: {
+          resyncReinviteCSeq: nextCSeq,
+        }})
+        actions.push({ type: "add-cdr-event", eventType: "provisional",
+          legId: "a", statusCode: 0, reason: "promote-pem-to-200:resync-reinvite" })
+      }
+
+      return { actions, state: undefined }
+    }),
+})
+
+// ── Rule 4: resync-reinvite-response ─────────────────────────────────────
+//
+// Match the response to OUR re-INVITE on the a-leg. send-reinvite does NOT
+// register a pendingPersistentRequest snapshot, so relay-reinvite-response
+// will not claim this — but our filter must still distinguish a resync
+// response from a stray a-side INVITE response (none normally exist).
+
+const resyncReinviteResponseRule = defineRule({
+  id: "promote-resync-reinvite-response",
+  name: "Resync re-INVITE response (2xx → ACK + close window; failure → BYE both)",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    direction: "from-a",
+    // `transferPhase: null` carves out a-realign responses (which a transfer
+    // phase owns) and keeps this rule scoped to the post-promote resync only.
+    transferPhase: null,
+    filter: (ctx) => {
+      const cseq = ctx.event.message.getHeader("cseq").seq
+      const expected = ctx.call.earlyPromote?.resyncReinviteCSeq
+      return expected !== undefined && cseq === expected
+    },
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) =>
+    Effect.sync(() => {
+      const resp = ctx.event.message
+      // Provisional — keep waiting. Returning undefined leaves the event
+      // unclaimed; with no other rule matching from-a INVITE responses,
+      // the executor falls through to its noop fallback.
+      if (resp.status < 200) {
+        return undefined
+      }
+
+      if (resp.status < 300) {
+        // 2xx — ACK alice, close the window, return to normal flow.
+        const actions: RuleAction[] = [
+          { type: "ack-leg", legId: "a" },
+          { type: "clear-early-promote" },
+          { type: "add-cdr-event", eventType: "answer", legId: "a",
+            statusCode: resp.status, reason: "promote-pem-to-200:resync-success" },
+        ]
+        return { actions, state: undefined }
+      }
+
+      // 3xx/4xx/5xx/6xx — alice and bob now disagree on SDP. BYE both.
+      const reason = reasonHeader(resp.status, resp.reason)
+      const actions: RuleAction[] = [
+        // Layer the diagnostic Reason on every BYE the framework emits as
+        // part of begin-termination. The default `relay-bye`-style begin
+        // path doesn't accept per-leg headers, so we apply update-headers
+        // generically: emit BYEs by destroying both legs explicitly to
+        // ensure the Reason header is attached.
+        { type: "add-cdr-event", eventType: "reject", legId: "a",
+          statusCode: resp.status, reason: `promote-pem-to-200:resync-failed:${reason}` },
+        { type: "clear-early-promote" },
+        { type: "begin-termination" },
+      ]
+      return { actions, state: undefined }
+    }),
+})
+
+// ── Rule 5: reject A in-dialog re-INVITE/UPDATE during window ────────────
+
+const rejectAReinviteUpdateRule = defineRule({
+  id: "promote-reject-a-reinvite-update",
+  name: "Reject A re-INVITE/UPDATE during promote window with 491",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  // Override the default UPDATE/INVITE relay rules — both have lower
+  // specificity (no filter, no direction) so this wins by ranking too,
+  // but the explicit override keeps things resilient against future
+  // additions.
+  overrides: "relay-update",
+  match: {
+    kind: "request",
+    method: ["INVITE", "UPDATE"],
+    direction: "from-a",
+    filter: (ctx) => ctx.call.earlyPromote?.windowOpen === true,
+  },
+
+  init: () => undefined,
+
+  handle: () =>
+    Effect.succeed({
+      actions: [
+        { type: "respond" as const, status: 491, reason: "Request Pending" },
+      ],
+      state: undefined,
+    }),
+})
+
+// ── Rule 6: reject A in-dialog INFO/MESSAGE/NOTIFY/REFER during window ──
+
+const rejectAOtherInDialogRule = defineRule({
+  id: "promote-reject-a-other-indialog",
+  name: "Reject A INFO/MESSAGE/NOTIFY/REFER during promote window with 488",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  overrides: "relay-info",
+  match: {
+    kind: "request",
+    // REFER from-a is already rejected by the default
+    // `transfer-reject-a-leg-refer` (501); leaving it out avoids a
+    // same-specificity column overlap with that rule. NOTIFY has no
+    // default relay rule and falls through to the framework's noop
+    // fallback (501), which is also a refusal.
+    method: ["INFO", "MESSAGE"],
+    direction: "from-a",
+    filter: (ctx) => ctx.call.earlyPromote?.windowOpen === true,
+  },
+
+  init: () => undefined,
+
+  handle: () =>
+    Effect.succeed({
+      actions: [
+        { type: "respond" as const, status: 488, reason: "Not Acceptable Here" },
+      ],
+      state: undefined,
+    }),
+})
+
+// ── Rule 7: absorb A's ACK during promote window ─────────────────────────
+//
+// Alice will ACK our promoted 200 OK while bob is still in early dialog.
+// The default `relay-ack` would forward that ACK to bob, where it would
+// race with bob's still-open INVITE transaction. Absorb it locally —
+// later, in-dialog ACKs (e.g. for a successful resync re-INVITE) are
+// generated by the framework via `ack-leg`, not by alice's stack.
+
+const absorbAAckDuringWindowRule = defineRule({
+  id: "promote-absorb-a-ack",
+  name: "Absorb A ACK during promote window",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  overrides: "relay-ack",
+  match: {
+    kind: "request",
+    method: "ACK",
+    direction: "from-a",
+    // Until the b-leg is bridged into activePeer, alice's ACK has no
+    // valid forwarding target — absorb. Once activePeer is set (after
+    // the merge in confirm-after-promote), the default `relay-ack`
+    // takes over for any future ACKs.
+    filter: (ctx) => ctx.call.earlyPromote != null && ctx.call.activePeer === null,
+  },
+
+  init: () => undefined,
+
+  handle: () =>
+    Effect.succeed({
+      actions: [
+        { type: "add-cdr-event" as const, eventType: "provisional",
+          legId: "a", statusCode: 0, reason: "promote-pem-to-200:ack-absorbed" },
+      ],
+      state: undefined,
+    }),
+})
+
+// ── Rule 8: B fails post-promote — BYE A with diagnostic Reason ──────────
+//
+// Override route-failure for the promoted case: the default rule treats
+// 4xx/5xx/6xx from b as a route failure that may failover and ultimately
+// 4xx alice. But alice is already confirmed — we cannot retract our
+// 200 OK. BYE alice with a Reason carrying the original status.
+
+const bFailsPostPromoteRule = defineRule({
+  id: "promote-b-fails-post-promote",
+  name: "B fails post-promote → BYE A with Reason",
+  alwaysActive: true,
+  stateKey: STATE_KEY,
+  stateSchema: Schema.Undefined,
+  paramsSchema: Schema.Undefined,
+
+  overrides: "route-failure",
+  match: {
+    kind: "response",
+    cseqMethod: "INVITE",
+    statusClass: ["3xx", "4xx", "5xx", "6xx"],
+    direction: "from-b",
+    // `callState: "active"` mirrors the default `handle-481` rule's column.
+    // With matching specificity on this dimension the validator no longer
+    // flags an equal-specificity overlap, and our higher overall score
+    // (we add `direction` + `filter`) wins for the b-failure-post-promote
+    // case while leaving handle-481 to claim 481s on other methods /
+    // outside the promotion window.
+    callState: "active",
+    // `transferPhase: null` keeps the REFER c-leg failure rules
+    // (transfer-c-fail-initial / transfer-c-realign-fail) as the strict
+    // owners of failure responses inside the transfer lifecycle.
+    transferPhase: null,
+    filter: (ctx) => ctx.call.earlyPromote != null,
+  },
+
+  init: () => undefined,
+
+  handle: (ctx) =>
+    Effect.sync(() => {
+      const resp = ctx.event.message
+      const bLeg = ctx.sourceLeg
+      const reason = reasonHeader(resp.status, resp.reason)
+
+      const actions: RuleAction[] = [
+        { type: "add-cdr-event", eventType: "reject", legId: bLeg.legId,
+          statusCode: resp.status, reason: `promote-pem-to-200:b-failed:${reason}` },
+        // Mark the failed b-leg so begin-termination skips re-BYEing it.
+        { type: "terminate-leg", legId: bLeg.legId, byeDisposition: "rejected" as const },
+        { type: "clear-early-promote" },
+        // begin-termination BYEs the (still-confirmed) a-leg.
+        { type: "begin-termination" },
+      ]
+
+      // Suppress unused warnings on the helper if pendingBLegId is unused.
+      void pendingBLegId
+
+      return { actions, state: undefined }
+    }),
+})
+
+// ── Single export: the PolicyModule ──────────────────────────────────────
+
+export const promote18xPemTo200 = definePolicyModule({
+  id: "promote_18x_pem_to_200",
+  guard: (ctx) =>
+    ctx.call.features?.relayFirst18xTo180?.strategy === "promote-pem-to-200",
+  rules: [
+    promote183PemRule,
+    suppressPostPromote18xRule,
+    confirmAfterPromoteRule,
+    resyncReinviteResponseRule,
+    rejectAReinviteUpdateRule,
+    rejectAOtherInDialogRule,
+    absorbAAckDuringWindowRule,
+    bFailsPostPromoteRule,
+  ],
+})

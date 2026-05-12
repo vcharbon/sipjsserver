@@ -54,7 +54,7 @@ export const WireNewCallRouteResponse = Schema.Struct({
   relay_first_18x_to_180: Schema.optional(
     Schema.Union([
       Schema.Boolean,
-      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack", "promote-pem-to-200"]),
     ]),
   ),
 })
@@ -87,7 +87,7 @@ export const WireCallFailureFailoverResponse = Schema.Struct({
   relay_first_18x_to_180: Schema.optional(
     Schema.Union([
       Schema.Boolean,
-      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack", "promote-pem-to-200"]),
     ]),
   ),
 })
@@ -115,7 +115,7 @@ export const WireCallReferAllowResponse = Schema.Struct({
   relay_first_18x_to_180: Schema.optional(
     Schema.Union([
       Schema.Boolean,
-      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
+      Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack", "promote-pem-to-200"]),
     ]),
   ),
 })
