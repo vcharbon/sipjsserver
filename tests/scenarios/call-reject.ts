@@ -24,9 +24,6 @@ export const callReject = scenario("call-reject", (s) => {
 
   // Alice receives 403 Forbidden
   aliceInviteTxn.expect(403, {
-    predicate: (msg) => {
-      if (msg.type !== "response") return false
-      return msg.reason === "Forbidden"
-    },
+    predicate: (msg) => msg.reason === "Forbidden",
   })
 })

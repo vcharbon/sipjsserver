@@ -17,37 +17,6 @@
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
-import type { SipMessage } from "../../src/sip/types.js"
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-function decodeBody(body: Uint8Array | undefined): string {
-  if (body === undefined || body.byteLength === 0) return ""
-  return new TextDecoder().decode(body)
-}
-
-function headerValue(
-  msg: { headers: ReadonlyArray<{ name: string; value: string }> },
-  name: string,
-): string | undefined {
-  const target = name.toLowerCase()
-  return msg.headers.find((h) => h.name.toLowerCase() === target)?.value
-}
-
-/** Byte-for-byte comparison of two SDP bodies. */
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false
-  for (let i = 0; i < a.byteLength; i++) {
-    if (a[i] !== b[i]) return false
-  }
-  return true
-}
-
-/** Assert `Contact: …;leg=b-2` on a re-INVITE to C. */
-function contactHasCLegTag(msg: SipMessage, cLegId: string): boolean {
-  const contact = headerValue(msg, "contact") ?? ""
-  return contact.includes(`leg=${cLegId}`)
-}
 
 const CHARLIE_PORT = 5667
 const REFER_TO_CHARLIE = `<sip:charlie@127.0.0.1:${CHARLIE_PORT}>`
@@ -102,9 +71,8 @@ export const referAllowCRealignHappy = scenario("refer-allow-c-realign-happy", (
   // NOTIFY 100 active
   const notifyTryingTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-      decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+      msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
   })
   notifyTryingTxn.reply(200)
 
@@ -116,9 +84,8 @@ export const referAllowCRealignHappy = scenario("refer-allow-c-realign-happy", (
   // NOTIFY 180 active
   const notify180Txn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-      decodeBody(msg.body).includes("SIP/2.0 180 Ringing"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+      msg.bodyText()?.includes("SIP/2.0 180 Ringing") === true,
   })
   notify180Txn.reply(200)
 
@@ -129,9 +96,8 @@ export const referAllowCRealignHappy = scenario("refer-allow-c-realign-happy", (
   // NOTIFY 200 terminated (final).
   const notifyTermTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-      decodeBody(msg.body).includes("SIP/2.0 200"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+      msg.bodyText()?.includes("SIP/2.0 200") === true,
   })
   notifyTermTxn.reply(200)
 
@@ -139,11 +105,10 @@ export const referAllowCRealignHappy = scenario("refer-allow-c-realign-happy", (
   const cRealignTxn = charlieDialog.expect("INVITE", {
     skipValidation: ["offerAnswer"],
     predicate: (msg) => {
-      if (msg.type !== "request") return false
-      if (!bytesEqual(msg.body, aliceSdp)) return false
+      if (!msg.bodyEquals(aliceSdp)) return false
       if (msg.getHeader("cseq").method !== "INVITE") return false
       if (msg.getHeader("cseq").seq <= 1) return false
-      return contactHasCLegTag(msg, "b-2")
+      return (msg.getHeader("contact")?.uri ?? "").includes("leg=b-2")
     },
   })
   cRealignTxn.reply(200, {
@@ -156,12 +121,9 @@ export const referAllowCRealignHappy = scenario("refer-allow-c-realign-happy", (
   // B2BUA re-INVITEs A with C's initial SDP, Contact tagged leg=a.
   const aRealignTxn = aliceDialog.expect("INVITE", {
     skipValidation: ["offerAnswer"],
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      if (!bytesEqual(msg.body, charlieInitialSdp)) return false
-      const contact = headerValue(msg, "contact") ?? ""
-      return contact.includes("leg=a")
-    },
+    predicate: (msg) =>
+      msg.bodyEquals(charlieInitialSdp) &&
+      (msg.getHeader("contact")?.uri ?? "").includes("leg=a"),
   })
   aRealignTxn.reply(200, {
     overrides: { body: sdpAnswer(charlieInitialSdp) },
@@ -214,8 +176,7 @@ export const referAllowCRealignCReject488 = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -226,8 +187,7 @@ export const referAllowCRealignCReject488 = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -293,8 +253,7 @@ export const referAllowCRealignCTimeout = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -305,8 +264,7 @@ export const referAllowCRealignCTimeout = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -367,8 +325,7 @@ export const referAllowCRealignCGlare = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -379,8 +336,7 @@ export const referAllowCRealignCGlare = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -407,12 +363,9 @@ export const referAllowCRealignCGlare = scenario(
     // B2BUA re-INVITEs A with C's initial SDP, Contact tagged leg=a.
     const aRealignTxn = aliceDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
-      predicate: (msg) => {
-        if (msg.type !== "request") return false
-        if (!bytesEqual(msg.body, charlieInitialSdp)) return false
-        const contact = headerValue(msg, "contact") ?? ""
-        return contact.includes("leg=a")
-      },
+      predicate: (msg) =>
+        msg.bodyEquals(charlieInitialSdp) &&
+        (msg.getHeader("contact")?.uri ?? "").includes("leg=a"),
     })
     aRealignTxn.reply(200, {
       overrides: { body: sdpAnswer(charlieInitialSdp) },
@@ -465,8 +418,7 @@ export const referAllowCRealignBNonBye = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -477,8 +429,7 @@ export const referAllowCRealignBNonBye = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -504,12 +455,9 @@ export const referAllowCRealignBNonBye = scenario(
     // B2BUA re-INVITEs A with C's initial SDP, Contact tagged leg=a.
     const aRealignTxn = aliceDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
-      predicate: (msg) => {
-        if (msg.type !== "request") return false
-        if (!bytesEqual(msg.body, charlieInitialSdp)) return false
-        const contact = headerValue(msg, "contact") ?? ""
-        return contact.includes("leg=a")
-      },
+      predicate: (msg) =>
+        msg.bodyEquals(charlieInitialSdp) &&
+        (msg.getHeader("contact")?.uri ?? "").includes("leg=a"),
     })
     aRealignTxn.reply(200, {
       overrides: { body: sdpAnswer(charlieInitialSdp) },

@@ -8,26 +8,13 @@
  * Test 5: 100rel stripped — verify outbound INVITE has no 100rel in Supported
  */
 
+import { Result } from "effect"
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
-import type { SipMessage } from "../../src/sip/types.js"
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-/** Extract To-tag from a SIP message. */
-function extractToTag(msg: SipMessage): string {
-  return msg.getHeader("to").tag ?? ""
-}
-
-/** Check if a SIP message has a body. */
-function hasBody(msg: SipMessage): boolean {
-  return msg.body.length > 0
-}
-
-/** Check if a header contains a specific token (case-insensitive). */
-function headerContainsToken(msg: SipMessage, headerName: string, token: string): boolean {
-  const header = msg.headers.find((h) => h.name.toLowerCase() === headerName.toLowerCase())?.value ?? ""
-  return header.toLowerCase().split(",").some((t) => t.trim() === token.toLowerCase())
+/** Comma-list token membership (case-insensitive), per RFC 3261 header syntax. */
+function hasToken(headerValue: string, token: string): boolean {
+  return headerValue.toLowerCase().split(",").some((t) => t.trim() === token.toLowerCase())
 }
 
 // ── Ports ──────────────────────────────────────────────────────────────────
@@ -61,11 +48,8 @@ export const suppress18xBasic = scenario("suppress-18x-basic", (s) => {
 
   // Bob receives INVITE — verify no 100rel in Supported
   const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite({
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      // 100rel should be stripped from Supported
-      return !headerContainsToken(msg, "Supported", "100rel")
-    },
+    // 100rel should be stripped from Supported
+    predicate: (msg) => !hasToken(msg.getHeader("supported")[0] ?? "", "100rel"),
   })
 
   // Bob sends 183 with SDP and 100rel headers (simulating a UAS that offered 100rel)
@@ -82,12 +66,10 @@ export const suppress18xBasic = scenario("suppress-18x-basic", (s) => {
   // Alice should receive a bare 180 (not 183) — no body, no Require, no RSeq
   aliceInviteTxn.expect(180, {
     predicate: (msg) => {
-      if (msg.type !== "response") return false
-      if (msg.status !== 180) return false
       // Must have no body (SDP stripped)
-      if (hasBody(msg)) return false
+      if (msg.hasBody()) return false
       // Must not have Require: 100rel
-      if (headerContainsToken(msg, "Require", "100rel")) return false
+      if (hasToken(msg.getHeader("require")[0] ?? "", "100rel")) return false
       return true
     },
   })
@@ -96,9 +78,9 @@ export const suppress18xBasic = scenario("suppress-18x-basic", (s) => {
   // provisional and will not generate her own PRACK.
   const bobPrackTxn = bobDialog.expect("PRACK", {
     predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const rack = msg.headers.find((h) => h.name.toLowerCase() === "rack")?.value ?? ""
-      return /^1\s+\d+\s+INVITE$/i.test(rack.trim())
+      const r = msg.getHeader("rack")
+      if (Result.isFailure(r) || r.success === undefined) return false
+      return r.success.rseq === 1 && r.success.method.toUpperCase() === "INVITE"
     },
   })
   bobPrackTxn.reply(200)
@@ -160,8 +142,7 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
   let firstToTag: string = ""
   aliceInviteTxn.expect(180, {
     predicate: (msg) => {
-      if (msg.type !== "response" || msg.status !== 180) return false
-      firstToTag = extractToTag(msg)
+      firstToTag = msg.getHeader("to").tag ?? ""
       return true
     },
   })
@@ -187,11 +168,8 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
 
   // Bob2 receives new INVITE — verify Request-URI is the failover new_ruri
   const { dialog: bob2Dialog, transaction: bob2InviteTxn } = bob2.receiveInitialInvite({
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      // RFC 3261 §8.1.1.1: Request-URI must be the configured new_ruri
-      return msg.uri === `sip:+1234@127.0.0.1:${BOB2_PORT}`
-    },
+    // RFC 3261 §8.1.1.1: Request-URI must be the configured new_ruri
+    predicate: (msg) => msg.uri === `sip:+1234@127.0.0.1:${BOB2_PORT}`,
   })
 
   // Bob2 sends 180 — should be suppressed (first 18x already sent)
@@ -203,10 +181,8 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
   // Alice receives 200 OK — To-tag must match the first 180
   aliceInviteTxn.expect(200, {
     predicate: (msg) => {
-      if (msg.type !== "response" || msg.status !== 200) return false
-      const okToTag = extractToTag(msg)
       // The To-tag on 200 OK must match the To-tag from the first 180
-      return firstToTag !== "" && okToTag === firstToTag
+      return firstToTag !== "" && msg.getHeader("to").tag === firstToTag
     },
   })
 
@@ -215,11 +191,8 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
 
   // Bob2 validates ACK contains SDP answer for its offer
   bob2Dialog.expect("ACK", {
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      // RFC 3264 §4: ACK must contain SDP answer when 200 OK contained offer
-      return msg.body.length > 0
-    },
+    // RFC 3264 §4: ACK must contain SDP answer when 200 OK contained offer
+    predicate: (msg) => msg.hasBody(),
   })
 
   s.pause(15_000)
@@ -268,8 +241,7 @@ export const suppress18xFailoverReject = scenario("suppress-18x-failover-reject"
   let firstToTag: string = ""
   aliceInviteTxn.expect(180, {
     predicate: (msg) => {
-      if (msg.type !== "response" || msg.status !== 180) return false
-      firstToTag = extractToTag(msg)
+      firstToTag = msg.getHeader("to").tag ?? ""
       return true
     },
   })
@@ -291,11 +263,8 @@ export const suppress18xFailoverReject = scenario("suppress-18x-failover-reject"
 
   // Alice receives 200 OK — To-tag must match the first 180 (from Bob1!)
   aliceInviteTxn.expect(200, {
-    predicate: (msg) => {
-      if (msg.type !== "response" || msg.status !== 200) return false
-      const okToTag = extractToTag(msg)
-      return firstToTag !== "" && okToTag === firstToTag
-    },
+    predicate: (msg) =>
+      firstToTag !== "" && msg.getHeader("to").tag === firstToTag,
   })
 
   aliceDialog.ack()

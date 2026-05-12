@@ -6,7 +6,12 @@
  * No SIP messages are sent during recording.
  */
 
-import type { SipMessage } from "../../sip/types.js"
+import type {
+  InDialogMethodRequest,
+  MethodRequest,
+  SipMessage,
+  SipResponseTagged,
+} from "../../sip/types.js"
 import type {
   AgentConfig,
   AllowedExtraPattern,
@@ -41,9 +46,17 @@ export interface SendOpts {
   readonly skipValidation?: ValidationCheckName[]
 }
 
-export interface ExpectOpts {
+/**
+ * `M` narrows the message type seen by `predicate`. Defaults to the
+ * widest `SipMessage` so callers that don't pin a status / method (e.g.
+ * `receiveInitialInvite` callers that only care about the side-effect)
+ * keep working unchanged. The per-handle `expect` overloads in this
+ * module substitute `M` with the precise post-match shape so predicates
+ * never re-prove what the matcher already matched.
+ */
+export interface ExpectOpts<M extends SipMessage = SipMessage> {
   readonly timeout?: number
-  readonly predicate?: (msg: SipMessage, ctx: MessageContext) => boolean
+  readonly predicate?: (msg: M, ctx: MessageContext) => boolean
   readonly allowReemission?: boolean
   readonly skipValidation?: ValidationCheckName[]
   readonly validation?: ValidationOverrides
@@ -65,7 +78,10 @@ export interface ReplyOpts {
 /** UAC INVITE transaction (caller side). */
 export interface UacInviteTransaction {
   /** Expect a provisional or final response to this INVITE. */
-  expect(statusCode: number, opts?: ExpectOpts): ExpectRef
+  expect<S extends number>(
+    statusCode: S,
+    opts?: ExpectOpts<SipResponseTagged & { status: S }>,
+  ): ExpectRef
   /** Send CANCEL for this INVITE, returns the CANCEL's own UAC transaction. */
   cancel(opts?: SendOpts): UacTransaction
 }
@@ -78,20 +94,27 @@ export interface UasInviteTransaction {
    * Expect a CANCEL for this INVITE (RFC 3261 §9). The CANCEL travels in a
    * separate client transaction but is tied to this INVITE server transaction
    * (same branch). Returns a UAS transaction so the callee can reply 200 OK.
+   *
+   * Note: CANCEL is not in-dialog — the To-tag is not yet guaranteed at the
+   * point the CANCEL is observed, so the predicate sees `MethodRequest<"CANCEL">`
+   * rather than `InDialogMethodRequest<"CANCEL">`.
    */
-  expectCancel(opts?: ExpectOpts): UasTransaction
+  expectCancel(opts?: ExpectOpts<MethodRequest<"CANCEL">>): UasTransaction
   /**
    * Expect the auto-ACK that the INVITE client (here the B2BUA) sends after
    * a non-2xx final response on this INVITE's transaction (RFC 3261 §17.1.1.3).
    * No reply is expected — the ACK completes the INVITE server transaction.
    */
-  expectAck(opts?: ExpectOpts): ExpectRef
+  expectAck(opts?: ExpectOpts<InDialogMethodRequest<"ACK">>): ExpectRef
 }
 
 /** Generic UAC transaction (for BYE, PRACK, re-INVITE, CANCEL, etc.). */
 export interface UacTransaction {
   /** Expect a response to this request. */
-  expect(statusCode: number, opts?: ExpectOpts): ExpectRef
+  expect<S extends number>(
+    statusCode: S,
+    opts?: ExpectOpts<SipResponseTagged & { status: S }>,
+  ): ExpectRef
 }
 
 /** Generic UAS transaction (received in-dialog request). */
@@ -109,7 +132,10 @@ export interface DialogRef {
   /** Send an arbitrary in-dialog request (re-INVITE, PRACK, INFO, etc.). */
   send(method: string, opts?: SendOpts): UacTransaction
   /** Expect an in-dialog request from the remote side. */
-  expect(method: string, opts?: ExpectOpts): UasTransaction
+  expect<M extends string>(
+    method: M,
+    opts?: ExpectOpts<InDialogMethodRequest<M>>,
+  ): UasTransaction
 }
 
 /** Result of sending an initial INVITE. */
@@ -167,7 +193,7 @@ export interface AgentProxy {
   ): InviteResult
 
   /** Expect an initial INVITE. Returns both a dialog handle and a UAS INVITE transaction. */
-  receiveInitialInvite(opts?: ExpectOpts): ReceiveInviteResult
+  receiveInitialInvite(opts?: ExpectOpts<MethodRequest<"INVITE">>): ReceiveInviteResult
 
   /**
    * Send a REGISTER (RFC 3261 §10). Returns a UAC transaction so the
@@ -205,6 +231,19 @@ interface InternalSendOpts {
 
 type InternalSend = (methodOrStatusCode: string | number, opts?: InternalSendOpts) => StepRef
 type InternalExpect = (methodOrStatusCode: string | number, opts?: ExpectOpts) => ExpectRef
+
+/**
+ * Widen the message-type generic when forwarding a typed `ExpectOpts<M>`
+ * into the internal recorder. The runtime predicate is only invoked
+ * after the matcher has narrowed the message to `M`, so erasing the
+ * generic at this single boundary is sound. Centralised here to keep
+ * the cast in one place.
+ */
+function eraseOpts<M extends SipMessage>(
+  opts: ExpectOpts<M> | undefined,
+): ExpectOpts | undefined {
+  return opts as ExpectOpts | undefined
+}
 
 // ---------------------------------------------------------------------------
 // Scenario context (the `s` parameter in scenario builders)
@@ -428,13 +467,13 @@ export function record(
 
     function makeUacTransaction(): UacTransaction {
       return {
-        expect: (statusCode, opts) => expect(statusCode, opts),
+        expect: (statusCode, opts) => expect(statusCode, eraseOpts(opts)),
       }
     }
 
     function makeUacInviteTransaction(): UacInviteTransaction {
       return {
-        expect: (statusCode, opts) => expect(statusCode, opts),
+        expect: (statusCode, opts) => expect(statusCode, eraseOpts(opts)),
         cancel: (opts) => {
           send("CANCEL", sendMethodToOpts("CANCEL", opts))
           return makeUacTransaction()
@@ -455,7 +494,7 @@ export function record(
           return makeUacTransaction()
         },
         expect: (method, opts) => {
-          const expRef = expect(method, opts)
+          const expRef = expect(method, eraseOpts(opts))
           return {
             reply: (statusCode, replyOpts) => expRef.reply(statusCode, replyOpts),
           }
@@ -508,18 +547,18 @@ export function record(
     }
 
     const receiveInitialInvite: AgentProxy["receiveInitialInvite"] = (opts) => {
-      const expRef = expect("INVITE", opts)
+      const expRef = expect("INVITE", eraseOpts(opts))
       return {
         dialog: makeDialogRef(),
         transaction: {
           reply: (statusCode, replyOpts) => expRef.reply(statusCode, replyOpts),
           expectCancel: (cancelOpts) => {
-            const cancelExp = expect("CANCEL", cancelOpts)
+            const cancelExp = expect("CANCEL", eraseOpts(cancelOpts))
             return {
               reply: (statusCode, replyOpts) => cancelExp.reply(statusCode, replyOpts),
             }
           },
-          expectAck: (ackOpts) => expect("ACK", ackOpts),
+          expectAck: (ackOpts) => expect("ACK", eraseOpts(ackOpts)),
         },
       }
     }

@@ -17,11 +17,6 @@
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer } from "../../src/test-harness/framework/helpers/sdp.js"
-import type { SipHeader } from "../../src/sip/types.js"
-
-function findHeader(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {
-  return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value
-}
 
 const REASON_VALUE = 'SIP ;cause=403;text="Carrier blocked"'
 
@@ -53,10 +48,9 @@ export const rejectWithReasonHeader = scenario(
 
     aliceInviteTxn.expect(403, {
       predicate: (msg) => {
-        if (msg.type !== "response") return false
         if (msg.reason !== "Forbidden") return false
-        if (findHeader(msg.headers, "Reason") !== REASON_VALUE) return false
-        if (findHeader(msg.headers, "X-Trace-Id") !== "abc-123") return false
+        if (msg.getHeader("reason")[0] !== REASON_VALUE) return false
+        if (msg.getHeader("x-trace-id")[0] !== "abc-123") return false
         return true
       },
     })
@@ -64,6 +58,7 @@ export const rejectWithReasonHeader = scenario(
 )
 
 const REDIRECT_CONTACT = "<sip:alt@10.0.0.42:5060;transport=udp>"
+const REDIRECT_CONTACT_URI = "sip:alt@10.0.0.42:5060;transport=udp"
 
 const reject302WithContactInstruction = JSON.stringify({
   action: "reject",
@@ -91,16 +86,14 @@ export const reject302WithContact = scenario(
     aliceInviteTxn.expect(100)
 
     aliceInviteTxn.expect(302, {
-      predicate: (msg) => {
-        if (msg.type !== "response") return false
-        // Consumer-supplied Contact must override the B2BUA's a-leg contact.
-        return findHeader(msg.headers, "Contact") === REDIRECT_CONTACT
-      },
+      // Consumer-supplied Contact must override the B2BUA's a-leg contact.
+      predicate: (msg) => msg.getHeader("contact")?.uri === REDIRECT_CONTACT_URI,
     })
   },
 )
 
 const FALLBACK_CONTACT = "<sip:fallback@10.0.0.99:5060;transport=udp>"
+const FALLBACK_CONTACT_URI = "sip:fallback@10.0.0.99:5060;transport=udp"
 
 const reject403WithContactInstruction = JSON.stringify({
   action: "reject",
@@ -130,10 +123,7 @@ export const reject403WithContactPassesThrough = scenario(
     // Issue 9 final decision: Contact is allowed on reject UNCONDITIONALLY,
     // no 3xx-family gating. The B2BUA does not police RFC meaningfulness.
     aliceInviteTxn.expect(403, {
-      predicate: (msg) => {
-        if (msg.type !== "response") return false
-        return findHeader(msg.headers, "Contact") === FALLBACK_CONTACT
-      },
+      predicate: (msg) => msg.getHeader("contact")?.uri === FALLBACK_CONTACT_URI,
     })
   },
 )

@@ -11,7 +11,6 @@
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
-import type { SipMessage } from "../../src/sip/types.js"
 
 export const prackCall = scenario("prack", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })
@@ -45,11 +44,7 @@ export const prackCall = scenario("prack", (s) => {
 
   // Alice receives 183 with 100rel
   aliceInviteTxn.expect(183, {
-    predicate: (msg: SipMessage) => {
-      if (msg.type !== "response") return false
-      const require = msg.headers.find((h) => h.name.toLowerCase() === "require")
-      return require?.value === "100rel"
-    },
+    predicate: (msg) => msg.getHeader("require")[0] === "100rel",
   })
 
   // Alice sends PRACK

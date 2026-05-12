@@ -19,11 +19,6 @@
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
-import type { SipHeader } from "../../src/sip/types.js"
-
-function findHeader(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {
-  return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value
-}
 
 const FROM_OVERRIDE = '"Service" <sip:service@10.0.0.7>'
 const TO_OVERRIDE = '"Backend" <sip:backend@10.0.0.42>'
@@ -82,11 +77,7 @@ export const bLegFromOverridePersistsToBye = scenario(
     // Bob receives the B-leg INVITE — assert From URI was overridden.
     const { dialog: bobDialog, transaction: bobInviteTxn } =
       bob.receiveInitialInvite({
-        predicate: (msg) => {
-          if (msg.type !== "request") return false
-          const from = findHeader(msg.headers, "From") ?? ""
-          return from.includes("sip:service@10.0.0.7")
-        },
+        predicate: (msg) => msg.getHeader("from").uri.includes("sip:service@10.0.0.7"),
       })
 
     bobInviteTxn.reply(180)
@@ -134,11 +125,7 @@ export const bLegToOverridePersistsToBye = scenario(
 
     const { dialog: bobDialog, transaction: bobInviteTxn } =
       bob.receiveInitialInvite({
-        predicate: (msg) => {
-          if (msg.type !== "request") return false
-          const to = findHeader(msg.headers, "To") ?? ""
-          return to.includes("sip:backend@10.0.0.42")
-        },
+        predicate: (msg) => msg.getHeader("to").uri.includes("sip:backend@10.0.0.42"),
       })
 
     bobInviteTxn.reply(180)
@@ -176,15 +163,9 @@ export const bLegBothOverridePersistsToBye = scenario(
 
     const { dialog: bobDialog, transaction: bobInviteTxn } =
       bob.receiveInitialInvite({
-        predicate: (msg) => {
-          if (msg.type !== "request") return false
-          const from = findHeader(msg.headers, "From") ?? ""
-          const to = findHeader(msg.headers, "To") ?? ""
-          return (
-            from.includes("sip:service@10.0.0.7") &&
-            to.includes("sip:backend@10.0.0.42")
-          )
-        },
+        predicate: (msg) =>
+          msg.getHeader("from").uri.includes("sip:service@10.0.0.7") &&
+          msg.getHeader("to").uri.includes("sip:backend@10.0.0.42"),
       })
 
     bobInviteTxn.reply(180)
@@ -227,15 +208,10 @@ export const bLegFromOverrideTagStripped = scenario(
 
     const { dialog: bobDialog, transaction: bobInviteTxn } =
       bob.receiveInitialInvite({
-        predicate: (msg) => {
-          if (msg.type !== "request") return false
-          const from = findHeader(msg.headers, "From") ?? ""
-          // URI present, consumer tag is gone.
-          return (
-            from.includes("sip:service@10.0.0.7") &&
-            !from.includes("consumer-tag-must-be-stripped")
-          )
-        },
+        // URI present, consumer tag is gone.
+        predicate: (msg) =>
+          msg.getHeader("from").uri.includes("sip:service@10.0.0.7") &&
+          msg.getHeader("from").tag !== "consumer-tag-must-be-stripped",
       })
 
     bobInviteTxn.reply(180)

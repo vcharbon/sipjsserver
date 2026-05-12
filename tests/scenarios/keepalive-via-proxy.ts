@@ -36,12 +36,8 @@
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
-import type { SipMessage } from "../../src/sip/types.js"
 
 const KEEPALIVE_INTERVAL_MS = 900_000
-
-const viaCount = (msg: SipMessage): number =>
-  msg.headers.filter((h) => h.name.toLowerCase() === "via").length
 
 export const keepaliveViaProxy = scenario("keepalive-via-proxy", (s) => {
   const alice = s.agent("alice", { uri: "sip:alice@test" })
@@ -68,12 +64,12 @@ export const keepaliveViaProxy = scenario("keepalive-via-proxy", (s) => {
 
     aliceDialog
       .expect("OPTIONS", {
-        predicate: (msg) => msg.type === "request" && viaCount(msg) >= 2,
+        predicate: (msg) => msg.getHeader("via").length >= 2,
       })
       .reply(200)
     bobDialog
       .expect("OPTIONS", {
-        predicate: (msg) => msg.type === "request" && viaCount(msg) >= 2,
+        predicate: (msg) => msg.getHeader("via").length >= 2,
       })
       .reply(200)
   }
@@ -111,7 +107,7 @@ export const keepaliveMissingOutboundProxyRegressionGuard = scenario(
     // missing b-leg outbound proxy config.
     aliceDialog
       .expect("OPTIONS", {
-        predicate: (msg) => msg.type === "request" && viaCount(msg) >= 2,
+        predicate: (msg) => msg.getHeader("via").length >= 2,
       })
       .reply(200)
     // b-leg is the bug surface: with `b2bOutboundProxy` unset and Bob
@@ -119,7 +115,7 @@ export const keepaliveMissingOutboundProxyRegressionGuard = scenario(
     // OPTIONS lands worker-direct on Bob with exactly one Via.
     bobDialog
       .expect("OPTIONS", {
-        predicate: (msg) => msg.type === "request" && viaCount(msg) === 1,
+        predicate: (msg) => msg.getHeader("via").length === 1,
       })
       .reply(200)
 

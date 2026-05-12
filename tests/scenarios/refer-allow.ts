@@ -10,21 +10,6 @@
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-function decodeBody(body: Uint8Array | undefined): string {
-  if (body === undefined || body.byteLength === 0) return ""
-  return new TextDecoder().decode(body)
-}
-
-function headerValue(
-  msg: { headers: ReadonlyArray<{ name: string; value: string }> },
-  name: string,
-): string | undefined {
-  const target = name.toLowerCase()
-  return msg.headers.find((h) => h.name.toLowerCase() === target)?.value
-}
-
 const CHARLIE_PORT = 5667
 const REFER_TO_CHARLIE = `<sip:charlie@127.0.0.1:${CHARLIE_PORT}>`
 
@@ -75,12 +60,9 @@ export const referAllowHappy = scenario("refer-allow-happy", (s) => {
 
   // NOTIFY 100 active
   const notifyTryingTxn = bobDialog.expect("NOTIFY", {
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const subState = headerValue(msg, "subscription-state") ?? ""
-      return subState.startsWith("active") &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying")
-    },
+    predicate: (msg) =>
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+      msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
   })
   notifyTryingTxn.reply(200)
 
@@ -91,12 +73,9 @@ export const referAllowHappy = scenario("refer-allow-happy", (s) => {
 
   // NOTIFY 180 active
   const notify180Txn = bobDialog.expect("NOTIFY", {
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const subState = headerValue(msg, "subscription-state") ?? ""
-      return subState.startsWith("active") &&
-        decodeBody(msg.body).includes("SIP/2.0 180 Ringing")
-    },
+    predicate: (msg) =>
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+      msg.bodyText()?.includes("SIP/2.0 180 Ringing") === true,
   })
   notify180Txn.reply(200)
 
@@ -106,12 +85,9 @@ export const referAllowHappy = scenario("refer-allow-happy", (s) => {
 
   // NOTIFY 200 terminated — final sipfrag, subscription closes.
   const notifyTermTxn = bobDialog.expect("NOTIFY", {
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const subState = headerValue(msg, "subscription-state") ?? ""
-      return subState.startsWith("terminated") &&
-        decodeBody(msg.body).includes("SIP/2.0 200")
-    },
+    predicate: (msg) =>
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+      msg.bodyText()?.includes("SIP/2.0 200") === true,
   })
   notifyTermTxn.reply(200)
 
@@ -162,9 +138,8 @@ export const referAllowC486 = scenario("refer-allow-c-rejects-486", (s) => {
 
   const notifyTryingTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-      decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+      msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
   })
   notifyTryingTxn.reply(200)
 
@@ -176,9 +151,8 @@ export const referAllowC486 = scenario("refer-allow-c-rejects-486", (s) => {
 
   const notifyTermTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-      decodeBody(msg.body).includes("SIP/2.0 486"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+      msg.bodyText()?.includes("SIP/2.0 486") === true,
   })
   notifyTermTxn.reply(200)
 
@@ -221,9 +195,8 @@ export const referAllowC603 = scenario("refer-allow-c-rejects-603", (s) => {
 
   const notifyTryingTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-      decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+      msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
   })
   notifyTryingTxn.reply(200)
 
@@ -233,9 +206,8 @@ export const referAllowC603 = scenario("refer-allow-c-rejects-603", (s) => {
 
   const notifyTermTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-      decodeBody(msg.body).includes("SIP/2.0 603"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+      msg.bodyText()?.includes("SIP/2.0 603") === true,
   })
   notifyTermTxn.reply(200)
 
@@ -285,9 +257,8 @@ export const referAllowCNoAnswer = scenario("refer-allow-c-no-answer", (s) => {
 
   const notifyTryingTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-      decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+      msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
   })
   notifyTryingTxn.reply(200)
 
@@ -298,9 +269,8 @@ export const referAllowCNoAnswer = scenario("refer-allow-c-no-answer", (s) => {
   // observed charlie ringing.
   const notify180Txn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-      decodeBody(msg.body).includes("SIP/2.0 180 Ringing"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+      msg.bodyText()?.includes("SIP/2.0 180 Ringing") === true,
   })
   notify180Txn.reply(200)
 
@@ -309,9 +279,8 @@ export const referAllowCNoAnswer = scenario("refer-allow-c-no-answer", (s) => {
 
   const notifyTermTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-      decodeBody(msg.body).includes("SIP/2.0 408"),
+      (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+      msg.bodyText()?.includes("SIP/2.0 408") === true,
   })
   notifyTermTxn.reply(200)
 
@@ -358,9 +327,8 @@ export const referAllowCMultiple18x = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -371,9 +339,8 @@ export const referAllowCMultiple18x = scenario(
     charlieInviteTxn.reply(180)
     const notify180aTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-        decodeBody(msg.body).includes("SIP/2.0 180"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+        msg.bodyText()?.includes("SIP/2.0 180") === true,
     })
     notify180aTxn.reply(200)
 
@@ -381,9 +348,8 @@ export const referAllowCMultiple18x = scenario(
     charlieInviteTxn.reply(183, { reason: "Session Progress" })
     const notify183Txn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-        decodeBody(msg.body).includes("SIP/2.0 183"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+        msg.bodyText()?.includes("SIP/2.0 183") === true,
     })
     notify183Txn.reply(200)
 
@@ -392,9 +358,8 @@ export const referAllowCMultiple18x = scenario(
     charlieInviteTxn.reply(180)
     const notify180bTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-        decodeBody(msg.body).includes("SIP/2.0 180"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+        msg.bodyText()?.includes("SIP/2.0 180") === true,
     })
     notify180bTxn.reply(200)
 
@@ -407,9 +372,8 @@ export const referAllowCMultiple18x = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 

@@ -29,7 +29,6 @@
 import { scenario } from "../../../src/test-harness/framework/dsl.js"
 import type { ScenarioContext } from "../../../src/test-harness/framework/recorder.js"
 import { sdpOffer, sdpAnswer } from "../../../src/test-harness/framework/helpers/sdp.js"
-import type { SipMessage } from "../../../src/sip/types.js"
 import {
   HA_PROXY_ADDR,
   haAliceIp,
@@ -48,9 +47,6 @@ const HEALTHY_CYCLES = 2
 // keepaliveTimeoutSec=10 in the test config; pad slightly for
 // scheduler skew under TestClock.
 const KEEPALIVE_TIMEOUT_SETTLE_MS = 12_000
-
-const viaCount = (msg: SipMessage): number =>
-  msg.headers.filter((h) => h.name.toLowerCase() === "via").length
 
 interface HaCallOpts {
   readonly aliceName: string
@@ -107,12 +103,12 @@ function haKeepaliveTimeoutBody(s: ScenarioContext, opts: HaCallOpts): void {
     s.pause(KEEPALIVE_INTERVAL_MS)
     aliceDialog
       .expect("OPTIONS", {
-        predicate: (msg) => msg.type === "request" && viaCount(msg) >= 2,
+        predicate: (msg) => msg.getHeader("via").length >= 2,
       })
       .reply(200)
     bobDialog
       .expect("OPTIONS", {
-        predicate: (msg) => msg.type === "request" && viaCount(msg) >= 2,
+        predicate: (msg) => msg.getHeader("via").length >= 2,
       })
       .reply(200)
   }
@@ -125,14 +121,14 @@ function haKeepaliveTimeoutBody(s: ScenarioContext, opts: HaCallOpts): void {
   aliceDialog.expect("OPTIONS", {
     timeout: 10_000,
     allowReemission: true,
-    predicate: (msg) => msg.type === "request" && viaCount(msg) >= 2,
+    predicate: (msg) => msg.getHeader("via").length >= 2,
   })
 
   // Bob still answers — `absorb-options-200` cancels his keepalive_timeout.
   bobDialog
     .expect("OPTIONS", {
       timeout: 10_000,
-      predicate: (msg) => msg.type === "request" && viaCount(msg) >= 2,
+      predicate: (msg) => msg.getHeader("via").length >= 2,
     })
     .reply(200)
 

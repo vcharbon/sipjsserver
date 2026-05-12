@@ -46,12 +46,9 @@ export const indialogOptions = scenario("indialog-options", (s) => {
 
   bobDialog
     .expect("OPTIONS", {
-      predicate: (msg) => {
-        if (msg.type !== "request") return false
-        const ct = msg.headers.find((h) => h.name.toLowerCase() === "content-type")?.value
-        return ct === "application/x-test-a" &&
-          new TextDecoder().decode(msg.body) === new TextDecoder().decode(aliceBody)
-      },
+      predicate: (msg) =>
+        msg.getHeader("content-type")[0] === "application/x-test-a" &&
+        msg.bodyEquals(aliceBody),
     })
     .reply(200)
 
@@ -66,12 +63,9 @@ export const indialogOptions = scenario("indialog-options", (s) => {
 
   aliceDialog
     .expect("OPTIONS", {
-      predicate: (msg) => {
-        if (msg.type !== "request") return false
-        const ct = msg.headers.find((h) => h.name.toLowerCase() === "content-type")?.value
-        return ct === "application/x-test-b" &&
-          new TextDecoder().decode(msg.body) === new TextDecoder().decode(bobBody)
-      },
+      predicate: (msg) =>
+        msg.getHeader("content-type")[0] === "application/x-test-b" &&
+        msg.bodyEquals(bobBody),
     })
     .reply(200)
 

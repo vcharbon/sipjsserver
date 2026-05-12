@@ -19,29 +19,6 @@ import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipMessage } from "../../src/sip/types.js"
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function decodeBody(body: Uint8Array | undefined): string {
-  if (body === undefined || body.byteLength === 0) return ""
-  return new TextDecoder().decode(body)
-}
-
-function headerValue(
-  msg: { headers: ReadonlyArray<{ name: string; value: string }> },
-  name: string,
-): string | undefined {
-  const target = name.toLowerCase()
-  return msg.headers.find((h) => h.name.toLowerCase() === target)?.value
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false
-  for (let i = 0; i < a.byteLength; i++) {
-    if (a[i] !== b[i]) return false
-  }
-  return true
-}
-
 /**
  * Body-equality modulo the SDP `o=` line. The framework rewrites the
  * `o=` line on outbound SDP to honour RFC 3264 §8 / RFC 4566 §5.2
@@ -62,8 +39,7 @@ function sdpBodyEqualIgnoringOrigin(actual: Uint8Array, expected: Uint8Array): b
 }
 
 function contactHasLegTag(msg: SipMessage, legTag: string): boolean {
-  const contact = headerValue(msg, "contact") ?? ""
-  return contact.includes(`leg=${legTag}`)
+  return (msg.getHeader("contact")?.uri ?? "").includes(`leg=${legTag}`)
 }
 
 const CHARLIE_PORT = 5667
@@ -117,9 +93,8 @@ export const referGatingAReinviteRefAuthorizing = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("active") &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("active") &&
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -134,7 +109,7 @@ export const referGatingAReinviteRefAuthorizing = scenario(
     const bobReinviteTxn = bobDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
       predicate: (msg) =>
-        msg.type === "request" && sdpBodyEqualIgnoringOrigin(msg.body, aliceReinviteSdp),
+        sdpBodyEqualIgnoringOrigin(msg.body, aliceReinviteSdp),
     })
     bobReinviteTxn.reply(200, {
       overrides: { body: sdpAnswer(aliceReinviteSdp) },
@@ -148,9 +123,8 @@ export const referGatingAReinviteRefAuthorizing = scenario(
     s.pause(61_000)
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-        decodeBody(msg.body).includes("SIP/2.0 500"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+        msg.bodyText()?.includes("SIP/2.0 500") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -193,8 +167,7 @@ export const referGatingAReinviteCRinging = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -202,8 +175,7 @@ export const referGatingAReinviteCRinging = scenario(
     charlieInviteTxn.reply(180)
     const notify180Txn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 180"),
+        msg.bodyText()?.includes("SIP/2.0 180") === true,
     })
     notify180Txn.reply(200)
 
@@ -218,7 +190,7 @@ export const referGatingAReinviteCRinging = scenario(
     const bobReinviteTxn = bobDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
       predicate: (msg) =>
-        msg.type === "request" && sdpBodyEqualIgnoringOrigin(msg.body, aliceReinviteSdp),
+        sdpBodyEqualIgnoringOrigin(msg.body, aliceReinviteSdp),
     })
     bobReinviteTxn.reply(200, {
       overrides: { body: sdpAnswer(aliceReinviteSdp) },
@@ -234,9 +206,8 @@ export const referGatingAReinviteCRinging = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-        decodeBody(msg.body).includes("SIP/2.0 486"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+        msg.bodyText()?.includes("SIP/2.0 486") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -279,8 +250,7 @@ export const referGatingAReinviteCRealigning = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -291,8 +261,7 @@ export const referGatingAReinviteCRealigning = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -366,8 +335,7 @@ export const referGatingAInfoRefAuthorizing = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("active"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("active"),
     })
     notifyTryingTxn.reply(200)
 
@@ -379,9 +347,8 @@ export const referGatingAInfoRefAuthorizing = scenario(
     bobDialog
       .expect("INFO", {
         predicate: (msg) =>
-          msg.type === "request" &&
-          headerValue(msg, "content-type") === "application/dtmf-relay" &&
-          bytesEqual(msg.body, DTMF_PAYLOAD),
+          msg.getHeader("content-type")[0] === "application/dtmf-relay" &&
+          msg.bodyEquals(DTMF_PAYLOAD),
       })
       .reply(200)
     aliceInfoTxn.expect(200)
@@ -389,8 +356,7 @@ export const referGatingAInfoRefAuthorizing = scenario(
     s.pause(61_000)
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("terminated"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated"),
     })
     notifyTermTxn.reply(200)
 
@@ -430,8 +396,7 @@ export const referGatingAInfoCRinging = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -439,8 +404,7 @@ export const referGatingAInfoCRinging = scenario(
     charlieInviteTxn.reply(180)
     const notify180Txn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 180"),
+        msg.bodyText()?.includes("SIP/2.0 180") === true,
     })
     notify180Txn.reply(200)
 
@@ -452,8 +416,7 @@ export const referGatingAInfoCRinging = scenario(
     bobDialog
       .expect("INFO", {
         predicate: (msg) =>
-          msg.type === "request" &&
-          bytesEqual(msg.body, DTMF_PAYLOAD),
+          msg.bodyEquals(DTMF_PAYLOAD),
       })
       .reply(200)
     aliceInfoTxn.expect(200)
@@ -463,9 +426,8 @@ export const referGatingAInfoCRinging = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-        decodeBody(msg.body).includes("SIP/2.0 486"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+        msg.bodyText()?.includes("SIP/2.0 486") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -506,8 +468,7 @@ export const referGatingBInfoRefAuthorizing = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("active"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("active"),
     })
     notifyTryingTxn.reply(200)
 
@@ -519,8 +480,7 @@ export const referGatingBInfoRefAuthorizing = scenario(
     aliceDialog
       .expect("INFO", {
         predicate: (msg) =>
-          msg.type === "request" &&
-          bytesEqual(msg.body, DTMF_PAYLOAD),
+          msg.bodyEquals(DTMF_PAYLOAD),
       })
       .reply(200)
     bobInfoTxn.expect(200)
@@ -528,8 +488,7 @@ export const referGatingBInfoRefAuthorizing = scenario(
     s.pause(61_000)
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("terminated"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated"),
     })
     notifyTermTxn.reply(200)
 
@@ -569,8 +528,7 @@ export const referGatingSecondReferCRinging = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -578,8 +536,7 @@ export const referGatingSecondReferCRinging = scenario(
     charlieInviteTxn.reply(180)
     const notify180Txn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 180"),
+        msg.bodyText()?.includes("SIP/2.0 180") === true,
     })
     notify180Txn.reply(200)
 
@@ -594,9 +551,8 @@ export const referGatingSecondReferCRinging = scenario(
     charlieInviteTxn.expectAck()
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-        decodeBody(msg.body).includes("SIP/2.0 486"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+        msg.bodyText()?.includes("SIP/2.0 486") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -639,8 +595,7 @@ export const referGatingSecondReferCRealigning = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -651,8 +606,7 @@ export const referGatingSecondReferCRealigning = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 

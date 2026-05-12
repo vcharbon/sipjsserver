@@ -9,12 +9,6 @@
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { callSetup } from "./bye-directions.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
-import type { SipMessage } from "../../src/sip/types.js"
-
-/** Helper to check a message carries a non-empty body. */
-function hasBody(msg: SipMessage): boolean {
-  return msg.body.byteLength > 0
-}
 
 // ---------------------------------------------------------------------------
 // 1. Alice re-INVITEs Bob — no SDP in re-INVITE, offer in 200 OK, answer in ACK
@@ -37,7 +31,7 @@ const aliceReInviteFragment = scenario("alice-reinvite-fragment", (s) => {
 
   // Bob receives re-INVITE (no body)
   const bobReInvTxn = bobDialog.expect("INVITE", {
-    predicate: (msg) => msg.type === "request" && !hasBody(msg),
+    predicate: (msg) => !msg.hasBody(),
   })
 
   // Bob responds 200 OK with SDP offer
@@ -47,7 +41,7 @@ const aliceReInviteFragment = scenario("alice-reinvite-fragment", (s) => {
 
   // Alice receives 200 OK with SDP offer
   aliceReInvTxn.expect(200, {
-    predicate: (msg) => msg.type === "response" && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   // Alice sends ACK with SDP answer
@@ -57,7 +51,7 @@ const aliceReInviteFragment = scenario("alice-reinvite-fragment", (s) => {
 
   // Bob receives ACK with SDP answer
   bobDialog.expect("ACK", {
-    predicate: (msg) => msg.type === "request" && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   // Verify call is still alive — Alice hangs up normally
@@ -93,7 +87,7 @@ const bobReInviteFragment = scenario("bob-reinvite-fragment", (s) => {
 
   // Alice receives re-INVITE with SDP body
   const aliceReInvTxn = aliceDialog.expect("INVITE", {
-    predicate: (msg) => msg.type === "request" && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   // Alice responds 200 OK with SDP answer
@@ -103,7 +97,7 @@ const bobReInviteFragment = scenario("bob-reinvite-fragment", (s) => {
 
   // Bob receives 200 OK with SDP answer
   bobReInvTxn.expect(200, {
-    predicate: (msg) => msg.type === "response" && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   // Bob sends ACK (no SDP — offer/answer already complete)
@@ -171,7 +165,7 @@ const crossingReInviteFragment = scenario("crossing-reinvite-fragment", (s) => {
 
   // Alice receives 200 OK
   aliceReInvTxn.expect(200, {
-    predicate: (msg) => msg.type === "response" && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   // Alice sends ACK

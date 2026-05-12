@@ -19,19 +19,6 @@
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 
-function decodeBody(body: Uint8Array | undefined): string {
-  if (body === undefined || body.byteLength === 0) return ""
-  return new TextDecoder().decode(body)
-}
-
-function headerValue(
-  msg: { headers: ReadonlyArray<{ name: string; value: string }> },
-  name: string,
-): string | undefined {
-  const target = name.toLowerCase()
-  return msg.headers.find((h) => h.name.toLowerCase() === target)?.value
-}
-
 const CHARLIE_PORT = 5667
 const REFER_TO_CHARLIE = `<sip:charlie@127.0.0.1:${CHARLIE_PORT}>`
 
@@ -92,8 +79,7 @@ export const referOverallSafetyFires = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -105,9 +91,8 @@ export const referOverallSafetyFires = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("terminated") &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated") &&
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 

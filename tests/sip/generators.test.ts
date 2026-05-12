@@ -20,6 +20,7 @@ import type { InviteClientTransactionHandle } from "../../src/sip/TransactionLay
 import { getHeader, getHeaders } from "../../src/sip/MessageHelpers.js"
 import { serialize } from "../../src/sip/Serializer.js"
 import type { SipHeader, SipRequest } from "../../src/sip/types.js"
+import { hydrateRequest } from "../../src/sip/parsers/extract-fields.js"
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -73,52 +74,50 @@ const SDP_BODY = new TextEncoder().encode(
 )
 
 function makeALegInvite(): SipRequest {
-  return {
-    type: "request",
+  const headers: SipHeader[] = [
+    { name: "Via", value: "SIP/2.0/UDP atlanta.example.com:5060;branch=z9hG4bKalice" },
+    { name: "Max-Forwards", value: "70" },
+    { name: "From", value: '"Alice" <sip:alice@atlanta.example.com>;tag=alice-tag' },
+    { name: "To", value: "<sip:bob@biloxi.example.com>" },
+    { name: "Call-ID", value: "call-aleg-1" },
+    { name: "CSeq", value: "1 INVITE" },
+    { name: "Contact", value: "<sip:alice@atlanta.example.com:5060>" },
+    { name: "Allow", value: "INVITE, ACK, CANCEL, BYE, OPTIONS" },
+    { name: "Supported", value: "replaces, 100rel" },
+    { name: "P-Asserted-Identity", value: "<sip:alice@atlanta.example.com>" },
+    { name: "Content-Type", value: "application/sdp" },
+    { name: "Content-Length", value: String(SDP_BODY.byteLength) },
+  ]
+  return hydrateRequest({
     method: "INVITE",
     uri: "sip:bob@biloxi.example.com",
-    version: "SIP/2.0",
-    headers: [
-      { name: "Via", value: "SIP/2.0/UDP atlanta.example.com:5060;branch=z9hG4bKalice" },
-      { name: "Max-Forwards", value: "70" },
-      { name: "From", value: '"Alice" <sip:alice@atlanta.example.com>;tag=alice-tag' },
-      { name: "To", value: "<sip:bob@biloxi.example.com>" },
-      { name: "Call-ID", value: "call-aleg-1" },
-      { name: "CSeq", value: "1 INVITE" },
-      { name: "Contact", value: "<sip:alice@atlanta.example.com:5060>" },
-      { name: "Allow", value: "INVITE, ACK, CANCEL, BYE, OPTIONS" },
-      { name: "Supported", value: "replaces, 100rel" },
-      { name: "P-Asserted-Identity", value: "<sip:alice@atlanta.example.com>" },
-      { name: "Content-Type", value: "application/sdp" },
-      { name: "Content-Length", value: String(SDP_BODY.byteLength) },
-    ],
+    headers,
     body: SDP_BODY,
     raw: Buffer.alloc(0),
-  }
+  })
 }
 
 function inviteHandle(): InviteClientTransactionHandle {
   // The handle's originalInvite mirrors what TransactionLayer would stash —
   // an already-stamped outbound INVITE whose CSeq and Via are load-bearing
   // for CANCEL / ACK-for-2xx.
-  const invite: SipRequest = {
-    type: "request",
+  const headers: SipHeader[] = [
+    { name: "Via", value: "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123;cr=cref1;lg=b-1" },
+    { name: "Max-Forwards", value: "70" },
+    { name: "From", value: "<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local" },
+    { name: "To", value: "<sip:bob@192.0.2.20:5060>" },
+    { name: "Call-ID", value: "call-bleg-1" },
+    { name: "CSeq", value: "42 INVITE" },
+    { name: "Contact", value: "<sip:b2bua@10.0.0.1:5060;callRef=cref1;leg=b-1>" },
+    { name: "Content-Length", value: "0" },
+  ]
+  const invite: SipRequest = hydrateRequest({
     method: "INVITE",
     uri: "sip:bob@192.0.2.20:5060",
-    version: "SIP/2.0",
-    headers: [
-      { name: "Via", value: "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bKinvite123;cr=cref1;lg=b-1" },
-      { name: "Max-Forwards", value: "70" },
-      { name: "From", value: "<sip:b2bua@10.0.0.1:5060>;tag=b2bua-local" },
-      { name: "To", value: "<sip:bob@192.0.2.20:5060>" },
-      { name: "Call-ID", value: "call-bleg-1" },
-      { name: "CSeq", value: "42 INVITE" },
-      { name: "Contact", value: "<sip:b2bua@10.0.0.1:5060;callRef=cref1;leg=b-1>" },
-      { name: "Content-Length", value: "0" },
-    ],
+    headers,
     body: new Uint8Array(0),
     raw: Buffer.alloc(0),
-  }
+  })
   return {
     kind: "invite",
     branch: "z9hG4bKinvite123",

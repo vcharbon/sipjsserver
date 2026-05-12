@@ -19,19 +19,21 @@
  *                         relay (regression guard).
  */
 
+import { Result } from "effect"
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipMessage } from "../../src/sip/types.js"
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function hasBody(msg: SipMessage): boolean {
-  return msg.body.length > 0
+/** Comma-list token membership (case-insensitive), per RFC 3261 header syntax. */
+function hasToken(headerValue: string, token: string): boolean {
+  return headerValue.toLowerCase().split(",").some((t) => t.trim() === token.toLowerCase())
 }
 
-function headerContainsToken(msg: SipMessage, headerName: string, token: string): boolean {
-  const header = msg.headers.find((h) => h.name.toLowerCase() === headerName.toLowerCase())?.value ?? ""
-  return header.toLowerCase().split(",").some((t) => t.trim() === token.toLowerCase())
+/** Match RAck against `<rseq> <any-cseq-num> <method>` via the parsed structure. */
+function rackMatches(msg: SipMessage, rseq: number, method: string): boolean {
+  const r = msg.getHeader("rack")
+  if (Result.isFailure(r) || r.success === undefined) return false
+  return r.success.rseq === rseq && r.success.method.toUpperCase() === method.toUpperCase()
 }
 
 // Latency between bob's reliable 18x and his 200 OK so PRACK / UPDATE
@@ -71,10 +73,7 @@ export const fakePrackBasic = scenario("fake-prack-basic", (s) => {
   // Bob receives INVITE — fake-prack must KEEP `Supported: 100rel` intact
   // so bob may negotiate reliable provisional with us.
   const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite({
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      return headerContainsToken(msg, "Supported", "100rel")
-    },
+    predicate: (msg) => hasToken(msg.getHeader("supported")[0] ?? "", "100rel"),
   })
 
   // Bob: 183 with Require:100rel + RSeq + SDP
@@ -88,22 +87,15 @@ export const fakePrackBasic = scenario("fake-prack-basic", (s) => {
 
   // Alice sees a bare 180 — no body, no Require/RSeq.
   aliceInviteTxn.expect(180, {
-    predicate: (msg) => {
-      if (msg.type !== "response" || msg.status !== 180) return false
-      if (hasBody(msg)) return false
-      if (headerContainsToken(msg, "Require", "100rel")) return false
-      const rseq = msg.headers.find((h) => h.name.toLowerCase() === "rseq")
-      return rseq === undefined
-    },
+    predicate: (msg) =>
+      !msg.hasBody() &&
+      !hasToken(msg.getHeader("require")[0] ?? "", "100rel") &&
+      !msg.hasHeader("rseq"),
   })
 
   // B2BUA originates PRACK toward bob.
   const bobPrackTxn = bobDialog.expect("PRACK", {
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const rack = msg.headers.find((h) => h.name.toLowerCase() === "rack")?.value ?? ""
-      return /^1\s+\d+\s+INVITE$/i.test(rack.trim())
-    },
+    predicate: (msg) => rackMatches(msg, 1, "INVITE"),
   })
   bobPrackTxn.reply(200)
 
@@ -115,9 +107,8 @@ export const fakePrackBasic = scenario("fake-prack-basic", (s) => {
   // Alice's 200 OK carries bob's cached SDP.
   aliceInviteTxn.expect(200, {
     predicate: (msg) => {
-      if (msg.type !== "response" || msg.status !== 200) return false
-      if (!hasBody(msg)) return false
-      const ct = msg.headers.find((h) => h.name.toLowerCase() === "content-type")?.value ?? ""
+      if (!msg.hasBody()) return false
+      const ct = msg.getHeader("content-type")[0] ?? ""
       return ct.toLowerCase().includes("application/sdp")
     },
   })
@@ -160,11 +151,7 @@ export const fakePrackMultiple18x = scenario("fake-prack-multiple-18x", (s) => {
   aliceInviteTxn.expect(180)
 
   bobDialog.expect("PRACK", {
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const rack = msg.headers.find((h) => h.name.toLowerCase() === "rack")?.value ?? ""
-      return /^1\s+\d+\s+INVITE$/i.test(rack.trim())
-    },
+    predicate: (msg) => rackMatches(msg, 1, "INVITE"),
   }).reply(200)
 
   s.pause(LATENCY_MS)
@@ -178,11 +165,7 @@ export const fakePrackMultiple18x = scenario("fake-prack-multiple-18x", (s) => {
   })
 
   bobDialog.expect("PRACK", {
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const rack = msg.headers.find((h) => h.name.toLowerCase() === "rack")?.value ?? ""
-      return /^2\s+\d+\s+INVITE$/i.test(rack.trim())
-    },
+    predicate: (msg) => rackMatches(msg, 2, "INVITE"),
   }).reply(200)
 
   s.pause(LATENCY_MS)
@@ -191,7 +174,7 @@ export const fakePrackMultiple18x = scenario("fake-prack-multiple-18x", (s) => {
   bobInviteTxn.reply(200)
 
   aliceInviteTxn.expect(200, {
-    predicate: (msg) => msg.type === "response" && msg.status === 200 && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   aliceDialog.ack()
@@ -244,10 +227,9 @@ export const fakePrackUpdateHappy = scenario("fake-prack-update-happy", (s) => {
   })
   bobUpdateTxn.expect(200, {
     predicate: (msg) => {
-      if (msg.type !== "response" || msg.status !== 200) return false
       // Skeleton-fit answer must include SDP body and Content-Type.
-      if (!hasBody(msg)) return false
-      const ct = msg.headers.find((h) => h.name.toLowerCase() === "content-type")?.value ?? ""
+      if (!msg.hasBody()) return false
+      const ct = msg.getHeader("content-type")[0] ?? ""
       return ct.toLowerCase().includes("application/sdp")
     },
   })
@@ -257,7 +239,7 @@ export const fakePrackUpdateHappy = scenario("fake-prack-update-happy", (s) => {
   // 200 OK INVITE — alice gets the LATEST cached SDP (bob's UPDATE offer).
   bobInviteTxn.reply(200)
   aliceInviteTxn.expect(200, {
-    predicate: (msg) => msg.type === "response" && msg.status === 200 && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   aliceDialog.ack()
@@ -330,7 +312,7 @@ export const fakePrackUpdateCodecMismatch = scenario("fake-prack-update-codec-mi
   // Call still proceeds with original cached SDP from the 183.
   bobInviteTxn.reply(200)
   aliceInviteTxn.expect(200, {
-    predicate: (msg) => msg.type === "response" && msg.status === 200 && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   aliceDialog.ack()
@@ -403,7 +385,7 @@ export const fakePrackForking = scenario("fake-prack-forking", (s) => {
 
   // Alice 200 OK — must carry bob2's cached SDP (winner).
   aliceInviteTxn.expect(200, {
-    predicate: (msg) => msg.type === "response" && msg.status === 200 && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   aliceDialog.ack()
@@ -472,7 +454,7 @@ export const fakePrackFailover = scenario("fake-prack-failover", (s) => {
   // Alice's 200 OK uses bob2's body (no cache for bob2 since no 100rel was
   // used; the relay path forwards bob2's own SDP).
   aliceInviteTxn.expect(200, {
-    predicate: (msg) => msg.type === "response" && msg.status === 200 && hasBody(msg),
+    predicate: (msg) => msg.hasBody(),
   })
 
   aliceDialog.ack()
@@ -503,19 +485,14 @@ export const fakePrackDelayedOfferFallback = scenario("fake-prack-delayed-offer-
   // Outbound INVITE to bob must have `Supported: 100rel` stripped
   // (delayed-offer fallback path in applyRoute).
   const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite({
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      return !headerContainsToken(msg, "Supported", "100rel")
-    },
+    predicate: (msg) => !hasToken(msg.getHeader("supported")[0] ?? "", "100rel"),
   })
 
   // Bob can only use unreliable provisional. Bare 180 (no body — keeping the
   // delayed-offer protocol clean: offer comes in 200 OK, answer in ACK).
   bobInviteTxn.reply(180)
 
-  aliceInviteTxn.expect(180, {
-    predicate: (msg) => msg.type === "response" && msg.status === 180,
-  })
+  aliceInviteTxn.expect(180)
 
   s.pause(LATENCY_MS)
 
@@ -571,10 +548,7 @@ export const fakePrackNoPolicyControl = scenario("fake-prack-no-policy-control",
   // Alice sees the 183 with 100rel intact (regression guard against the new
   // code leaking into the default path).
   aliceInviteTxn.expect(183, {
-    predicate: (msg) => {
-      if (msg.type !== "response" || msg.status !== 183) return false
-      return headerContainsToken(msg, "Require", "100rel")
-    },
+    predicate: (msg) => hasToken(msg.getHeader("require")[0] ?? "", "100rel"),
   })
 
   // Alice sends PRACK end-to-end.

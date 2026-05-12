@@ -139,6 +139,14 @@ export interface SipRequest {
    */
   getHeader<K extends keyof SipHeaderTypes>(name: K): SipHeaderTypes[K]
   getHeader(name: string): ReadonlyArray<string>
+  /** `body.length > 0`. */
+  hasBody(): boolean
+  /** UTF-8 decode of `body`; `undefined` when `body` is empty. */
+  bodyText(): string | undefined
+  /** Byte-for-byte equality against `other`. */
+  bodyEquals(other: Uint8Array): boolean
+  /** Case-insensitive header-presence check. */
+  hasHeader(name: string): boolean
 }
 
 export interface SipResponse {
@@ -152,6 +160,14 @@ export interface SipResponse {
   /** Typed header access — see `SipRequest.getHeader` for the union-access caveat. */
   getHeader<K extends keyof SipHeaderTypes>(name: K): SipHeaderTypes[K]
   getHeader(name: string): ReadonlyArray<string>
+  /** `body.length > 0`. */
+  hasBody(): boolean
+  /** UTF-8 decode of `body`; `undefined` when `body` is empty. */
+  bodyText(): string | undefined
+  /** Byte-for-byte equality against `other`. */
+  bodyEquals(other: Uint8Array): boolean
+  /** Case-insensitive header-presence check. */
+  hasHeader(name: string): boolean
 }
 
 export type SipMessage = SipRequest | SipResponse

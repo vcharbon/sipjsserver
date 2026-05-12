@@ -43,7 +43,7 @@ export const delayedOfferFailure = scenario("delayed-offer-failure", (s) => {
 
   // Bob receives INVITE — should have no body (delayed offer)
   const { dialog: bobDialog, transaction: bobInviteTxn } = bob.receiveInitialInvite({
-    predicate: (msg) => msg.type === "request" && msg.body.length === 0,
+    predicate: (msg) => !msg.hasBody(),
   })
 
   // Bob sends 200 OK WITH SDP offer (offerer in delayed-offer model).
@@ -60,7 +60,7 @@ export const delayedOfferFailure = scenario("delayed-offer-failure", (s) => {
 
   // Bob receives ACK — validate it has NO body (detecting the violation)
   bobDialog.expect("ACK", {
-    predicate: (msg) => msg.type === "request" && msg.body.length === 0,
+    predicate: (msg) => !msg.hasBody(),
   })
 
   // Bob detects missing SDP answer — tears down the call

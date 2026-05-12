@@ -16,30 +16,8 @@ import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipMessage } from "../../src/sip/types.js"
 
-function decodeBody(body: Uint8Array | undefined): string {
-  if (body === undefined || body.byteLength === 0) return ""
-  return new TextDecoder().decode(body)
-}
-
-function headerValue(
-  msg: { headers: ReadonlyArray<{ name: string; value: string }> },
-  name: string,
-): string | undefined {
-  const target = name.toLowerCase()
-  return msg.headers.find((h) => h.name.toLowerCase() === target)?.value
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false
-  for (let i = 0; i < a.byteLength; i++) {
-    if (a[i] !== b[i]) return false
-  }
-  return true
-}
-
 function contactHasLegTag(msg: SipMessage, legTag: string): boolean {
-  const contact = headerValue(msg, "contact") ?? ""
-  return contact.includes(`leg=${legTag}`)
+  return (msg.getHeader("contact")?.uri ?? "").includes(`leg=${legTag}`)
 }
 
 const CHARLIE_PORT = 5667
@@ -83,8 +61,7 @@ export const referAllowFullHappy = scenario("refer-allow-full-happy", (s) => {
 
   const notifyTryingTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+      msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
   })
   notifyTryingTxn.reply(200)
 
@@ -96,8 +73,7 @@ export const referAllowFullHappy = scenario("refer-allow-full-happy", (s) => {
 
   const notifyTermTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) =>
-      msg.type === "request" &&
-      decodeBody(msg.body).includes("SIP/2.0 200"),
+      msg.bodyText()?.includes("SIP/2.0 200") === true,
   })
   notifyTermTxn.reply(200)
 
@@ -105,10 +81,8 @@ export const referAllowFullHappy = scenario("refer-allow-full-happy", (s) => {
   const cRealignTxn = charlieDialog.expect("INVITE", {
     skipValidation: ["offerAnswer"],
     predicate: (msg) => {
-      if (msg.type !== "request") return false
-      if (!bytesEqual(msg.body, aliceSdp)) return false
-      const cseq = headerValue(msg, "cseq") ?? ""
-      if (!cseq.trim().endsWith("INVITE")) return false
+      if (!msg.bodyEquals(aliceSdp)) return false
+      if (msg.getHeader("cseq").method !== "INVITE") return false
       return contactHasLegTag(msg, "b-2")
     },
   })
@@ -121,11 +95,8 @@ export const referAllowFullHappy = scenario("refer-allow-full-happy", (s) => {
   // re-INVITE A with C's initial SDP, Contact has leg=a.
   const aRealignTxn = aliceDialog.expect("INVITE", {
     skipValidation: ["offerAnswer"],
-    predicate: (msg) => {
-      if (msg.type !== "request") return false
-      if (!bytesEqual(msg.body, charlieInitialSdp)) return false
-      return contactHasLegTag(msg, "a")
-    },
+    predicate: (msg) =>
+      msg.bodyEquals(charlieInitialSdp) && contactHasLegTag(msg, "a"),
   })
   aRealignTxn.reply(200, {
     overrides: { body: sdpAnswer(charlieInitialSdp) },
@@ -175,8 +146,7 @@ export const referAllowFullARejectRealign = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -187,8 +157,7 @@ export const referAllowFullARejectRealign = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -250,8 +219,7 @@ export const referAllowFullAGlareReinvite = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -262,8 +230,7 @@ export const referAllowFullAGlareReinvite = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -341,8 +308,7 @@ export const referAllowFullABye = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -353,8 +319,7 @@ export const referAllowFullABye = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 
@@ -424,8 +389,7 @@ export const referAllowFullATimeout = scenario(
 
     const notifyTryingTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying"),
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true,
     })
     notifyTryingTxn.reply(200)
 
@@ -436,8 +400,7 @@ export const referAllowFullATimeout = scenario(
 
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        decodeBody(msg.body).includes("SIP/2.0 200"),
+        msg.bodyText()?.includes("SIP/2.0 200") === true,
     })
     notifyTermTxn.reply(200)
 

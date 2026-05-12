@@ -174,6 +174,38 @@ export function extractResponseFields(
   return common
 }
 
+// Shared convenience methods attached to every finalized SipRequest /
+// SipResponse so tests and rule code can avoid re-implementing body /
+// header presence checks inline. The TextDecoder instance is module-
+// scoped — decoders are stateless for UTF-8 and reuse is recommended.
+const bodyDecoder = new TextDecoder()
+
+function makeMessageHelpers(
+  headers: ReadonlyArray<SipHeader>,
+  body: Uint8Array,
+): {
+  hasBody: () => boolean
+  bodyText: () => string | undefined
+  bodyEquals: (other: Uint8Array) => boolean
+  hasHeader: (name: string) => boolean
+} {
+  return {
+    hasBody: () => body.length > 0,
+    bodyText: () => (body.length === 0 ? undefined : bodyDecoder.decode(body)),
+    bodyEquals: (other) => {
+      if (body.byteLength !== other.byteLength) return false
+      for (let i = 0; i < body.byteLength; i++) {
+        if (body[i] !== other[i]) return false
+      }
+      return true
+    },
+    hasHeader: (name) => {
+      const lower = name.toLowerCase()
+      return headers.some((h) => h.name.toLowerCase() === lower)
+    },
+  }
+}
+
 /**
  * Construct a finalized `SipRequest` from parsed pieces. Attaches the
  * top-level `requestUri` and the `getHeader` accessor.
@@ -199,6 +231,7 @@ export function finalizeRequest(args: {
     body: args.body,
     raw: args.raw,
     getHeader,
+    ...makeMessageHelpers(args.headers, args.body),
   }
 }
 
@@ -223,6 +256,7 @@ export function finalizeResponse(args: {
     body: args.body,
     raw: args.raw,
     getHeader,
+    ...makeMessageHelpers(args.headers, args.body),
   }
 }
 

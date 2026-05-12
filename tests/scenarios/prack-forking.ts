@@ -28,7 +28,6 @@
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
-import type { SipMessage } from "../../src/sip/types.js"
 import { parseNameAddr } from "../../src/sip/parsers/custom/structured-headers.js"
 
 /** Extract the To URI (without tag) from a To header value. */
@@ -86,11 +85,7 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   // enforced automatically by the framework (dialog key = callId|fromTag|fork1
   // has no prior, so it uses INVITE baseline + 1).
   const bobPrack1Txn = bobDialog.expect("PRACK", {
-    predicate: (msg: SipMessage) => {
-      if (msg.type !== "request") return false
-      const to = msg.headers.find((h) => h.name.toLowerCase() === "to")?.value ?? ""
-      return to.includes("fork1")
-    },
+    predicate: (msg) => msg.getHeader("to").tag === "fork1",
   })
 
   // Bob sends 200 OK for PRACK (fork1)
@@ -137,11 +132,7 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
   // CSeq sequence starts independently from the shared INVITE baseline; any
   // leakage of fork1's counter into fork2 is flagged by validateCSeq.
   const bobPrack2Txn = bobDialog.expect("PRACK", {
-    predicate: (msg: SipMessage) => {
-      if (msg.type !== "request") return false
-      const to = msg.headers.find((h) => h.name.toLowerCase() === "to")?.value ?? ""
-      return to.includes("fork2")
-    },
+    predicate: (msg) => msg.getHeader("to").tag === "fork2",
   })
 
   // Bob sends 200 OK for PRACK (fork2)

@@ -43,12 +43,9 @@ export const indialogInfo = scenario("indialog-info", (s) => {
 
   bobDialog
     .expect("INFO", {
-      predicate: (msg) => {
-        if (msg.type !== "request") return false
-        const ct = msg.headers.find((h) => h.name.toLowerCase() === "content-type")?.value
-        return ct === "application/dtmf-relay" &&
-          new TextDecoder().decode(msg.body) === new TextDecoder().decode(dtmfFromAlice)
-      },
+      predicate: (msg) =>
+        msg.getHeader("content-type")[0] === "application/dtmf-relay" &&
+        msg.bodyEquals(dtmfFromAlice),
     })
     .reply(200)
 
@@ -63,12 +60,9 @@ export const indialogInfo = scenario("indialog-info", (s) => {
 
   aliceDialog
     .expect("INFO", {
-      predicate: (msg) => {
-        if (msg.type !== "request") return false
-        const ct = msg.headers.find((h) => h.name.toLowerCase() === "content-type")?.value
-        return ct === "application/dtmf-relay" &&
-          new TextDecoder().decode(msg.body) === new TextDecoder().decode(dtmfFromBob)
-      },
+      predicate: (msg) =>
+        msg.getHeader("content-type")[0] === "application/dtmf-relay" &&
+        msg.bodyEquals(dtmfFromBob),
     })
     .reply(200)
 

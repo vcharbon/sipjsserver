@@ -12,11 +12,6 @@
 
 import { scenario } from "../../../src/test-harness/framework/dsl.js"
 import { extIp } from "../../support/registrarFrontProxyFakeStack.js"
-import type { SipHeader } from "../../../src/sip/types.js"
-
-function getHeader(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {
-  return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value
-}
 
 export const registerHappyPath = scenario("register-happy-path", (s) => {
   const alice = s.agent("alice", {
@@ -35,15 +30,13 @@ export const registerHappyPath = scenario("register-happy-path", (s) => {
   // userpart. Verify the address shape and that `Expires=3600` was applied.
   txn.expect(200, {
     predicate: (msg) => {
-      if (msg.type !== "response") return false
-      const expires = getHeader(msg.headers, "expires")
-      const contact = getHeader(msg.headers, "contact")
-      return (
-        expires === "3600" &&
-        contact !== undefined &&
-        contact.includes(extIp(1)) &&
-        contact.includes("expires=3600")
-      )
+      const expires = msg.getHeader("expires")[0]
+      const contact = msg.getHeader("contact")
+      if (expires !== "3600" || contact === undefined) return false
+      if (!contact.uri.includes(extIp(1))) return false
+      // `expires=3600` may appear as a URI param (inside <...>) or as a
+      // header-level Contact param (outside <...>) — accept either form.
+      return contact.uri.includes("expires=3600") || contact.params["expires"] === "3600"
     },
   })
 })

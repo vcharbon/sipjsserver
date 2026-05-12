@@ -32,26 +32,6 @@
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
-import type { SipMessage } from "../../src/sip/types.js"
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-function hasBody(msg: SipMessage): boolean {
-  return msg.body.length > 0
-}
-
-function headerValue(msg: SipMessage, name: string): string | undefined {
-  const target = name.toLowerCase()
-  return msg.headers.find((h) => h.name.toLowerCase() === target)?.value
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false
-  for (let i = 0; i < a.byteLength; i++) {
-    if (a[i] !== b[i]) return false
-  }
-  return true
-}
 
 const PEM_HEADER = "sendrecv"
 
@@ -105,13 +85,12 @@ export const promotePemHappyNoResync = scenario("promote-pem-happy-no-resync", (
   // and explicit Allow + Supported (RFC 3261 §13.3.1 / §20.5 / §20.37).
   aliceInviteTxn.expect(200, {
     predicate: (msg) => {
-      if (msg.type !== "response" || msg.status !== 200) return false
-      if (!hasBody(msg)) return false
-      if (!bytesEqual(msg.body, bobSdp)) return false
-      if (headerValue(msg, "p-early-media") !== undefined) return false
-      const allow = headerValue(msg, "allow") ?? ""
+      if (!msg.hasBody()) return false
+      if (!msg.bodyEquals(bobSdp)) return false
+      if (msg.hasHeader("p-early-media")) return false
+      const allow = msg.getHeader("allow")[0] ?? ""
       if (!/\bINVITE\b/i.test(allow) || !/\bBYE\b/i.test(allow)) return false
-      const supported = headerValue(msg, "supported") ?? ""
+      const supported = msg.getHeader("supported")[0] ?? ""
       // 100rel intentionally absent on the synthetic 200 OK — alice
       // never saw a reliable provisional from us.
       if (/\b100rel\b/i.test(supported)) return false
@@ -167,8 +146,7 @@ export const promotePemResyncSdpChanged = scenario(
     })
 
     aliceInviteTxn.expect(200, {
-      predicate: (msg) =>
-        msg.type === "response" && msg.status === 200 && bytesEqual(msg.body, earlySdp),
+      predicate: (msg) => msg.bodyEquals(earlySdp),
     })
 
     aliceDialog.ack()
@@ -185,11 +163,10 @@ export const promotePemResyncSdpChanged = scenario(
     const aliceResyncTxn = aliceDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
       predicate: (msg) => {
-        if (msg.type !== "request") return false
-        if (!new TextDecoder().decode(msg.body).includes("m=audio 30000")) return false
-        const allow = headerValue(msg, "allow") ?? ""
+        if (msg.bodyText()?.includes("m=audio 30000") !== true) return false
+        const allow = msg.getHeader("allow")[0] ?? ""
         if (!/\bINVITE\b/i.test(allow)) return false
-        const supported = headerValue(msg, "supported") ?? ""
+        const supported = msg.getHeader("supported")[0] ?? ""
         return /\btimer\b/i.test(supported) || supported.length > 0
       },
     })
@@ -258,8 +235,7 @@ export const promotePemBFailsPostPromote = scenario(
 
     const aliceByeTxn = aliceDialog.expect("BYE", {
       predicate: (msg) => {
-        if (msg.type !== "request") return false
-        const reason = headerValue(msg, "reason") ?? ""
+        const reason = msg.getHeader("reason")[0] ?? ""
         return /\bcause\s*=\s*503\b/i.test(reason)
       },
     })
@@ -307,14 +283,15 @@ export const promotePemResyncFailedByA = scenario(
     aliceResyncTxn.reply(488, { reason: "Not Acceptable Here" })
 
     // begin-termination BYEs both legs with `Reason: SIP;cause=488;…`.
-    const reasonHasCause488 = (msg: SipMessage): boolean => {
-      if (msg.type !== "request") return false
-      const reason = headerValue(msg, "reason") ?? ""
-      return /\bcause\s*=\s*488\b/i.test(reason)
-    }
-    const aliceByeTxn = aliceDialog.expect("BYE", { predicate: reasonHasCause488 })
+    const reasonHasCause488 = (reason: string): boolean =>
+      /\bcause\s*=\s*488\b/i.test(reason)
+    const aliceByeTxn = aliceDialog.expect("BYE", {
+      predicate: (msg) => reasonHasCause488(msg.getHeader("reason")[0] ?? ""),
+    })
     aliceByeTxn.reply(200)
-    const bobByeTxn = bobDialog.expect("BYE", { predicate: reasonHasCause488 })
+    const bobByeTxn = bobDialog.expect("BYE", {
+      predicate: (msg) => reasonHasCause488(msg.getHeader("reason")[0] ?? ""),
+    })
     bobByeTxn.reply(200)
   },
 )
@@ -385,11 +362,7 @@ export const promotePemNoPolicyControl = scenario(
     // Default relay-provisional fires — alice sees a 183, NOT a 200 OK,
     // and the body / PEM header survive the relay.
     aliceInviteTxn.expect(183, {
-      predicate: (msg) => {
-        if (msg.type !== "response" || msg.status !== 183) return false
-        if (!hasBody(msg)) return false
-        return headerValue(msg, "p-early-media") !== undefined
-      },
+      predicate: (msg) => msg.hasBody() && msg.hasHeader("p-early-media"),
     })
 
     bobInviteTxn.reply(200, { body: earlySdp })
@@ -454,8 +427,7 @@ export const promotePemForkingResync = scenario(
     })
 
     aliceInviteTxn.expect(200, {
-      predicate: (msg) =>
-        msg.type === "response" && msg.status === 200 && bytesEqual(msg.body, earlySdp),
+      predicate: (msg) => msg.bodyEquals(earlySdp),
     })
     aliceDialog.ack()
 
@@ -471,17 +443,12 @@ export const promotePemForkingResync = scenario(
     // sticking with t1.
     bobDialog.expect("ACK", {
       skipValidation: ["tagConsistency"],
-      predicate: (msg) => {
-        if (msg.type !== "request") return false
-        return msg.getHeader("to").tag === FORK_T2
-      },
+      predicate: (msg) => msg.getHeader("to").tag === FORK_T2,
     })
 
     const aliceResyncTxn = aliceDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
-      predicate: (msg) =>
-        msg.type === "request" &&
-        new TextDecoder().decode(msg.body).includes("m=audio 30000"),
+      predicate: (msg) => msg.bodyText()?.includes("m=audio 30000") === true,
     })
     aliceResyncTxn.reply(200, {
       overrides: { body: sdpAnswer(finalSdp) },
@@ -493,10 +460,7 @@ export const promotePemForkingResync = scenario(
     const aliceByeTxn = aliceDialog.bye()
     const bobByeTxn = bobDialog.expect("BYE", {
       skipValidation: ["tagConsistency"],
-      predicate: (msg) => {
-        if (msg.type !== "request") return false
-        return msg.getHeader("to").tag === FORK_T2
-      },
+      predicate: (msg) => msg.getHeader("to").tag === FORK_T2,
     })
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)

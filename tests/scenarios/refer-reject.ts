@@ -13,21 +13,6 @@
 import { scenario } from "../../src/test-harness/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-function decodeBody(body: Uint8Array | undefined): string {
-  if (body === undefined || body.byteLength === 0) return ""
-  return new TextDecoder().decode(body)
-}
-
-function headerValue(
-  msg: { headers: ReadonlyArray<{ name: string; value: string }> },
-  name: string,
-): string | undefined {
-  const target = name.toLowerCase()
-  return msg.headers.find((h) => h.name.toLowerCase() === target)?.value
-}
-
 const REFER_TO_CHARLIE = "<sip:charlie@example.com>"
 
 // Build a REFER send call with a given X-Api-Call key encoded into sip_headers.
@@ -70,12 +55,11 @@ export const referRejectHttp403 = scenario("refer-reject-http-403", (s) => {
   // NOTIFY 100 Trying (implicit subscription active).
   const notifyActiveTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const subState = headerValue(msg, "subscription-state") ?? ""
-      const event = headerValue(msg, "event") ?? ""
+      const subState = msg.getHeader("subscription-state")[0] ?? ""
+      const event = msg.getHeader("event")[0] ?? ""
       return event === "refer" &&
         subState.startsWith("active") &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying")
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true
     },
   })
   notifyActiveTxn.reply(200)
@@ -83,10 +67,9 @@ export const referRejectHttp403 = scenario("refer-reject-http-403", (s) => {
   // NOTIFY terminated — status matches HTTP reject_code (403).
   const notifyTermTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const subState = headerValue(msg, "subscription-state") ?? ""
+      const subState = msg.getHeader("subscription-state")[0] ?? ""
       return subState.startsWith("terminated") &&
-        decodeBody(msg.body).includes("SIP/2.0 403 Forbidden")
+        msg.bodyText()?.includes("SIP/2.0 403 Forbidden") === true
     },
   })
   notifyTermTxn.reply(200)
@@ -135,10 +118,9 @@ export const referHttpTimeout = scenario("refer-http-timeout", (s) => {
 
   const notifyActiveTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const subState = headerValue(msg, "subscription-state") ?? ""
+      const subState = msg.getHeader("subscription-state")[0] ?? ""
       return subState.startsWith("active") &&
-        decodeBody(msg.body).includes("SIP/2.0 100 Trying")
+        msg.bodyText()?.includes("SIP/2.0 100 Trying") === true
     },
   })
   notifyActiveTxn.reply(200)
@@ -149,10 +131,9 @@ export const referHttpTimeout = scenario("refer-http-timeout", (s) => {
 
   const notifyTermTxn = bobDialog.expect("NOTIFY", {
     predicate: (msg) => {
-      if (msg.type !== "request") return false
-      const subState = headerValue(msg, "subscription-state") ?? ""
+      const subState = msg.getHeader("subscription-state")[0] ?? ""
       return subState.startsWith("terminated") &&
-        decodeBody(msg.body).includes("SIP/2.0 500")
+        msg.bodyText()?.includes("SIP/2.0 500") === true
     },
   })
   notifyTermTxn.reply(200)
@@ -278,8 +259,7 @@ export const referSecondDuringAuthorizing = scenario(
 
     const notifyActiveTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("active"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("active"),
     })
     notifyActiveTxn.reply(200)
 
@@ -294,8 +274,7 @@ export const referSecondDuringAuthorizing = scenario(
     s.pause(61_000)
     const notifyTermTxn = bobDialog.expect("NOTIFY", {
       predicate: (msg) =>
-        msg.type === "request" &&
-        (headerValue(msg, "subscription-state") ?? "").startsWith("terminated"),
+        (msg.getHeader("subscription-state")[0] ?? "").startsWith("terminated"),
     })
     notifyTermTxn.reply(200)
 

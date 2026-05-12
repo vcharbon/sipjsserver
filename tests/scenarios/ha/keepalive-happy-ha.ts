@@ -37,7 +37,6 @@ import type {
   ScenarioContext,
 } from "../../../src/test-harness/framework/recorder.js"
 import { sdpOffer, sdpAnswer } from "../../../src/test-harness/framework/helpers/sdp.js"
-import type { SipMessage } from "../../../src/sip/types.js"
 import {
   HA_PROXY_ADDR,
   haAliceIp,
@@ -50,9 +49,6 @@ import {
 
 const KEEPALIVE_INTERVAL_MS = 900_000
 const KEEPALIVE_CYCLES = 3
-
-const viaCount = (msg: SipMessage): number =>
-  msg.headers.filter((h) => h.name.toLowerCase() === "via").length
 
 interface HaCallOpts {
   readonly aliceName: string
@@ -109,12 +105,12 @@ function haKeepaliveCallBody(s: ScenarioContext, opts: HaCallOpts): void {
     s.pause(KEEPALIVE_INTERVAL_MS)
     aliceDialog
       .expect("OPTIONS", {
-        predicate: (msg) => msg.type === "request" && viaCount(msg) >= 2,
+        predicate: (msg) => msg.getHeader("via").length >= 2,
       })
       .reply(200)
     bobDialog
       .expect("OPTIONS", {
-        predicate: (msg) => msg.type === "request" && viaCount(msg) >= 2,
+        predicate: (msg) => msg.getHeader("via").length >= 2,
       })
       .reply(200)
   }

@@ -95,10 +95,7 @@ const rejectedCall = scenario("rejected-call-cancel", (s) => {
 
   // 486 Busy Here — limiter rejected
   alice2InviteTxn.expect(486, {
-    predicate: (msg) => {
-      if (msg.type !== "response") return false
-      return msg.reason === "Busy Here"
-    },
+    predicate: (msg) => msg.reason === "Busy Here",
   })
 
   // ACK for non-2xx
