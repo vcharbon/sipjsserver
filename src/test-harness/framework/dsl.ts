@@ -26,8 +26,13 @@ import { record, type ScenarioContext } from "./recorder.js"
 // ---------------------------------------------------------------------------
 
 export class ComposableScenario {
+  // Mutable to allow `registerScenarios(module)` to backfill an empty name
+  // from the module's export key. Once set to a non-empty string, attempts
+  // to overwrite throw.
+  name: string
+
   constructor(
-    readonly name: string,
+    name: string,
     readonly agents: Record<string, AgentConfig>,
     readonly steps: readonly Step[],
     /**
@@ -56,7 +61,45 @@ export class ComposableScenario {
      * topology (e.g. asserting B2BUA-only header semantics).
      */
     readonly applicableSuts: readonly Sut[] = DEFAULT_APPLICABLE_SUTS,
-  ) {}
+    /**
+     * Human-readable title used as the vitest `it.effect(...)` name when
+     * the test file iterates a scenario barrel. Distinct from `name`
+     * (kebab-case identifier used for reports/file output) and from
+     * `description` (long-form scenario commentary). Set via `.title(...)`.
+     */
+    readonly displayTitle: string | undefined = undefined,
+  ) {
+    this.name = name
+  }
+
+  /**
+   * Internal: assign a name to a scenario that was constructed without one
+   * (i.e. via `scenario(builder)` rather than `scenario(name, builder)`).
+   * Called by `registerScenarios()` to derive the name from the module
+   * export key. Throws if the name has already been set.
+   */
+  _setName(name: string): void {
+    if (this.name !== "") {
+      throw new Error(`ComposableScenario._setName: name already set to "${this.name}"`)
+    }
+    this.name = name
+  }
+
+  /** Attach a vitest test title. Returns a new immutable scenario. */
+  title(displayTitle: string): ComposableScenario {
+    return new ComposableScenario(
+      this.name,
+      this.agents,
+      this.steps,
+      this.sippCompliant,
+      this.allowedExtras,
+      this.description,
+      this.scenarioTier,
+      this.skipFinalSweepFlag,
+      this.applicableSuts,
+      displayTitle,
+    )
+  }
 
   /** Attach a human-readable description. Returns a new immutable scenario. */
   describe(description: string): ComposableScenario {
@@ -70,6 +113,7 @@ export class ComposableScenario {
       this.scenarioTier,
       this.skipFinalSweepFlag,
       this.applicableSuts,
+      this.displayTitle,
     )
   }
 
@@ -88,6 +132,7 @@ export class ComposableScenario {
       t,
       this.skipFinalSweepFlag,
       this.applicableSuts,
+      this.displayTitle,
     )
   }
 
@@ -107,6 +152,7 @@ export class ComposableScenario {
       this.scenarioTier,
       this.skipFinalSweepFlag,
       suts,
+      this.displayTitle,
     )
   }
 
@@ -133,6 +179,7 @@ export class ComposableScenario {
       this.scenarioTier,
       true,
       this.applicableSuts,
+      this.displayTitle,
     )
   }
 
@@ -156,6 +203,9 @@ export class ComposableScenario {
       maxTier(this.scenarioTier, other.scenarioTier),
       this.skipFinalSweepFlag || other.skipFinalSweepFlag,
       intersectSuts(this.applicableSuts, other.applicableSuts),
+      // andThen-composed scenarios drop the test title: the composed
+      // result is rarely the direct subject of an it.effect() call.
+      undefined,
     )
   }
 
@@ -184,6 +234,7 @@ export class ComposableScenario {
       this.scenarioTier,
       this.skipFinalSweepFlag,
       this.applicableSuts,
+      this.displayTitle,
     )
   }
 
@@ -203,6 +254,7 @@ export class ComposableScenario {
       this.scenarioTier,
       this.skipFinalSweepFlag,
       this.applicableSuts,
+      this.displayTitle,
     )
   }
 
@@ -275,11 +327,23 @@ export class OrComposable {
 /**
  * Define a standalone scenario.
  * The builder function runs in record mode — no SIP messages are sent.
+ *
+ * Two forms:
+ *   - `scenario(builder)` — name is derived from the module export key at
+ *     `registerScenarios()` time. Standard form for new scenarios.
+ *   - `scenario(name, builder)` — explicit kebab-case name. Use when the
+ *     canonical name cannot be derived from the variable identifier
+ *     (e.g. p2pDirectCall → variable→kebab yields `p-2p-direct-call`
+ *     but you want `p2p-direct-call`).
  */
+export function scenario(builder: (s: ScenarioContext) => void): ComposableScenario
+export function scenario(name: string, builder: (s: ScenarioContext) => void): ComposableScenario
 export function scenario(
-  name: string,
-  builder: (s: ScenarioContext) => void
+  nameOrBuilder: string | ((s: ScenarioContext) => void),
+  maybeBuilder?: (s: ScenarioContext) => void,
 ): ComposableScenario {
+  const name = typeof nameOrBuilder === "string" ? nameOrBuilder : ""
+  const builder = typeof nameOrBuilder === "string" ? maybeBuilder! : nameOrBuilder
   const result = record(builder)
   return new ComposableScenario(
     name,
@@ -294,11 +358,16 @@ export function scenario(
  * Define a reusable scenario fragment.
  * Identical to scenario() but named differently for clarity.
  */
+export function sequence(builder: (s: ScenarioContext) => void): ComposableScenario
+export function sequence(name: string, builder: (s: ScenarioContext) => void): ComposableScenario
 export function sequence(
-  name: string,
-  builder: (s: ScenarioContext) => void
+  nameOrBuilder: string | ((s: ScenarioContext) => void),
+  maybeBuilder?: (s: ScenarioContext) => void,
 ): ComposableScenario {
-  return scenario(name, builder)
+  if (typeof nameOrBuilder === "string") {
+    return scenario(nameOrBuilder, maybeBuilder!)
+  }
+  return scenario(nameOrBuilder)
 }
 
 /**
@@ -339,10 +408,15 @@ export function withOr(
  * Each sub-scenario's steps are tagged with a group index. The interpreter
  * runs each group as a concurrent fiber with independent dialog state.
  */
+export function parallel(...scenarios: ComposableScenario[]): ComposableScenario
+export function parallel(name: string, ...scenarios: ComposableScenario[]): ComposableScenario
 export function parallel(
-  name: string,
-  ...scenarios: ComposableScenario[]
+  nameOrFirst: string | ComposableScenario,
+  ...rest: ComposableScenario[]
 ): ComposableScenario {
+  const name = typeof nameOrFirst === "string" ? nameOrFirst : ""
+  const scenarios = typeof nameOrFirst === "string" ? rest : [nameOrFirst, ...rest]
+
   // Validate: no agent name collisions across sub-scenarios
   const seenAgents = new Set<string>()
   for (const s of scenarios) {
@@ -398,6 +472,7 @@ export function parallel(
     composedTier,
     composedSkip,
     composedSuts,
+    undefined,
   )
 }
 
@@ -420,5 +495,54 @@ function renameStepAgent(step: Step, mapping: Record<string, string>): Step {
       // their cluster-side worker id (`b2b-1`, etc.) rather than the
       // logical agent identifier the rename mapping operates on.
       return step
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario registry — derive names from module export keys
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a camelCase identifier to kebab-case. Splits at:
+ *   - lowercase/digit → uppercase boundaries (`fooBar` → `foo-bar`)
+ *   - letter → digit boundaries (`suppress18x` → `suppress-18x`,
+ *     `referAllowC486` → `refer-allow-c-486`)
+ *
+ * Does NOT split digit → letter boundaries, so `18x`, `200ok`, `481` etc.
+ * stay glued in the natural reading direction. Scenarios whose variable
+ * name doesn't fit this scheme should pass an explicit name to
+ * `scenario("explicit-name", ...)`.
+ */
+function camelToKebab(s: string): string {
+  return s
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/([a-zA-Z])(\d)/g, "$1-$2")
+    .toLowerCase()
+}
+
+/**
+ * Walk a module-shaped object (e.g. `import * as S from "./index.js"`),
+ * assign a kebab-case name (derived from the export key) to every
+ * `ComposableScenario` constructed without one, and throw on duplicate
+ * canonical names.
+ *
+ * Call this from the scenario barrel at module-evaluation time, before
+ * any test file iterates the registered scenarios.
+ */
+export function registerScenarios(module: Record<string, unknown>): void {
+  const seenNames = new Map<string, string>() // name -> export key
+  for (const [key, val] of Object.entries(module)) {
+    if (!(val instanceof ComposableScenario)) continue
+    if (val.name === "") {
+      val._setName(camelToKebab(key))
+    }
+    const prevKey = seenNames.get(val.name)
+    if (prevKey !== undefined && prevKey !== key) {
+      throw new Error(
+        `registerScenarios: duplicate scenario name "${val.name}" ` +
+        `from exports "${prevKey}" and "${key}"`,
+      )
+    }
+    seenNames.set(val.name, key)
   }
 }
