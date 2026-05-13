@@ -102,3 +102,4 @@ export const twoCallsRoutedToTwoWorkers = scenario(
   // services (the secondary worker's are hidden in a forked scope).
   // HA-specific cleanliness assertions belong in dedicated HA scenarios.
   .skipFinalSweep()
+  .title("HA: two calls routed to two workers (alice-BYE + bob-BYE)")

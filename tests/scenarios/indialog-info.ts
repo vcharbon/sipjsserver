@@ -74,4 +74,4 @@ export const indialogInfo = scenario("indialog-info", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("in-dialog INFO relayed end-to-end (DTMF payload, both directions)")

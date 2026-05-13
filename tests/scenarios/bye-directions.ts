@@ -57,7 +57,7 @@ export const calleeBye = sequence("callee-bye", (s) => {
 })
 
 /** Full scenario: setup + caller hangs up. */
-export const callerHangup = callSetup.andThen(callerBye)
+export const callerHangup = callSetup.andThen(callerBye).title("caller hangup (composed)")
 
 /** Full scenario: setup + callee hangs up. */
-export const calleeHangup = callSetup.andThen(calleeBye)
+export const calleeHangup = callSetup.andThen(calleeBye).title("callee hangup (composed)")

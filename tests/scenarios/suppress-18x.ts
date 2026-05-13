@@ -104,7 +104,7 @@ export const suppress18xBasic = scenario("suppress-18x-basic", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("suppress-18x: basic (183→180, suppression, 200 OK)")
 
 // ── Test 2: Failover — Bob1 180, no-answer timeout, Bob2 answers ─────────
 
@@ -201,7 +201,7 @@ export const suppress18xFailoverNoAnswer = scenario("suppress-18x-failover-no-an
   const bob2ByeTxn = bob2Dialog.expect("BYE")
   bob2ByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("suppress-18x: failover no-answer (tag consistency)")
 
 // ── Test 3: Failover on reject — Bob1 180 then 503, Bob2 answers ─────────
 
@@ -276,7 +276,7 @@ export const suppress18xFailoverReject = scenario("suppress-18x-failover-reject"
   const bob2ByeTxn = bob2Dialog.expect("BYE")
   bob2ByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("suppress-18x: failover reject (tag consistency)")
 
 // ── Test 4: No policy — normal behavior ──────────────────────────────────
 
@@ -320,4 +320,4 @@ export const suppress18xDisabled = scenario("suppress-18x-disabled", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("suppress-18x: disabled (normal 180 relay)")

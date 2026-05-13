@@ -100,7 +100,7 @@ export const bLegFromOverridePersistsToBye = scenario(
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
-)
+).title("b-leg From override persists to BYE (RFC 3261 §12.2.1.1)")
 
 /**
  * Override To. Same shape — Bob captures To URI at INVITE time
@@ -143,7 +143,7 @@ export const bLegToOverridePersistsToBye = scenario(
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
-)
+).title("b-leg To override persists to BYE (RFC 3261 §12.2.1.1)")
 
 /** Both From AND To overridden — full happy path through BYE. */
 export const bLegBothOverridePersistsToBye = scenario(
@@ -183,7 +183,7 @@ export const bLegBothOverridePersistsToBye = scenario(
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
-)
+).title("b-leg From AND To override persist to BYE")
 
 /**
  * Tag stripping — consumer-supplied `tag=` on the From override is
@@ -229,4 +229,4 @@ export const bLegFromOverrideTagStripped = scenario(
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
-)
+).title("b-leg From override with consumer-supplied tag — tag is stripped")

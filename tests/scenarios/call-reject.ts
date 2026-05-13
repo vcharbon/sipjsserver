@@ -26,4 +26,4 @@ export const callReject = scenario("call-reject", (s) => {
   aliceInviteTxn.expect(403, {
     predicate: (msg) => msg.reason === "Forbidden",
   })
-})
+}).title("call rejection (403)")

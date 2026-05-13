@@ -69,4 +69,4 @@ export const delayedOfferFailure = scenario("delayed-offer-failure", (s) => {
   const aliceByeTxn = aliceDialog.expect("BYE")
   aliceByeTxn.reply(200)
   bobByeTxn.expect(200)
-})
+}).title("delayed-offer-failure: missing SDP answer in ACK")

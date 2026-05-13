@@ -81,4 +81,4 @@ export const prackCall = scenario("prack", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("PRACK flow")

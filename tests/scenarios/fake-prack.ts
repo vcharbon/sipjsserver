@@ -121,7 +121,7 @@ export const fakePrackBasic = scenario("fake-prack-basic", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("fake-prack: basic (originated PRACK + cached SDP at 200)")
 
 // ── Test 2: multiple-18x ──────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ export const fakePrackMultiple18x = scenario("fake-prack-multiple-18x", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("fake-prack: multiple reliable 18x (one PRACK each, latest cache wins)")
 
 // ── Test 3: update-happy ──────────────────────────────────────────────────
 
@@ -250,7 +250,7 @@ export const fakePrackUpdateHappy = scenario("fake-prack-update-happy", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("fake-prack: UPDATE happy (skeleton-fit answer + cache advances)")
 
 // ── Test 4: update-codec-mismatch ─────────────────────────────────────────
 //
@@ -323,7 +323,7 @@ export const fakePrackUpdateCodecMismatch = scenario("fake-prack-update-codec-mi
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("fake-prack: UPDATE codec mismatch (488)")
 
 // ── Test 5: forking ───────────────────────────────────────────────────────
 //
@@ -396,7 +396,7 @@ export const fakePrackForking = scenario("fake-prack-forking", (s) => {
   const bob2ByeTxn = bob2Dialog.expect("BYE")
   bob2ByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("fake-prack: forking (independent caches; loser cancelled)")
 
 // ── Test 6: failover ──────────────────────────────────────────────────────
 // Same shape as forking above (failover-on-503), kept as a separate test
@@ -465,7 +465,7 @@ export const fakePrackFailover = scenario("fake-prack-failover", (s) => {
   const bob2ByeTxn = bob2Dialog.expect("BYE")
   bob2ByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("fake-prack: failover (b1 cache discarded)")
 
 // ── Test 7: delayed-offer-fallback ────────────────────────────────────────
 
@@ -512,7 +512,7 @@ export const fakePrackDelayedOfferFallback = scenario("fake-prack-delayed-offer-
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("fake-prack: delayed-offer fallback (Supported:100rel stripped)")
 
 // ── Test 8: no-policy-control ─────────────────────────────────────────────
 
@@ -571,4 +571,4 @@ export const fakePrackNoPolicyControl = scenario("fake-prack-no-policy-control",
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("fake-prack: no policy control (default end-to-end PRACK)")

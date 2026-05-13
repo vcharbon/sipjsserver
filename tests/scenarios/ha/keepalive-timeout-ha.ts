@@ -179,3 +179,4 @@ export const haKeepaliveTimeout = scenario("ha-keepalive-timeout", (s) => {
 })
   .runOn(["sipproxyHA"])
   .skipFinalSweep()
+  .title("HA: long call with keepalive timeout → BYE to responsive peer")

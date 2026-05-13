@@ -82,4 +82,4 @@ export const unknownDialogReject = scenario("indialog-unknown-reject", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("in-dialog unknown dialog → 481 reject")

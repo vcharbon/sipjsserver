@@ -55,7 +55,7 @@ export const rejectWithReasonHeader = scenario(
       },
     })
   },
-)
+).title("reject (403) carries consumer-supplied Reason header (RFC 3326)")
 
 const REDIRECT_CONTACT = "<sip:alt@10.0.0.42:5060;transport=udp>"
 const REDIRECT_CONTACT_URI = "sip:alt@10.0.0.42:5060;transport=udp"
@@ -90,7 +90,7 @@ export const reject302WithContact = scenario(
       predicate: (msg) => msg.getHeader("contact")?.uri === REDIRECT_CONTACT_URI,
     })
   },
-)
+).title("reject (302) carries consumer-supplied Contact header (redirect)")
 
 const FALLBACK_CONTACT = "<sip:fallback@10.0.0.99:5060;transport=udp>"
 const FALLBACK_CONTACT_URI = "sip:fallback@10.0.0.99:5060;transport=udp"
@@ -126,4 +126,4 @@ export const reject403WithContactPassesThrough = scenario(
       predicate: (msg) => msg.getHeader("contact")?.uri === FALLBACK_CONTACT_URI,
     })
   },
-)
+).title("reject (403) passes consumer Contact through (no family gating)")

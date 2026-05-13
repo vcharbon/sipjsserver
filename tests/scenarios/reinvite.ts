@@ -62,7 +62,7 @@ const aliceReInviteFragment = scenario("alice-reinvite-fragment", (s) => {
   aliceByeTxn.expect(200)
 })
 
-export const aliceReInvite = callSetup.andThen(aliceReInviteFragment)
+export const aliceReInvite = callSetup.andThen(aliceReInviteFragment).title("re-INVITE from caller (SDP in ACK)")
 
 // ---------------------------------------------------------------------------
 // 2. Bob re-INVITEs Alice — SDP offer in re-INVITE, answer in 200 OK
@@ -114,7 +114,7 @@ const bobReInviteFragment = scenario("bob-reinvite-fragment", (s) => {
   bobByeTxn.expect(200)
 })
 
-export const bobReInvite = callSetup.andThen(bobReInviteFragment)
+export const bobReInvite = callSetup.andThen(bobReInviteFragment).title("re-INVITE from callee")
 
 // ---------------------------------------------------------------------------
 // 3. Crossing re-INVITEs (glare) — both sides send re-INVITE simultaneously
@@ -182,4 +182,4 @@ const crossingReInviteFragment = scenario("crossing-reinvite-fragment", (s) => {
   aliceByeTxn.expect(200)
 })
 
-export const crossingReInvite = callSetup.andThen(crossingReInviteFragment)
+export const crossingReInvite = callSetup.andThen(crossingReInviteFragment).title("crossing re-INVITEs (glare → 491)")

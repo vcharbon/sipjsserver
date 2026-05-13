@@ -47,4 +47,4 @@ export const keepalive481 = scenario("keepalive-481", (s) => {
   // No BYE is sent to bob (terminate-leg with bye_timeout disposition).
 
   aliceDialog.expect("BYE").reply(200)
-})
+}).title("keepalive + 481: bob rejects OPTIONS → begin-termination BYEs alice")

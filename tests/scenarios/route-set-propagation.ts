@@ -101,4 +101,4 @@ export const routeSetPropagation = scenario("route-set-propagation", (s) => {
     },
   }).reply(200)
   aliceByeTxn.expect(200)
-}).runOn(["proxy+b2b"])
+}).runOn(["proxy+b2b"]).title("route-set propagation")

@@ -77,4 +77,4 @@ export const indialogOptions = scenario("indialog-options", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("in-dialog OPTIONS relayed end-to-end (payload preserved, both directions)")

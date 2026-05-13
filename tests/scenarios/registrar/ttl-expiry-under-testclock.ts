@@ -56,3 +56,4 @@ export const ttlExpiryUnderTestClock = scenario(
   )
   .tier("medium")
   .runOn(["registrarFrontProxy"])
+  .title("registrar: TTL expiry under TestClock (core INVITE → 404)")

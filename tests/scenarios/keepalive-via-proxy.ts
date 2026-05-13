@@ -78,7 +78,7 @@ export const keepaliveViaProxy = scenario("keepalive-via-proxy", (s) => {
   const aliceByeTxn = aliceDialog.bye()
   bobDialog.expect("BYE").reply(200)
   aliceByeTxn.expect(200)
-}).runOn(["proxy+b2b"])
+}).runOn(["proxy+b2b"]).title("keepalive: in-dialog OPTIONS travels via proxy on both legs (regression for k8s endurance)")
 
 export const keepaliveMissingOutboundProxyRegressionGuard = scenario(
   "keepalive-missing-outbound-proxy-regression-guard",
@@ -123,4 +123,4 @@ export const keepaliveMissingOutboundProxyRegressionGuard = scenario(
     bobDialog.expect("BYE").reply(200)
     aliceByeTxn.expect(200)
   },
-).runOn(["proxy+b2b"])
+).runOn(["proxy+b2b"]).title("keepalive: missing B2B_OUTBOUND_PROXY → b-leg OPTIONS goes worker-direct (bug-presence guard)")

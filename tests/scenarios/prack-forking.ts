@@ -175,4 +175,4 @@ export const prackForkingCall = scenario("prack-forking", (s) => {
 
   // Alice receives 200 OK for BYE
   aliceByeTxn.expect(200)
-})
+}).title("PRACK forking flow")

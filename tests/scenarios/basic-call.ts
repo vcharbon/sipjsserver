@@ -181,7 +181,7 @@ export function basicCallBody(s: ScenarioContext, opts: BasicCallOpts = {}): voi
  */
 export const basicCall = scenario("basic-call", (s) => {
   basicCallBody(s)
-})
+}).title("basic call")
 
 // ---------------------------------------------------------------------------
 // Split form — establish-only / bye-only halves

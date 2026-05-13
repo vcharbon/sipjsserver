@@ -65,4 +65,4 @@ export const cancelCrossing200Ok = scenario("cancel-200ok-crossing", (s) => {
 
   // Bob sends 200 OK for the BYE
   bobByeTxn.reply(200)
-})
+}).title("CANCEL ↔ 200 OK crossing")

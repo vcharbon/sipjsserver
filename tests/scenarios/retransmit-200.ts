@@ -53,4 +53,4 @@ export const retransmit200 = scenario("retransmit-200", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("retransmit-200: duplicate 200 OK on confirmed leg → re-ACK only")

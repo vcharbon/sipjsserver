@@ -99,3 +99,4 @@ export const coreCallToRegisteredExt = scenario(
       "steering responses back to the core endpoint.",
   )
   .runOn(["registrarFrontProxy"])
+  .title("registrar: core→ext call (aliceCore → proxy registrar lookup → bobExt)")

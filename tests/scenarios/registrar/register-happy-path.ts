@@ -46,3 +46,4 @@ export const registerHappyPath = scenario("register-happy-path", (s) => {
       "with the Contact echoed and the default Expires=3600 applied.",
   )
   .runOn(["registrarFrontProxy"])
+  .title("registrar: REGISTER happy path (200 OK with Contact + Expires)")

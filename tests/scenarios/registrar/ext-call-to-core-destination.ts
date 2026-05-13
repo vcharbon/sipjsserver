@@ -93,3 +93,4 @@ export const extCallToCoreDestination = scenario(
       "proxy with `;net=` Via tagging steering responses back to ext.",
   )
   .runOn(["registrarFrontProxy"])
+  .title("registrar: ext→core call (alice → proxy → bobCore@coreDestination)")

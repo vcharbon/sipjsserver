@@ -55,3 +55,4 @@ export const deregisterViaExpiresZero = scenario(
       "404 Not Found — the binding was cleared.",
   )
   .runOn(["registrarFrontProxy"])
+  .title("registrar: deregister via Expires=0 (core INVITE → 404)")

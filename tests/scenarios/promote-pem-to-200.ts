@@ -115,7 +115,7 @@ export const promotePemHappyNoResync = scenario("promote-pem-happy-no-resync", (
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("promote-pem-to-200: happy (SDP unchanged → no resync)")
 
 // ── Scenario 2: SDP changes → B2BUA re-INVITEs Alice + UPDATE flows ──────
 
@@ -194,7 +194,7 @@ export const promotePemResyncSdpChanged = scenario(
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
-)
+).title("promote-pem-to-200: resync (SDP changed → re-INVITE A; in-dialog resumes)")
 
 // ── Scenario 3a: B fails post-promote — BYE A with Reason ─────────────────
 
@@ -241,7 +241,7 @@ export const promotePemBFailsPostPromote = scenario(
     })
     aliceByeTxn.reply(200)
   },
-)
+).title("promote-pem-to-200: B fails post-promote (BYE A with Reason)")
 
 // ── Scenario 3b: A rejects resync re-INVITE → BYE both legs ──────────────
 
@@ -294,7 +294,7 @@ export const promotePemResyncFailedByA = scenario(
     })
     bobByeTxn.reply(200)
   },
-)
+).title("promote-pem-to-200: A 488s resync re-INVITE (BYE both legs)")
 
 // ── Scenario 3c: A BYEs during early window → CANCEL B + 200 ─────────────
 
@@ -333,7 +333,7 @@ export const promotePemABYEDuringWindow = scenario(
     bobCancelTxn.reply(200)
     bobInviteTxn.reply(487)
   },
-)
+).title("promote-pem-to-200: A BYE during window (CANCEL B)")
 
 // ── Scenario 4: no policy control — default 18x relay ────────────────────
 
@@ -376,7 +376,7 @@ export const promotePemNoPolicyControl = scenario(
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
-)
+).title("promote-pem-to-200: no policy control (default 18x relay)")
 
 // ── Scenario 5: forking — promoting fork ≠ winning fork ──────────────────
 //
@@ -465,7 +465,7 @@ export const promotePemForkingResync = scenario(
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
-)
+).title("promote-pem-to-200: forking — resync to winning fork")
 
 // ── Scenario 6: in-dialog rejection during the window ────────────────────
 
@@ -515,4 +515,4 @@ export const promotePemInDialogRejection = scenario(
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
   },
-)
+).title("promote-pem-to-200: in-dialog rejection (491/488) during window")

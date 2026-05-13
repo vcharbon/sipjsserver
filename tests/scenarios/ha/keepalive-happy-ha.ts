@@ -175,3 +175,4 @@ export const haKeepaliveHappy = scenario("ha-keepalive-happy", (s) => {
   // undeliverable entries; verifyCleanState's CallState/TimerService
   // handles only see the primary worker's services.
   .skipFinalSweep()
+  .title("HA: long call with successful keepalive cycles → BYE → tombstone")

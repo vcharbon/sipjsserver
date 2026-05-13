@@ -62,4 +62,4 @@ export const keepaliveHappy = scenario("keepalive-happy", (s) => {
   const bobByeTxn = bobDialog.expect("BYE")
   bobByeTxn.reply(200)
   aliceByeTxn.expect(200)
-})
+}).title("keepalive: OPTIONS to both legs, two cycles (TestClock 15 min)")

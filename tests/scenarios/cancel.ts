@@ -54,4 +54,4 @@ export const cancelCall = scenario("cancel", (s) => {
 
   // Bob sends 487 for the original INVITE
   bobInviteTxn.reply(487)
-})
+}).title("CANCEL during early dialog")
