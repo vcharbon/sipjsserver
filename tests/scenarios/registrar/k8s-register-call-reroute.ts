@@ -59,6 +59,19 @@ export const k8sRegisterCallReroute = (opts: K8sRegisterCallRerouteOpts) =>
     // each AOR (`bob1` → bob1's contact, `bob2` → bob2's contact) and
     // forwards on the EXT side. The b2bua-worker's only job is to swap
     // RURI between attempts and re-route to the proxy.
+    //
+    // RURI host MUST be `proxyCoreAdvertised` (not `kindlab`): inside the
+    // kind cluster, the b2bua-worker forwards via its outbound proxy
+    // which strips its self-Route and falls back to the RURI host for
+    // the next hop. `kindlab` isn't resolvable from inside the cluster,
+    // so a `sip:bobN@kindlab` RURI causes the cluster proxy to attempt
+    // `getaddrinfo("kindlab")` → EAI_AGAIN → 503. Set new_ruri on BOTH
+    // primary and failover so the wire-level destination is explicit
+    // (no reliance on MockServer's `sip:<user>@<dest>` auto-fill).
+    const proxyCoreHostPort = `${opts.proxyCoreAdvertised.host}:${opts.proxyCoreAdvertised.port}`
+    const primaryRuri = `sip:bob1@${proxyCoreHostPort}`
+    const failoverRuri = `sip:bob2@${proxyCoreHostPort}`
+
     const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite(
       "sip:bob1@kindlab",
       {
@@ -68,11 +81,11 @@ export const k8sRegisterCallReroute = (opts: K8sRegisterCallRerouteOpts) =>
             "X-Api-Call": JSON.stringify({
               action: "route",
               destination: opts.proxyCoreAdvertised,
-              // RURI = sip:bob1@kindlab — proxy looks up "bob1".
+              new_ruri: primaryRuri,
               on_failure: {
                 action: "failover",
                 destination: opts.proxyCoreAdvertised,
-                new_ruri: "sip:bob2@kindlab",
+                new_ruri: failoverRuri,
               },
             }),
           },

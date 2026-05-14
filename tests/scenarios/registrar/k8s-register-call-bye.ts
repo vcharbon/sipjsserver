@@ -49,6 +49,16 @@ export const k8sRegisterCallBye = (opts: K8sRegisterCallByeOpts) =>
 
     s.pause(50)
 
+    // new_ruri MUST point at `proxyCoreAdvertised` (not `kindlab`):
+    // inside the kind cluster, the b2bua-worker forwards via its
+    // outbound proxy which strips its self-Route and falls back to the
+    // RURI host for the next hop. `kindlab` isn't resolvable from
+    // inside the cluster, so a `sip:bob@kindlab` RURI causes the
+    // cluster proxy to attempt `getaddrinfo("kindlab")` → EAI_AGAIN.
+    // The register-proxy still keys the registrar lookup on userpart
+    // "bob"; only the host/port carries the wire-level target.
+    const bobRuri = `sip:bob@${opts.proxyCoreAdvertised.host}:${opts.proxyCoreAdvertised.port}`
+
     const { dialog: aliceDialog, transaction: aliceInviteTxn } = alice.invite(
       "sip:bob@kindlab",
       {
@@ -58,9 +68,7 @@ export const k8sRegisterCallBye = (opts: K8sRegisterCallByeOpts) =>
             "X-Api-Call": JSON.stringify({
               action: "route",
               destination: opts.proxyCoreAdvertised,
-              // Keep RURI as `sip:bob@kindlab` — the register-proxy
-              // will run a registrar lookup on userpart "bob" and
-              // forward.
+              new_ruri: bobRuri,
             }),
           },
         }),
