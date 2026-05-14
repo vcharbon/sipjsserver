@@ -138,6 +138,44 @@ export const AppConfigData = Schema.Struct({
   /** End-to-end safety net for a whole REFER transfer (seconds). */
   referOverallSafetySec: Schema.Int,
 
+  // ── B-leg target admission (DoS hardening) ────────────────────────────
+  /**
+   * Suffix allow-list for b-leg destination hosts returned by call-control.
+   * A host is admitted when it is an IP literal OR ends with one of these
+   * suffixes (case-insensitive). The literal `"*"` in the list disables
+   * admission entirely (rollback sentinel). Default `.svc.cluster.local`
+   * is the K8s in-cluster DNS suffix — production traffic should always
+   * pass; bogus hostnames (typos, dev `/etc/hosts` entries) get rejected
+   * with a 503 before any per-peer state is allocated.
+   */
+  workerAllowedTargetSuffixes: Schema.Array(Schema.String),
+
+  // ── Proxy ingress concurrency ─────────────────────────────────────────
+  /**
+   * Concurrency for the proxy's per-endpoint ingress stream. Default 16:
+   * a slow handler on one packet (rule chain, GC, occasional DNS slip)
+   * no longer wedges every subsequent packet behind it. Set to 1 to
+   * collapse to legacy sequential behavior.
+   *
+   * Known limitation: with concurrency > 1, an INVITE-CANCEL race can
+   * surface as a CANCEL processed before its INVITE's `cancelLru.remember`.
+   * In registrar mode this returns 481 instead of forwarding (LB mode falls
+   * back to selectForNewDialog). The race window is microseconds for normal
+   * traffic; future work may add per-Call-ID serialization via
+   * `Stream.groupByKey`.
+   */
+  proxyIngressConcurrency: Schema.Int,
+
+  // ── BufferedUdpEndpoint (non-blocking outbound send) ──────────────────
+  /** Per-peer outbound queue capacity. Drop-newest on overflow. */
+  bufferedSendPerPeerQueueMax: Schema.Int,
+  /** A peer with no successful drain in this window is reclaimed. */
+  bufferedSendIdleTtlMs: Schema.Int,
+  /** Hard ceiling on total per-peer entries; new-peer creation evicts. */
+  bufferedSendMaxPeers: Schema.Int,
+  /** Cadence of the idle-reclamation sweeper. */
+  bufferedSendSweepIntervalMs: Schema.Int,
+
   // ── Tracing ───────────────────────────────────────────────────────────
   /** Header names whose values are redacted in sip.raw_message span attributes. */
   scrubHeaders: Schema.Array(Schema.String),
@@ -279,6 +317,18 @@ function readConfigFromEnv(): AppConfigData {
     referSubscriptionExpirySec: parseInt(envOrDefault("REFER_SUBSCRIPTION_EXPIRY_SEC", "60"), 10),
     referReinviteAnswerSec: parseInt(envOrDefault("REFER_REINVITE_ANSWER_SEC", "32"), 10),
     referOverallSafetySec: parseInt(envOrDefault("REFER_OVERALL_SAFETY_SEC", "120"), 10),
+    workerAllowedTargetSuffixes: envOrDefault(
+      "WORKER_ALLOWED_TARGET_SUFFIXES",
+      ".svc.cluster.local",
+    )
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
+    proxyIngressConcurrency: parseInt(envOrDefault("PROXY_INGRESS_CONCURRENCY", "16"), 10),
+    bufferedSendPerPeerQueueMax: parseInt(envOrDefault("BUFFERED_SEND_PER_PEER_QUEUE_MAX", "32"), 10),
+    bufferedSendIdleTtlMs: parseInt(envOrDefault("BUFFERED_SEND_IDLE_TTL_MS", "5000"), 10),
+    bufferedSendMaxPeers: parseInt(envOrDefault("BUFFERED_SEND_MAX_PEERS", "10000"), 10),
+    bufferedSendSweepIntervalMs: parseInt(envOrDefault("BUFFERED_SEND_SWEEP_INTERVAL_MS", "1000"), 10),
     scrubHeaders: envOrDefault("SCRUB_HEADERS", "Authorization,Proxy-Authorization")
       .split(",")
       .map((h) => h.trim())

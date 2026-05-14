@@ -33,6 +33,7 @@ import {
   type PreIngressHook,
   type UdpPacket,
 } from "./SignalingNetwork.js"
+import { wrapEndpoint, type BufferedSendCounters, makeBufferedSendCounters } from "./BufferedUdpEndpoint.js"
 
 export type { UdpPacket } from "./SignalingNetwork.js"
 
@@ -47,6 +48,10 @@ export interface UdpTransportMetrics {
   dropsTier1Brake: number
   dropsTailDrop: number
   tier1RejectSent: number
+  /** BufferedUdpEndpoint counters — non-blocking outbound send. */
+  bufferedSend: BufferedSendCounters
+  /** Active per-peer drainer fibers. */
+  bufferedSendPeerCount: number
 }
 
 export class UdpTransport extends ServiceMap.Service<
@@ -92,7 +97,7 @@ export class UdpTransport extends ServiceMap.Service<
         return PreIngressAction.accept()
       }
 
-      const endpoint = yield* network
+      const rawEndpoint = yield* network
         .bindUdp({
           ip: config.sipLocalIp,
           port: config.sipLocalPort,
@@ -100,6 +105,24 @@ export class UdpTransport extends ServiceMap.Service<
           preIngress,
         })
         .pipe(Effect.orDie)
+
+      // Non-blocking outbound send. Per-peer queue + drainer fiber isolate
+      // a slow `getaddrinfo` or `EAGAIN` to that peer; other peers continue.
+      // Setting `bufferedSendPerPeerQueueMax === 0` disables the wrapper
+      // entirely (rollback sentinel) — used by fake-clock tests where the
+      // extra fiber-hop interacts poorly with TestClock quiescence.
+      const bufferedCounters = makeBufferedSendCounters()
+      const wrappedEndpoint = config.bufferedSendPerPeerQueueMax > 0
+        ? yield* wrapEndpoint(rawEndpoint, {
+            perPeerQueueMax: config.bufferedSendPerPeerQueueMax,
+            idleTtlMs: config.bufferedSendIdleTtlMs,
+            maxPeers: config.bufferedSendMaxPeers,
+            sweepIntervalMs: config.bufferedSendSweepIntervalMs,
+            counters: bufferedCounters,
+            pendingWorkDelta: (delta: number) => network.bumpInFlight(delta),
+          })
+        : undefined
+      const endpoint = wrappedEndpoint ?? rawEndpoint
 
       // Prometheus-visible shape. Every field is a live getter — both
       // the scrape endpoint and test reads want the instantaneous value.
@@ -109,6 +132,8 @@ export class UdpTransport extends ServiceMap.Service<
         get dropsTailDrop() { return endpoint.counters.tailDropped },
         get dropsTier1Brake() { return dropsTier1Brake },
         get tier1RejectSent() { return tier1RejectSent },
+        bufferedSend: bufferedCounters,
+        get bufferedSendPeerCount() { return wrappedEndpoint?.peerCount() ?? 0 },
       }
       registry.udp = metrics
 
@@ -116,16 +141,16 @@ export class UdpTransport extends ServiceMap.Service<
         `UDP socket listening on ${endpoint.localAddress.ip}:${endpoint.localAddress.port} (queueMax=${queueMax}, tier1Threshold=${tier1Threshold})`
       )
 
-      // Fire-and-forget from TransactionLayer's perspective. SendErrors are
-      // infrastructure-level (socket gone, kernel queue full) — surface as
-      // defects so they're logged by the top-level runtime rather than
-      // polluting the typed failure channel of every caller.
+      // Buffered send never fails — the wrapper enqueues and the per-peer
+      // drainer fiber absorbs SendErrors. `Effect.orDie` retained for
+      // signature parity (`Effect<void, never>`) in case the wrapper API
+      // is ever extended to surface a typed error.
       const send = Effect.fnUntraced(function* (
         msg: Buffer,
         port: number,
         address: string
       ) {
-        yield* endpoint.send(msg, port, address).pipe(Effect.orDie)
+        yield* endpoint.send(msg, port, address)
       })
 
       return {

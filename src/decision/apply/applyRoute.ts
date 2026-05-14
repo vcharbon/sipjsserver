@@ -31,8 +31,40 @@ import type { ContactSpec } from "../../sip/generators.js"
 import type { RemoteInfo, SipRequest } from "../../sip/types.js"
 import type { HandlerResult, OutboundEnvelope } from "../../sip/SipRouter.js"
 import { createBLegFromRoute, terminateCallEffects } from "../../b2bua/helpers.js"
+import { classifyAdmission } from "../../b2bua/TargetAdmission.js"
 import type { CallDecisionEngine } from "../CallDecisionEngine.js"
 import type { NewCallResponse } from "../schemas/responses.js"
+
+const buildAdmissionRejectResult = (
+  call: Call,
+  req: SipRequest,
+  aLegContact: ContactSpec,
+  rinfo: RemoteInfo,
+  host: string,
+): HandlerResult => {
+  const rejectResp = generateResponse(req, 503, "Service Unavailable", {
+    toTag: newTag(),
+    contact: aLegContact,
+  })
+  return {
+    call,
+    outbound: [{
+      message: rejectResp,
+      destination: { host: rinfo.address, port: rinfo.port },
+      label: `reject 503 (admission: host=${host} not allow-listed)`,
+      legId: "a",
+    }] as OutboundEnvelope[],
+    effects: terminateCallEffects(call),
+    spanEvents: [{
+      name: "route_decision",
+      attributes: {
+        "route.action": "error",
+        "route.reason": "admission_reject",
+        "route.host": host,
+      },
+    }],
+  } satisfies HandlerResult
+}
 
 type NewCallRouteResponse = Extract<NewCallResponse, { action: "route" }>
 
@@ -89,6 +121,31 @@ export function applyRoute(
           attributes: { "route.action": "error", "route.reason": "missing_features" },
         }],
       } satisfies HandlerResult
+    }
+
+    // ── Admission: reject non-IP non-allow-listed destinations early ────
+    // Catches the case where call-control returns a bogus host (e.g.
+    // `kindlab` from a misconfigured fixture). Without this, the host
+    // would flow to `dgram.send`, libuv's `getaddrinfo` would block for
+    // ~5 s on EAI_AGAIN. The proxy's `BufferedUdpEndpoint` quarantines
+    // that blocking; admission is the cheap-and-clear early filter.
+    {
+      const verdict = classifyAdmission(
+        routing.destination.host,
+        config.workerAllowedTargetSuffixes,
+      )
+      if (verdict === "reject") {
+        yield* Effect.logWarning(
+          `[admission] reject host=${routing.destination.host} reason=non-ip-non-suffixed callRef=${args.call.callRef}`,
+        )
+        return buildAdmissionRejectResult(
+          args.call,
+          req,
+          aLegContact,
+          rinfo,
+          routing.destination.host,
+        )
+      }
     }
 
     let updated: Call = { ...args.call, features: routing.features }
@@ -159,6 +216,24 @@ export function applyRoute(
             )
 
             if (failureResp !== undefined && failureResp.action === "failover") {
+              // Same admission gate as the main route — applied to the
+              // failover destination separately.
+              const failoverVerdict = classifyAdmission(
+                failureResp.destination.host,
+                config.workerAllowedTargetSuffixes,
+              )
+              if (failoverVerdict === "reject") {
+                yield* Effect.logWarning(
+                  `[admission] reject host=${failureResp.destination.host} reason=non-ip-non-suffixed callRef=${args.call.callRef} path=failover`,
+                )
+                return buildAdmissionRejectResult(
+                  args.call,
+                  req,
+                  aLegContact,
+                  rinfo,
+                  failureResp.destination.host,
+                )
+              }
               // Failover: skip this limiter and try a different route.
               // aLegInvite is already populated at call creation (SipRouter) —
               // we just thread the callback context through.

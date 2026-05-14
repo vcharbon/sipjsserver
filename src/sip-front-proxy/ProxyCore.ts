@@ -113,6 +113,12 @@ export interface ProxyBindConfigData {
   readonly queueMax?: number
   /** Set SO_REUSEPORT on the underlying socket. Defaults to false. */
   readonly reusePort?: boolean
+  /**
+   * Concurrency for the ingress packet stream. Default 16: cross-call
+   * fan-out so a slow handler doesn't HOL-block subsequent packets. Set
+   * to 1 to collapse to legacy sequential behavior.
+   */
+  readonly ingressConcurrency?: number
 }
 
 export class ProxyBindConfig extends ServiceMap.Service<
@@ -278,6 +284,14 @@ const makeProxyCore: Effect.Effect<
   const coreNetworkOpt = yield* Effect.serviceOption(SignalingNetworkCore)
 
   const queueMax = cfg.queueMax ?? 1024
+  // The proxy's outbound destinations are well-known IPs (worker registry,
+  // registered Contact URIs after lookup, etc.); DNS-blocking on this side
+  // is rare in practice and Phase B's worker admission already catches the
+  // common foot-gun (`sip:bob@kindlab` from a misconfigured fixture).
+  // Wrapping the proxy egress would be defense-in-depth — for now we leave
+  // it direct to avoid the per-peer-drainer fiber-hop showing up in
+  // fake-clock test quiescence detection. Revisit if a real-world failure
+  // surfaces a hostname target at this layer.
   const extEndpoint = yield* network
     .bindUdp({
       ip: cfg.bindHost,
@@ -330,27 +344,27 @@ const makeProxyCore: Effect.Effect<
   )
 
   /**
-   * Send a buffer on a specific endpoint. Catches `SendError`s into the
-   * existing counter — outbound failures are observed but never propagate
-   * (D4 of the proxy plan). Returns `true` when the send succeeded; the
-   * request-forwarding path uses this to log `result=dropped` and
-   * synthesize a 503 to the UAC instead of silently claiming `forwarded`.
+   * Send a buffer on a specific endpoint. The endpoint is a
+   * `BufferedUdpEndpoint` — `send` is pure enqueue, never blocks, never
+   * fails. Inner `SendError`s (DNS, EAGAIN, ICMP unreachable) are
+   * absorbed by the per-peer drainer fiber and surfaced via
+   * `bufferedSend.innerSendErrors` metric. SIP UDP retransmits handle
+   * any genuine loss; the old "send=false ⇒ synthesize 503 to UAC" path
+   * is gone (RFC 3261 §17 transaction timers cover the recovery case).
    */
-  const sendOn = (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr): Effect.Effect<boolean> =>
+  const sendOn = (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr): Effect.Effect<void> =>
     ep.send(buf, dst.port, dst.host).pipe(
-      Effect.as(true),
       Effect.catchTag("SendError", (err) =>
         Effect.sync(() => {
           counters.sendErrors++
         }).pipe(
           Effect.tap(() =>
             Effect.logWarning(
-              `[ProxyCore] send to ${dst.host}:${dst.port} failed: ${err.message}`
-            )
+              `[ProxyCore] send to ${dst.host}:${dst.port} failed: ${err.message}`,
+            ),
           ),
-          Effect.as(false)
-        )
-      )
+        ),
+      ),
     )
 
   // Default-egress-on-ext helpers — keep the legacy single-endpoint code
@@ -498,12 +512,36 @@ const makeProxyCore: Effect.Effect<
       )
     )
 
+  // Ingress concurrency: each endpoint's packet stream is consumed via
+  // `Stream.mapEffect` with `concurrency=ingressConcurrency` so a slow
+  // handler (GC pause, rule chain, occasional DNS slip-through) no
+  // longer head-of-line blocks subsequent packets on the same endpoint.
+  // Trade-off: same-call ordering is no longer guaranteed across
+  // packets — a CANCEL processed before the matching INVITE's
+  // `cancelLru.remember` surfaces as a `cancelUnmatched` (LB mode falls
+  // back to `selectForNewDialog`; registrar mode synthesizes 481).
+  // The race window is microseconds for normal traffic; future work may
+  // add per-Call-ID serialization via `Stream.groupByKey`.
+  // Default `1` (sequential) preserves the legacy shape for any callsite
+  // that hasn't explicitly opted in. The production `bin/proxy.ts` sets
+  // this to 16 via `PROXY_INGRESS_CONCURRENCY`.
+  const ingressConcurrency = cfg.ingressConcurrency ?? 1
   yield* Effect.forkScoped(
-    Stream.runForEach(extEndpoint.messages, (packet) => processPacket(packet, "ext"))
+    extEndpoint.messages.pipe(
+      Stream.mapEffect((packet) => processPacket(packet, "ext"), {
+        concurrency: ingressConcurrency,
+      }),
+      Stream.runDrain,
+    )
   )
   if (coreEndpoint !== undefined) {
     yield* Effect.forkScoped(
-      Stream.runForEach(coreEndpoint.messages, (packet) => processPacket(packet, "core"))
+      coreEndpoint.messages.pipe(
+        Stream.mapEffect((packet) => processPacket(packet, "core"), {
+          concurrency: ingressConcurrency,
+        }),
+        Stream.runDrain,
+      )
     )
   }
 
@@ -536,11 +574,11 @@ interface HandleRequestArgs {
   readonly strategy: RoutingStrategyApi
   readonly cancelLru: CancelBranchLruApi
   readonly counters: ProxyCounters
-  readonly sendBuf: (buf: Buffer, dst: SocketAddr) => Effect.Effect<boolean>
+  readonly sendBuf: (buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
   readonly replyToSource: (
     buf: Buffer,
     src: { readonly address: string; readonly port: number }
-  ) => Effect.Effect<boolean>
+  ) => Effect.Effect<void>
   readonly metrics: ProxyMetricsApi
   readonly tracing: ProxyTracingApi
   readonly logger: ProxyLoggerApi
@@ -948,35 +986,22 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         yield* metrics.setActiveDialogsEstimate(cancelLru.size())
       }
 
-      // ── Serialize + send (observe send outcome) ───────────────────────────
-      // If the egress send fails (DNS NXDOMAIN/EAI_AGAIN, ICMP unreach, …)
-      // we surface that in the routing log as `result=dropped` rather than
-      // claiming `forwarded`, and synthesize a 503 to the UAC so it stops
-      // retransmitting on T1/T2 instead of hanging until transaction
-      // timeout.
+      // ── Serialize + send ──────────────────────────────────────────────────
+      // BufferedUdpEndpoint makes `send` pure enqueue: it never blocks on
+      // DNS, never fails on EAGAIN, and never reports per-call failure
+      // back to us. SIP UDP retransmits on the UAC side cover any genuine
+      // loss. The old 503-with-Retry-After synthesis was the workaround
+      // for a blocking-send-that-could-fail-synchronously era; with the
+      // wrapper it's no longer the right shape.
       const outBuf = serialize({ ...req, headers: nextHeaders })
       counters.routedRequests++
-      const sentOk = yield* sendBuf(outBuf, target)
-      if (sentOk) {
-        result = "forwarded"
-        yield* metrics.recordMessage({
-          direction: "outbound",
-          methodOrStatus: method,
-          result: "forwarded",
-        })
-      } else {
-        result = "dropped"
-        const resp = generateResponse(req, 503, "Service Unavailable", {
-          toTag: newTag(),
-          extraHeaders: [{ name: "Retry-After", value: "5" }],
-        })
-        yield* replyToSource(serialize(resp), src)
-        yield* metrics.recordMessage({
-          direction: "outbound",
-          methodOrStatus: "503",
-          result: "dropped",
-        })
-      }
+      yield* sendBuf(outBuf, target)
+      result = "forwarded"
+      yield* metrics.recordMessage({
+        direction: "outbound",
+        methodOrStatus: method,
+        result: "forwarded",
+      })
     })
 
     yield* tracing
@@ -1025,7 +1050,7 @@ interface HandleResponseArgs {
   /** Present in dual-endpoint mode; the response may be ours via Via match here. */
   readonly coreAdvertisedAddress?: { readonly ip: string; readonly port: number } | undefined
   readonly counters: ProxyCounters
-  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<boolean>
+  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
   readonly extEndpoint: UdpEndpoint
   readonly coreEndpoint?: UdpEndpoint | undefined
   /** Ingress network — fallback when our top Via has no `;net=` tag; also
@@ -1192,7 +1217,7 @@ interface HandleRegistrarRequestArgs {
   readonly coreToExtStrategy: CoreToExtRoutingStrategyApi
   readonly cancelLru: CancelBranchLruApi
   readonly counters: ProxyCounters
-  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<boolean>
+  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
   readonly metrics: ProxyMetricsApi
 }
 
@@ -1431,43 +1456,23 @@ const handleRequestRegistrarMode = (
       yield* cancelLru.remember(key, { target, branch: ourBranch })
     }
 
-    // ── Serialize + observe send on egress endpoint ──────────────────────
-    // Parity with the K8s-LB path (`handleRequestImpl`): if the egress
-    // send fails (NXDOMAIN / EAI_AGAIN / ICMP-unreachable) we synthesize
-    // a 503 to the UAC so it stops retransmitting on T1/T2 instead of
-    // hanging until Timer B (32 s). RFC 3261 §16.6.10 / §16.6 — 503 with
-    // `Retry-After` is the spec-aligned code for "downstream
-    // unreachable" from a stateful proxy.
+    // ── Serialize + send on egress endpoint ──────────────────────────────
+    // BufferedUdpEndpoint absorbs all per-call send failures (DNS, EAGAIN,
+    // ICMP unreach); no synthetic 503-with-Retry-After. SIP UDP transaction
+    // timers (T1 / T2 / Timer B) handle UAC-side retry.
     const finalReq = ruriOverride !== undefined
       ? ({ ...req, uri: ruriOverride, headers: nextHeaders } as SipRequest)
       : ({ ...req, headers: nextHeaders } as SipRequest)
     const outBuf = serialize(finalReq)
     counters.routedRequests++
     resolvedTarget = target
-    const sentOk = yield* sendOn(egressEp, outBuf, target)
-    if (sentOk) {
-      result = "forwarded"
-      yield* metrics.recordMessage({
-        direction: "outbound",
-        methodOrStatus: method,
-        result: "forwarded",
-      })
-    } else {
-      result = "dropped"
-      const resp = generateResponse(req, 503, "Service Unavailable", {
-        toTag: newTag(),
-        extraHeaders: [{ name: "Retry-After", value: "5" }],
-      })
-      yield* sendOn(net === "core" ? coreEndpoint : extEndpoint, serialize(resp), {
-        host: src.address,
-        port: src.port,
-      })
-      yield* metrics.recordMessage({
-        direction: "outbound",
-        methodOrStatus: "503",
-        result: "dropped",
-      })
-    }
+    yield* sendOn(egressEp, outBuf, target)
+    result = "forwarded"
+    yield* metrics.recordMessage({
+      direction: "outbound",
+      methodOrStatus: method,
+      result: "forwarded",
+    })
   }).pipe(
     Effect.tap(() =>
       Effect.logInfo(

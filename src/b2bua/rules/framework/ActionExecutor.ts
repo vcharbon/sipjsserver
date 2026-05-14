@@ -63,8 +63,9 @@ import {
   generateResponse,
 } from "../../../sip/generators.js"
 import type { InviteClientTransactionHandle } from "../../../sip/TransactionLayer.js"
-import { createBLegFromRoute } from "../../helpers.js"
+import { createBLegFromRoute, terminateCallEffects } from "../../helpers.js"
 import { legStackIdentity } from "../../stack-identity.js"
+import { classifyAdmission } from "../../TargetAdmission.js"
 
 // ── Internal working state ─────────────────────────────────────────────────
 
@@ -1569,6 +1570,25 @@ function executeCreateLeg(
       : undefined
 
   const port = destination.port ?? 5060
+
+  // Admission gate — same policy as applyRoute. A rule-driven destination
+  // that doesn't pass the suffix allow-list is a config bug; surface it as
+  // a terminate effect so the call doesn't hang waiting for an answer that
+  // will never come.
+  const verdict = classifyAdmission(destination.host, ctx.config.workerAllowedTargetSuffixes)
+  if (verdict === "reject") {
+    state.effects.push(...terminateCallEffects(state.call))
+    state.spanEvents.push({
+      name: "rule_action",
+      attributes: {
+        "rule.action": "create-leg",
+        "rule.outcome": "admission_reject",
+        "rule.host": destination.host,
+      },
+    })
+    return
+  }
+
   const result = createBLegFromRoute({
     call: state.call,
     baseInvite,

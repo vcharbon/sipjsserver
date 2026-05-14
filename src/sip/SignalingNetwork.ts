@@ -258,6 +258,15 @@ export interface SignalingNetworkApi {
    * tracked here (the kernel owns it).
    */
   readonly inFlight: () => number
+  /**
+   * External hook the `BufferedUdpEndpoint` wrapper calls to register
+   * its in-flight buffered packets with the simulated network's
+   * `inFlight` counter. Production layers (real UDP) accept the call
+   * and discard — there's nothing to coordinate with `pumpAll` outside
+   * tests. Simulated layer adds `delta` to the shared `inFlightCount`
+   * so `pumpAll` waits for buffered packets to drain.
+   */
+  readonly bumpInFlight: (delta: number) => void
 }
 
 export class SignalingNetwork extends ServiceMap.Service<
@@ -596,6 +605,7 @@ export class SignalingNetwork extends ServiceMap.Service<
           drainTrace,
           transitDelayMs: opts.transitDelayMs,
           inFlight: () => inFlightCount,
+          bumpInFlight: (delta: number) => { inFlightCount += delta },
         }
       })
     )
@@ -817,5 +827,6 @@ function makeRealImpl({
       }),
     transitDelayMs: undefined,
     inFlight: () => 0,
+    bumpInFlight: (_: number) => undefined,
   }
 }

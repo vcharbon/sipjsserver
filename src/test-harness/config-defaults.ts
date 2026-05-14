@@ -73,6 +73,20 @@ export function testAppConfigDefaults(overrides?: Partial<AppConfigData>): AppCo
     referOverallSafetySec: 120,
     otelMaxAttributeValueLength: 32768,
     scrubHeaders: [],
+    workerAllowedTargetSuffixes: ["*"],
+    // Sequential ingress under fake clock — same reason as the buffered
+    // send below: concurrent stream processing interacts poorly with
+    // TestClock determinism. Production defaults to 16.
+    proxyIngressConcurrency: 1,
+    // Disable the BufferedUdpEndpoint wrapper in fake-clock tests:
+    // its per-peer drainer fiber adds a scheduler hop between offer and
+    // inner.send, which interacts poorly with TestClock quiescence
+    // detection and the scenario's hand-tuned `s.pause(...)` windows.
+    // Production wires the wrapper on (default value in AppConfig is 32).
+    bufferedSendPerPeerQueueMax: 0,
+    bufferedSendIdleTtlMs: 3_600_000,
+    bufferedSendMaxPeers: 10_000,
+    bufferedSendSweepIntervalMs: 600_000,
     traceTombstoneEnabled: false,
     replicationBootstrapTimeoutMs: 30_000,
     ...overrides,

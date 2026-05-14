@@ -59,6 +59,8 @@ export interface ProxyOnlyFakeStackOpts {
   readonly cancelLruSweepIntervalMs?: number
   /** Override proxy bind queueMax (default: 1024). */
   readonly proxyQueueMax?: number
+  /** Override proxy ingress concurrency (default: 1 — sequential). */
+  readonly ingressConcurrency?: number
 }
 
 /**
@@ -79,6 +81,9 @@ export function proxyOnlyFakeStackLayer(opts: ProxyOnlyFakeStackOpts) {
     advertisedHost: opts.proxyAddr.host,
     advertisedPort: opts.proxyAddr.port,
     queueMax: opts.proxyQueueMax ?? 1024,
+    ...(opts.ingressConcurrency !== undefined
+      ? { ingressConcurrency: opts.ingressConcurrency }
+      : {}),
   }
   const BindCfgLayer = ProxyBindConfig.layer(bindCfg)
   const ForwardCfgLayer = ForwardAllConfig.layer(opts.forwardTarget)

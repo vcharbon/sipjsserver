@@ -127,6 +127,7 @@ const bindHost = process.env["PROXY_BIND_HOST"] ?? DEFAULT_BIND_HOST
 const bindPort = parsePort(process.env["PROXY_BIND_PORT"], DEFAULT_BIND_PORT)
 const advertisedHost = process.env["PROXY_ADVERTISED_HOST"] ?? bindHost
 const advertisedPort = parsePort(process.env["PROXY_ADVERTISED_PORT"], bindPort)
+const ingressConcurrency = Number.parseInt(process.env["PROXY_INGRESS_CONCURRENCY"] ?? "16", 10)
 const mode = (process.env["PROXY_REGISTRY_MODE"] ?? "static").toLowerCase()
 
 // Register-strategy default for both static and kubernetes modes is `noop`
@@ -154,6 +155,9 @@ const baseBindLayer = Layer.mergeAll(
     advertisedHost,
     advertisedPort,
     reusePort: true,
+    ingressConcurrency: Number.isFinite(ingressConcurrency) && ingressConcurrency > 0
+      ? ingressConcurrency
+      : 16,
   }),
   CancelBranchLru.Default,
   registrarLayers,
