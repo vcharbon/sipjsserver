@@ -25,6 +25,7 @@ import { afterAll, beforeAll } from "vitest"
 import { Effect } from "effect"
 import { k8sRegisterSmoke } from "../scenarios/registrar/k8s-register-smoke.js"
 import { k8sRegisterCallBye } from "../scenarios/registrar/k8s-register-call-bye.js"
+import { k8sRegisterCallReroute } from "../scenarios/registrar/k8s-register-call-reroute.js"
 import {
   createHybridRunner,
   discoverHostReachableIp,
@@ -72,12 +73,14 @@ describe.skipIf(!E2E_KIND_ENABLED)("E2E (real clock) — register fakeExt-realCo
     { timeout: 60_000 },
   )
 
-  // TODO: k8sRegisterCallReroute currently fails for reasons unrelated to
-  // this cleanup pass (dual-fabric harness). Re-enable after investigating
-  // the underlying reroute failure and porting the scenario to the
-  // factory shape (proxyCoreAdvertised injection).
-  it.skip(
+  it.live(
     "REGISTER + INVITE + reroute (bob1 503 → failover → bob2 via on_failure)",
-    () => undefined,
+    () =>
+      buildRunner()(
+        k8sRegisterCallReroute({
+          proxyCoreAdvertised: hybridProxyCoreDestination(advertisedIp, CORE_PORT),
+        }).toScenario(),
+      ),
+    { timeout: 60_000 },
   )
 })
