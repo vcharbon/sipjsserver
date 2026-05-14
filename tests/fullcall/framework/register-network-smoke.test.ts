@@ -80,6 +80,8 @@ describe("network-tagged TraceEntry round-trip", () => {
         receivedMs: 15,
         from: "alice",
         to: "registrar",
+        fromAddr: { ip: "10.20.0.5", port: 5060 },
+        toAddr: { ip: "10.20.0.10", port: 5060 },
         direction: "send",
         stepIndex: 0,
         status: "pass",
@@ -90,12 +92,18 @@ describe("network-tagged TraceEntry round-trip", () => {
 
     const result: ScenarioResult = {
       scenarioName: "smoke-network-roundtrip",
+      transportKind: "fake",
       stepResults: [],
       trace,
       participants: [
         { name: "alice", network: "core" },
         { name: "registrar", network: "core" },
       ],
+      lanes: [
+        { ip: "10.20.0.5", port: 5060, names: ["alice"], network: "core", killedAt: [] },
+        { ip: "10.20.0.10", port: 5060, names: ["registrar"], network: "core", killedAt: [] },
+      ],
+      anomalies: [],
       passed: 1,
       failed: 0,
       skipped: 0,
@@ -119,6 +127,10 @@ describe("network-tagged TraceEntry round-trip", () => {
       participants: [
         { name: "alice", network: "ext" },
         { name: "registrar", network: "core" },
+      ],
+      lanes: [
+        { ip: "10.20.0.5", port: 5060, names: ["alice"], network: "ext", killedAt: [] },
+        { ip: "10.20.0.10", port: 5060, names: ["registrar"], network: "core", killedAt: [] },
       ],
     }
     const dualTxt = writeTextReports(dualResult, dir)

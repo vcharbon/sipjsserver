@@ -367,11 +367,69 @@ export type NetworkTag = "ext" | "core"
 
 export const DEFAULT_NETWORK: NetworkTag = "ext"
 
+/**
+ * Which transport stack a scenario ran on. Set at `TestTransport`
+ * construction time (one per backend), surfaced on `ScenarioResult` so
+ * the report renderer can show a `[FAKE NET]` / `[LIVE UDP]` /
+ * `[HYBRID]` chip and tint the diagram canvas.
+ *
+ * `"hybrid"` is reserved for scenarios that compose both fake and live
+ * fabrics in one timeline (currently only the registrar-fakeExt /
+ * realCore kind harness).
+ */
+export type TransportKind = "fake" | "live" | "hybrid"
+
 /** Participant entry in `ScenarioResult.participants` — name + network. */
 export interface Participant {
   readonly name: string
   readonly network: NetworkTag
 }
+
+/**
+ * Lane key — `"<ip>:<port>"` form for `MutableHashMap` / index lookups
+ * keyed by wire address.
+ */
+export type LaneKey = string
+
+export const laneKey = (ip: string, port: number): LaneKey => `${ip}:${port}`
+
+/**
+ * A column in the rendered sequence diagram. Identified by `(ip, port)`;
+ * names are decorations attached via the recorder's `registerLane`
+ * (Slice 1) or, in this slice, derived from the trace's `from`/`to`
+ * name fields after the lanes are materialised from addresses.
+ *
+ * Multiple names on one lane → either a legitimate alias (e.g.
+ * "proxy" and "proxy(ext)" share a socket) or a real data anomaly.
+ * `killedAt` accumulates kill-event timestamps so the renderer can
+ * paint a red dashed band on the lifeline without spawning a new
+ * column.
+ */
+export interface Lane {
+  readonly ip: string
+  readonly port: number
+  readonly names: ReadonlyArray<string>
+  readonly network: NetworkTag
+  readonly killedAt: ReadonlyArray<number>
+}
+
+/**
+ * Soft warnings surfaced in a "data anomalies" panel of the report.
+ * Distinct from step failures — these are recorder-data issues, not
+ * test assertions. Currently emitted only by the Recorder service
+ * (Slice 1); the Slice-2-light interpreter does not synthesise them
+ * yet.
+ */
+export type RecordedAnomaly =
+  | {
+      readonly kind: "nameConflict"
+      readonly laneKey: LaneKey
+      readonly names: ReadonlyArray<string>
+    }
+  | {
+      readonly kind: "orphanReplPod"
+      readonly pod: string
+    }
 
 // ---------------------------------------------------------------------------
 // Agent configuration
@@ -584,15 +642,18 @@ export interface TraceEntry {
   readonly from: string
   readonly to: string
   /**
-   * Optional wire-level addresses corresponding to `from` / `to`. Carried
-   * separately so the rule engine can key on the bare name (`from`) while
-   * the renderer can show `name (ip:port)` to disambiguate look-alike
-   * names (e.g. proxy-ext vs proxy-core both labelled "proxy" by the
-   * transport's `participantLabel`). Undefined when the originator is a
-   * test agent (whose name is already address-disambiguated by port).
+   * Wire-level addresses corresponding to `from` / `to`. Required so the
+   * renderer can key lanes on `(ip,port)` rather than name — this is the
+   * structural defense against "report invents names/IPs" (Slice 2 of
+   * `.claude/plans/html-report-recording-layer-faithful-trace.md`).
+   *
+   * For synthesized placeholder entries (dangling-offer / dangling-PRACK
+   * sentinels emitted at scenario end) the addresses are derived from
+   * the agent's configured bind and SUT target so they still anchor on
+   * real lanes even though no packet actually crossed the wire.
    */
-  readonly fromAddr?: { readonly ip: string; readonly port: number }
-  readonly toAddr?: { readonly ip: string; readonly port: number }
+  readonly fromAddr: { readonly ip: string; readonly port: number }
+  readonly toAddr: { readonly ip: string; readonly port: number }
   readonly direction: "send" | "receive"
   readonly stepIndex: number
   readonly status: TraceStatus
@@ -610,6 +671,12 @@ export interface TraceEntry {
 export interface ScenarioResult {
   readonly scenarioName: string
   readonly scenarioDescription?: string | undefined
+  /**
+   * Which transport stack this scenario ran on. Copied from the
+   * `TestTransport.kind` field at scenario end so the HTML renderer can
+   * show the `[FAKE NET]` / `[LIVE UDP]` / `[HYBRID]` chip.
+   */
+  readonly transportKind: TransportKind
   readonly stepResults: readonly StepResult[]
   readonly trace: readonly TraceEntry[]
   /**
@@ -624,8 +691,25 @@ export interface ScenarioResult {
    * entry carries its `network` so the HTML renderer can group / colour
    * lanes by fabric. Order is "first appearance in the trace" so the
    * SVG lays out columns in the order the conversation flows.
+   *
+   * @deprecated — kept for backward compatibility with consumers that
+   * read participant names. The renderer reads `lanes` instead, which
+   * is keyed by `(ip,port)` and immune to name fabrication.
    */
   readonly participants: ReadonlyArray<Participant>
+  /**
+   * `(ip,port)`-keyed lanes. The renderer uses these as the column
+   * identity; names from `participants` decorate the lane headers but
+   * are not the lookup key. Ordering: by `NetworkTag` group (`ext`
+   * left, `core` right), then first appearance within the group.
+   */
+  readonly lanes: ReadonlyArray<Lane>
+  /**
+   * Soft data-quality warnings (name conflicts, orphan replication
+   * pods) surfaced in the report's "data anomalies" panel. Empty when
+   * the recorder is not wired (Slice-2-light path).
+   */
+  readonly anomalies: ReadonlyArray<RecordedAnomaly>
   readonly passed: number
   readonly failed: number
   readonly skipped: number
@@ -647,6 +731,15 @@ export interface ScenarioResult {
  *   so the drain MUST use the non-blocking variant.
  */
 export interface TestTransport {
+  /**
+   * Structural fake/live tag — set by each transport factory at
+   * construction time (`"fake"` in `simulated-backend`, `"live"` in
+   * `live-backend`, `"hybrid"` in `hybrid-runner`). Threaded onto
+   * `ScenarioResult.transportKind` so the renderer can show a chip /
+   * canvas tint without inferring from optional fields like
+   * `drainNetworkTrace`.
+   */
+  readonly kind: TransportKind
   /**
    * Optional layer to provide around the whole scenario (fake backend only).
    * Applied at the outer scope so layer-scoped resources (UdpTransport's

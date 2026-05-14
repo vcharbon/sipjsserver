@@ -68,12 +68,8 @@ function renderTraceEntries(
       entry.status === "unexpected" ? " [UNEXPECTED]"
       : entry.status === "fail" ? " [FAIL]"
       : ""
-    const fromLabel = entry.fromAddr
-      ? `${entry.from} (${entry.fromAddr.ip}:${entry.fromAddr.port})`
-      : entry.from
-    const toLabel = entry.toAddr
-      ? `${entry.to} (${entry.toAddr.ip}:${entry.toAddr.port})`
-      : entry.to
+    const fromLabel = `${entry.from} (${entry.fromAddr.ip}:${entry.fromAddr.port})`
+    const toLabel = `${entry.to} (${entry.toAddr.ip}:${entry.toAddr.port})`
     const prefix = `── [${tsBlock}] ${fromLabel} → ${toLabel} ── ${label}${statusTag} `
     lines.push(prefix.padEnd(SEPARATOR_WIDTH, "─"))
     lines.push("")
@@ -94,10 +90,15 @@ function renderHeader(
 ): string {
   const statusLine = result.failed > 0 ? "FAIL" : "PASS"
   const stats = `${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped`
+  const transportLabel =
+    result.transportKind === "fake" ? "FAKE NET"
+    : result.transportKind === "live" ? "LIVE UDP"
+    : "HYBRID"
   const lines: string[] = [
     "=".repeat(SEPARATOR_WIDTH),
     `  SIP Exchange Report: ${scenarioName}`,
     `  View: ${viewLabel}`,
+    `  Transport: ${transportLabel}`,
     `  Status: ${statusLine} (${stats})`,
     "=".repeat(SEPARATOR_WIDTH),
     "",

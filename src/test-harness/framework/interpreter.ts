@@ -69,8 +69,11 @@ import type {
   AgentInfo,
   ExpectStep,
   K8sStep,
+  Lane,
+  LaneKey,
   NetworkTag,
   Participant,
+  RecordedAnomaly,
   Scenario,
   ScenarioResult,
   SendStep,
@@ -81,7 +84,7 @@ import type {
   TraceEntry,
   TraceStatus,
 } from "./types.js"
-import { DEFAULT_NETWORK } from "./types.js"
+import { DEFAULT_NETWORK, laneKey } from "./types.js"
 import { setCurrentScenario } from "./rule-usage-collector.js"
 import {
   buildMessageContext,
@@ -422,17 +425,20 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
   const failed = state.results.filter((r) => r.status === "fail").length
   const skipped = state.results.filter((r) => r.status === "skip").length
 
-  // Build ordered participant list: agents and SUT names by first appearance in trace
-  const participants = buildParticipantList(state)
+  // Build ordered participant list AND (ip,port)-keyed lanes.
+  const { participants, lanes, anomalies } = buildParticipantsAndLanes(state)
 
   const replicationTrace = transport.drainReplicationTrace?.() ?? []
 
   const result: ScenarioResult = {
     scenarioName: scenario.name,
     scenarioDescription: scenario.description,
+    transportKind: transport.kind,
     stepResults: state.results,
     trace: state.trace,
     participants,
+    lanes,
+    anomalies,
     passed,
     failed,
     skipped,
@@ -1122,6 +1128,8 @@ function executeSend(
       receivedMs: clockTs + netDelay,
       from: step.agent,
       to: sutLabel,
+      fromAddr: { ip: agentInfo.ip, port: agentInfo.port },
+      toAddr: { ip: tgt.host, port: tgt.port },
       direction: "send" as const,
       stepIndex: index,
       status: sendStatus as TraceStatus,
@@ -1359,12 +1367,19 @@ function executeExpect(
         ? transport.participantNetwork?.(matchedRinfo.ip, matchedRinfo.port)
         : undefined)
         ?? state.networkOf(step.agent)
+    // matchedRinfo is set whenever `matched` is (see the assignments at
+    // packet.rinfo binding above) — but the type-system can't see that, so
+    // fall back to the SUT target if for any reason it's missing.
+    const recvFromAddr = matchedRinfo
+      ?? { ip: state.targetFor(step.agent).host, port: state.targetFor(step.agent).port }
     state.trace.push(defined({
       timestamp: arrivalTs,
       sentMs: arrivalTs - netDelayR,
       receivedMs: arrivalTs,
       from: sutName,
       to: step.agent,
+      fromAddr: { ip: recvFromAddr.ip, port: recvFromAddr.port },
+      toAddr: { ip: agentInfo.ip, port: agentInfo.port },
       direction: "receive" as const,
       stepIndex: index,
       status: status as TraceStatus,
@@ -1594,47 +1609,126 @@ function describeMessage(msg: SipMessage): string {
 }
 
 /**
- * Build an ordered participant list from the trace.
- * Order: by first appearance in trace entries, preserving from→to ordering.
- * SUT participants with the same host:port are collapsed into one name.
+ * Build the participant + lane lists for a scenario result.
  *
- * Each participant is tagged with its `network` (so the renderer can
- * group / colour lanes by fabric). The network of a participant is
- * inferred from the first trace entry that mentions it — both ends of
- * a single hop always share a fabric, so either side gives the right
- * answer.
+ * `participants` is the legacy name-keyed list (kept until the renderer
+ * stops reading it). `lanes` is the new `(ip,port)`-keyed list, ordered
+ * per D10: by `NetworkTag` group (`ext` left, `core` right), then
+ * first-appearance within the group. `anomalies` carries soft warnings
+ * (name conflicts surfaced at lane-merge time, etc.).
  */
-function buildParticipantList(state: InterpreterState): Participant[] {
-  const seen = new Map<string, NetworkTag>()
-  const ordered: Participant[] = []
+function buildParticipantsAndLanes(state: InterpreterState): {
+  participants: Participant[]
+  lanes: Lane[]
+  anomalies: RecordedAnomaly[]
+} {
+  // Participants (legacy name-keyed list).
+  const seenNames = new Map<string, NetworkTag>()
+  const participants: Participant[] = []
+  // Lanes (new (ip,port)-keyed list) — recorded in first-appearance order.
+  const laneMap = new Map<
+    LaneKey,
+    {
+      readonly ip: string
+      readonly port: number
+      readonly network: NetworkTag
+      readonly names: string[]
+      readonly firstSeen: number
+    }
+  >()
+  const anomalies: RecordedAnomaly[] = []
+  const conflictReported = new Set<LaneKey>()
 
-  for (const entry of state.trace) {
-    for (const name of [entry.from, entry.to]) {
-      if (!seen.has(name)) {
-        seen.set(name, entry.network)
-        ordered.push({ name, network: entry.network })
+  let order = 0
+  const seeLane = (
+    addr: { ip: string; port: number },
+    name: string,
+    network: NetworkTag,
+  ): void => {
+    const key = laneKey(addr.ip, addr.port)
+    const existing = laneMap.get(key)
+    if (existing === undefined) {
+      laneMap.set(key, {
+        ip: addr.ip,
+        port: addr.port,
+        network,
+        names: [name],
+        firstSeen: order++,
+      })
+      return
+    }
+    if (existing.names.includes(name)) return
+    existing.names.push(name)
+    if (!conflictReported.has(key)) {
+      conflictReported.add(key)
+      anomalies.push({
+        kind: "nameConflict",
+        laneKey: key,
+        names: existing.names.slice(),
+      })
+    } else {
+      const idx = anomalies.findIndex(
+        (a) => a.kind === "nameConflict" && a.laneKey === key,
+      )
+      if (idx >= 0) {
+        anomalies[idx] = {
+          kind: "nameConflict",
+          laneKey: key,
+          names: existing.names.slice(),
+        }
       }
     }
   }
 
-  // If trace is empty, fall back to agent names with SUT in the middle.
-  if (ordered.length === 0) {
+  for (const entry of state.trace) {
+    if (!seenNames.has(entry.from)) {
+      seenNames.set(entry.from, entry.network)
+      participants.push({ name: entry.from, network: entry.network })
+    }
+    if (!seenNames.has(entry.to)) {
+      seenNames.set(entry.to, entry.network)
+      participants.push({ name: entry.to, network: entry.network })
+    }
+    seeLane(entry.fromAddr, entry.from, entry.network)
+    seeLane(entry.toAddr, entry.to, entry.network)
+  }
+
+  // Empty-trace fallback for participants only — the renderer can do
+  // nothing useful with an empty lane list (no addresses to anchor on).
+  if (participants.length === 0) {
     const agentNames = Object.keys(state.agentInfos)
     const sutNamesSet = new Set(Object.values(state.sutNames))
     if (agentNames.length > 0) {
       const first = agentNames[0]!
-      ordered.push({ name: first, network: state.networkOf(first) })
-      // SUTs land on `ext` in slice 1; slice 2 will surface a `core` SUT
-      // participant via `transport.participantNetwork`.
-      for (const sut of sutNamesSet) ordered.push({ name: sut, network: DEFAULT_NETWORK })
+      participants.push({ name: first, network: state.networkOf(first) })
+      for (const sut of sutNamesSet) {
+        participants.push({ name: sut, network: DEFAULT_NETWORK })
+      }
       for (let i = 1; i < agentNames.length; i++) {
         const name = agentNames[i]!
-        ordered.push({ name, network: state.networkOf(name) })
+        participants.push({ name, network: state.networkOf(name) })
       }
     }
   }
 
-  return ordered
+  // D10: order lanes by NetworkTag group (ext left, core right), then by
+  // first appearance within the group.
+  const lanes: Lane[] = Array.from(laneMap.values())
+    .sort((a, b) => {
+      if (a.network !== b.network) {
+        return a.network === "ext" ? -1 : 1
+      }
+      return a.firstSeen - b.firstSeen
+    })
+    .map((l) => ({
+      ip: l.ip,
+      port: l.port,
+      network: l.network,
+      names: l.names.slice(),
+      killedAt: [] as ReadonlyArray<number>,
+    }))
+
+  return { participants, lanes, anomalies }
 }
 
 /**
@@ -1667,12 +1761,18 @@ function checkDanglingOffers(state: InterpreterState): Effect.Effect<void> {
           `CSeq=${pending.cseqNum} ${pending.cseqMethod}, port=${pending.port}, nonce="${pending.nonce}") ` +
           `was never answered — RFC 3264 §5`,
       }))
+      const partyInfo = state.agentInfos[pending.party]
+      const partyTgt = state.targetFor(pending.party)
       state.trace.push({
         timestamp: clockTs,
         sentMs: clockTs,
         receivedMs: clockTs,
         from: state.sutNames[pending.party] ?? "B2BUA",
         to: pending.party,
+        fromAddr: { ip: partyTgt.host, port: partyTgt.port },
+        toAddr: partyInfo
+          ? { ip: partyInfo.ip, port: partyInfo.port }
+          : { ip: partyTgt.host, port: partyTgt.port },
         direction: "receive",
         stepIndex,
         status: "unexpected",
@@ -1700,12 +1800,18 @@ function checkDanglingReliableProvisionals(state: InterpreterState): Effect.Effe
           status: "fail",
           error: `Reliable 1xx sent by ${agent} (${pending.statusCode}, RSeq=${pending.rseq}, CSeq=${pending.inviteCSeq}) was never PRACKed — RFC 3262 §3-4`,
         }))
+        const ai = state.agentInfos[agent]
+        const at = state.targetFor(agent)
         state.trace.push({
           timestamp: clockTs,
           sentMs: clockTs,
           receivedMs: clockTs,
           from: state.sutNames[agent] ?? "B2BUA",
           to: agent,
+          fromAddr: { ip: at.host, port: at.port },
+          toAddr: ai
+            ? { ip: ai.ip, port: ai.port }
+            : { ip: at.host, port: at.port },
           direction: "receive",
           stepIndex,
           status: "unexpected",
@@ -1741,12 +1847,18 @@ function checkUnexpectedMessages(
       }))
 
       // Trace: unexpected message
+      const uxAi = state.agentInfos[agent]
+      const uxTgt = state.targetFor(agent)
       state.trace.push({
         timestamp: clockTs,
         sentMs: clockTs,
         receivedMs: clockTs,
         from: state.sutNames[agent] ?? "B2BUA",
         to: agent,
+        fromAddr: { ip: uxTgt.host, port: uxTgt.port },
+        toAddr: uxAi
+          ? { ip: uxAi.ip, port: uxAi.port }
+          : { ip: uxTgt.host, port: uxTgt.port },
         direction: "receive",
         stepIndex,
         status: "unexpected",
@@ -1784,12 +1896,18 @@ function checkUnexpectedMessages(
           const reemNet =
             transport.participantNetwork?.(packet.rinfo.address, packet.rinfo.port)
               ?? state.networkOf(agentName)
+          const reemAi = state.agentInfos[agentName]
+          const reemTgt = state.targetFor(agentName)
           state.trace.push({
             timestamp: packet.arrivalMs,
             sentMs: packet.arrivalMs - dD,
             receivedMs: packet.arrivalMs,
             from: state.sutNames[agentName] ?? "B2BUA",
             to: agentName,
+            fromAddr: { ip: packet.rinfo.address, port: packet.rinfo.port },
+            toAddr: reemAi
+              ? { ip: reemAi.ip, port: reemAi.port }
+              : { ip: reemTgt.host, port: reemTgt.port },
             direction: "receive",
             stepIndex: -1,
             status: "pass",
@@ -1822,12 +1940,18 @@ function checkUnexpectedMessages(
           const drainNet =
             transport.participantNetwork?.(packet.rinfo.address, packet.rinfo.port)
               ?? state.networkOf(agentName)
+          const drainAi = state.agentInfos[agentName]
+          const drainTgt = state.targetFor(agentName)
           state.trace.push({
             timestamp: packet.arrivalMs,
             sentMs: packet.arrivalMs - dD2,
             receivedMs: packet.arrivalMs,
             from: state.sutNames[agentName] ?? "B2BUA",
             to: agentName,
+            fromAddr: { ip: packet.rinfo.address, port: packet.rinfo.port },
+            toAddr: drainAi
+              ? { ip: drainAi.ip, port: drainAi.port }
+              : { ip: drainTgt.host, port: drainTgt.port },
             direction: "receive",
             stepIndex: drainStepIndex,
             status: "unexpected",

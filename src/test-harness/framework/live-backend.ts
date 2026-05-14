@@ -76,6 +76,7 @@ export function createLiveTransport(opts?: {
   const labelKey = (ip: string, port: number) => `${ip}:${port}`
 
   return {
+    kind: "live" as const,
     setup: (agentConfigs, _b2buaTarget) =>
       Effect.gen(function* () {
         const network = yield* SignalingNetwork

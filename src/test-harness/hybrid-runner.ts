@@ -311,6 +311,7 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
       const labelKeyOf = (ip: string, port: number) => `${ip}:${port}`
       const transport: TestTransport = {
         ...transportBase,
+        kind: "hybrid" as const,
         drainNetworkTrace: () =>
           network.drainTrace().pipe(
             Effect.map((entries) => {

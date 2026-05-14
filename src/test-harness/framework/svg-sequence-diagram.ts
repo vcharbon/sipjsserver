@@ -1,17 +1,25 @@
 /**
  * SVG sequence diagram renderer for SIP message traces.
  *
- * Generates a raw SVG string from TraceEntry[] and participant list.
- * Supports per-arrow Call-ID text coloring, pass/fail/unexpected styling,
- * click targets for message inspection, and timing annotations.
+ * Lane identity is `(ip, port)` — every column header shows the wire
+ * address as the primary label and any registered name(s) underneath.
+ * This is the structural defense against the "report invents names/IPs"
+ * failure mode: a name slot can only contain values that were actually
+ * registered as participants; if no name is known the slot stays empty.
+ *
+ * Arrows are placed on their `fromAddr`/`toAddr` columns, NOT on their
+ * `from`/`to` name fields, so a transport that fabricates a name string
+ * cannot move the arrow to a different lane.
  */
 
 import type { SipMessage } from "../../sip/types.js"
-import type {
-  NetworkTag,
-  Participant,
-  ReplicationTraceEntry,
-  TraceEntry,
+import {
+  laneKey,
+  type Lane,
+  type NetworkTag,
+  type ReplicationTraceEntry,
+  type TraceEntry,
+  type TransportKind,
 } from "./types.js"
 
 // ---------------------------------------------------------------------------
@@ -20,9 +28,9 @@ import type {
 
 const PARTICIPANT_SPACING = 250
 const ROW_HEIGHT = 55
-const HEADER_HEIGHT = 60
-const PARTICIPANT_BOX_WIDTH = 120
-const PARTICIPANT_BOX_HEIGHT = 35
+const HEADER_HEIGHT = 80
+const PARTICIPANT_BOX_WIDTH = 200
+const PARTICIPANT_BOX_HEIGHT = 56
 const MARGIN_LEFT = 40
 const MARGIN_TOP = 20
 const FONT_SIZE = 12
@@ -56,7 +64,6 @@ function getCallIdColor(callId: string, colorMap: Map<string, string>): string {
 /**
  * Format a virtual-clock offset (in ms, relative to the first trace
  * entry) as `T+SEC.mmms` — e.g. `T+0.015s`, `T+1.230s`, `T+1m02.345s`.
- * Matches the text-report format so the two views agree on time.
  */
 function formatRelativeTimestamp(ms: number): string {
   if (ms < 0) ms = 0
@@ -104,12 +111,8 @@ function isInitialInvite(msg: SipMessage): boolean {
 
 /**
  * `true` when the message is an out-of-dialog request that is NOT a
- * dialog-creating INVITE — i.e. a request without a To-tag whose method
- * is anything other than INVITE. Catches OPTIONS keepalive, out-of-dialog
- * NOTIFY/INFO, and similar "non-call-establishing" traffic. Used to mute
- * such arrows in the report so call signaling stays visually dominant
- * while keepalive traffic remains visible (critical for HA scenarios
- * where probe loss is the protagonist).
+ * dialog-creating INVITE. Used to mute keepalive-style arrows so call
+ * signaling stays visually dominant.
  */
 function isOutOfDialogNonInvite(msg: SipMessage): boolean {
   if (msg.type !== "request") return false
@@ -149,12 +152,27 @@ function escapeXml(str: string): string {
 }
 
 /**
- * Render one replication-frame row inside the same SVG sequence diagram
- * as the SIP arrows. The row uses a dashed indigo arrow with a
- * one-line summary so the cause→effect ordering against the SIP
- * messages above and below it is visually obvious. Click target
- * carries `data-repl-index` for the html-report handler to map to the
- * full decoded JSON frame.
+ * Build a pod-name → lane-key index for resolving replication frames.
+ * A replication frame names pods (worker-1, worker-2, …); the renderer
+ * places the arrow on whichever lane has that pod registered as one of
+ * its names. Lanes with no SIP traffic at all are not in this map — the
+ * caller falls back to a synthetic pod-only column when that happens.
+ */
+function buildPodLaneIndex(lanes: readonly Lane[]): Map<string, string> {
+  const idx = new Map<string, string>()
+  for (const lane of lanes) {
+    const key = laneKey(lane.ip, lane.port)
+    for (const name of lane.names) {
+      if (!idx.has(name)) idx.set(name, key)
+    }
+  }
+  return idx
+}
+
+/**
+ * Render one replication-frame row inside the SVG sequence diagram.
+ * Dashed indigo arrow with a one-line summary; click target carries
+ * `data-repl-index` for the html-report handler.
  */
 function renderReplicationRow(args: {
   readonly svgParts: string[]
@@ -162,15 +180,18 @@ function renderReplicationRow(args: {
   readonly index: number
   readonly y: number
   readonly baseTs: number
-  readonly participantX: Map<string, number>
+  readonly laneX: Map<string, number>
+  readonly podLaneIndex: Map<string, string>
 }): void {
-  const { svgParts, repl, index, y, baseTs, participantX } = args
-  const fromX = participantX.get(repl.from)
-  const toX = participantX.get(repl.to)
+  const { svgParts, repl, index, y, baseTs, laneX, podLaneIndex } = args
+  const fromLaneKey = podLaneIndex.get(repl.from)
+  const toLaneKey = podLaneIndex.get(repl.to)
+  const fromX = fromLaneKey !== undefined ? laneX.get(fromLaneKey) : undefined
+  const toX = toLaneKey !== undefined ? laneX.get(toLaneKey) : undefined
   if (fromX === undefined || toX === undefined) return
 
   const isLeftToRight = fromX < toX
-  const lineColor = "#4f46e5" // indigo, distinct from SIP greys / call-id palette
+  const lineColor = "#4f46e5"
   const arrowFromX = isLeftToRight ? fromX + 5 : fromX - 5
   const arrowToX = isLeftToRight ? toX - 5 : toX + 5
 
@@ -186,21 +207,18 @@ function renderReplicationRow(args: {
   svgParts.push(
     `<text x="${midX}" y="${y - 14}" text-anchor="middle" font-family="monospace" font-size="${LABEL_FONT_SIZE}" fill="${lineColor}">${escapeXml("⇢ repl: " + summary)}</text>`,
   )
-  // Receiver-side timing annotation, same as SIP rows.
   const rcvdLabel = formatRelativeTimestamp(repl.timestamp - baseTs)
   const receiverAnchor = isLeftToRight ? "start" : "end"
   const receiverX = isLeftToRight ? toX + 8 : toX - 8
   svgParts.push(
     `<text x="${receiverX}" y="${y + 4}" text-anchor="${receiverAnchor}" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" fill="#4338ca">${rcvdLabel}</text>`,
   )
-  // Click target.
   svgParts.push(
     `<rect x="${Math.min(fromX, toX)}" y="${y - 20}" width="${Math.abs(toX - fromX)}" height="30" fill="transparent"/>`,
   )
   svgParts.push(`</g>`)
 }
 
-/** One-line summary of a decoded replication frame for the SVG label. */
 function replicationSummary(frame: unknown): string {
   if (typeof frame !== "object" || frame === null) return "?"
   const obj = frame as Record<string, unknown>
@@ -241,11 +259,9 @@ export function serializeMessage(msg: SipMessage): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Pastel background tints used to colour-band participant lanes by
- * `NetworkTag`. Soft colours so the sequence-diagram text and arrows
- * stay legible. `ext` keeps the existing white-ish background;
- * `core` gets a faint amber so dual-stack scenarios make the
- * cross-fabric hop visually obvious.
+ * Pastel background tints used to colour-band lanes by `NetworkTag`.
+ * `ext` keeps a near-white background; `core` gets a faint amber so
+ * dual-stack scenarios make the cross-fabric hop visually obvious.
  */
 const NETWORK_LANE_COLORS: Record<NetworkTag, string> = {
   ext: "#ffffff",
@@ -257,31 +273,45 @@ const NETWORK_LANE_LABEL_COLORS: Record<NetworkTag, string> = {
   core: "#a16207", // amber-700
 }
 
+/**
+ * Faint canvas tints applied behind the whole diagram so an operator
+ * scanning thumbnails can recognize the transport kind at a glance.
+ * Header chip in `html-report.ts` carries matching colors.
+ */
+const TRANSPORT_KIND_CANVAS: Record<TransportKind, string> = {
+  fake: "#eef2ff", // indigo-50 — fake/simulated
+  live: "#ecfdf5", // emerald-50 — live UDP
+  hybrid: "#faf5ff", // purple-50 — composed fake+live
+}
+
 export function renderSequenceDiagram(
   trace: readonly TraceEntry[],
-  participants: readonly Participant[],
+  lanes: readonly Lane[],
   replicationTrace: readonly ReplicationTraceEntry[] = [],
+  transportKind: TransportKind = "fake",
 ): string {
-  if (participants.length === 0 || (trace.length === 0 && replicationTrace.length === 0)) {
+  if (lanes.length === 0 || (trace.length === 0 && replicationTrace.length === 0)) {
     return `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="100">
       <text x="200" y="50" text-anchor="middle" font-family="monospace" font-size="14" fill="#666">No messages to display</text>
     </svg>`
   }
 
   const callIdColorMap = new Map<string, string>()
-  const participantX = new Map<string, number>()
-  const participantNetwork = new Map<string, NetworkTag>()
+  // Lane-key (`"<ip>:<port>"`) → X centre coordinate.
+  const laneX = new Map<string, number>()
+  // Lane-key → resolved `Lane` (kept for kill-band rendering).
+  const laneByKey = new Map<string, Lane>()
 
-  // Compute participant X positions
-  for (let i = 0; i < participants.length; i++) {
-    const p = participants[i]!
-    participantX.set(p.name, MARGIN_LEFT + i * PARTICIPANT_SPACING + PARTICIPANT_BOX_WIDTH / 2)
-    participantNetwork.set(p.name, p.network)
+  for (let i = 0; i < lanes.length; i++) {
+    const lane = lanes[i]!
+    const key = laneKey(lane.ip, lane.port)
+    laneX.set(key, MARGIN_LEFT + i * PARTICIPANT_SPACING + PARTICIPANT_BOX_WIDTH / 2)
+    laneByKey.set(key, lane)
   }
 
-  // Merge SIP and replication entries into a single timeline. SIP
-  // entries keep their `TraceEntry` shape; replication entries are
-  // wrapped with a discriminator so the row renderer can dispatch.
+  const podLaneIndex = buildPodLaneIndex(lanes)
+
+  // Merge SIP and replication entries into a single timeline.
   type Row =
     | { readonly kind: "sip"; readonly index: number; readonly entry: TraceEntry }
     | { readonly kind: "repl"; readonly index: number; readonly entry: ReplicationTraceEntry }
@@ -292,13 +322,6 @@ export function renderSequenceDiagram(
   for (let i = 0; i < replicationTrace.length; i++) {
     rows.push({ kind: "repl", index: i, entry: replicationTrace[i]! })
   }
-  // Stable order: by timestamp ascending, with replication AFTER SIP
-  // when timestamps tie. Tie-breaks matter because TestClock often
-  // hands the same virtual instant to a SIP final response and the
-  // replication write that response triggered (rule processing →
-  // flushToRedis → propagate-channel write → puller apply all happen
-  // inside a single Effect tick); rendering replication after the
-  // triggering SIP message makes the cause→effect sequence obvious.
   rows.sort((a, b) => {
     const dt = a.entry.timestamp - b.entry.timestamp
     if (dt !== 0) return dt
@@ -306,23 +329,18 @@ export function renderSequenceDiagram(
     return a.kind === "sip" ? -1 : 1
   })
 
-  // Base timestamp for T+ annotations — the first row's virtual-clock
-  // time. Replication and SIP entries share the same TestClock so a
-  // single base is correct.
   const baseTs = rows[0]!.entry.timestamp
 
-  // Compute SVG dimensions
-  const totalWidth = MARGIN_LEFT * 2 + (participants.length - 1) * PARTICIPANT_SPACING + PARTICIPANT_BOX_WIDTH
+  const totalWidth = MARGIN_LEFT * 2 + (lanes.length - 1) * PARTICIPANT_SPACING + PARTICIPANT_BOX_WIDTH
   let currentY = MARGIN_TOP + HEADER_HEIGHT
   const rowYs: number[] = []
 
-  // Pre-compute row Y positions (account for pause gaps if we add them later)
   for (let i = 0; i < rows.length; i++) {
     rowYs.push(currentY)
     currentY += ROW_HEIGHT
   }
 
-  const totalHeight = currentY + 40 // bottom margin
+  const totalHeight = currentY + 40
 
   const svgParts: string[] = []
 
@@ -345,31 +363,31 @@ export function renderSequenceDiagram(
     </marker>
   </defs>`)
 
-  // --- Background ---
-  svgParts.push(`<rect width="${totalWidth}" height="${totalHeight}" fill="#ffffff"/>`)
+  // --- Canvas backdrop tinted by transport kind ---
+  svgParts.push(
+    `<rect width="${totalWidth}" height="${totalHeight}" fill="${TRANSPORT_KIND_CANVAS[transportKind]}"/>`,
+  )
 
   // --- Per-network lane bands ---
-  // For each contiguous run of participants that share a NetworkTag,
-  // paint a coloured background band. With `ext`-only scenarios this
-  // reduces to a no-op (white over white). Bands are drawn UNDER the
-  // participant boxes / lifelines so arrow text stays readable.
+  // Paint a coloured background band for each contiguous run of lanes
+  // sharing a NetworkTag. With `ext`-only scenarios this is a no-op
+  // over the canvas tint.
   {
     const distinctNetworks = new Set<NetworkTag>()
-    for (const p of participants) distinctNetworks.add(p.network)
+    for (const lane of lanes) distinctNetworks.add(lane.network)
     if (distinctNetworks.size > 1) {
       let i = 0
-      while (i < participants.length) {
-        const net = participants[i]!.network
+      while (i < lanes.length) {
+        const net = lanes[i]!.network
         let j = i
-        while (j + 1 < participants.length && participants[j + 1]!.network === net) j++
-        const leftP = participants[i]!
-        const rightP = participants[j]!
-        const xStart = (participantX.get(leftP.name) ?? 0) - PARTICIPANT_BOX_WIDTH / 2 - 8
-        const xEnd = (participantX.get(rightP.name) ?? 0) + PARTICIPANT_BOX_WIDTH / 2 + 8
+        while (j + 1 < lanes.length && lanes[j + 1]!.network === net) j++
+        const leftLane = lanes[i]!
+        const rightLane = lanes[j]!
+        const xStart = (laneX.get(laneKey(leftLane.ip, leftLane.port)) ?? 0) - PARTICIPANT_BOX_WIDTH / 2 - 8
+        const xEnd = (laneX.get(laneKey(rightLane.ip, rightLane.port)) ?? 0) + PARTICIPANT_BOX_WIDTH / 2 + 8
         const width = Math.max(0, xEnd - xStart)
         const fill = NETWORK_LANE_COLORS[net]
-        svgParts.push(`<rect x="${xStart}" y="0" width="${width}" height="${totalHeight}" fill="${fill}" opacity="0.6"/>`)
-        // Network label, rendered just above the participant boxes.
+        svgParts.push(`<rect x="${xStart}" y="0" width="${width}" height="${totalHeight}" fill="${fill}" opacity="0.5"/>`)
         const midX = (xStart + xEnd) / 2
         const labelColor = NETWORK_LANE_LABEL_COLORS[net]
         svgParts.push(`<text x="${midX}" y="${MARGIN_TOP - 4}" text-anchor="middle" font-family="monospace" font-size="${LABEL_FONT_SIZE - 1}" fill="${labelColor}" font-weight="bold">${escapeXml(net)}</text>`)
@@ -378,17 +396,54 @@ export function renderSequenceDiagram(
     }
   }
 
-  // --- Participant boxes ---
-  for (const [name, x] of participantX) {
+  // --- Lane headers (two-line: address primary, names secondary) ---
+  for (const [key, x] of laneX) {
+    const lane = laneByKey.get(key)!
     const boxX = x - PARTICIPANT_BOX_WIDTH / 2
     const boxY = MARGIN_TOP
     svgParts.push(`<rect x="${boxX}" y="${boxY}" width="${PARTICIPANT_BOX_WIDTH}" height="${PARTICIPANT_BOX_HEIGHT}" rx="4" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>`)
-    svgParts.push(`<text x="${x}" y="${boxY + PARTICIPANT_BOX_HEIGHT / 2 + 5}" text-anchor="middle" font-family="monospace" font-size="${FONT_SIZE}" font-weight="bold" fill="#111827">${escapeXml(name)}</text>`)
+    // Primary line: address.
+    const addrLabel = `${lane.ip}:${lane.port}`
+    svgParts.push(`<text x="${x}" y="${boxY + 22}" text-anchor="middle" font-family="monospace" font-size="${FONT_SIZE}" font-weight="bold" fill="#111827">${escapeXml(addrLabel)}</text>`)
+    // Secondary line: name(s). Empty when nothing was registered.
+    const nameLabel = lane.names.join(", ")
+    if (nameLabel.length > 0) {
+      svgParts.push(`<text x="${x}" y="${boxY + 42}" text-anchor="middle" font-family="monospace" font-size="${FONT_SIZE - 1}" fill="#4b5563">${escapeXml(nameLabel)}</text>`)
+    }
   }
 
   // --- Lifelines ---
-  for (const [, x] of participantX) {
+  for (const [, x] of laneX) {
     svgParts.push(`<line x1="${x}" y1="${MARGIN_TOP + PARTICIPANT_BOX_HEIGHT}" x2="${x}" y2="${totalHeight - 20}" stroke="#d1d5db" stroke-width="1" stroke-dasharray="4,4"/>`)
+  }
+
+  // --- Kill bands ---
+  // For each lane with a recorded kill, paint a horizontal red dashed
+  // strip across its lifeline at the kill timestamp. Maps virtual time
+  // to Y by snapping to the row whose timestamp is closest to the
+  // kill instant; for single-row precision we'd need exact y-mapping
+  // but the row-grain marker is sufficient to indicate the boundary.
+  if (rows.length > 0) {
+    for (const [key, lane] of laneByKey) {
+      if (lane.killedAt.length === 0) continue
+      const x = laneX.get(key)!
+      for (const at of lane.killedAt) {
+        // Find row idx whose timestamp >= `at`; place marker just above.
+        let ry = totalHeight - 20
+        for (let i = 0; i < rows.length; i++) {
+          if (rows[i]!.entry.timestamp >= at) {
+            ry = rowYs[i]! - ROW_HEIGHT / 2
+            break
+          }
+        }
+        svgParts.push(
+          `<line x1="${x - 18}" y1="${ry}" x2="${x + 18}" y2="${ry}" stroke="#dc2626" stroke-width="3" stroke-dasharray="4,3"/>`,
+        )
+        svgParts.push(
+          `<text x="${x + 22}" y="${ry + 3}" text-anchor="start" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" font-weight="bold" fill="#991b1b">KILL</text>`,
+        )
+      }
+    }
   }
 
   // --- Arrows ---
@@ -396,10 +451,6 @@ export function renderSequenceDiagram(
     const row = rows[rowIdx]!
     const y = rowYs[rowIdx]!
 
-    // Replication frames render as a distinct dashed indigo arrow with
-    // a JSON-summary label. Their click target carries a
-    // `data-repl-index` attribute the HTML report's click handler uses
-    // to look up the full decoded frame.
     if (row.kind === "repl") {
       renderReplicationRow({
         svgParts,
@@ -407,14 +458,15 @@ export function renderSequenceDiagram(
         index: row.index,
         y,
         baseTs,
-        participantX,
+        laneX,
+        podLaneIndex,
       })
       continue
     }
 
     const entry = row.entry
-    const fromX = participantX.get(entry.from)
-    const toX = participantX.get(entry.to)
+    const fromX = laneX.get(laneKey(entry.fromAddr.ip, entry.fromAddr.port))
+    const toX = laneX.get(laneKey(entry.toAddr.ip, entry.toAddr.port))
 
     if (fromX === undefined || toX === undefined) continue
 
@@ -423,7 +475,6 @@ export function renderSequenceDiagram(
     const label = getArrowLabel(entry.message)
     const tagLabel = getTagLabel(entry.message)
 
-    // Arrow line styling
     const isLeftToRight = fromX < toX
     const lineColor = entry.status === "fail" ? "#dc2626"
       : entry.status === "unexpected" ? "#d97706"
@@ -433,40 +484,23 @@ export function renderSequenceDiagram(
       : entry.status === "unexpected" ? "url(#arrowhead-unexpected)"
       : "url(#arrowhead-pass)"
 
-    // Clickable group. The lookup key is the entry's index in the sorted
-    // trace, NOT `stepIndex` — internal hops (proxy↔worker, spliced in by
-    // the interpreter) all share `stepIndex = -1` and would otherwise
-    // collide in the click-handler map. `data-step-index` is kept on the
-    // attribute for backward compatibility with anything that scrapes the
-    // SVG; the click handler uses `data-trace-index` exclusively.
     const arrowClasses = isOutOfDialogNonInvite(entry.message)
       ? "trace-arrow trace-arrow--out-of-dialog-non-invite"
       : "trace-arrow"
-    // `data-trace-index` keys the html-report click handler's
-    // `messages` map. Replication rows (rendered separately above)
-    // carry their own `data-repl-index` instead.
     svgParts.push(`<g class="${arrowClasses}" data-step-index="${entry.stepIndex}" data-trace-index="${row.index}" style="cursor:pointer">`)
 
-    // Arrow line
     const arrowFromX = isLeftToRight ? fromX + 5 : fromX - 5
     const arrowToX = isLeftToRight ? toX - 5 : toX + 5
     svgParts.push(`<line x1="${arrowFromX}" y1="${y}" x2="${arrowToX}" y2="${y}" stroke="${lineColor}" stroke-width="1.5" marker-end="${markerEnd}" ${dashArray}/>`)
 
-    // Label (method/status + URI) — colored by Call-ID
     const midX = (fromX + toX) / 2
     const labelY = y - 14
     svgParts.push(`<text x="${midX}" y="${labelY}" text-anchor="middle" font-family="monospace" font-size="${LABEL_FONT_SIZE}" fill="${color}">${escapeXml(label)}</text>`)
 
-    // Tag label (From-tag / To-tag) — smaller, below the main label
     if (tagLabel) {
       svgParts.push(`<text x="${midX}" y="${y - 3}" text-anchor="middle" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" fill="#9ca3af">${escapeXml(tagLabel)}</text>`)
     }
 
-    // Timing annotations: show the virtual-clock moment the packet left
-    // the sender (next to the sender lifeline) and the moment the receiver
-    // observed it (next to the receiver lifeline). When the two are equal
-    // (e.g. framework-synthesised entries for dangling offers/PRACKs) a
-    // single annotation is rendered on the receiver side.
     const sentLabel = formatRelativeTimestamp(entry.sentMs - baseTs)
     const rcvdLabel = formatRelativeTimestamp(entry.receivedMs - baseTs)
     const senderAnchor = isLeftToRight ? "end" : "start"
@@ -480,13 +514,11 @@ export function renderSequenceDiagram(
       svgParts.push(`<text x="${receiverX}" y="${y + 4}" text-anchor="${receiverAnchor}" font-family="monospace" font-size="${LABEL_FONT_SIZE - 2}" fill="#6b7280">${rcvdLabel}</text>`)
     }
 
-    // Unexpected badge
     if (entry.status === "unexpected") {
       const badgeX = isLeftToRight ? toX + 8 : toX - 70
       svgParts.push(`<text x="${badgeX}" y="${y + 4}" text-anchor="start" font-family="monospace" font-size="${LABEL_FONT_SIZE - 1}" font-weight="bold" fill="#d97706">UNEXPECTED</text>`)
     }
 
-    // Invisible wide click target
     svgParts.push(`<rect x="${Math.min(fromX, toX)}" y="${y - 20}" width="${Math.abs(toX - fromX)}" height="30" fill="transparent"/>`)
 
     svgParts.push(`</g>`)

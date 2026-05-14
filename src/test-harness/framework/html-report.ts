@@ -43,7 +43,12 @@ export function writeScenarioReport(
 
   const sortedTrace = [...result.trace].sort((a, b) => a.timestamp - b.timestamp)
   const replicationEntries = result.replicationTrace ?? []
-  const svg = renderSequenceDiagram(sortedTrace, result.participants, replicationEntries)
+  const svg = renderSequenceDiagram(
+    sortedTrace,
+    result.lanes,
+    replicationEntries,
+    result.transportKind,
+  )
 
   // Build message data for the click handler. Key is the entry's index
   // in `sortedTrace` — `stepIndex` would collide for internal hops
@@ -58,6 +63,37 @@ export function writeScenarioReport(
   const statusBadge = result.failed > 0
     ? `<span class="badge fail">FAIL</span>`
     : `<span class="badge pass">PASS</span>`
+
+  // Transport-kind chip — `[FAKE NET]` / `[LIVE UDP]` / `[HYBRID]`.
+  // Colours match the faint canvas tint in the SVG so an operator
+  // scanning thumbnails recognises the transport at a glance.
+  const transportChip = (() => {
+    switch (result.transportKind) {
+      case "fake":
+        return `<span class="badge transport-fake">FAKE NET</span>`
+      case "live":
+        return `<span class="badge transport-live">LIVE UDP</span>`
+      case "hybrid":
+        return `<span class="badge transport-hybrid">HYBRID</span>`
+    }
+  })()
+
+  // Data-anomalies panel — Slice 1's recorder emits these; the
+  // Slice-2-light interpreter currently surfaces name conflicts from
+  // `buildParticipantsAndLanes`. Empty array → panel omitted.
+  const anomaliesHtml = result.anomalies.length > 0
+    ? `<div class="anomalies">
+        <div class="anomalies-header">Data anomalies — ${result.anomalies.length} item${result.anomalies.length === 1 ? "" : "s"}</div>
+        <ul class="anomalies-list">
+          ${result.anomalies.map((a) => {
+            if (a.kind === "nameConflict") {
+              return `<li><span class="anomalies-kind">name conflict</span> <code>${escapeHtml(a.laneKey)}</code> → ${escapeHtml(a.names.join(", "))}</li>`
+            }
+            return `<li><span class="anomalies-kind">orphan repl pod</span> <code>${escapeHtml(a.pod)}</code></li>`
+          }).join("")}
+        </ul>
+      </div>`
+    : ""
 
   // Collect failure details (step errors + assertion errors) for the root-cause panel
   const failureItems: Array<{ stepIndex: number; label: string; reasons: string[] }> = []
@@ -135,6 +171,37 @@ export function writeScenarioReport(
     }
     .badge.pass { background: #059669; color: white; }
     .badge.fail { background: #dc2626; color: white; }
+    .badge.transport-fake { background: #4f46e5; color: white; }
+    .badge.transport-live { background: #047857; color: white; }
+    .badge.transport-hybrid { background: #7c3aed; color: white; }
+    .anomalies {
+      background: #fffbeb;
+      border-bottom: 2px solid #d97706;
+      padding: 8px 20px;
+      max-height: 25vh;
+      overflow-y: auto;
+    }
+    .anomalies-header {
+      font-size: 12px;
+      font-weight: 700;
+      color: #92400e;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .anomalies-list { list-style: none; padding: 0; margin: 0; }
+    .anomalies-list li {
+      font-size: 12px;
+      color: #92400e;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      padding: 2px 0;
+    }
+    .anomalies-kind {
+      display: inline-block;
+      font-weight: 600;
+      color: #b45309;
+      margin-right: 6px;
+    }
     .summary {
       font-size: 13px;
       color: #9ca3af;
@@ -275,6 +342,7 @@ export function writeScenarioReport(
     <a href="./" class="index-link">&larr; Index</a>
     <h1>${escapeHtml(result.scenarioName)}</h1>
     ${statusBadge}
+    ${transportChip}
     <span class="summary">${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped</span>
     ${(textFilenames && textFilenames.length > 0) ? `<div class="txt-links">${textFilenames.map((f) => {
       // `f` is either a flat name (`scenario.global.txt`) or a network-
@@ -286,6 +354,7 @@ export function writeScenarioReport(
     }).join("")}</div>` : ""}
   </header>
   ${failuresHtml}
+  ${anomaliesHtml}
   <div class="main">
     <div class="diagram-panel">
       ${svg}

@@ -38,6 +38,8 @@ import {
 } from "../../../src/test-harness/framework/html-report.js"
 import { writeTextReports } from "../../../src/test-harness/framework/text-report.js"
 import type {
+  Lane,
+  NetworkTag,
   Participant,
   ScenarioResult,
   TraceEntry,
@@ -86,6 +88,23 @@ const finalize = (
     // detail panels. Unknown endpoints fall back to "<ip>:<port>".
     const trace: TraceEntry[] = []
     const seenParticipants = new Set<string>(names)
+    // Lane registry built from observed addresses, in first-appearance
+    // order. Each entry tracks the names ever assigned to its
+    // `(ip,port)` so the renderer's column header shows whichever
+    // participant the test registered for that socket — and nothing else.
+    const laneBuilder = new Map<
+      string,
+      { ip: string; port: number; network: NetworkTag; names: string[] }
+    >()
+    const seeLane = (ip: string, port: number, name: string): void => {
+      const key = labelKey(ip, port)
+      const existing = laneBuilder.get(key)
+      if (existing === undefined) {
+        laneBuilder.set(key, { ip, port, network: DEFAULT_NETWORK, names: [name] })
+        return
+      }
+      if (!existing.names.includes(name)) existing.names.push(name)
+    }
     for (const e of netEntries) {
       const msg = tryParse(e.raw)
       if (msg === undefined) continue
@@ -95,12 +114,16 @@ const finalize = (
         addrs.get(labelKey(e.dst.ip, e.dst.port)) ?? `${e.dst.ip}:${e.dst.port}`
       seenParticipants.add(fromLabel)
       seenParticipants.add(toLabel)
+      seeLane(e.src.ip, e.src.port, fromLabel)
+      seeLane(e.dst.ip, e.dst.port, toLabel)
       trace.push({
         timestamp: e.deliveredMs,
         sentMs: e.sentMs,
         receivedMs: e.deliveredMs,
         from: fromLabel,
         to: toLabel,
+        fromAddr: { ip: e.src.ip, port: e.src.port },
+        toAddr: { ip: e.dst.ip, port: e.dst.port },
         direction: "send",
         stepIndex: -1,
         status: e.delivered ? "pass" : "unexpected",
@@ -136,12 +159,23 @@ const finalize = (
     // The `failureReason` (when present) is captured at the framework level
     // by vitest itself; the on-disk report shows the FAIL badge plus the
     // global trace, which is enough to diagnose proxy-side regressions.
+    const lanes: ReadonlyArray<Lane> = Array.from(laneBuilder.values()).map((l) => ({
+      ip: l.ip,
+      port: l.port,
+      network: l.network,
+      names: l.names.slice(),
+      killedAt: [] as ReadonlyArray<number>,
+    }))
+
     const result: ScenarioResult = {
       scenarioName: opts.name,
       scenarioDescription: opts.description,
+      transportKind: "fake",
       stepResults: [],
       trace,
       participants: orderedParticipants,
+      lanes,
+      anomalies: [],
       passed: status === "pass" ? 1 : 0,
       failed: status === "fail" ? 1 : 0,
       skipped: 0,

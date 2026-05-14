@@ -288,6 +288,7 @@ export function createSimulatedTransport(opts?: {
   }
 
   return {
+    kind: "fake" as const,
     stackLayer: StackLayer,
     setup: (agentConfigs, _b2buaTarget) =>
       Effect.gen(function* () {
