@@ -44,6 +44,17 @@ export interface SendOpts {
   readonly build?: (ctx: MessageContext) => HeaderOverrides
   readonly body?: Uint8Array
   readonly skipValidation?: ValidationCheckName[]
+  /**
+   * Bypass the implicit "dialog established" dependency on `dialog.ack()` /
+   * `dialog.bye()` / `dialog.send()` returned from `invite()` or
+   * `receiveInitialInvite()`. By default these in-dialog sends are skipped
+   * when the establishing 2xx INVITE response was never observed (UAC) or
+   * never sent (UAS) — sending ACK / BYE on a non-existent dialog would
+   * produce misleading off-dialog traffic. Set to `true` for negative
+   * scenarios that deliberately send those without a 2xx (e.g. spec-
+   * violation tests).
+   */
+  readonly forceSend?: boolean
 }
 
 /**
@@ -471,9 +482,21 @@ export function record(
       }
     }
 
-    function makeUacInviteTransaction(): UacInviteTransaction {
+    // Mutable cell carrying the StepRef of the 2xx INVITE response that
+    // established the dialog (UAC side: the expect; UAS side: the reply
+    // send). Threaded into dialog.ack / dialog.bye / dialog.send so those
+    // steps depend on the establisher — skipped when it failed/skipped.
+    type EstablisherCell = { ref: StepRef | undefined }
+
+    function makeUacInviteTransaction(establisher?: EstablisherCell): UacInviteTransaction {
       return {
-        expect: (statusCode, opts) => expect(statusCode, eraseOpts(opts)),
+        expect: (statusCode, opts) => {
+          const expRef = expect(statusCode, eraseOpts(opts))
+          if (establisher !== undefined && statusCode >= 200 && statusCode < 300) {
+            establisher.ref = expRef
+          }
+          return expRef
+        },
         cancel: (opts) => {
           send("CANCEL", sendMethodToOpts("CANCEL", opts))
           return makeUacTransaction()
@@ -481,16 +504,31 @@ export function record(
       }
     }
 
-    function makeDialogRef(): DialogRef {
+    function withImplicitDep(
+      opts: SendOpts | undefined,
+      establisher: EstablisherCell | undefined,
+    ): InternalSendOpts {
+      const base = sendMethodToOpts("_", opts)
+      if (
+        establisher !== undefined &&
+        establisher.ref !== undefined &&
+        !opts?.forceSend
+      ) {
+        return { ...base, inResponseTo: establisher.ref }
+      }
+      return base
+    }
+
+    function makeDialogRef(establisher?: EstablisherCell): DialogRef {
       return {
-        ack: (opts) => send("ACK", sendMethodToOpts("ACK", opts)),
+        ack: (opts) => send("ACK", withImplicitDep(opts, establisher)),
         bye: (opts) => {
-          send("BYE", sendMethodToOpts("BYE", opts))
+          send("BYE", withImplicitDep(opts, establisher))
           return makeUacTransaction()
         },
         send: (method, opts) => {
           if (opts?.build) hasBuildCallbacks = true
-          send(method, sendMethodToOpts(method, opts))
+          send(method, withImplicitDep(opts, establisher))
           return makeUacTransaction()
         },
         expect: (method, opts) => {
@@ -512,9 +550,10 @@ export function record(
       if (opts?.build) sendOpts.build = opts.build
       if (opts?.skipValidation) sendOpts.skipValidation = opts.skipValidation
       send("INVITE", sendOpts as InternalSendOpts)
+      const establisher: EstablisherCell = { ref: undefined }
       return {
-        dialog: makeDialogRef(),
-        transaction: makeUacInviteTransaction(),
+        dialog: makeDialogRef(establisher),
+        transaction: makeUacInviteTransaction(establisher),
       }
     }
 
@@ -548,10 +587,20 @@ export function record(
 
     const receiveInitialInvite: AgentProxy["receiveInitialInvite"] = (opts) => {
       const expRef = expect("INVITE", eraseOpts(opts))
+      // UAS-side establisher: the 2xx reply we send. Threaded so that a
+      // bob-side dialog.bye() / dialog.send() skips when the reply step
+      // itself was skipped (e.g. the INVITE was never received).
+      const establisher: EstablisherCell = { ref: undefined }
       return {
-        dialog: makeDialogRef(),
+        dialog: makeDialogRef(establisher),
         transaction: {
-          reply: (statusCode, replyOpts) => expRef.reply(statusCode, replyOpts),
+          reply: (statusCode, replyOpts) => {
+            const replyRef = expRef.reply(statusCode, replyOpts)
+            if (statusCode >= 200 && statusCode < 300) {
+              establisher.ref = replyRef
+            }
+            return replyRef
+          },
           expectCancel: (cancelOpts) => {
             const cancelExp = expect("CANCEL", eraseOpts(cancelOpts))
             return {
