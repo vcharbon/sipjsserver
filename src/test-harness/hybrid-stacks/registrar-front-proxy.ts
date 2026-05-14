@@ -3,22 +3,24 @@
  * hybrid `register-fakeExt-realCore` harness.
  *
  * Runs `ProxyCore` in dual-endpoint registrar mode **inside the test
- * process** on real UDP sockets (`SignalingNetwork.real`), so:
- *   - alice / bob (in-process agents) connect to the proxy's `ext`
- *     endpoint at `EXT_BIND`.
- *   - the kind-cluster b2bua stack (sip-front-proxy + b2bua-worker +
- *     redis + mock call-control) becomes an opaque "core" peer, reached
- *     via the kind hostPort at `CORE_DESTINATION`.
- *   - the worker reaches the proxy's `core` endpoint via the docker
- *     bridge gateway IP — that's why the core endpoint advertises
- *     `coreAdvertisedHost` rather than `0.0.0.0`.
+ * process**, with the two endpoints intentionally on DIFFERENT fabrics:
  *
- * `SignalingNetwork.real` records every `send` and accepted `recv` into
- * a per-instance trace buffer (see [src/sip/SignalingNetwork.ts](../../src/sip/SignalingNetwork.ts)),
- * which the hybrid runner drains into `drainNetworkTrace` so both ext
- * and core hops appear on the HTML / global.txt report. The internal
- * cluster LB → worker traffic stays inside kind and is intentionally
- * not visible — the proxy treats that as a single core peer.
+ *   - `ext` endpoint binds on `SignalingNetwork` (provided externally
+ *     as `SignalingNetwork.simulated`). alice/bob bind on the same
+ *     fabric on synthetic `5.1.x.x` addresses — no kernel sockets.
+ *   - `core` endpoint binds on `SignalingNetworkCore` (provided
+ *     externally as `SignalingNetworkCore.realTracing`). Talks to the
+ *     kind cluster over real UDP via the docker bridge gateway.
+ *
+ * Both fabrics record per-instance trace buffers; the hybrid runner
+ * drains both and merges them into one timeline for the
+ * HTML / global.txt report. The in-cluster LB → worker traffic stays
+ * inside kind and is intentionally invisible — the proxy treats that
+ * as a single opaque core peer at `coreDestination`.
+ *
+ * Production code (`bin/proxy.ts`) and the fake-clock fakestack do NOT
+ * provide `SignalingNetworkCore`; ProxyCore then falls back to reusing
+ * `SignalingNetwork` for both endpoints (the legacy single-fabric shape).
  */
 
 import { Effect, Layer } from "effect"

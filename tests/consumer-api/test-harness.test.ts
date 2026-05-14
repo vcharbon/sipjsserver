@@ -54,7 +54,6 @@ describe("@vcharbon/sipjs/test-harness public surface", () => {
     const opts: RegistrarTestProxyRunnerOptions = {
       coreDestination: { host: "10.0.0.1", port: 5060 },
       advertisedIp: "127.0.0.1",
-      extPort: 35080,
       corePort: 35081,
       outputDir: "test-results/consumer-api-smoke",
     }

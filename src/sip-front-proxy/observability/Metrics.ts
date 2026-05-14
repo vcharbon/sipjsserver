@@ -158,6 +158,7 @@ export type RoutingDecisionKind =
   | "cancel_lookup_hit"
   | "cancel_lookup_miss"
   | "worker_outbound"
+  | "loose_route"
 
 export type HmacFailureReason = "missing" | "decode" | "mismatch" | "unknown_kid"
 

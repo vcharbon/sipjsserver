@@ -193,48 +193,56 @@ export class SendError extends Schema.TaggedErrorClass<SendError>()("SendError",
 // Service
 // ---------------------------------------------------------------------------
 
+/**
+ * Shape shared by every SignalingNetwork-flavoured service tag. Extracted
+ * so sibling tags (e.g. `SignalingNetworkCore`, used by the hybrid runner
+ * to split the proxy's ext vs core endpoints across two distinct fabrics)
+ * can re-use the same surface without re-declaring it.
+ */
+export interface SignalingNetworkApi {
+  readonly bindUdp: (opts: BindUdpOpts) => Effect.Effect<UdpEndpoint, BindError, Scope.Scope>
+  /**
+   * Drain undeliverable packets accumulated since last drain. Real
+   * implementation always returns []; simulated implementation returns
+   * and clears its buffer.
+   */
+  readonly drainUndeliverable: () => Effect.Effect<ReadonlyArray<UndeliveredPacket>>
+  /**
+   * Drain network-level trace entries accumulated since last drain.
+   * Simulated implementation populates this on every delivery; real
+   * implementation returns an empty array (real-UDP recording lives
+   * elsewhere, if anywhere).
+   *
+   * Used by the test harness to reconstruct the full end-to-end
+   * exchange — including internal proxy↔worker hops that no agent
+   * endpoint would otherwise observe.
+   */
+  readonly drainTrace: () => Effect.Effect<ReadonlyArray<NetworkTraceEntry>>
+  /**
+   * Simulated: configured endpoint-to-endpoint transit delay (ms). The
+   * trace renderer reads this to compute the peer-side observation time
+   * from a single captured send/receive clock.
+   *
+   * Real: `undefined` — on real sockets each side stamps its own clock.
+   */
+  readonly transitDelayMs: number | undefined
+  /**
+   * Number of packets currently mid-transit on the simulated fabric — i.e.
+   * a `send()` was called but the destination-side `deliver` hasn't run
+   * yet. Synchronous getter; cheap.
+   *
+   * Used by `tests/support/pumpAll.ts` as a defense-in-depth signal that
+   * "no pending sleep" doesn't mean "no transit fiber waiting to run".
+   *
+   * Real impl: always returns 0 — real UDP has no notion of in-flight
+   * tracked here (the kernel owns it).
+   */
+  readonly inFlight: () => number
+}
+
 export class SignalingNetwork extends ServiceMap.Service<
   SignalingNetwork,
-  {
-    readonly bindUdp: (opts: BindUdpOpts) => Effect.Effect<UdpEndpoint, BindError, Scope.Scope>
-    /**
-     * Drain undeliverable packets accumulated since last drain. Real
-     * implementation always returns []; simulated implementation returns
-     * and clears its buffer.
-     */
-    readonly drainUndeliverable: () => Effect.Effect<ReadonlyArray<UndeliveredPacket>>
-    /**
-     * Drain network-level trace entries accumulated since last drain.
-     * Simulated implementation populates this on every delivery; real
-     * implementation returns an empty array (real-UDP recording lives
-     * elsewhere, if anywhere).
-     *
-     * Used by the test harness to reconstruct the full end-to-end
-     * exchange — including internal proxy↔worker hops that no agent
-     * endpoint would otherwise observe.
-     */
-    readonly drainTrace: () => Effect.Effect<ReadonlyArray<NetworkTraceEntry>>
-    /**
-     * Simulated: configured endpoint-to-endpoint transit delay (ms). The
-     * trace renderer reads this to compute the peer-side observation time
-     * from a single captured send/receive clock.
-     *
-     * Real: `undefined` — on real sockets each side stamps its own clock.
-     */
-    readonly transitDelayMs: number | undefined
-    /**
-     * Number of packets currently mid-transit on the simulated fabric — i.e.
-     * a `send()` was called but the destination-side `deliver` hasn't run
-     * yet. Synchronous getter; cheap.
-     *
-     * Used by `tests/support/pumpAll.ts` as a defense-in-depth signal that
-     * "no pending sleep" doesn't mean "no transit fiber waiting to run".
-     *
-     * Real impl: always returns 0 — real UDP has no notion of in-flight
-     * tracked here (the kernel owns it).
-     */
-    readonly inFlight: () => number
-  }
+  SignalingNetworkApi
 >()("@sipjsserver/SignalingNetwork") {
   // -------------------------------------------------------------------------
   // Real (dgram-backed) implementation
@@ -518,6 +526,37 @@ export class SignalingNetwork extends ServiceMap.Service<
         }
       })
     )
+}
+
+// ---------------------------------------------------------------------------
+// Sibling tag for the proxy's core endpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional second-fabric tag, consumed by `ProxyCore` when it needs to
+ * bind its `core` endpoint on a different physical fabric than its `ext`
+ * endpoint. Production and the fake-clock fakestack do NOT provide this;
+ * the proxy then falls back to reusing the single `SignalingNetwork`
+ * instance for both endpoints (current behaviour).
+ *
+ * The hybrid `register-fakeExt-realCore` runner provides it as a real
+ * dgram-backed layer while keeping `SignalingNetwork` simulated, so the
+ * ext side stays fully in-memory while the core side talks to real
+ * sockets.
+ */
+export class SignalingNetworkCore extends ServiceMap.Service<
+  SignalingNetworkCore,
+  SignalingNetworkApi
+>()("@sipjsserver/SignalingNetworkCore") {
+  static readonly real: Layer.Layer<SignalingNetworkCore> = Layer.sync(
+    SignalingNetworkCore,
+    () => makeRealImpl({ recordTrace: false })
+  )
+
+  static readonly realTracing: Layer.Layer<SignalingNetworkCore> = Layer.sync(
+    SignalingNetworkCore,
+    () => makeRealImpl({ recordTrace: true })
+  )
 }
 
 // ─────────────────────────────────────────────────────────────────────────

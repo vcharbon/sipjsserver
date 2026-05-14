@@ -47,7 +47,11 @@ import { generateResponse } from "../sip/generators.js"
 import { SipParser } from "../sip/Parser.js"
 import { splitTopLevelCommas } from "../sip/parsers/custom/structured-headers.js"
 import { serialize } from "../sip/Serializer.js"
-import { SignalingNetwork, type UdpEndpoint } from "../sip/SignalingNetwork.js"
+import {
+  SignalingNetwork,
+  SignalingNetworkCore,
+  type UdpEndpoint,
+} from "../sip/SignalingNetwork.js"
 import type { SipHeader, SipMessage, SipRequest } from "../sip/types.js"
 import {
   CancelBranchLru,
@@ -259,6 +263,11 @@ const makeProxyCore: Effect.Effect<
   // Optional: registrar deployments provide this; the K8s-LB binary
   // doesn't and the proxy stays single-endpoint.
   const registrarCfgOpt = yield* Effect.serviceOption(RegistrarProxyConfig)
+  // Optional second fabric for the core endpoint. The hybrid
+  // fake-ext/real-core harness provides this so ext stays in-memory
+  // (simulated) while core uses real UDP. When absent (production,
+  // single-fabric tests), the core endpoint reuses `network`.
+  const coreNetworkOpt = yield* Effect.serviceOption(SignalingNetworkCore)
 
   const queueMax = cfg.queueMax ?? 1024
   const extEndpoint = yield* network
@@ -289,7 +298,8 @@ const makeProxyCore: Effect.Effect<
   let registrarCfg: RegistrarProxyConfigData | undefined
   if (Option.isSome(registrarCfgOpt)) {
     registrarCfg = registrarCfgOpt.value
-    coreEndpoint = yield* network
+    const coreNetwork = Option.getOrElse(coreNetworkOpt, () => network)
+    coreEndpoint = yield* coreNetwork
       .bindUdp({
         ip: registrarCfg.coreBind.host,
         port: registrarCfg.coreBind.port,
@@ -706,6 +716,37 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       // we cache that branch in the LRU and reuse it on the CANCEL below.
       let reuseBranch: string | undefined
 
+      // RFC 3261 §16.12.1: if a Route header survived our self-strip (we
+      // weren't the only proxy on the path), that's the next hop. This
+      // takes precedence over the K8s-LB shortcuts (cookie decode,
+      // worker-outbound → R-URI) which otherwise assume the request had
+      // exactly one self-RR and nothing else. The dual-fabric hybrid
+      // harness double-Record-Routes, so worker-outbound in-dialog
+      // requests arrive with an additional downstream RR below our
+      // own — without this check the worker-outbound branch would
+      // shortcut to the (potentially unreachable) R-URI Contact and
+      // strand the in-dialog request.
+      //
+      // Only loose-route entries (`;lr`) are honored. Strict route is
+      // out of scope for this proxy. CANCEL keeps its dedicated LRU
+      // path below.
+      let looseRouteNextHop: SocketAddr | undefined
+      if (method !== "CANCEL") {
+        const nextRoute = getHeader(headers, "route")
+        if (nextRoute !== undefined) {
+          const isLoose = /;\s*lr(\s*[;>]|\s*$)/i.test(nextRoute)
+          if (isLoose) {
+            const parsedNext = parseSipUri(nextRoute)
+            if (parsedNext !== undefined) {
+              looseRouteNextHop = {
+                host: parsedNext.host,
+                port: parsedNext.port ?? 5060,
+              }
+            }
+          }
+        }
+      }
+
       if (method === "CANCEL") {
         // §16.10: forward CANCEL to the same downstream as the matching
         // INVITE. RFC 3261 §9.1 — a CANCEL shares the INVITE's Call-ID and
@@ -731,6 +772,14 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
           // can't conjure a "we don't know" — we'd otherwise drop.
           target = yield* tryStrategySelect(strategy, req, counters)
         }
+      } else if (looseRouteNextHop !== undefined) {
+        // A downstream proxy added an RR below ours — follow it
+        // (loose-route, RFC §16.12.1). This wins over both the
+        // worker-outbound R-URI shortcut and the cookie decode below:
+        // when an explicit Route header survives our strip, it
+        // unambiguously declares the next hop and we must honor it.
+        target = looseRouteNextHop
+        decisionKind = "loose_route"
       } else if (isWorkerOutbound) {
         // Worker→external (B-leg egress through us). The packet's source
         // IP:port identifies the originating worker; forward to whatever
@@ -1088,21 +1137,26 @@ const handleRequestRegistrarMode = (
     }
     const mfNext = (Number.isFinite(mf) ? mf : 70) - 1
 
-    // ── §16.4 strip topmost Route if it points at us (either side) ───────
+    // ── §16.4 strip topmost Route(s) if they point at us (either side) ───
+    // Iterative: with double-Record-Routing (RFC 3261 §16.7), in-dialog
+    // requests arrive carrying TWO of our RRs back-to-back. Strip
+    // greedily while the top continues to be one of our advertised
+    // addresses; otherwise an inner self-Route survives and would get
+    // forwarded as the next hop.
     let headers: ReadonlyArray<SipHeader> = req.headers
-    const topRoute = getHeader(headers, "route")
-    if (topRoute !== undefined) {
+    while (true) {
+      const topRoute = getHeader(headers, "route")
+      if (topRoute === undefined) break
       const parsedRoute = parseSipUri(topRoute)
-      if (
+      const isSelf =
         parsedRoute !== undefined &&
         ((parsedRoute.host === extAdvertised.ip &&
           parsedRoute.port === extAdvertised.port) ||
           (parsedRoute.host === coreAdvertised.ip &&
             parsedRoute.port === coreAdvertised.port))
-      ) {
-        headers = removeFirstHeader(headers, "route")
-        counters.routeStripped++
-      }
+      if (!isSelf) break
+      headers = removeFirstHeader(headers, "route")
+      counters.routeStripped++
     }
 
     // ── Pick egress endpoint + destination ───────────────────────────────
@@ -1205,13 +1259,35 @@ const handleRequestRegistrarMode = (
     nextHeaders = upsertHeader(nextHeaders, "Max-Forwards", String(mfNext))
 
     if (DIALOG_CREATING.has(method)) {
-      // Stamp Record-Route on the egress side so the far party's
-      // in-dialog requests come back through us. The URI advertises the
-      // egress fabric's address — that's the side the far party can
-      // reach. v1 inserts a single RR (no double-RR for transport
-      // bridging — out of scope).
-      const rrUri = `<sip:${egressAdvertised.ip}:${egressAdvertised.port};lr>`
-      nextHeaders = prependHeader(nextHeaders, "Record-Route", rrUri)
+      // Stamp Record-Route on each side so in-dialog requests can flow
+      // back through us regardless of which side originates them.
+      //
+      // When ext and core advertise DIFFERENT addresses (e.g. the
+      // hybrid fake-ext/real-core harness: ext on a simulated fabric
+      // at 5.1.0.1, core on real UDP at the bridge gateway), neither
+      // single address is reachable from BOTH peers. We must
+      // double-Record-Route per RFC 3261 §16.7: insert the egress RR
+      // on top (closest to UAS in the request) AND the ingress RR
+      // below (closest to UAC). The far-end peer then has BOTH
+      // addresses in its route set and always sends to a reachable
+      // hop; the iterative self-Route strip above peels both off when
+      // the in-dialog request bounces back through us.
+      //
+      // When the two advertised addresses are identical (default
+      // single-fabric registrar mode, K8s-LB mode collapses to ext
+      // only), one RR is sufficient — `egressAdvertised` collapses to
+      // the same address so the legacy single-RR shape is preserved.
+      const sameAdvertised =
+        extAdvertised.ip === coreAdvertised.ip &&
+        extAdvertised.port === coreAdvertised.port
+      const ingressAdvertised = net === "ext" ? extAdvertised : coreAdvertised
+      if (!sameAdvertised) {
+        const ingressRr = `<sip:${ingressAdvertised.ip}:${ingressAdvertised.port};lr>`
+        nextHeaders = prependHeader(nextHeaders, "Record-Route", ingressRr)
+        counters.recordRouteInserted++
+      }
+      const egressRr = `<sip:${egressAdvertised.ip}:${egressAdvertised.port};lr>`
+      nextHeaders = prependHeader(nextHeaders, "Record-Route", egressRr)
       counters.recordRouteInserted++
     }
 

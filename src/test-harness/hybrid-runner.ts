@@ -1,31 +1,35 @@
 /**
- * Hybrid runner — fake in-process SIP agents (alice / bob1 / bob2 …) AND
- * an in-process register-proxy (dual-endpoint, registrar mode) on real
- * UDP sockets, with the kind-cluster b2bua stack as an opaque "core"
- * peer.
+ * Hybrid runner — fake in-process SIP agents + an in-process register-proxy,
+ * with a dual-fabric topology:
  *
- *   alice / bob ↔ proxy(ext)  ←─── proxy(core) ↔ kind hostPort:5060
- *                  ▲                                       │
- *                  │ shared SignalingNetwork.real          │
- *                  │ trace buffer                          ▼
- *                  └────── drainTrace() ──────►  in-cluster sip-front-proxy
- *                                                + b2bua-worker StatefulSet
- *                                                + mock call-control
+ *   ┌─────────────── ext (simulated fabric, in-memory) ───────────────┐
+ *   │  alice (5.1.1.x:5060) ──┐                                       │
+ *   │  bob   (5.1.2.x:5060) ──┼──► proxy(ext)  5.1.0.1:5060           │
+ *   └─────────────────────────┴──────────────┬─────────────────────────┘
+ *                                            │ same in-process proxy
+ *   ┌─────────────────────── core (real UDP) ┴─────────────────────────┐
+ *   │  proxy(core) <bridge-gw>:25081 ◄──► k8s-ingress 172.20.255.250:5060│
+ *   └─────────────────────────────────────────────────────────────────┘
  *
- * Why in-process: every UDP hop on both ext and core traverses the test
- * process, so `SignalingNetwork.real`'s built-in per-instance trace
- * buffer captures everything. The in-cluster LB → worker exchange is
- * intentionally invisible — it's "inside" the opaque core peer.
+ * Why dual-fabric: the ext side has NO real-network constraints —
+ * `SignalingNetwork.simulated` routes purely by `ip:port` in an
+ * in-memory table, so we pick deliberately exotic addresses
+ * (`5.1.0.1` proxy, `5.1.1.x` alices, `5.1.2.x` bobs) that can't be
+ * confused for a kind/WSL/RFC1918 host. The core side must talk to
+ * real pods inside the kind cluster, so it uses
+ * `SignalingNetworkCore.realTracing` bound on the docker-bridge
+ * gateway IP discovered at startup. Both fabrics record per-instance
+ * trace buffers; the runner drains both and merges by `sentMs` for
+ * the unified hop-by-hop report.
  *
- * Networking:
- *   - alice/bob bind on `0.0.0.0:<port>`, advertise `<bridge-gateway>:<port>`
- *     so kind pods can address them back.
- *   - proxy ext binds on `0.0.0.0:<EXT_PORT>`, advertised same way.
- *   - proxy core binds on `0.0.0.0:<CORE_PORT>`, advertised on the bridge
- *     gateway so the b2bua-worker (inside kind) can reach it for b-leg
- *     INVITE delivery.
- *   - proxy.coreDestination = kind hostPort `127.0.0.1:5060` (NodePort
- *     30060 → in-cluster sip-front-proxy).
+ *   ─ proxy(core) forwards out-of-registrar INVITEs to the kind
+ *     cluster via the MetalLB VIP `172.20.255.250:5060` — same VIP
+ *     `sipp -s uac 172.20.255.250:5060 -i <bridge-gw>` reaches.
+ *     Override via `HybridRunnerOptions.kindHost` / `kindPort` or
+ *     the `E2E_KIND_PROXY_HOST` / `E2E_KIND_PROXY_PORT` env vars.
+ *   ─ The in-cluster LB → worker → mock-call-control exchange stays
+ *     inside kind and is intentionally invisible — the proxy treats
+ *     that as one opaque "core" peer.
  *
  * Reports land under `test-results/real-clock/registrarFrontProxy-kind/`.
  */
@@ -54,12 +58,37 @@ import {
 } from "../sip-front-proxy/index.js"
 import {
   SignalingNetwork,
+  SignalingNetworkCore,
   type NetworkTraceEntry,
 } from "../sip/SignalingNetwork.js"
 import type { AppConfigData } from "../config/AppConfig.js"
 import { registrarFrontProxyHybridStackLayer } from "./hybrid-stacks/registrar-front-proxy.js"
 
 const execFileAsync = promisify(execFile)
+
+// ---------------------------------------------------------------------------
+// Synthetic fake-fabric addressing convention
+// ---------------------------------------------------------------------------
+
+/** Proxy(ext) ingress on the simulated fabric. */
+export const FAKE_PROXY_EXT_IP = "5.1.0.1"
+
+/** Build an `alice<n>` synthetic IP on the simulated fabric. */
+export const fakeAliceIp = (n: number): string => `5.1.1.${n}`
+
+/** Build a `bob<n>` synthetic IP on the simulated fabric. */
+export const fakeBobIp = (n: number): string => `5.1.2.${n}`
+
+/**
+ * Default UDP port for every endpoint on the simulated ext fabric.
+ * The simulated fabric routes by `(ip, port)` so all participants can
+ * share one port — the IPs disambiguate. We pick the SIP well-known
+ * port `5060` here precisely because the fabric is in-memory: there's
+ * no kernel-level conflict with the host's real `5060` socket (used
+ * elsewhere), and using the canonical SIP port keeps the traces
+ * looking like wire-level SIP without a contrived port suffix.
+ */
+export const FAKE_EXT_PORT = 5060
 
 // ---------------------------------------------------------------------------
 // Result collection
@@ -194,26 +223,35 @@ function defaultHybridAppConfig(): AppConfigData {
 // ---------------------------------------------------------------------------
 
 export interface HybridEndpoints {
-  /** Proxy ext bind (alice/bob send REGISTER + INVITE here). */
+  /** Proxy ext bind (alice/bob send REGISTER + INVITE here). Simulated fabric. */
   readonly extBind: SocketAddr
-  /** Proxy ext advertised host:port (what alice sees in Record-Route, etc.). */
+  /** Proxy ext advertised host:port. Equals `extBind` — fabric is in-memory. */
   readonly extAdvertised: SocketAddr
-  /** Proxy core bind (k8s SBC sends b-leg INVITE here). */
+  /** Proxy core bind (k8s SBC sends b-leg INVITE here). Real UDP. */
   readonly coreBind: SocketAddr
-  /** Proxy core advertised host:port (kind-reachable). */
+  /** Proxy core advertised host:port (kind-reachable, real UDP). */
   readonly coreAdvertised: SocketAddr
-  /** Where the proxy forwards out-of-registrar INVITEs (kind hostPort). */
+  /** Where the proxy forwards out-of-registrar INVITEs (real UDP, cluster ingress). */
   readonly coreDestination: SocketAddr
 }
 
 export interface HybridRunnerOptions {
-  /** Discovered docker bridge gateway IP — host-reachable from kind pods. */
+  /**
+   * Docker-bridge gateway IP discovered via `discoverHostReachableIp`.
+   * Used as bind + advertised host for the REAL UDP core endpoint, so
+   * kind pods can route their b-leg INVITE back to the host process.
+   */
   readonly advertisedIp: string
-  /** Proxy ext UDP port. Default 25080. */
-  readonly extPort?: number
-  /** Proxy core UDP port. Default 25081. */
+  /**
+   * Proxy core UDP port on the host. Real socket — must not conflict
+   * with anything else listening on the host. Default 25081.
+   */
   readonly corePort?: number
-  /** Kind hostPort that maps to proxy NodePort. Default 127.0.0.1:5060. */
+  /**
+   * Cluster ingress host and port — typically the MetalLB-assigned VIP
+   * for the in-cluster `sip-front-proxy` Service. Default
+   * `172.20.255.250:5060` (the VIP `sipp` reaches in this lab).
+   */
   readonly kindHost?: string
   readonly kindPort?: number
   /** Output directory for HTML / global.txt reports. */
@@ -225,57 +263,57 @@ export interface HybridRunnerOptions {
 // ---------------------------------------------------------------------------
 
 export function createHybridRunner(opts: HybridRunnerOptions) {
-  const extPort = opts.extPort ?? 25080
   const corePort = opts.corePort ?? 25081
-  const kindHost = opts.kindHost ?? "127.0.0.1"
+  const kindHost = opts.kindHost ?? "172.20.255.250"
   const kindPort = opts.kindPort ?? 5060
   const outputDir =
     opts.outputDir ?? "test-results/real-clock/registrarFrontProxy-kind"
 
   const endpoints: HybridEndpoints = {
-    extBind: { host: "0.0.0.0", port: extPort },
-    extAdvertised: { host: opts.advertisedIp, port: extPort },
-    coreBind: { host: "0.0.0.0", port: corePort },
+    // ext: simulated fabric; bind == advertised, addresses are synthetic.
+    extBind: { host: FAKE_PROXY_EXT_IP, port: FAKE_EXT_PORT },
+    extAdvertised: { host: FAKE_PROXY_EXT_IP, port: FAKE_EXT_PORT },
+    // core: real UDP; bind == advertised on the kind-bridge gateway.
+    coreBind: { host: opts.advertisedIp, port: corePort },
     coreAdvertised: { host: opts.advertisedIp, port: corePort },
     coreDestination: { host: kindHost, port: kindPort },
   }
 
   const labelKey = (ip: string, port: number) => `${ip}:${port}`
-  // Identify the proxy's own bind addresses + the kind-cluster ingress so
-  // the trace renderer can paint them with meaningful names. The
-  // advertised gateway IP also resolves to "proxy" (because that's what
-  // the b-leg sees as the proxy's source).
+  // Static label registry for endpoints whose addresses don't appear in
+  // the per-agent label map populated by live-backend (alice/bob auto-
+  // register themselves). With dual fabrics there are no kernel-source-
+  // address surprises — every recorded src/dst matches one of these.
   const labels = new Map<string, string>([
-    [labelKey("0.0.0.0", extPort), "proxy(ext)"],
-    [labelKey("0.0.0.0", corePort), "proxy(core)"],
-    [labelKey(opts.advertisedIp, extPort), "proxy(ext)"],
-    [labelKey(opts.advertisedIp, corePort), "proxy(core)"],
+    [labelKey(endpoints.extBind.host, endpoints.extBind.port), "proxy(ext)"],
+    [labelKey(endpoints.coreBind.host, endpoints.coreBind.port), "proxy(core)"],
     [labelKey(kindHost, kindPort), "k8s-ingress"],
   ])
   const networks = new Map<string, NetworkTag>([
-    [labelKey("0.0.0.0", extPort), "ext"],
-    [labelKey("0.0.0.0", corePort), "core"],
-    [labelKey(opts.advertisedIp, extPort), "ext"],
-    [labelKey(opts.advertisedIp, corePort), "core"],
+    [labelKey(endpoints.extBind.host, endpoints.extBind.port), "ext"],
+    [labelKey(endpoints.coreBind.host, endpoints.coreBind.port), "core"],
     [labelKey(kindHost, kindPort), "core"],
   ])
 
   const transportBase = createLiveTransport({
-    bindIp: "0.0.0.0",
-    advertisedIp: opts.advertisedIp,
     useExternalNetwork: true,
     participantLabels: labels,
     participantNetworkOverrides: networks,
   })
   const target = { host: endpoints.extAdvertised.host, port: endpoints.extAdvertised.port }
 
-  // Build the proxy SUT layer (requires SignalingNetwork from R) and the
-  // shared `SignalingNetwork.realTracing` layer; merge them so the
-  // network is built ONCE and shared between the proxy and the agent
-  // transport. `realTracing` (not `real`): this runner calls
-  // `drainTrace()` at line 296 below to render hop-by-hop reports;
-  // production layers MUST use `real` (recording disabled).
-  const sharedNetworkLayer = SignalingNetwork.realTracing
+  // Two distinct fabrics:
+  //   - `SignalingNetwork.simulated` for the ext side. The proxy(ext)
+  //     endpoint and every agent transport bind here. `transitDelayMs: 0`
+  //     keeps the report timestamps tight — packets are still forked
+  //     through `Effect.sleep("0 millis")` so fire-and-forget UDP
+  //     semantics are preserved.
+  //   - `SignalingNetworkCore.realTracing` for the core side. Only the
+  //     proxy(core) endpoint binds here. `realTracing` (not `real`) so
+  //     `drainTrace()` captures every send/recv for the merged report;
+  //     production layers MUST use the non-tracing variants.
+  const extNetworkLayer = SignalingNetwork.simulated({ transitDelayMs: 0 })
+  const coreNetworkLayer = SignalingNetworkCore.realTracing
   const proxySutLayer = registrarFrontProxyHybridStackLayer({
     config: defaultHybridAppConfig(),
     extBind: endpoints.extBind,
@@ -284,12 +322,14 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
     coreAdvertised: endpoints.coreAdvertised,
     coreDestination: endpoints.coreDestination,
   })
-  // Layer.provideMerge: the proxy gets SignalingNetwork from the shared
-  // layer AND the shared layer is re-exported, so the outer effect can
-  // also `yield* SignalingNetwork` to get the same instance for the
-  // agent transport.
+  // `provideMerge`: the proxy reads both `SignalingNetwork` (ext) and
+  // `SignalingNetworkCore` (core), and the outer effect re-yields
+  // `SignalingNetwork` so the agent transport binds on the same ext
+  // fabric instance. `SignalingNetworkCore` is only consumed by the
+  // proxy — no agent ever binds there.
   const stackLayer = proxySutLayer.pipe(
-    Layer.provideMerge(sharedNetworkLayer),
+    Layer.provideMerge(extNetworkLayer),
+    Layer.provideMerge(coreNetworkLayer),
   )
 
   return (scenario: Scenario): Effect.Effect<void> => {
@@ -301,31 +341,35 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
           `→ core-dest=${endpoints.coreDestination.host}:${endpoints.coreDestination.port}`,
       )
 
-      // Wrap the live transport so its drainNetworkTrace pulls from
-      // the shared SignalingNetwork's per-instance buffer. Same-host
-      // sender+receiver pairs record the same packet twice; dedupe on
-      // `raw` and drop any entry that has no known participant on
-      // either side (those are recv-side records using kernel-reported
-      // ephemeral peer addresses that aren't in our label registry).
-      const network = yield* SignalingNetwork
+      // Drain both fabric trace buffers, merge by `sentMs`, then run the
+      // same dedup+filter as before. The dedup defends against the same
+      // packet being recorded twice on the real fabric (send-side +
+      // recv-side both push). The label filter drops entries where
+      // neither endpoint is one we know about — defence in depth, but
+      // with consistent IPs on both fabrics nothing should slip through.
+      const extNetwork = yield* SignalingNetwork
+      const coreNetwork = yield* SignalingNetworkCore
       const labelKeyOf = (ip: string, port: number) => `${ip}:${port}`
       const transport: TestTransport = {
         ...transportBase,
         kind: "hybrid" as const,
         drainNetworkTrace: () =>
-          network.drainTrace().pipe(
-            Effect.map((entries) => {
-              const seen = new Set<string>()
-              return entries.filter((e) => {
-                const k = e.raw.toString("binary")
-                if (seen.has(k)) return false
-                seen.add(k)
-                const srcKnown = labels.has(labelKeyOf(e.src.ip, e.src.port))
-                const dstKnown = labels.has(labelKeyOf(e.dst.ip, e.dst.port))
-                return srcKnown || dstKnown
-              }) as ReadonlyArray<NetworkTraceEntry>
-            }),
-          ),
+          Effect.gen(function* () {
+            const ext = yield* extNetwork.drainTrace()
+            const core = yield* coreNetwork.drainTrace()
+            const merged = [...ext, ...core].sort(
+              (a, b) => a.sentMs - b.sentMs,
+            )
+            const seen = new Set<string>()
+            return merged.filter((e) => {
+              const k = e.raw.toString("binary")
+              if (seen.has(k)) return false
+              seen.add(k)
+              const srcKnown = labels.has(labelKeyOf(e.src.ip, e.src.port))
+              const dstKnown = labels.has(labelKeyOf(e.dst.ip, e.dst.port))
+              return srcKnown || dstKnown
+            }) as ReadonlyArray<NetworkTraceEntry>
+          }),
       }
 
       const result = yield* executeScenario(scenario, transport, target)
@@ -377,14 +421,12 @@ export interface RegistrarTestProxyRunnerOptions {
    */
   readonly coreDestination: SocketAddr
   /**
-   * IP address that alice / bob and the proxy advertise in Contact / Via /
-   * From URIs. Must be reachable from the consumer's SUT for in-bound SIP
-   * to come back. Default `127.0.0.1` (local-only test SUTs).
+   * IP address the proxy advertises on its `core` (real-UDP) endpoint.
+   * Must be reachable from the consumer's SUT so in-bound b-leg traffic
+   * can return. Default `127.0.0.1` (local-only test SUTs).
    */
   readonly advertisedIp?: string
-  /** Proxy ext UDP port (where alice/bob send REGISTER + INVITE). */
-  readonly extPort?: number
-  /** Proxy core UDP port (where the SUT sends b-leg traffic). */
+  /** Proxy core UDP port on the host. */
   readonly corePort?: number
   /** Output directory for HTML / global.txt reports. */
   readonly outputDir?: string
@@ -407,7 +449,6 @@ export function createRegistrarTestProxyRunner(
 ) {
   return createHybridRunner({
     advertisedIp: opts.advertisedIp ?? "127.0.0.1",
-    extPort: opts.extPort ?? 25080,
     corePort: opts.corePort ?? 25081,
     kindHost: opts.coreDestination.host,
     kindPort: opts.coreDestination.port,

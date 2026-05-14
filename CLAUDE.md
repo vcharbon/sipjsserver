@@ -6,6 +6,8 @@ Always reply and write in English, even when the user writes in French.
 
 When adding comments be brief, only comment non obvious behavior. Do not reference slice or plan number.
 
+Project use [Effect v4](./repos/effect/LLMS.md) extensively. ALways read the doc before writing or designing effect systems.
+
 ## Commands
 
 ```bash
@@ -20,6 +22,15 @@ npm run dev             # Start the server in development mode
 
 After every code change, run `npm run typecheck` and verify zero errors and zero warnings.
 
+## Vendored Repositories
+
+This project vendors external repositories under @repos/
+
+  - Use vendored repositories as read-only reference material when working with related libraries
+  - Prefer examples and patterns from the vendored source code over generated guesses or web search results
+  - Do not edit files under @repos/ unless explicitly asked
+  - Do not import from @repos/ - application code should continue importing from normal package dependencies
+
 ## Never ignore a warning
 
 Two independent gates run during typecheck and BOTH must be clean:
@@ -33,25 +44,6 @@ The single most common silent mis-fix when migrating from v3: replacing `Effect.
 
 Only suppress a warning with a lint-disable comment as a last resort, always with an explanation.
 
-
-## Agent Strategy
-
-For complex multi-step tasks, prefer delegating independent implementation
-subtasks to subagents via the Task tool rather than executing inline.
-Reserve the main context for planning, coordination, and review.
-
-## Subagent Delegation
-
-When spawning subagents via Task(), always include in the task description:
-- Relevant file paths and their purpose
-- Conventions or patterns to follow
-- Acceptance criteria / expected output
-- Any prior decisions that affect this subtask
-- explicit instruction to 
-
-## Commit policy
-
-On complex multi slice tasks with on line comment the intermediate slice.
 
 ## test strategy
 

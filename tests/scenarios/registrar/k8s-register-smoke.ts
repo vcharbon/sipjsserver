@@ -13,12 +13,15 @@
 import { scenario } from "../../../src/test-harness/framework/dsl.js"
 
 export const k8sRegisterSmoke = scenario("k8s-register-smoke", (s) => {
-  // No `network` tag — the kind cluster is one fabric from the test's
-  // POV. The hybrid runner sets `advertisedIp` transport-wide so Alice's
-  // Contact carries a kind-reachable IP.
+  // Synthetic `5.1.x.x` address on the simulated ext fabric. The hybrid
+  // runner binds proxy(ext) at `5.1.0.1:5060`; alice binds at
+  // `5.1.1.1:5060` here. Standard SIP port `5060` is fine because the
+  // simulated fabric is in-memory — no kernel collision with anything
+  // else listening on the host's real 5060.
   const alice = s.agent("alice", {
     uri: "sip:alice@kindlab",
-    port: 25060,
+    ip: "5.1.1.1",
+    port: 5060,
   })
   alice.register({ expires: 3600 }).expect(200)
 })
