@@ -109,6 +109,18 @@ export interface UdpEndpoint {
 }
 
 /**
+ * Sequencer hook for `NetworkTraceEntry.seq`. Opaque to this module so
+ * `src/sip/...` stays independent of `src/test-harness/...`. The test
+ * harness builds an `EventSequencer` and adapts it into this shape so
+ * one counter spans SIP network entries, interpreter step traces, and
+ * replication frames — guaranteeing a deterministic render order even
+ * when events collide on the same ms.
+ */
+export interface NetworkTraceSequencer {
+  readonly nextSync: () => number
+}
+
+/**
  * Undeliverable record — simulated-only. Accumulated when a sender targets
  * an ip:port that has no bound endpoint. The test harness drains this in
  * verifyCleanState() and fails scenarios that leave undelivered packets.
@@ -138,6 +150,14 @@ export interface NetworkTraceEntry {
   readonly deliveredMs: number
   /** False when no endpoint was bound at `dst`; the packet was dropped. */
   readonly delivered: boolean
+  /**
+   * Monotonic capture-order tiebreaker. Allocated from the harness's
+   * shared `EventSequencer` at the moment the entry is appended, so
+   * renderers can stable-sort events that share the same `deliveredMs`.
+   * Zero when no sequencer was supplied to the network layer (low-level
+   * unit tests that don't render reports).
+   */
+  readonly seq: number
 }
 
 export type PreIngressAction = Data.TaggedEnum<{
@@ -281,10 +301,23 @@ export class SignalingNetwork extends ServiceMap.Service<
    * leak. The split into a separate symbol exists so production code
    * paths can't accidentally enable recording.
    */
-  static readonly realTracing: Layer.Layer<SignalingNetwork> = Layer.sync(
-    SignalingNetwork,
-    () => makeRealImpl({ recordTrace: true })
-  )
+  /**
+   * Test-harness factory: `realTracing(opts?)`. Optionally accepts a
+   * `traceSequencer` so the harness's shared `EventSequencer` stamps
+   * `seq` on every recorded packet. Called with no arg, the layer
+   * falls back to a per-instance counter — sufficient for standalone
+   * trace tests but not for rendering merged reports across fabrics.
+   */
+  static readonly realTracing = (opts?: {
+    readonly traceSequencer?: NetworkTraceSequencer
+  }): Layer.Layer<SignalingNetwork> =>
+    Layer.sync(SignalingNetwork, () =>
+      makeRealImpl(
+        opts?.traceSequencer !== undefined
+          ? { recordTrace: true, traceSequencer: opts.traceSequencer }
+          : { recordTrace: true },
+      ),
+    )
 
   // -------------------------------------------------------------------------
   // Simulated (in-memory fabric) implementation
@@ -292,11 +325,40 @@ export class SignalingNetwork extends ServiceMap.Service<
 
   static readonly simulated = (opts: {
     readonly transitDelayMs: number
+    /**
+     * Optional shared sequencer (see `NetworkTraceSequencer` above).
+     * When the harness passes one, every `NetworkTraceEntry.seq` is
+     * allocated from this counter so the render path can tiebreak
+     * same-ms events across multiple fabrics + recording layers.
+     */
+    readonly traceSequencer?: NetworkTraceSequencer
+    /**
+     * Test-only: when set, every `UdpEndpoint.send` runs this predicate
+     * before enqueueing the packet. A non-null return makes the send fail
+     * with `SendError({ message })` — used by drop-handling tests
+     * (NXDOMAIN, EAI_AGAIN, ICMP unreachable) without going through real
+     * UDP. Default `undefined`: send never fails (legacy behaviour).
+     */
+    readonly sendFault?: (
+      src: { readonly ip: string; readonly port: number },
+      dst: { readonly ip: string; readonly port: number },
+    ) => string | null
   }): Layer.Layer<SignalingNetwork> =>
     Layer.effect(
       SignalingNetwork,
       Effect.gen(function* () {
-        const { transitDelayMs } = opts
+        const { transitDelayMs, sendFault } = opts
+        // Falls back to a per-instance counter when the harness didn't
+        // supply a shared sequencer (low-level unit tests). Ordering
+        // within this fabric stays monotonic; cross-fabric ordering is
+        // only guaranteed when a shared sequencer is plumbed in.
+        const allocSeq: () => number = (() => {
+          if (opts.traceSequencer !== undefined) {
+            return opts.traceSequencer.nextSync
+          }
+          let local = 0
+          return () => ++local
+        })()
 
         interface EndpointRecord {
           readonly endpoint: UdpEndpoint
@@ -397,6 +459,7 @@ export class SignalingNetwork extends ServiceMap.Service<
                     sentMs,
                     deliveredMs: nowMs,
                     delivered: false,
+                    seq: allocSeq(),
                   })
                   yield* Effect.logWarning(
                     `[SignalingNetwork.simulated] undeliverable ${src.address}:${src.port} → ${dst.address}:${dst.port} (no endpoint bound)`
@@ -447,6 +510,7 @@ export class SignalingNetwork extends ServiceMap.Service<
                       sentMs,
                       deliveredMs: arrivalMs,
                       delivered: true,
+                      seq: allocSeq(),
                     })
                   }
                 }
@@ -454,6 +518,15 @@ export class SignalingNetwork extends ServiceMap.Service<
 
             const send: UdpEndpoint["send"] = (buf, dstPort, dstAddress) =>
               Effect.gen(function* () {
+                if (sendFault !== undefined) {
+                  const reason = sendFault(
+                    { ip: localAddress.ip, port: localAddress.port },
+                    { ip: dstAddress, port: dstPort },
+                  )
+                  if (reason !== null) {
+                    return yield* new SendError({ message: reason })
+                  }
+                }
                 const sentMs = yield* Clock.currentTimeMillis
                 inFlightCount++
                 yield* Effect.forkDetach(
@@ -553,10 +626,16 @@ export class SignalingNetworkCore extends ServiceMap.Service<
     () => makeRealImpl({ recordTrace: false })
   )
 
-  static readonly realTracing: Layer.Layer<SignalingNetworkCore> = Layer.sync(
-    SignalingNetworkCore,
-    () => makeRealImpl({ recordTrace: true })
-  )
+  static readonly realTracing = (opts?: {
+    readonly traceSequencer?: NetworkTraceSequencer
+  }): Layer.Layer<SignalingNetworkCore> =>
+    Layer.sync(SignalingNetworkCore, () =>
+      makeRealImpl(
+        opts?.traceSequencer !== undefined
+          ? { recordTrace: true, traceSequencer: opts.traceSequencer }
+          : { recordTrace: true },
+      ),
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -568,13 +647,23 @@ export class SignalingNetworkCore extends ServiceMap.Service<
 // ─────────────────────────────────────────────────────────────────────────
 function makeRealImpl({
   recordTrace,
+  traceSequencer,
 }: {
   readonly recordTrace: boolean
+  readonly traceSequencer?: NetworkTraceSequencer
 }) {
   // Per-instance trace buffer. Always allocated; `recordTrace` gates the
   // writes. Drains return [] on the non-recording layer regardless of
   // contents (defence in depth).
   const trace: NetworkTraceEntry[] = []
+  // See `simulated()` for the same fallback logic. UDP recv handlers
+  // run in non-Effect Node callbacks, so we need the synchronous
+  // accessor here.
+  const allocSeq: () => number = (() => {
+    if (traceSequencer !== undefined) return traceSequencer.nextSync
+    let local = 0
+    return () => ++local
+  })()
 
   return {
     bindUdp: (opts: BindUdpOpts) =>
@@ -652,6 +741,7 @@ function makeRealImpl({
                       sentMs: arrivalMs,
                       deliveredMs: arrivalMs,
                       delivered: true,
+                      seq: allocSeq(),
                     })
                   }
                 }
@@ -689,6 +779,7 @@ function makeRealImpl({
                   sentMs,
                   deliveredMs: sentMs,
                   delivered: true,
+                  seq: allocSeq(),
                 })
               }
               resume(

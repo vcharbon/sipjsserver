@@ -121,13 +121,24 @@ function extractBranch(msg: SipMessage): string | undefined {
   return msg.getHeader("via")[0].branch
 }
 
-/** Extract Via custom params (cr/lg) from a message. */
+/** Extract Via custom params (cr/lg) from a message.
+ *
+ * `buildCallVia` (src/b2bua/stack-identity.ts) URL-encodes both values
+ * because production callRefs / legIds contain `|` and `@` which are
+ * not safe in Via params; the parser at structured-headers.ts stores
+ * raw param strings. Decode here so the rest of the stack
+ * (TransactionLayer.cancelTxnsForCall, SipRouter event.callRef →
+ * CallState.callsMap lookup) sees the natural form CallState keys by.
+ * Without this decode timer events emitted with `callRef: txn.callRef`
+ * never resolve to a call, every Timer B/F fires as a zombie, and the
+ * call-evict cancellation can't match. */
 function extractViaCustomParams(msg: SipMessage): { cr: string | undefined; lg: string | undefined } {
   const params = msg.getHeader("via")[0].params
-  return {
-    cr: typeof params.cr === "string" ? params.cr : undefined,
-    lg: typeof params.lg === "string" ? params.lg : undefined,
+  const decode = (v: unknown): string | undefined => {
+    if (typeof v !== "string") return undefined
+    try { return decodeURIComponent(v) } catch { return v }
   }
+  return { cr: decode(params.cr), lg: decode(params.lg) }
 }
 
 /** Extract Call-ID from a message. */
@@ -191,6 +202,13 @@ export interface TransactionLayerMetrics {
    * the UDP receive path.
    */
   readonly eventQueueDrops: Record<EventQueueDropReason, number>
+  /**
+   * Counter of client transactions cancelled because their owning call
+   * was evicted. Steady-state non-zero is normal (eviction races a live
+   * INVITE / BYE); rapidly-growing values suggest a leak in the
+   * call-deletion path is being papered over here.
+   */
+  txnCancelledOnCallEvict: number
 }
 
 export class TransactionLayer extends ServiceMap.Service<
@@ -227,6 +245,15 @@ export class TransactionLayer extends ServiceMap.Service<
     ) => Effect.Effect<void>
     /** Send raw buffer directly (bypass transaction management). */
     readonly sendRaw: (buf: Buffer, port: number, address: string) => Effect.Effect<void>
+    /**
+     * Cancel every client transaction whose `callRef` matches. Used by the
+     * call-eviction path: when a call is deleted, its in-flight INVITE /
+     * BYE client transactions must be torn down so Timer B/F doesn't fire
+     * minutes later against a vanished call (the symptom that drains
+     * libuv's DNS thread-pool under sustained EAI_AGAIN). Idempotent;
+     * no-op when no live transactions match.
+     */
+    readonly cancelTxnsForCall: (callRef: string) => Effect.Effect<void>
     /** Lightweight metrics for observability. */
     readonly metrics: TransactionLayerMetrics
   }
@@ -282,6 +309,7 @@ export class TransactionLayer extends ServiceMap.Service<
         eventQueueDepth: () => Queue.sizeUnsafe(eventQueue),
         eventQueueCapacity,
         eventQueueDrops,
+        txnCancelledOnCallEvict: 0,
       }
       registry.transactionLayer = txnMetrics
 
@@ -403,6 +431,22 @@ export class TransactionLayer extends ServiceMap.Service<
         function* (txn: Transaction) {
           if (txn.retransmitFiber) yield* Fiber.interrupt(txn.retransmitFiber)
           if (txn.timeoutFiber) yield* Fiber.interrupt(txn.timeoutFiber)
+        }
+      )
+
+      const cancelTxnsForCall = Effect.fnUntraced(
+        function* (callRef: string) {
+          // Snapshot first — interrupting timer fibers below can race the
+          // `MutableHashMap` we'd otherwise be iterating.
+          const victims: Transaction[] = []
+          for (const [, txn] of txnMap) {
+            if (txn.callRef === callRef) victims.push(txn)
+          }
+          for (const txn of victims) {
+            yield* stopTxnTimers(txn)
+            yield* deleteTxn(txn.branch)
+            txnMetrics.txnCancelledOnCallEvict++
+          }
         }
       )
 
@@ -862,7 +906,7 @@ export class TransactionLayer extends ServiceMap.Service<
 
       const events = Stream.fromQueue(eventQueue)
 
-      return { events, sendRequest, sendResponse, send, sendRaw, metrics: txnMetrics }
+      return { events, sendRequest, sendResponse, send, sendRaw, cancelTxnsForCall, metrics: txnMetrics }
     })
   )
 }

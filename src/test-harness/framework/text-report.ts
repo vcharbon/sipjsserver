@@ -55,7 +55,12 @@ function renderTraceEntries(
   baseTimestamp: number
 ): string {
   const lines: string[] = []
-  const sorted = [...entries].sort((a, b) => a.timestamp - b.timestamp)
+  // Tiebreak same-ms entries by `seq` so the merged SIP + internal-hop
+  // stream renders in capture order — matches the SVG renderer's sort.
+  const sorted = [...entries].sort((a, b) => {
+    const dt = a.timestamp - b.timestamp
+    return dt !== 0 ? dt : a.seq - b.seq
+  })
   for (const entry of sorted) {
     const sentRel = entry.sentMs - baseTimestamp
     const rcvdRel = entry.receivedMs - baseTimestamp

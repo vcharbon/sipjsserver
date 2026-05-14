@@ -41,7 +41,14 @@ export function writeScenarioReport(
 ): string {
   mkdirSync(outputDir, { recursive: true })
 
-  const sortedTrace = [...result.trace].sort((a, b) => a.timestamp - b.timestamp)
+  // Tiebreak same-ms entries by `seq` so the click-to-inspect index
+  // matches the SVG row order (the SVG renderer applies the same
+  // tiebreaker). Without this the index can desync from the diagram
+  // when two trace entries share a timestamp.
+  const sortedTrace = [...result.trace].sort((a, b) => {
+    const dt = a.timestamp - b.timestamp
+    return dt !== 0 ? dt : a.seq - b.seq
+  })
   const replicationEntries = result.replicationTrace ?? []
   const svg = renderSequenceDiagram(
     sortedTrace,

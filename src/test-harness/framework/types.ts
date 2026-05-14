@@ -8,7 +8,7 @@
 import type { Effect, Layer, Scope } from "effect"
 import { Data } from "effect"
 import type { SipHeader, SipMessage } from "../../sip/types.js"
-import type { NetworkTraceEntry } from "../../sip/SignalingNetwork.js"
+import type { NetworkTraceEntry, NetworkTraceSequencer } from "../../sip/SignalingNetwork.js"
 import type { ValidationCheckName, ValidationOverrides } from "./validation.js"
 
 // ---------------------------------------------------------------------------
@@ -625,6 +625,12 @@ export interface ReplicationTraceEntry {
   /** Consumer peer ordinal (the worker pulling from `from`). */
   readonly to: string
   readonly frame: unknown
+  /**
+   * Monotonic capture-order tiebreaker from the shared `EventSequencer`.
+   * Renderers tiebreak on this when `timestamp` collides with a SIP entry
+   * or another replication frame at the same ms.
+   */
+  readonly seq: number
 }
 
 export interface TraceEntry {
@@ -635,6 +641,14 @@ export interface TraceEntry {
    * callers that want a single scalar clock.
    */
   readonly timestamp: number
+  /**
+   * Monotonic capture-order tiebreaker allocated from the harness's shared
+   * `EventSequencer` at recording time. Used by the renderers as the
+   * secondary sort key — guarantees a deterministic ordering even when
+   * two entries share the same `timestamp` ms (TestClock bursts, or
+   * collisions between real and fake clocks under the hybrid stack).
+   */
+  readonly seq: number
   /** Virtual-clock instant the sender placed the packet on the wire. */
   readonly sentMs: number
   /** Virtual-clock instant the receiver observed the packet. */
@@ -795,6 +809,19 @@ export interface TestTransport {
    * the HTML report alongside the SIP timeline.
    */
   readonly drainReplicationTrace?: () => ReadonlyArray<ReplicationTraceEntry>
+  /**
+   * Optional shared monotonic sequencer used by the interpreter to stamp
+   * `seq` on every `TraceEntry` it pushes (send/receive step events). The
+   * same instance is given to the underlying SignalingNetwork(s) and the
+   * ReplicationTraceRecorder so all recording layers contribute to a
+   * single ordering — the renderers tiebreak `(timestamp, seq)`.
+   *
+   * When `undefined`, the interpreter falls back to `seq: 0`. This is
+   * acceptable for transports that don't render reports (e.g. transports
+   * built ad-hoc by low-level unit tests); the renderer's sort then
+   * degrades to pure-timestamp order, same as before this field existed.
+   */
+  readonly traceSequencer?: NetworkTraceSequencer
   /**
    * Optional post-scenario verification: asserts that all internal state
    * (callsMap, limiter counters, timer fibers) is fully empty after the

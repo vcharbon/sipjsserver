@@ -35,6 +35,7 @@ import type { Call } from "./CallModel.js"
 import { Call as CallSchema, callIndexKeys, isFullyResolved, parseCallRef, setByeDisposition } from "./CallModel.js"
 import { MetricsRegistry, type TerminatingCallsByBucket } from "../observability/MetricsRegistry.js"
 import { TimerService } from "./TimerService.js"
+import { TransactionLayer } from "../sip/TransactionLayer.js"
 
 const JsonCallSchema = Schema.fromJsonString(CallSchema)
 
@@ -163,6 +164,21 @@ export class CallState extends ServiceMap.Service<
       const limiter = yield* CallLimiter
       const registry = yield* MetricsRegistry
       const timers = yield* TimerService
+      // TransactionLayer is read at call time (not at layer-build time)
+      // because the build-time Effect.gen of CallState.layer runs BEFORE
+      // the parent layer composition has provided TransactionLayer into
+      // its scope; a build-time `serviceOption` returns None and the
+      // cancellation becomes a no-op. Reading inside each method body
+      // resolves against the calling fiber's context, where the worker
+      // stack does have TransactionLayer in scope. Call-only test
+      // harnesses (cache-and-limiter, HTTP-only CallStateLayer in main.ts)
+      // legitimately have no TransactionLayer at call time and the no-op
+      // branch is correct for them.
+      const cancelTxnsForCallRef = (callRef: string): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const opt = yield* Effect.serviceOption(TransactionLayer)
+          if (Option.isSome(opt)) yield* opt.value.cancelTxnsForCall(callRef)
+        })
       const ttl = config.callContextTtlSec
       // Slice 4/5: this worker's ordinal, used to compute
       // `(role, primary)` from a callRef. Prefers the explicit
@@ -385,6 +401,7 @@ export class CallState extends ServiceMap.Service<
         if (decoded.state === "terminated" || decoded.state === "terminating") {
           if (decoded.state === "terminating") {
             yield* Effect.logWarning(`loadCall skipping terminating call ${callRef} from cache — stuck after crash, deleting`)
+            yield* cancelTxnsForCallRef(callRef)
             yield* storage
               .deleteCall(role, primary, callRef, callIndexKeys(decoded))
               .pipe(Effect.mapError(toRedisErr))
@@ -555,6 +572,12 @@ export class CallState extends ServiceMap.Service<
           call !== undefined ? call._topology : undefined
         )
         const direction = directionFor(role)
+        // Cancel any live client INVITE/BYE transactions for this call
+        // BEFORE the storage delete. Pre-delete so that if a Timer B/F
+        // fires concurrently and wins the race, it still resolves the
+        // call and goes through the 481 reject path rather than firing
+        // against a vanished call (the orphan-transaction leak).
+        yield* cancelTxnsForCallRef(callRef)
         yield* storage
           .deleteCall(role, primary, callRef, indexes, {
             peer: peerOpt,
@@ -679,6 +702,7 @@ export class CallState extends ServiceMap.Service<
             // "drop the call" primitive is consistently paired with
             // "drop its timers" on every code path.
             yield* timers.cancelAll(decoded.callRef)
+            yield* cancelTxnsForCallRef(decoded.callRef)
             yield* storage
               .deleteCall("pri", selfOrdinal, decoded.callRef, callIndexKeys(decoded))
               .pipe(Effect.mapError(toRedisErr))
@@ -791,8 +815,12 @@ export class CallState extends ServiceMap.Service<
         // entry, otherwise a still-armed keepalive or safety timer
         // would fire against a callRef that no longer resolves, eating
         // CPU + emitting an OTel span every cycle until the timer
-        // expires.
+        // expires. Same rationale for the transaction-layer cancel:
+        // any in-flight INVITE/BYE retransmit fiber must die together
+        // with the call, otherwise Timer B/F fires +32s against a
+        // vanished call (see TransactionLayer.cancelTxnsForCall doc).
         yield* timers.cancelAll(callRef)
+        yield* cancelTxnsForCallRef(callRef)
 
         MutableHashMap.remove(callsMap, callRef)
         MutableHashMap.remove(semaphores, callRef)

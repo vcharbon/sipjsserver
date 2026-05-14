@@ -55,7 +55,7 @@ export function liveStackLayer(opts: {
   // reports via `drainTrace()`. Production layers MUST use `real`
   // (recording disabled) — `realTracing` retains every Buffer payload
   // forever, which leaks under sustained load.
-  const NetworkLayer = SignalingNetwork.realTracing
+  const NetworkLayer = SignalingNetwork.realTracing()
 
   const RedisLayer = RedisClient.layer.pipe(Layer.provide(AppConfigLayer))
 

@@ -72,6 +72,16 @@ export const coreIp = (n: number): string => `10.40.0.${n + 100}`
 export interface RegistrarFrontProxyFakeStackOpts {
   readonly config: AppConfigData
   readonly transitDelayMs?: number
+  /**
+   * Optional send-fault injector forwarded to `SignalingNetwork.simulated`.
+   * Returning a string for a (src, dst) pair makes that send fail with
+   * `SendError`, used by drop-handling regression tests (e.g. registrar
+   * 503-on-EAI_AGAIN).
+   */
+  readonly sendFault?: (
+    src: { readonly ip: string; readonly port: number },
+    dst: { readonly ip: string; readonly port: number },
+  ) => string | null
 }
 
 /**
@@ -88,7 +98,10 @@ export function registrarFrontProxyFakeStackLayer(
 ) {
   const transitDelayMs = opts.transitDelayMs ?? DEFAULT_TRANSIT_DELAY_MS
 
-  const NetworkLayer = SignalingNetwork.simulated({ transitDelayMs })
+  const NetworkLayer = SignalingNetwork.simulated({
+    transitDelayMs,
+    sendFault: opts.sendFault,
+  })
 
   const BindCfgLayer = ProxyBindConfig.layer({
     bindHost: EXT_INGRESS.host,

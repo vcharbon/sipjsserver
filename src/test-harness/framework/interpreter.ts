@@ -339,8 +339,8 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     yield* transport.settle()
   }
   yield* checkUnexpectedMessages(state, transport)
-  yield* checkDanglingReliableProvisionals(state)
-  yield* checkDanglingOffers(state)
+  yield* checkDanglingReliableProvisionals(state, transport)
+  yield* checkDanglingOffers(state, transport)
 
   // --- Verify internal state is clean (no leaked calls/timers) ---
   if (!scenario.skipFinalSweep && transport.verifyCleanState) {
@@ -399,6 +399,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
             ?? DEFAULT_NETWORK
         out.push({
           timestamp: entry.deliveredMs,
+          seq: entry.seq,
           sentMs: entry.sentMs,
           receivedMs: entry.deliveredMs,
           from,
@@ -415,9 +416,13 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
       return out
     }).pipe(Effect.provide(SipParser.layer))
     state.trace.push(...parsed)
-    // Re-sort by timestamp so internal hops interleave correctly with
-    // the agent-perspective entries.
-    state.trace.sort((a, b) => a.timestamp - b.timestamp)
+    // Re-sort by `(timestamp, seq)` so internal hops interleave with the
+    // agent-perspective entries; `seq` tiebreaks same-ms events in the
+    // order they were captured across recording layers.
+    state.trace.sort((a, b) => {
+      const dt = a.timestamp - b.timestamp
+      return dt !== 0 ? dt : a.seq - b.seq
+    })
   }
 
   // --- Aggregate results ---
@@ -1124,6 +1129,7 @@ function executeSend(
         ?? state.networkOf(step.agent)
     state.trace.push(defined({
       timestamp: clockTs,
+      seq: transport.traceSequencer?.nextSync() ?? 0,
       sentMs: clockTs,
       receivedMs: clockTs + netDelay,
       from: step.agent,
@@ -1374,6 +1380,7 @@ function executeExpect(
       ?? { ip: state.targetFor(step.agent).host, port: state.targetFor(step.agent).port }
     state.trace.push(defined({
       timestamp: arrivalTs,
+      seq: transport.traceSequencer?.nextSync() ?? 0,
       sentMs: arrivalTs - netDelayR,
       receivedMs: arrivalTs,
       from: sutName,
@@ -1742,7 +1749,7 @@ function buildParticipantsAndLanes(state: InterpreterState): {
  * pending offers on any Call-ID, the exchange was never completed — flag each
  * as a failure so regressions in offer/answer modeling are caught automatically.
  */
-function checkDanglingOffers(state: InterpreterState): Effect.Effect<void> {
+function checkDanglingOffers(state: InterpreterState, transport: TestTransport): Effect.Effect<void> {
   return Effect.gen(function* () {
     const clockTs = yield* Clock.currentTimeMillis
     for (const pending of state.offerAnswer.danglingOffers()) {
@@ -1765,6 +1772,7 @@ function checkDanglingOffers(state: InterpreterState): Effect.Effect<void> {
       const partyTgt = state.targetFor(pending.party)
       state.trace.push({
         timestamp: clockTs,
+        seq: transport.traceSequencer?.nextSync() ?? 0,
         sentMs: clockTs,
         receivedMs: clockTs,
         from: state.sutNames[pending.party] ?? "B2BUA",
@@ -1783,7 +1791,7 @@ function checkDanglingOffers(state: InterpreterState): Effect.Effect<void> {
   })
 }
 
-function checkDanglingReliableProvisionals(state: InterpreterState): Effect.Effect<void> {
+function checkDanglingReliableProvisionals(state: InterpreterState, transport: TestTransport): Effect.Effect<void> {
   return Effect.gen(function* () {
     const clockTs = yield* Clock.currentTimeMillis
     for (const [agent, dialogState] of Object.entries(state.dialogStates)) {
@@ -1804,6 +1812,7 @@ function checkDanglingReliableProvisionals(state: InterpreterState): Effect.Effe
         const at = state.targetFor(agent)
         state.trace.push({
           timestamp: clockTs,
+          seq: transport.traceSequencer?.nextSync() ?? 0,
           sentMs: clockTs,
           receivedMs: clockTs,
           from: state.sutNames[agent] ?? "B2BUA",
@@ -1851,6 +1860,7 @@ function checkUnexpectedMessages(
       const uxTgt = state.targetFor(agent)
       state.trace.push({
         timestamp: clockTs,
+        seq: transport.traceSequencer?.nextSync() ?? 0,
         sentMs: clockTs,
         receivedMs: clockTs,
         from: state.sutNames[agent] ?? "B2BUA",
@@ -1900,6 +1910,7 @@ function checkUnexpectedMessages(
           const reemTgt = state.targetFor(agentName)
           state.trace.push({
             timestamp: packet.arrivalMs,
+            seq: transport.traceSequencer?.nextSync() ?? 0,
             sentMs: packet.arrivalMs - dD,
             receivedMs: packet.arrivalMs,
             from: state.sutNames[agentName] ?? "B2BUA",
@@ -1944,6 +1955,7 @@ function checkUnexpectedMessages(
           const drainTgt = state.targetFor(agentName)
           state.trace.push({
             timestamp: packet.arrivalMs,
+            seq: transport.traceSequencer?.nextSync() ?? 0,
             sentMs: packet.arrivalMs - dD2,
             receivedMs: packet.arrivalMs,
             from: state.sutNames[agentName] ?? "B2BUA",

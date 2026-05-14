@@ -227,6 +227,14 @@ export interface SipRouterMetrics {
    * docs/plan/lets-plan-a-proper-crystalline-emerson.md.
    */
   readonly staleResponseDroppedTotal: () => Record<string, number>
+  /**
+   * `b2bua_zombie_timeout_total` — Timer B/F (RFC 3261 §17.1) fired on a
+   * client transaction whose owning call has already been deleted.
+   * Should be unreachable after TransactionLayer.cancelTxnsForCall is
+   * wired into every call-eviction path; non-zero indicates an eviction
+   * path that bypassed the cancel and is alert-worthy.
+   */
+  readonly zombieTimeoutTotal: () => number
 }
 
 /**

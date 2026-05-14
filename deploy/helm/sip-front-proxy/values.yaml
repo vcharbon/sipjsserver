@@ -2,6 +2,17 @@
 
 replicaCount: 2
 
+# Rolling-update strategy. Defaults match the kind smoke-cluster topology
+# (2 anti-affined replicas on 2 edge nodes, hostPort 5060): there is no
+# room to schedule a surged pod, so `maxSurge: 0` + `maxUnavailable: 1`
+# rolls one slot at a time. The brief VIP gap during the swap is covered
+# by keepalived re-election + UAC SIP T1/T2 retransmit. In a fleet with
+# ≥3 anti-affined edge nodes, override `maxSurge: 1` to keep both
+# proxies live throughout the rollout. See docs/lb-proxy-ha.md.
+strategy:
+  maxSurge: 0
+  maxUnavailable: 1
+
 image:
   repository: sipjsserver
   pullPolicy: IfNotPresent

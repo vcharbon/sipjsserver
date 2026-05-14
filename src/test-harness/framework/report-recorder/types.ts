@@ -62,6 +62,13 @@ export interface RecordedSipEntry {
   readonly message: SipMessage
   readonly durationMs?: number
   readonly network: NetworkTag
+  /**
+   * Monotonic capture-order tiebreaker from the shared `EventSequencer`,
+   * stamped at the moment the Recorder buffered this observation. The
+   * renderer uses `(timestamp, seq)` as the sort key so same-ms events
+   * across recording layers stay in the order they were captured.
+   */
+  readonly seq: number
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +90,8 @@ export interface RecordedReplEntry {
   readonly from: string
   readonly to: string
   readonly frame: unknown
+  /** See `RecordedSipEntry.seq`. */
+  readonly seq: number
 }
 
 // ---------------------------------------------------------------------------

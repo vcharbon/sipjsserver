@@ -269,6 +269,6 @@ describe("SignalingNetwork.real vs realTracing — drainTrace partition", () => 
       // Second drain returns [] (clear-on-read).
       const second = yield* net.drainTrace()
       expect(second.length).toBe(0)
-    }).pipe(Effect.provide(SignalingNetwork.realTracing))
+    }).pipe(Effect.provide(SignalingNetwork.realTracing()))
   )
 })

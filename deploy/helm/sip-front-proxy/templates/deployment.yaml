@@ -6,6 +6,21 @@ metadata:
     {{- include "sip-front-proxy.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # RollingUpdate with maxSurge: 0 / maxUnavailable: 1 is the only shape
+  # compatible with the hard `requiredDuringScheduling` anti-affinity +
+  # hostPort 5060 + 2 edge nodes topology used in the kind smoke cluster.
+  # The default `maxSurge: 25%` rounds DOWN to 0 on two replicas, but
+  # leaving it implicit forced `kubectl rollout restart` into a
+  # Pending-forever loop because the surge slot would need a third
+  # anti-affined edge node. Explicit values document the trade-off (≥1 s
+  # VIP gap during rollout while keepalived re-elects); prod with ≥3 edge
+  # nodes can override `maxSurge: 1` to remove that gap.
+  # See docs/lb-proxy-ha.md.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.strategy.maxSurge }}
+      maxUnavailable: {{ .Values.strategy.maxUnavailable }}
   selector:
     matchLabels:
       {{- include "sip-front-proxy.selectorLabels" . | nindent 6 }}

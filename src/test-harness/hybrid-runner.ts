@@ -38,6 +38,7 @@ import { Data, Effect, Layer } from "effect"
 import type { Scope } from "effect"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
+import { makeEventSequencer } from "./framework/EventSequencer.js"
 import { executeScenario } from "./framework/interpreter.js"
 import { createLiveTransport } from "./framework/live-backend.js"
 import { formatReport } from "./framework/report.js"
@@ -295,10 +296,18 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
     [labelKey(kindHost, kindPort), "core"],
   ])
 
+  // One sequencer per scenario, shared by every recording layer so the
+  // renderers can break `timestamp` ties deterministically. Without this
+  // the merged fake-ext + real-core trace would scramble whenever two
+  // events landed on the same ms (TestClock bursts on ext, or whenever
+  // the real core clock happened to align with an ext step).
+  const traceSequencer = makeEventSequencer()
+
   const transportBase = createLiveTransport({
     useExternalNetwork: true,
     participantLabels: labels,
     participantNetworkOverrides: networks,
+    traceSequencer,
   })
   const target = { host: endpoints.extAdvertised.host, port: endpoints.extAdvertised.port }
 
@@ -312,8 +321,15 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
   //     proxy(core) endpoint binds here. `realTracing` (not `real`) so
   //     `drainTrace()` captures every send/recv for the merged report;
   //     production layers MUST use the non-tracing variants.
-  const extNetworkLayer = SignalingNetwork.simulated({ transitDelayMs: 0 })
-  const coreNetworkLayer = SignalingNetworkCore.realTracing
+  //
+  // Both fabrics share `traceSequencer` so `NetworkTraceEntry.seq`
+  // values are monotonic across the merged ext+core stream and the
+  // renderers can resolve same-ms ties.
+  const extNetworkLayer = SignalingNetwork.simulated({
+    transitDelayMs: 0,
+    traceSequencer,
+  })
+  const coreNetworkLayer = SignalingNetworkCore.realTracing({ traceSequencer })
   const proxySutLayer = registrarFrontProxyHybridStackLayer({
     config: defaultHybridAppConfig(),
     extBind: endpoints.extBind,

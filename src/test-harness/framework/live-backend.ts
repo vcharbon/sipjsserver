@@ -18,7 +18,11 @@
 import { Effect } from "effect"
 import type { AgentInfo, NetworkTag, TestTransport } from "./types.js"
 import { DEFAULT_NETWORK, TransportError } from "./types.js"
-import { SignalingNetwork, type UdpEndpoint } from "../../sip/SignalingNetwork.js"
+import {
+  SignalingNetwork,
+  type NetworkTraceSequencer,
+  type UdpEndpoint,
+} from "../../sip/SignalingNetwork.js"
 
 interface LiveAgent {
   readonly ip: string
@@ -58,6 +62,16 @@ export function createLiveTransport(opts?: {
   participantLabels?: ReadonlyMap<string, string>
   /** Optional per-(ip,port) network tag override. */
   participantNetworkOverrides?: ReadonlyMap<string, NetworkTag>
+  /**
+   * Shared monotonic sequencer for cross-layer ordering. Stored on the
+   * returned `TestTransport.traceSequencer` (interpreter reads it from
+   * there) and passed into the internal `SignalingNetwork.realTracing`
+   * when `useExternalNetwork` is false. The hybrid runner provides one
+   * shared instance to both the simulated ext fabric, the real core
+   * fabric, and this transport so all recording layers stamp from the
+   * same counter.
+   */
+  traceSequencer?: NetworkTraceSequencer
 }): TestTransport {
   const bindIp = opts?.bindIp ?? "127.0.0.1"
   const transportAdvertisedIp = opts?.advertisedIp
@@ -138,7 +152,13 @@ export function createLiveTransport(opts?: {
       }).pipe(
         useExternalNetwork
           ? (e) => e as Effect.Effect<Record<string, AgentInfo>, TransportError, never>
-          : Effect.provide(SignalingNetwork.realTracing)
+          : Effect.provide(
+              SignalingNetwork.realTracing(
+                opts?.traceSequencer !== undefined
+                  ? { traceSequencer: opts.traceSequencer }
+                  : undefined,
+              ),
+            )
       ),
 
     send: (agentName, buf, port, address) =>
@@ -175,5 +195,8 @@ export function createLiveTransport(opts?: {
     participantLabel: (ip: string, port: number) =>
       externalLabels?.get(labelKey(ip, port))
         ?? participantLabels.get(labelKey(ip, port)),
+    ...(opts?.traceSequencer !== undefined
+      ? { traceSequencer: opts.traceSequencer }
+      : {}),
   }
 }

@@ -289,6 +289,12 @@ export class SipRouter extends ServiceMap.Service<
       // at zero in a healthy run.
       let eventHandlerTimeoutTotal = 0
       let forcePurgeTotal = 0
+      // Counts Timer B/F firings whose owning call has already vanished.
+      // After TransactionLayer.cancelTxnsForCall is wired into every
+      // call-eviction path, this should be unreachable; a non-zero
+      // count points to an eviction path that bypassed the cancel —
+      // alert-worthy.
+      let zombieTimeoutTotal = 0
       // `b2bua_stale_response_dropped_total{method, status}` — keyed
       // by the bucket label `${method}|${status}`. Incremented when
       // an inbound response resolves to a missing call (either via
@@ -304,6 +310,7 @@ export class SipRouter extends ServiceMap.Service<
         eventHandlerTimeoutTotal: () => eventHandlerTimeoutTotal,
         forcePurgeTotal: () => forcePurgeTotal,
         staleResponseDroppedTotal: () => ({ ...staleResponseDroppedTotal }),
+        zombieTimeoutTotal: () => zombieTimeoutTotal,
       }
       // Bind background forks to the layer's scope so they die when
       // the worker scope closes. Required for the simulated cluster's
@@ -735,7 +742,15 @@ export class SipRouter extends ServiceMap.Service<
                       : `${(event.message as SipResponse).status} ${(event.message as SipResponse).reason}`)
                   : event.type
                 const legInfo = legHint ? ` leg=${legHint}` : ""
-                yield* Effect.logWarning(`Call ${callRef} not found on checkout for ${summary}${legInfo} — rejecting`)
+                if (event.type === "timeout") {
+                  // After TransactionLayer.cancelTxnsForCall is wired into
+                  // every call-eviction path this is unreachable — Timer B/F
+                  // for an evicted call's transaction should never fire.
+                  zombieTimeoutTotal++
+                  yield* Effect.logError(`Call ${callRef} not found on checkout for ${summary}${legInfo} — zombie timer fired (eviction-path bug)`)
+                } else {
+                  yield* Effect.logWarning(`Call ${callRef} not found on checkout for ${summary}${legInfo} — rejecting`)
+                }
                 // Late response on a deleted call (the teardown-race
                 // surface that motivated the tombstone redesign):
                 // RFC 3261 §17.1.1.2 silent drop, observable via the

@@ -36,18 +36,50 @@ export interface ReplicationTraceEvent {
   /** Consumer peer ordinal — the worker pulling from `from`. */
   readonly to: string
   readonly frame: DataFrame | NoopFrame
+  /**
+   * Monotonic capture-order tiebreaker from the harness's shared
+   * `EventSequencer` (see src/test-harness/framework/EventSequencer.ts).
+   * Used by the renderers as the secondary sort key to break
+   * `timestamp` collisions between replication frames and SIP entries
+   * captured at the same virtual-clock ms.
+   */
+  readonly seq: number
 }
 
 export interface ReplicationTraceRecorder {
-  readonly record: (event: ReplicationTraceEvent) => void
+  /**
+   * Append a frame observation. The caller passes everything except
+   * `seq` — the recorder stamps `seq` from its sequencer so the same
+   * counter the SIP layers use feeds the replication entries too.
+   */
+  readonly record: (event: Omit<ReplicationTraceEvent, "seq">) => void
   readonly drain: () => ReadonlyArray<ReplicationTraceEvent>
 }
 
-export const makeReplicationTraceRecorder = (): ReplicationTraceRecorder => {
+/**
+ * Optional sequencer the harness supplies so this recorder stamps
+ * `seq` from the same counter as the SIP recording layers. Omit it in
+ * standalone tests; the recorder then uses a per-instance counter and
+ * cross-layer same-ms ordering degrades to insertion order (the
+ * pre-EventSequencer behaviour).
+ */
+export interface ReplicationTraceSequencer {
+  readonly nextSync: () => number
+}
+
+export const makeReplicationTraceRecorder = (
+  sequencer?: ReplicationTraceSequencer,
+): ReplicationTraceRecorder => {
   const buffer: ReplicationTraceEvent[] = []
+  const allocSeq: () => number = sequencer !== undefined
+    ? sequencer.nextSync
+    : (() => {
+        let local = 0
+        return () => ++local
+      })()
   return {
     record: (event) => {
-      buffer.push(event)
+      buffer.push({ ...event, seq: allocSeq() })
     },
     drain: () => {
       const out = buffer.slice()

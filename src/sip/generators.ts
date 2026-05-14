@@ -630,3 +630,49 @@ export function _generateAckForNon2xx(
 
   return makeRequest("ACK", originalInvite.uri, headers)
 }
+
+/**
+ * Build the hop-by-hop ACK a stateless proxy must send to the downstream
+ * UAS when forwarding a 3xx-6xx INVITE final response upstream
+ * (RFC 3261 §17.1.1.3 / §17.2.6). The proxy doesn't retain the full
+ * original INVITE — only the (downstream-target, our-egress-branch)
+ * pair it cached when it forwarded the INVITE — so we rebuild the ACK
+ * from that pair plus the final response itself:
+ *
+ *   RURI    = sip:<target.host>:<target.port>  (where the INVITE went)
+ *   Via     = our advertised address with the SAME branch as the INVITE,
+ *             so the downstream's INVITE server transaction matches and
+ *             closes (§17.2.1 matches the ACK on top-Via branch).
+ *   From    = response's From (carries the UAC's tag)
+ *   To      = response's To  (carries the UAS's tag)
+ *   Call-ID = response's Call-ID
+ *   CSeq    = response's CSeq number, method=ACK
+ *
+ * Stack-internal: called only by ProxyCore's response forwarding path.
+ */
+export function _generateProxyAckForNon2xx(
+  finalResponse: SipResponse,
+  target: { readonly host: string; readonly port: number },
+  ourBranch: string,
+  ourAdvertised: { readonly ip: string; readonly port: number },
+): SipRequest {
+  const from = getHeader(finalResponse.headers, "from") ?? ""
+  const to = getHeader(finalResponse.headers, "to") ?? ""
+  const callId = getHeader(finalResponse.headers, "call-id") ?? ""
+  const cseqNum = finalResponse.getHeader("cseq").seq
+
+  const headers: SipHeader[] = [
+    h(
+      "Via",
+      `SIP/2.0/UDP ${ourAdvertised.ip}:${ourAdvertised.port};branch=${ourBranch};rport`,
+    ),
+    h("Max-Forwards", "70"),
+    h("From", from),
+    h("To", to),
+    h("Call-ID", callId),
+    h("CSeq", `${cseqNum} ACK`),
+    h("Content-Length", "0"),
+  ]
+
+  return makeRequest("ACK", `sip:${target.host}:${target.port}`, headers)
+}

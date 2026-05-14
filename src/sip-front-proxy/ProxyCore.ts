@@ -43,7 +43,7 @@ import {
   newTag,
   parseSipUri,
 } from "../sip/MessageHelpers.js"
-import { generateResponse } from "../sip/generators.js"
+import { _generateProxyAckForNon2xx, generateResponse } from "../sip/generators.js"
 import { SipParser } from "../sip/Parser.js"
 import { splitTopLevelCommas } from "../sip/parsers/custom/structured-headers.js"
 import { serialize } from "../sip/Serializer.js"
@@ -195,6 +195,12 @@ interface ProxyCounters {
   routedResponses: number
   cancelMatched: number
   cancelUnmatched: number
+  /** Hop-by-hop ACKs we synthesized + sent downstream on forwarding a 3xx-6xx
+   *  INVITE final response (RFC 3261 §17.1.1.3 / §17.2.6). */
+  ackSynthesized: number
+  /** Upstream auto-ACKs we absorbed because we already synthesized the hop-by-hop
+   *  ACK ourselves — same RFC clauses. */
+  ackAbsorbed: number
   noTargetAvailable: number
   routeStripped: number
   recordRouteInserted: number
@@ -220,6 +226,8 @@ const newCounters = (): ProxyCounters => ({
   routedResponses: 0,
   cancelMatched: 0,
   cancelUnmatched: 0,
+  ackSynthesized: 0,
+  ackAbsorbed: 0,
   noTargetAvailable: 0,
   routeStripped: 0,
   recordRouteInserted: 0,
@@ -324,10 +332,13 @@ const makeProxyCore: Effect.Effect<
   /**
    * Send a buffer on a specific endpoint. Catches `SendError`s into the
    * existing counter — outbound failures are observed but never propagate
-   * (D4 of the proxy plan).
+   * (D4 of the proxy plan). Returns `true` when the send succeeded; the
+   * request-forwarding path uses this to log `result=dropped` and
+   * synthesize a 503 to the UAC instead of silently claiming `forwarded`.
    */
-  const sendOn = (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) =>
+  const sendOn = (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr): Effect.Effect<boolean> =>
     ep.send(buf, dst.port, dst.host).pipe(
+      Effect.as(true),
       Effect.catchTag("SendError", (err) =>
         Effect.sync(() => {
           counters.sendErrors++
@@ -336,7 +347,8 @@ const makeProxyCore: Effect.Effect<
             Effect.logWarning(
               `[ProxyCore] send to ${dst.host}:${dst.port} failed: ${err.message}`
             )
-          )
+          ),
+          Effect.as(false)
         )
       )
     )
@@ -410,6 +422,7 @@ const makeProxyCore: Effect.Effect<
           cancelLru,
           counters,
           sendOn,
+          metrics,
         })
         return
       }
@@ -441,6 +454,7 @@ const makeProxyCore: Effect.Effect<
       extEndpoint,
       coreEndpoint,
       defaultEgressNet: net,
+      cancelLru,
       metrics,
     })
 
@@ -522,11 +536,11 @@ interface HandleRequestArgs {
   readonly strategy: RoutingStrategyApi
   readonly cancelLru: CancelBranchLruApi
   readonly counters: ProxyCounters
-  readonly sendBuf: (buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
+  readonly sendBuf: (buf: Buffer, dst: SocketAddr) => Effect.Effect<boolean>
   readonly replyToSource: (
     buf: Buffer,
     src: { readonly address: string; readonly port: number }
-  ) => Effect.Effect<void>
+  ) => Effect.Effect<boolean>
   readonly metrics: ProxyMetricsApi
   readonly tracing: ProxyTracingApi
   readonly logger: ProxyLoggerApi
@@ -617,6 +631,24 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         return
       }
       const mfNext = (Number.isFinite(mf) ? mf : 70) - 1
+
+      // ── Absorb hop-by-hop ACK for non-2xx INVITE final (§17.1.1.3) ───────
+      // We synthesize the downstream-facing ACK ourselves on the response
+      // path (handleResponseImpl). The upstream UAC's own auto-ACK then
+      // arrives here — it MUST terminate at this proxy. Identified by
+      // method=ACK, NO Route on the wire (auto-ACK carries only a single
+      // Via per §17.1.1.3 — Record-Route is ignored on non-2xx finals so
+      // 2xx end-to-end ACKs always carry Routes and never hit this
+      // branch), and (Call-ID, CSeq#) matches a remembered INVITE.
+      if (method === "ACK" && getHeader(req.headers, "route") === undefined) {
+        const key = callIdCseqKey(req.getHeader("call-id"), req.getHeader("cseq").seq)
+        const found = yield* cancelLru.lookup(key)
+        if (Option.isSome(found)) {
+          counters.ackAbsorbed++
+          result = "forwarded" // accounting only; "absorbed" isn't in the union
+          return
+        }
+      }
 
       // ── §16.4 Route preprocessing ─────────────────────────────────────────
       // If topmost Route points at us, strip it and remember the params (used
@@ -916,16 +948,35 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         yield* metrics.setActiveDialogsEstimate(cancelLru.size())
       }
 
-      // ── Serialize + fire-and-forget send ──────────────────────────────────
+      // ── Serialize + send (observe send outcome) ───────────────────────────
+      // If the egress send fails (DNS NXDOMAIN/EAI_AGAIN, ICMP unreach, …)
+      // we surface that in the routing log as `result=dropped` rather than
+      // claiming `forwarded`, and synthesize a 503 to the UAC so it stops
+      // retransmitting on T1/T2 instead of hanging until transaction
+      // timeout.
       const outBuf = serialize({ ...req, headers: nextHeaders })
       counters.routedRequests++
-      yield* sendBuf(outBuf, target)
-      result = "forwarded"
-      yield* metrics.recordMessage({
-        direction: "outbound",
-        methodOrStatus: method,
-        result: "forwarded",
-      })
+      const sentOk = yield* sendBuf(outBuf, target)
+      if (sentOk) {
+        result = "forwarded"
+        yield* metrics.recordMessage({
+          direction: "outbound",
+          methodOrStatus: method,
+          result: "forwarded",
+        })
+      } else {
+        result = "dropped"
+        const resp = generateResponse(req, 503, "Service Unavailable", {
+          toTag: newTag(),
+          extraHeaders: [{ name: "Retry-After", value: "5" }],
+        })
+        yield* replyToSource(serialize(resp), src)
+        yield* metrics.recordMessage({
+          direction: "outbound",
+          methodOrStatus: "503",
+          result: "dropped",
+        })
+      }
     })
 
     yield* tracing
@@ -974,11 +1025,16 @@ interface HandleResponseArgs {
   /** Present in dual-endpoint mode; the response may be ours via Via match here. */
   readonly coreAdvertisedAddress?: { readonly ip: string; readonly port: number } | undefined
   readonly counters: ProxyCounters
-  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
+  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<boolean>
   readonly extEndpoint: UdpEndpoint
   readonly coreEndpoint?: UdpEndpoint | undefined
-  /** Ingress network — fallback when our top Via has no `;net=` tag. */
+  /** Ingress network — fallback when our top Via has no `;net=` tag; also
+   *  identifies the downstream side for hop-by-hop ACK synthesis on
+   *  3xx-6xx INVITE finals (§17.1.1.3 / §17.2.6). */
   readonly defaultEgressNet: NetworkTag
+  /** Per-INVITE (target, branch) memory — consulted to synthesize the
+   *  hop-by-hop ACK for 3xx-6xx finals. */
+  readonly cancelLru: CancelBranchLruApi
   readonly metrics: ProxyMetricsApi
 }
 
@@ -993,6 +1049,7 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
       extEndpoint,
       coreEndpoint,
       defaultEgressNet,
+      cancelLru,
       metrics,
     } = args
     if (msg.type !== "response") return
@@ -1082,6 +1139,41 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
       methodOrStatus: String(msg.status),
       result: "forwarded",
     })
+
+    // RFC 3261 §17.1.1.3 / §17.2.6 — for a 3xx-6xx INVITE final we (as
+    // the upstream UAC from the UAS's perspective) MUST send the ACK
+    // back downstream. The proxy is stateless overall but remembers
+    // (target, branch) per forwarded INVITE in `cancelLru`; that's the
+    // exact data the ACK needs. Without this the downstream UAS keeps
+    // retransmitting the 503 until Timer H.
+    if (msg.status >= 300 && msg.status < 700) {
+      const cseq = msg.getHeader("cseq")
+      if (cseq.method.toUpperCase() === "INVITE") {
+        const key = callIdCseqKey(msg.getHeader("call-id"), cseq.seq)
+        const found = yield* cancelLru.lookup(key)
+        if (Option.isSome(found)) {
+          // The ACK exits the side the response arrived on — that's the
+          // downstream-facing endpoint for this INVITE. `defaultEgressNet`
+          // carries that ingress tag here.
+          const downstreamEp =
+            defaultEgressNet === "core" && coreEndpoint !== undefined
+              ? coreEndpoint
+              : extEndpoint
+          const downstreamAdvertised =
+            defaultEgressNet === "core" && coreAdvertisedAddress !== undefined
+              ? coreAdvertisedAddress
+              : advertisedAddress
+          const ack = _generateProxyAckForNon2xx(
+            msg,
+            found.value.target,
+            found.value.branch,
+            downstreamAdvertised,
+          )
+          yield* sendOn(downstreamEp, serialize(ack), found.value.target)
+          counters.ackSynthesized++
+        }
+      }
+    }
   })
 
 // ---------------------------------------------------------------------------
@@ -1100,13 +1192,18 @@ interface HandleRegistrarRequestArgs {
   readonly coreToExtStrategy: CoreToExtRoutingStrategyApi
   readonly cancelLru: CancelBranchLruApi
   readonly counters: ProxyCounters
-  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<void>
+  readonly sendOn: (ep: UdpEndpoint, buf: Buffer, dst: SocketAddr) => Effect.Effect<boolean>
+  readonly metrics: ProxyMetricsApi
 }
 
 const handleRequestRegistrarMode = (
   args: HandleRegistrarRequestArgs
-): Effect.Effect<void> =>
-  Effect.gen(function* () {
+): Effect.Effect<void> => {
+  // Hoisted so the trailing `tap` can read the final values populated
+  // during the body.
+  let result: "forwarded" | "rejected" | "dropped" = "forwarded"
+  let resolvedTarget: SocketAddr | undefined
+  return Effect.gen(function* () {
     const {
       req,
       src,
@@ -1120,6 +1217,7 @@ const handleRequestRegistrarMode = (
       cancelLru,
       counters,
       sendOn,
+      metrics,
     } = args
     const method = req.method.toUpperCase()
 
@@ -1128,6 +1226,7 @@ const handleRequestRegistrarMode = (
     const mf = mfRaw === undefined ? 70 : Number.parseInt(mfRaw, 10)
     if (Number.isFinite(mf) && mf <= 0) {
       counters.maxForwardsRejected++
+      result = "rejected"
       const resp = generateResponse(req, 483, "Too Many Hops", { toTag: newTag() })
       yield* sendOn(net === "core" ? coreEndpoint : extEndpoint, serialize(resp), {
         host: src.address,
@@ -1136,6 +1235,28 @@ const handleRequestRegistrarMode = (
       return
     }
     const mfNext = (Number.isFinite(mf) ? mf : 70) - 1
+
+    // ── Absorb hop-by-hop ACK for non-2xx INVITE final (§17.1.1.3) ───────
+    // We synthesize that ACK ourselves on the response forwarding path
+    // (see handleResponseImpl). The upstream UAC's own auto-ACK then
+    // arrives here — it MUST terminate at this proxy, not propagate
+    // back to the UAS. Identified by: method=ACK, NO Route on the wire
+    // (§17.1.1.3 auto-ACK carries only a single Via — Record-Route is
+    // ignored on non-2xx so 2xx end-to-end ACKs always carry Routes
+    // and never hit this branch). MUST run BEFORE the self-Route strip
+    // below: stripping our own RR off a 2xx ACK in a single-proxy hop
+    // would also leave Route empty and falsely trigger absorption.
+    if (
+      method === "ACK" &&
+      getHeader(req.headers, "route") === undefined
+    ) {
+      const key = callIdCseqKey(req.getHeader("call-id"), req.getHeader("cseq").seq)
+      const found = yield* cancelLru.lookup(key)
+      if (Option.isSome(found)) {
+        counters.ackAbsorbed++
+        return
+      }
+    }
 
     // ── §16.4 strip topmost Route(s) if they point at us (either side) ───
     // Iterative: with double-Record-Routing (RFC 3261 §16.7), in-dialog
@@ -1232,6 +1353,7 @@ const handleRequestRegistrarMode = (
     }
 
     if (synthesizedReply !== undefined) {
+      result = "rejected"
       const resp = generateResponse(req, synthesizedReply.status, synthesizedReply.reason, {
         toTag: newTag(),
       })
@@ -1246,6 +1368,7 @@ const handleRequestRegistrarMode = (
       // synthesized reply. 500 because that's a proxy-side bug, not the
       // caller's.
       counters.noTargetAvailable++
+      result = "rejected"
       const resp = generateResponse(req, 500, "Server Internal Error", { toTag: newTag() })
       yield* sendOn(net === "core" ? coreEndpoint : extEndpoint, serialize(resp), {
         host: src.address,
@@ -1308,14 +1431,54 @@ const handleRequestRegistrarMode = (
       yield* cancelLru.remember(key, { target, branch: ourBranch })
     }
 
-    // ── Serialize + fire-and-forget send on egress endpoint ──────────────
+    // ── Serialize + observe send on egress endpoint ──────────────────────
+    // Parity with the K8s-LB path (`handleRequestImpl`): if the egress
+    // send fails (NXDOMAIN / EAI_AGAIN / ICMP-unreachable) we synthesize
+    // a 503 to the UAC so it stops retransmitting on T1/T2 instead of
+    // hanging until Timer B (32 s). RFC 3261 §16.6.10 / §16.6 — 503 with
+    // `Retry-After` is the spec-aligned code for "downstream
+    // unreachable" from a stateful proxy.
     const finalReq = ruriOverride !== undefined
       ? ({ ...req, uri: ruriOverride, headers: nextHeaders } as SipRequest)
       : ({ ...req, headers: nextHeaders } as SipRequest)
     const outBuf = serialize(finalReq)
     counters.routedRequests++
-    yield* sendOn(egressEp, outBuf, target)
-  })
+    resolvedTarget = target
+    const sentOk = yield* sendOn(egressEp, outBuf, target)
+    if (sentOk) {
+      result = "forwarded"
+      yield* metrics.recordMessage({
+        direction: "outbound",
+        methodOrStatus: method,
+        result: "forwarded",
+      })
+    } else {
+      result = "dropped"
+      const resp = generateResponse(req, 503, "Service Unavailable", {
+        toTag: newTag(),
+        extraHeaders: [{ name: "Retry-After", value: "5" }],
+      })
+      yield* sendOn(net === "core" ? coreEndpoint : extEndpoint, serialize(resp), {
+        host: src.address,
+        port: src.port,
+      })
+      yield* metrics.recordMessage({
+        direction: "outbound",
+        methodOrStatus: "503",
+        result: "dropped",
+      })
+    }
+  }).pipe(
+    Effect.tap(() =>
+      Effect.logInfo(
+        `[ProxyCore] registrar route ${args.req.method} ${args.req.getHeader("call-id")} ` +
+          `net=${args.net} target=${
+            resolvedTarget === undefined ? "n/a" : `${resolvedTarget.host}:${resolvedTarget.port}`
+          } result=${result}`
+      )
+    )
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Header helpers (proxy-local — kept here so PR2 doesn't touch src/sip/)

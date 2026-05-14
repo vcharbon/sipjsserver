@@ -46,11 +46,16 @@ export interface RecorderApi {
     readonly network: NetworkTag
   }) => Effect.Effect<void>
 
-  /** Append a SIP-packet observation to the scenario trace. */
-  readonly recordSip: (entry: RecordedSipEntry) => Effect.Effect<void>
+  /**
+   * Append a SIP-packet observation to the scenario trace. Callers
+   * pass everything except `seq` — the Recorder allocates from its
+   * sequencer so all recording layers stamp from the same counter and
+   * `(timestamp, seq)` orders deterministically.
+   */
+  readonly recordSip: (entry: Omit<RecordedSipEntry, "seq">) => Effect.Effect<void>
 
   /** Append a replication-frame observation to the scenario trace. */
-  readonly recordRepl: (entry: RecordedReplEntry) => Effect.Effect<void>
+  readonly recordRepl: (entry: Omit<RecordedReplEntry, "seq">) => Effect.Effect<void>
 
   /**
    * Mark a lane as killed at `at` (virtual or wall-clock ms). The
@@ -72,6 +77,15 @@ export interface RecorderApi {
   readonly snapshot: Effect.Effect<RecordedScenario>
 }
 
+/**
+ * Optional sequencer the harness supplies so the Recorder stamps `seq`
+ * from the same monotonic counter as the SIP / replication recording
+ * layers (see src/test-harness/framework/EventSequencer.ts).
+ */
+export interface RecorderSequencer {
+  readonly nextSync: () => number
+}
+
 export class Recorder extends ServiceMap.Service<Recorder, RecorderApi>()(
   "@sipjsserver/test-harness/Recorder",
 ) {
@@ -80,9 +94,16 @@ export class Recorder extends ServiceMap.Service<Recorder, RecorderApi>()(
    * named helpers (`Recorder.fake`, `Recorder.live`, `Recorder.hybrid`)
    * over calling this directly — they make the kind self-documenting
    * at the call site.
+   *
+   * Pass `sequencer` to share ordering with the other recording
+   * layers; omit it when the Recorder is the only recording layer in
+   * the scenario (its events still order monotonically among
+   * themselves via a per-instance fallback).
    */
-  static readonly layer = (kind: TransportKind): Layer.Layer<Recorder> =>
-    Layer.sync(Recorder, () => makeApi(kind))
+  static readonly layer = (
+    kind: TransportKind,
+    sequencer?: RecorderSequencer,
+  ): Layer.Layer<Recorder> => Layer.sync(Recorder, () => makeApi(kind, sequencer))
 
   static readonly fake: Layer.Layer<Recorder> = Recorder.layer("fake")
   static readonly live: Layer.Layer<Recorder> = Recorder.layer("live")
@@ -101,12 +122,21 @@ interface MutableLane {
   readonly killedAt: number[]
 }
 
-const makeApi = (kind: TransportKind): RecorderApi => {
+const makeApi = (
+  kind: TransportKind,
+  sequencer?: RecorderSequencer,
+): RecorderApi => {
   const lanes = MutableHashMap.empty<LaneKey, MutableLane>()
   // Pending kills for lanes not yet registered. Merged on registerLane.
   const pendingKills = MutableHashMap.empty<LaneKey, number[]>()
   const sipTrace: RecordedSipEntry[] = []
   const replTrace: RecordedReplEntry[] = []
+  const allocSeq: () => number = sequencer !== undefined
+    ? sequencer.nextSync
+    : (() => {
+        let local = 0
+        return () => ++local
+      })()
   // Lane keys that already produced a nameConflict anomaly. Avoids
   // emitting one anomaly per re-register on the same lane.
   const conflictsAlreadyReported = new Set<LaneKey>()
@@ -160,12 +190,12 @@ const makeApi = (kind: TransportKind): RecorderApi => {
 
   const recordSip: RecorderApi["recordSip"] = (entry) =>
     Effect.sync(() => {
-      sipTrace.push(entry)
+      sipTrace.push({ ...entry, seq: allocSeq() })
     })
 
   const recordRepl: RecorderApi["recordRepl"] = (entry) =>
     Effect.sync(() => {
-      replTrace.push(entry)
+      replTrace.push({ ...entry, seq: allocSeq() })
     })
 
   const markLaneKilled: RecorderApi["markLaneKilled"] = (args) =>

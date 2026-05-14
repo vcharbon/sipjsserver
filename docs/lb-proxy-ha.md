@@ -233,6 +233,20 @@ kubectl -n <ns> delete pod <master-pod>
 # preStop pkill on the keepalived sidecar moves VIP within ~300ms
 ```
 
+### Rolling updates — `maxSurge: 0` is mandatory at 2 replicas
+
+The Helm chart sets `strategy.rollingUpdate.maxSurge: 0` and
+`maxUnavailable: 1` (see `deploy/helm/sip-front-proxy/values.yaml`).
+With the hard `requiredDuringScheduling` anti-affinity, `hostPort 5060`,
+and the 2-edge-node kind topology, there is no slot for a surged pod —
+the default `maxSurge: 25%` (which rounds DOWN to 0 on 2 replicas)
+would leave a fresh rollout stuck `Pending` forever waiting for a
+nonexistent third edge node. Trade-off: each `kubectl rollout restart`
+takes one pod down at a time; keepalived re-elects within ~1.5s and
+in-flight UACs cover the gap via SIP T1/T2 retransmit. Fleets with ≥3
+anti-affined edge nodes can override `maxSurge: 1` in values to keep
+both proxies live through the entire rollout.
+
 ### Known failure modes
 
 - **Multicast loss on the L2 segment** — VRRP advertisements are

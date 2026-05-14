@@ -322,9 +322,17 @@ export function renderSequenceDiagram(
   for (let i = 0; i < replicationTrace.length; i++) {
     rows.push({ kind: "repl", index: i, entry: replicationTrace[i]! })
   }
+  // Primary sort: `timestamp`. Secondary: `seq` from the shared
+  // `EventSequencer` so same-ms events keep capture order across SIP +
+  // replication layers (matters most for hybrid fake-ext + real-core
+  // traces, where two clocks can land on the same ms). Tertiary: SIP
+  // before replication when the harness ran without a sequencer (seq=0
+  // on both sides) — preserves the legacy "SIP first" tiebreak.
   rows.sort((a, b) => {
     const dt = a.entry.timestamp - b.entry.timestamp
     if (dt !== 0) return dt
+    const ds = a.entry.seq - b.entry.seq
+    if (ds !== 0) return ds
     if (a.kind === b.kind) return 0
     return a.kind === "sip" ? -1 : 1
   })
