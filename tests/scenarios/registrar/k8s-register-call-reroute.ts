@@ -115,6 +115,11 @@ export const k8sRegisterCallReroute = (opts: K8sRegisterCallRerouteOpts) =>
     const bob2ByeTxn = bob2Dialog.expect("BYE")
     bob2ByeTxn.reply(200)
     aliceByeTxn.expect(200)
+
+    // Let the b-leg 200 OK propagate bob2 → proxy(ext) → proxy(core) → cluster
+    // before teardown so the worker's b-leg BYE UAC transaction terminates
+    // cleanly (otherwise Timer F retransmits leak into back-to-back runs).
+    s.pause(200)
   })
     .describe(
       "alice REGISTERs, bob1+bob2 REGISTER. alice INVITEs sip:bob1@kindlab " +
@@ -122,4 +127,3 @@ export const k8sRegisterCallReroute = (opts: K8sRegisterCallRerouteOpts) =>
         "with new_ruri=bob2. bob1 503 → worker /call/failure → re-route to bob2 → 200/ACK/BYE.",
     )
     .tier("short")
-    .skipFinalSweep()

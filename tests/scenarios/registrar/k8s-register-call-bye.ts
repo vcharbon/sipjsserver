@@ -96,10 +96,14 @@ export const k8sRegisterCallBye = (opts: K8sRegisterCallByeOpts) =>
     const bobByeTxn = bobDialog.expect("BYE")
     bobByeTxn.reply(200)
     aliceByeTxn.expect(200)
+
+    // Let the b-leg 200 OK propagate bob → proxy(ext) → proxy(core) → cluster
+    // before teardown so the worker's b-leg BYE UAC transaction terminates
+    // cleanly (otherwise Timer F retransmits leak into back-to-back runs).
+    s.pause(200)
   })
     .describe(
       "Full happy path against the kind-deployed SBC: alice + bob REGISTER, " +
         "alice INVITEs bob via X-Api-Call routing, BYE cleanly.",
     )
     .tier("short")
-    .skipFinalSweep()
