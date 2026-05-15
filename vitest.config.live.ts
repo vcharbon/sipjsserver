@@ -22,11 +22,18 @@ export default defineConfig({
       "tests/harness/limiter-rejection.test.ts",
       // Hybrid kind-cluster suite — no-ops unless `E2E_KIND=1` in env.
       "tests/fullcall/e2e-register-fakeExt-realCore.test.ts",
+      // Replication-stream medium-tier soak (real Redis + real HTTP);
+      // self-skips when TEST_TIER < medium, Redis is unreachable, or
+      // `--expose-gc` is not present.
+      "tests/fullcall/replication-stream-medium.test.ts",
     ],
     // Cap each test worker fork at 1 GB so a runaway test cannot starve
     // the rest of WSL. Applies to `npx vitest` as well as `npm run test*`.
-    poolOptions: {
-      forks: { execArgv: ["--max-old-space-size=1024"] },
-    },
+    // `--expose-gc` is required by the replication-stream medium-tier
+    // heap assertions; harmless when other tests ignore it.
+    //
+    // Vitest 4 moved poolOptions to top-level — `execArgv` is now
+    // applied directly to the worker fork.
+    execArgv: ["--max-old-space-size=1024", "--expose-gc"],
   },
 })

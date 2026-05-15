@@ -1,13 +1,16 @@
 /**
  * Line-buffered NDJSON byte stream → `PullFrame` stream.
  *
- * Shared between `/replog` and `/bootstrap` consumers. The state (chunk
- * buffer + TextDecoder) is created lazily inside `Stream.unwrap`, so a
- * fresh buffer is allocated per stream execution — restart-safe.
+ * Shared between `/replog` and `/bootstrap` consumers. Built on the
+ * standard Effect v4 byte-to-line pipeline:
  *
- * Multi-byte characters split across chunks are handled by passing
- * `{ stream: true }` to `TextDecoder.decode`. Empty lines (whitespace
- * only) are skipped. Decode failures surface as `ProtocolError`.
+ *   Uint8Array  →  decodeText  →  splitLines  →  mapEffect(decode)
+ *
+ * `Stream.decodeText` lazily allocates a `TextDecoder` inside `suspend`
+ * so each stream execution gets its own decoder — restart-safe.
+ * `Stream.splitLines` handles `\n`, `\r`, and `\r\n` delimiters across
+ * chunks, including multi-byte characters split mid-codepoint.
+ * Decode failures surface as `ProtocolError` via `decodeFrameEffect`.
  */
 
 import { Effect, Stream } from "effect"
@@ -20,39 +23,28 @@ import {
 export const streamNdjsonLines = <E>(
   bytes: Stream.Stream<Uint8Array, E>
 ): Stream.Stream<PullFrame, E | ProtocolError> =>
-  Stream.unwrap(
-    Effect.sync(() => {
-      const decoder = new TextDecoder()
-      const state = { buffer: "" }
-      const decodeChunk = (
-        chunk: Uint8Array
-      ): Stream.Stream<PullFrame, ProtocolError> =>
-        Stream.unwrap(
-          Effect.gen(function* () {
-            state.buffer += decoder.decode(chunk, { stream: true })
-            const frames: Array<PullFrame> = []
-            let nl = state.buffer.indexOf("\n")
-            while (nl !== -1) {
-              const line = state.buffer.slice(0, nl)
-              state.buffer = state.buffer.slice(nl + 1)
-              if (line.length > 0) {
-                const frame = yield* decodeFrameEffect(line)
-                if (frame !== null) frames.push(frame)
-              }
-              nl = state.buffer.indexOf("\n")
-            }
-            return Stream.fromIterable(frames)
-          })
-        )
-      return bytes.pipe(Stream.flatMap(decodeChunk))
-    })
+  bytes.pipe(
+    Stream.decodeText(),
+    Stream.splitLines,
+    Stream.filter((line) => line.length > 0),
+    Stream.mapEffect(decodeFrameEffect)
   )
 
 const decodeFrameEffect = (
   line: string
-): Effect.Effect<PullFrame | null, ProtocolError> =>
+): Effect.Effect<PullFrame, ProtocolError> =>
   Effect.try({
-    try: () => decodeFrame(line),
+    try: () => {
+      const frame = decodeFrame(line)
+      if (frame === null) {
+        // `decodeFrame` only returns null for whitespace-only lines,
+        // which the upstream `Stream.filter` already drops. Reaching
+        // here means a non-empty line decoded to null — treat as a
+        // protocol bug rather than silently swallowing.
+        throw new ProtocolError({ reason: "unexpected null frame", raw: line })
+      }
+      return frame
+    },
     catch: (err) =>
       err instanceof ProtocolError
         ? err

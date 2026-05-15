@@ -44,7 +44,6 @@ import {
 } from "./ChannelIndex.js"
 import {
   buildDataFrame,
-  encodeFrame,
   type DataFrame,
   type NoopFrame,
   type PullFrame,
@@ -55,6 +54,13 @@ import {
   type PartitionedRelayStorageApi,
   type ScanEntry,
 } from "../cache/PartitionedRelayStorage.js"
+import {
+  buildChannelStream,
+  encodeFramesToBytes,
+  type BootstrapTickState,
+  type ReplogTickState,
+  type Watermark,
+} from "./ChannelStream.js"
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -172,7 +178,7 @@ const makeServer = (
 }
 
 // ---------------------------------------------------------------------------
-// Stream builder — one batch-iteration per inner Effect; repeats forever
+// Replog stream builder — long-lived `/replog` endpoint.
 // ---------------------------------------------------------------------------
 
 interface BuildPullStreamArgs {
@@ -184,154 +190,187 @@ interface BuildPullStreamArgs {
    * here is purely for noop heartbeats.
    */
   readonly serverGen: number
-  readonly initialSince: { readonly gen: number; readonly counter: number }
+  readonly initialSince: Watermark
   readonly chunkSize: number
   readonly noopIntervalMs: number
 }
 
 /**
- * Tick state threaded through `Stream.paginate`. Kept inside paginate's
- * closure so the stream's pull is a single Suspend node — no recursive
- * `Stream.concat` chain that would grow per-tick for the lifetime of
- * the (long-lived) HTTP request.
- */
-interface TickState {
-  readonly since: { readonly gen: number; readonly counter: number }
-  readonly sleepFirst: boolean
-}
-
-/**
  * Construct the long-lived NDJSON stream for one /replog connection.
  *
- * Order of operations within a tick (executed by paginate's loop body):
- *   1. (optional) sleep `noopIntervalMs` if the previous tick's batch was
- *      partial. We sleep at the START of the next tick — never at the
- *      end of the current one — so the noop frame the previous tick
- *      emitted is flushed downstream before we block.
- *   2. Pull a batch from the channel via lex-ordered bucket walk.
- *   3. Emit one Data frame per entry — `gen` and `body_ttl_remaining_sec`
- *      come from the entry itself (per Story 7d).
- *   4. If the batch was partial, emit a Noop frame at `head` (the
- *      channel's lex-greatest tuple) and mark `partial=true` so the
- *      next tick begins with a sleep.
- *   5. Advance the cursor to the LAST entry's `(entryGen, score)` —
- *      this is the strict lex-greater anchor for the next pull.
+ * State machine (see `ReplogTickState`):
+ *   - **Pulling**: pull one batch via the channel's lex-ordered bucket
+ *     walk. Emit one Data frame per entry; on a partial batch append a
+ *     Noop at `head` and transition to Idle. On a full batch stay in
+ *     Pulling with the advanced cursor.
+ *   - **Idle**: sleep `noopIntervalMs`, then transition back to Pulling
+ *     with the same cursor. The Noop emitted at the prior Pulling tick
+ *     has already flushed downstream before the sleep begins — paginate
+ *     hands the chunk off before re-entering the step.
  *
- * Encoding to NDJSON bytes is pushed to a downstream `Stream.map` stage
- * so the loop body deals only in typed `PullFrame` values.
+ * Encoding to NDJSON bytes runs in `encodeFramesToBytes` downstream so
+ * the loop body deals only in typed `PullFrame` values.
  */
 export const buildPullStream = (
   args: BuildPullStreamArgs
-): Stream.Stream<Uint8Array> =>
-  Stream.paginate<TickState, PullFrame>(
-    { since: args.initialSince, sleepFirst: false },
-    (state) =>
-      Effect.gen(function* () {
-        if (state.sleepFirst) {
-          yield* Effect.sleep(Duration.millis(args.noopIntervalMs))
-        }
-        const batch = yield* args.channel
-          .pullBatch(state.since, args.chunkSize)
-          .pipe(Effect.orDie)
-        const nowMs = yield* Clock.currentTimeMillis
+): Stream.Stream<Uint8Array> => {
+  const step = (
+    state: ReplogTickState
+  ): Effect.Effect<
+    readonly [ReadonlyArray<PullFrame>, Option.Option<ReplogTickState>]
+  > => {
+    if (state._tag === "Idle") {
+      return Effect.as(
+        Effect.sleep(Duration.millis(args.noopIntervalMs)),
+        [
+          [],
+          Option.some<ReplogTickState>({ _tag: "Pulling", cursor: state.cursor }),
+        ] as const
+      )
+    }
+    return Effect.gen(function* () {
+      const batch = yield* args.channel
+        .pullBatch(state.cursor, args.chunkSize)
+        .pipe(Effect.orDie)
+      const nowMs = yield* Clock.currentTimeMillis
 
-        const frames: Array<PullFrame> = []
-        for (const entry of batch.entries) {
-          const data = buildDataFrame(entry, nowMs)
-          if (data !== null) frames.push(data)
+      const frames: Array<PullFrame> = []
+      for (const entry of batch.entries) {
+        const data = buildDataFrame(entry, nowMs)
+        if (data !== null) frames.push(data)
+      }
+      const partial = batch.entries.length < args.chunkSize
+      if (partial) {
+        // Noop carries the actual head tuple `(head.gen, head.counter)`,
+        // not `(serverGen, head.counter)`. With per-`(channel, entryGen)`
+        // buckets (Story 7d), `head.gen` may differ from `serverGen` —
+        // e.g. a channel with gen=0 mirror entries but an empty
+        // gen=`serverGen` originating bucket has `head.gen=0`. Stamping
+        // `serverGen` with `head.counter` from a different bucket
+        // fabricates a tuple that no entry occupies; the puller
+        // advances watermark to it and then filters out future
+        // originating writes whose counter is ≤ that value.
+        const noop: NoopFrame = {
+          _tag: "Noop",
+          gen: batch.head.gen,
+          counter: batch.head.counter,
+          latency_ms: 0,
         }
-        const partial = batch.entries.length < args.chunkSize
-        if (partial) {
-          // Noop carries the actual head tuple `(head.gen, head.counter)`,
-          // not `(serverGen, head.counter)`. With per-`(channel, entryGen)`
-          // buckets (Story 7d), `head.gen` may differ from `serverGen` —
-          // e.g. a channel with gen=0 mirror entries but an empty
-          // gen=`serverGen` originating bucket has `head.gen=0`. Stamping
-          // `serverGen` with `head.counter` from a different bucket
-          // fabricates a tuple that no entry occupies; the puller
-          // advances watermark to it and then filters out future
-          // originating writes whose counter is ≤ that value.
-          const noop: NoopFrame = {
-            _tag: "Noop",
-            gen: batch.head.gen,
-            counter: batch.head.counter,
-            latency_ms: 0,
-          }
-          frames.push(noop)
-        }
-        const nextSince =
-          batch.entries.length > 0
-            ? (() => {
-                const last = batch.entries[batch.entries.length - 1]!
-                return { gen: last.entryGen, counter: last.score }
-              })()
-            : state.since
-        // Infinite stream — always Some. The HTTP request scope bounds
-        // the stream's life; client disconnect closes the scope and
-        // interrupts the in-flight pull (including the idle sleep).
-        const nextState: TickState = {
-          since: nextSince,
-          sleepFirst: partial,
-        }
-        return [frames, Option.some(nextState)] as const
-      })
-  ).pipe(Stream.map((frame) => textEncoder.encode(encodeFrame(frame))))
+        frames.push(noop)
+      }
+      const nextCursor: Watermark =
+        batch.entries.length > 0
+          ? (() => {
+              const last = batch.entries[batch.entries.length - 1]!
+              return { gen: last.entryGen, counter: last.score }
+            })()
+          : state.cursor
+      // Infinite stream — always Some. The HTTP request scope bounds
+      // the stream's life; client disconnect closes the scope and
+      // interrupts the in-flight pull (including the idle sleep).
+      const next: ReplogTickState = partial
+        ? { _tag: "Idle", cursor: nextCursor }
+        : { _tag: "Pulling", cursor: nextCursor }
+      return [frames, Option.some(next)] as const
+    })
+  }
 
-const textEncoder = new TextEncoder()
+  const initial: ReplogTickState = {
+    _tag: "Pulling",
+    cursor: args.initialSince,
+  }
+  return encodeFramesToBytes(buildChannelStream(initial, step))
+}
 
 // ---------------------------------------------------------------------------
 // Bootstrap stream — one-shot scan of `bak:{caller}:*`, emitted as
 // `Data{op:"create",partition:"pri"}` frames followed by one terminal
-// `Noop`. Same NDJSON wire format as `/replog`; gen/counter are sentinel
-// `0`/`0` since bootstrap is outside the channel watermark space (the
-// client bypasses the watermark gate on this endpoint).
+// `Noop`. Same NDJSON wire format as `/replog`; data-frame gen/counter
+// are sentinel `0`/`0` since bootstrap is outside the channel watermark
+// space (the client bypasses the watermark gate on this endpoint), and
+// the terminal Noop carries the channel head watermark recorded before
+// the scan started — the receiver seeds its puller from that.
+//
+// Three-phase paginate (see `BootstrapTickState`):
+//   FetchingHead → Scanning → EmitTerminalNoop → None
+//
+// Scanning collects the whole partition in one tick via
+// `Stream.runCollect`. That bounds memory by partition size, which is
+// already the same order-of-magnitude as the HTTP response we are
+// streaming. If partitions ever grow large enough to make this a
+// concern, the path forward is to expose the Redis SCAN cursor on
+// `PartitionedRelayStorage.scanCalls` and step it inside paginate.
 // ---------------------------------------------------------------------------
 
 const buildBootstrapStream = (
   storage: PartitionedRelayStorageApi,
   channel: ChannelIndexApi,
   caller: string
-): Stream.Stream<Uint8Array> =>
-  Stream.unwrap(
-    Effect.gen(function* () {
-      // Snapshot head BEFORE scan. Channel writes that race the scan
-      // window land at `(head.gen, head.counter+N)` — the puller picks
-      // them up via the seeded watermark; applyReplicaUpdate is
-      // idempotent so any double-applies are no-ops.
-      const headBatch = yield* channel.pullBatch({ gen: 0, counter: 0 }, 0).pipe(
-        Effect.orDie
-      )
-      const dataFrames = storage.scanCalls("bak", caller).pipe(
-        Stream.orDie,
-        Stream.map(encodeBootstrapEntry)
-      )
-      const terminalNoop: NoopFrame = {
-        _tag: "Noop",
-        gen: headBatch.head.gen,
-        counter: headBatch.head.counter,
-        latency_ms: 0,
+): Stream.Stream<Uint8Array> => {
+  const step = (
+    state: BootstrapTickState
+  ): Effect.Effect<
+    readonly [ReadonlyArray<PullFrame>, Option.Option<BootstrapTickState>]
+  > => {
+    switch (state._tag) {
+      case "FetchingHead":
+        return Effect.gen(function* () {
+          // Snapshot head BEFORE scan. Channel writes that race the
+          // scan window land at `(head.gen, head.counter+N)` — the
+          // puller picks them up via the seeded watermark;
+          // applyReplicaUpdate is idempotent so any double-applies are
+          // no-ops.
+          const headBatch = yield* channel
+            .pullBatch({ gen: 0, counter: 0 }, 0)
+            .pipe(Effect.orDie)
+          const head: Watermark = {
+            gen: headBatch.head.gen,
+            counter: headBatch.head.counter,
+          }
+          return [
+            [],
+            Option.some<BootstrapTickState>({ _tag: "Scanning", head }),
+          ] as const
+        })
+      case "Scanning":
+        return Effect.gen(function* () {
+          const frames = yield* storage
+            .scanCalls("bak", caller)
+            .pipe(Stream.orDie, Stream.map(toBootstrapDataFrame), Stream.runCollect)
+          return [
+            frames,
+            Option.some<BootstrapTickState>({
+              _tag: "EmitTerminalNoop",
+              head: state.head,
+            }),
+          ] as const
+        })
+      case "EmitTerminalNoop": {
+        const noop: NoopFrame = {
+          _tag: "Noop",
+          gen: state.head.gen,
+          counter: state.head.counter,
+          latency_ms: 0,
+        }
+        return Effect.succeed([[noop], Option.none()] as const)
       }
-      return Stream.concat(
-        dataFrames,
-        Stream.succeed(textEncoder.encode(encodeFrame(terminalNoop)))
-      )
-    })
-  )
-
-const encodeBootstrapEntry = (entry: ScanEntry): Uint8Array => {
-  const frame: DataFrame = {
-    _tag: "Data",
-    gen: 0,
-    counter: 0,
-    op: "create",
-    partition: "pri",
-    callRef: entry.callRef,
-    body: safeParseJsonValue(entry.json),
-    body_ttl_remaining_sec: entry.ttlSec,
-    latency_ms: 0,
+    }
   }
-  return textEncoder.encode(encodeFrame(frame))
+  const initial: BootstrapTickState = { _tag: "FetchingHead" }
+  return encodeFramesToBytes(buildChannelStream(initial, step))
 }
+
+const toBootstrapDataFrame = (entry: ScanEntry): DataFrame => ({
+  _tag: "Data",
+  gen: 0,
+  counter: 0,
+  op: "create",
+  partition: "pri",
+  callRef: entry.callRef,
+  body: safeParseJsonValue(entry.json),
+  body_ttl_remaining_sec: entry.ttlSec,
+  latency_ms: 0,
+})
 
 const safeParseJsonValue = (raw: string): unknown => {
   try {
