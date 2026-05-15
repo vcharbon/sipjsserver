@@ -20,7 +20,7 @@
  * Semaphore is released before async cache flush.
  */
 
-import { Effect, Layer, MutableHashMap, Option, Ref, Schema, Semaphore, ServiceMap, Stream } from "effect"
+import { Clock, Effect, Layer, MutableHashMap, Option, Ref, Schema, Semaphore, ServiceMap, Stream } from "effect"
 import {
   PartitionedRelayStorage,
   type PartitionRole,
@@ -33,6 +33,8 @@ import { RedisError } from "../redis/RedisClient.js"
 import { CallLimiter } from "./CallLimiter.js"
 import type { Call } from "./CallModel.js"
 import { Call as CallSchema, callIndexKeys, isFullyResolved, parseCallRef, setByeDisposition } from "./CallModel.js"
+import type { TimerEntry } from "./CallModel.js"
+import { replaceTimerById, TERMINATING_TIMEOUT_MS } from "./timer-helpers.js"
 import { MetricsRegistry, type TerminatingCallsByBucket } from "../observability/MetricsRegistry.js"
 import { TimerService } from "./TimerService.js"
 import { TransactionLayer } from "../sip/TransactionLayer.js"
@@ -202,6 +204,19 @@ export class CallState extends ServiceMap.Service<
       let totalSync = 0
       // Diagnostic: count remove() invocations.
       let removeInvocations = 0
+
+      // Forward reference — the safety-timer handler installed by
+      // `update()` (the structural fix from ADR 0003 / plan
+      // "this-kind-of-issue-flickering-moth" Phase 5) needs to invoke
+      // `forcePurge`, but `forcePurge` is defined further down (after
+      // `forcePurgeOne`'s dependencies). The timer body doesn't run
+      // until `+TERMINATING_TIMEOUT_MS`, by which point this ref has
+      // been bound. Using `!` at the call site is safe; if the ref
+      // were ever still null at fire time, the call's signature on
+      // CallState was constructed wrong (programmer error).
+      let forcePurgeRef:
+        | ((callRef: string, reason: string) => Effect.Effect<void>)
+        | undefined = undefined
       // Counts calls the orphan sweep had to recover (rule path missed the
       // terminating→terminated transition or worker crashed mid-cleanup).
       // Should stay at 0 in healthy systems; non-zero indicates the sweep
@@ -450,12 +465,49 @@ export class CallState extends ServiceMap.Service<
         callRef: string,
         fn: (call: Call) => Call
       ) {
-        yield* Effect.sync(() => {
-          const opt = MutableHashMap.get(callsMap, callRef)
-          if (Option.isSome(opt)) {
-            MutableHashMap.set(callsMap, callRef, fn(opt.value))
-          }
-        })
+        // Phase 5 of "must-run effects under interruption" (ADR 0003):
+        // every transition into `terminating` must install the safety
+        // timer atomically with the state mutation. Pre-fix, the rule
+        // chain emitted a `schedule-timer(terminating_timeout)` effect
+        // separately and the interpreter could be interrupted between
+        // the mutation and the scheduling, leaving calls stuck in
+        // `terminating` until orphan sweep (60 s later). Doing both in
+        // a small `uninterruptibleMask` whose body is sync JS +
+        // `Effect.forkIn` (also sync from caller's POV) makes the
+        // guarantee structural — no caller can bypass it.
+        yield* Effect.uninterruptibleMask((_restore) =>
+          Effect.gen(function* () {
+            const opt = MutableHashMap.get(callsMap, callRef)
+            if (Option.isNone(opt)) return
+            const prev = opt.value
+            const next = fn(prev)
+
+            const enteringTerminating =
+              prev.state !== "terminating" && next.state === "terminating"
+
+            if (!enteringTerminating) {
+              MutableHashMap.set(callsMap, callRef, next)
+              return
+            }
+
+            const now = yield* Clock.currentTimeMillis
+            const safetyEntry: TimerEntry = {
+              id: `terminating-timeout-${callRef}`,
+              type: "terminating_timeout",
+              fireAt: now + TERMINATING_TIMEOUT_MS,
+            }
+            const withTimer: Call = {
+              ...next,
+              timers: replaceTimerById(next.timers, safetyEntry),
+            }
+            MutableHashMap.set(callsMap, callRef, withTimer)
+            yield* timers.schedule(callRef, safetyEntry, (cr) =>
+              forcePurgeRef !== undefined
+                ? forcePurgeRef(cr, "safety_timer")
+                : Effect.void,
+            )
+          }),
+        )
       })
 
       const peek = Effect.fnUntraced(function* (callRef: string) {
@@ -646,10 +698,9 @@ export class CallState extends ServiceMap.Service<
       // Slice 1) drifted calls indefinitely inside `terminating`; the
       // `gte300s` bucket should always read zero in healthy systems.
       // Age is derived from the safety-net `terminating_timeout` timer:
-      // `enteredAt = timer.fireAt - 64s`. For crash-recovered calls
-      // that lost the timer entry, fall back to `createdAt` so the
-      // canary still trips.
-      const TERMINATING_TIMEOUT_MS = 64_000
+      // `enteredAt = timer.fireAt - TERMINATING_TIMEOUT_MS`. For
+      // crash-recovered calls that lost the timer entry, fall back to
+      // `createdAt` so the canary still trips.
       const terminatingByBucket = (): TerminatingCallsByBucket => {
         const now = Date.now()
         let lt10s = 0
@@ -859,6 +910,11 @@ export class CallState extends ServiceMap.Service<
         )
         yield* forcePurgeOne(callRef)
       })
+
+      // Bind the forward reference declared at the top of the layer
+      // body, so the safety-timer handler installed by `update()`
+      // can invoke force-purge when it fires.
+      forcePurgeRef = forcePurge
 
       // ── Orphan sweep ──────────────────────────────────────────────────
       // Last-line recovery: if the rule-engine cleanup path missed a call (or

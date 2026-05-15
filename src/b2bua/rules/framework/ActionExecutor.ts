@@ -15,6 +15,7 @@ import { hydrateRequest } from "../../../sip/parsers/extract-fields.js"
 import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
 import type { TimerEntry, Leg, Dialog, TransferState, EarlyPromoteState, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
+import { replaceTimerById, TERMINATING_TIMEOUT_MS } from "../../../call/timer-helpers.js"
 import {
   type Call,
   addCdrEvent,
@@ -90,25 +91,12 @@ interface ExecutionState {
  * means some upstream code path appended directly instead of going
  * through this helper — that's the very leak we are guarding against.
  */
-function replaceTimerById(
-  existing: ReadonlyArray<TimerEntry>,
-  entry: TimerEntry,
-): TimerEntry[] {
-  const next = [...existing.filter((t) => t.id !== entry.id), entry]
-  if (process.env.NODE_ENV !== "production") {
-    const seen = new Set<string>()
-    for (const t of next) {
-      if (seen.has(t.id)) {
-        throw new Error(
-          `replaceTimerById invariant violated: duplicate timer id ${t.id} in ` +
-            `[${next.map((x) => x.id).join(", ")}] — some call site is bypassing replaceTimerById`,
-        )
-      }
-      seen.add(t.id)
-    }
-  }
-  return next
-}
+// `replaceTimerById` + `TERMINATING_TIMEOUT_MS` moved to
+// src/call/timer-helpers.ts so CallState.update can use the same
+// append-or-replace semantics for the structural safety-net install
+// without a circular import. See
+// docs/plan/this-kind-of-issue-flickering-moth.md (Phase 5) and
+// docs/adr/0003-must-run-effects-under-interruption.md.
 
 // ── Leg target resolution ──────────────────────────────────────────────────
 
@@ -1940,7 +1928,6 @@ function executeBeginTermination(
   // replace-by-id helper even though the idempotency guard above
   // normally short-circuits a second entry — defensive against future
   // call sites that bypass `begin-termination` and invoke this directly.
-  const TERMINATING_TIMEOUT_MS = 64_000
   const safetyTimer: TimerEntry = {
     id: safetyTimerId,
     type: "terminating_timeout",

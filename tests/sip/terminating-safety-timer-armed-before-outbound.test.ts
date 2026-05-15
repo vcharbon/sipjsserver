@@ -83,9 +83,34 @@ function makeActiveCall(callRef: string): Call {
   }
 }
 
+// NOTE on the Phase 5 structural fix:
+//
+// Pre-Phase 5 (the initial reordering patch), the two cases below
+// were intended to demonstrate the bug: with `mutate → slow → schedule`
+// the safety fiber was NEVER installed when the handler was
+// interrupted by the per-handler budget. The reordering patch in
+// SipRouter.processResult made the "post-fix" order land safely.
+//
+// Phase 5 (this commit) closes the gap structurally: every
+// `callState.update(... → terminating)` *itself* installs the
+// safety timer atomically with the state mutation, inside an
+// `Effect.uninterruptibleMask`. So even the "pre-fix" handler order
+// — mutate, then yield to a slow IO that gets interrupted, never
+// reaching the explicit `schedule` line — leaves the call with its
+// safety fiber armed, because the `update` call took care of it.
+//
+// Both cases now PASS the same invariant: after the handler is
+// aborted, the in-memory call is in `terminating` AND TimerService
+// has a `terminating_timeout` fiber active. The test stays in the
+// suite as a perimeter test for the structural guarantee. See:
+//   - docs/adr/0003-must-run-effects-under-interruption.md
+//   - docs/plan/this-kind-of-issue-flickering-moth.md (Phase 5)
+//   - tests/call/callstate-arms-safety-on-terminating.test.ts (the
+//     direct unit test for the structural fix).
+
 describe("processResult ordering: schedule-timer effects must precede slow outbound", () => {
   it.effect(
-    "PRE-FIX order (mutate → slow outbound → schedule): handler abort orphans the call — no safety timer installed",
+    "PRE-FIX handler order is now safe — Phase 5 auto-arms the safety on `update(→terminating)` regardless of what the handler does next",
     () =>
       Effect.gen(function* () {
         const callState = yield* CallState
@@ -123,19 +148,24 @@ describe("processResult ordering: schedule-timer effects must precede slow outbo
         yield* TestClock.adjust("6 seconds")
         for (let i = 0; i < 8; i++) yield* Effect.yieldNow
 
-        // Mutation persisted, but schedule was never reached.
+        // Mutation persisted; the handler's explicit `schedule` was
+        // never reached. But Phase 5 makes the safety arming a
+        // property of `callState.update(→terminating)` itself —
+        // independent of whatever the handler does afterwards.
         const after = yield* callState.peek(callRef)
         expect(after?.state).toBe("terminating")
         expect(yield* Ref.get(safetyScheduled)).toBe(false)
 
-        // fibersMap holds no timer for this call — the trigger fiber's
-        // onExit removed its own entry, and the safety never registered.
-        expect(yield* timers.activeCount()).toBe(0)
+        // The safety fiber was installed by `update` — not by the
+        // handler's never-reached schedule line.
+        expect(yield* timers.activeCount()).toBeGreaterThanOrEqual(1)
+        const safetyEntry = after?.timers.find((t) => t.type === "terminating_timeout")
+        expect(safetyEntry).toBeDefined()
       }).pipe(Effect.provide(stack)),
   )
 
   it.effect(
-    "POST-FIX order (mutate → schedule → slow outbound): handler abort still leaves the safety timer installed in fibersMap",
+    "POST-FIX handler order — safety installed (idempotent with the structural install from `update`); handler hasn't run yet because slow yield is ongoing",
     () =>
       Effect.gen(function* () {
         const callState = yield* CallState
@@ -175,9 +205,9 @@ describe("processResult ordering: schedule-timer effects must precede slow outbo
         yield* TestClock.adjust("6 seconds")
         for (let i = 0; i < 8; i++) yield* Effect.yieldNow
 
-        // Mutation persisted; the safety entry was installed before the
-        // handler hit the slow yield. fibersMap now holds the safety entry
-        // (the trigger's own onExit removed the trigger entry).
+        // Mutation persisted; the safety entry was installed (either
+        // by `update`'s structural auto-arm or by the handler's
+        // explicit `schedule` — same id via `replaceTimerById`).
         const after = yield* callState.peek(callRef)
         expect(after?.state).toBe("terminating")
         expect(yield* timers.activeCount()).toBeGreaterThanOrEqual(1)
