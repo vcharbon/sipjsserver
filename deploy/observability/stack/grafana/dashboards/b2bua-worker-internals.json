@@ -1,0 +1,101 @@
+{
+  "uid": "b2bua-worker-internals",
+  "title": "B2BUA — Worker internals",
+  "tags": ["sipjsserver", "b2bua", "internals"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(b2bua_worker_active_timers, pod)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "GC pause — total time / sec",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "rate(b2bua_worker_gc_pause_seconds_total{pod=~\"$pod\"}[1m])", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "GC — max pause in 1m window",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_worker_gc_window_pause_seconds{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 0.5 }] } } }
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "Active timer fibers",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_worker_active_timers{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "Event queue depth",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_worker_event_queue_depth{pod=~\"$pod\"}", "refId": "A", "legendFormat": "depth {{pod}}" },
+        { "expr": "b2bua_worker_event_queue_capacity{pod=~\"$pod\"}", "refId": "B", "legendFormat": "capacity {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Event queue drops / sec",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "rate(b2bua_worker_event_queue_drops_total{pod=~\"$pod\"}[1m])", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Terminating-state calls by age bucket",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (age_bucket) (b2bua_worker_terminating_calls{pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{age_bucket}}" }],
+      "fieldConfig": { "defaults": { "unit": "none", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } },
+      "description": "gte300s should always be 0 — non-zero is the stuck-terminating canary."
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "OTel BSP queue depth + drops",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_otel_bsp_queue_depth{pod=~\"$pod\"}", "refId": "A", "legendFormat": "queue {{pod}}" },
+        { "expr": "rate(b2bua_otel_bsp_dropped_total{pod=~\"$pod\"}[1m])", "refId": "B", "legendFormat": "dropped/s {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Pod RSS (cgroup)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "container_memory_working_set_bytes{pod=~\"$pod\", container!=\"\", container!=\"POD\"}", "refId": "A", "legendFormat": "{{pod}}/{{container}}" }],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Worker ready-in-ms (cold boot)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_worker_ready_in_ms{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Active dialogs (estimate)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_active_dialogs_estimate{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    }
+  ]
+}

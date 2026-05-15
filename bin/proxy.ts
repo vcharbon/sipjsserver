@@ -79,6 +79,7 @@ import {
 } from "../src/sip-front-proxy/registry/kubernetes.js"
 import { fromString as staticRegistryFromString } from "../src/sip-front-proxy/registry/static.js"
 import { kubernetesSecretLayer } from "../src/sip-front-proxy/security/HmacKeyProvider.js"
+import { MetricsServer } from "../src/sip-front-proxy/observability/MetricsServer.js"
 
 const DEFAULT_BIND_HOST = "0.0.0.0"
 const DEFAULT_BIND_PORT = 5070
@@ -125,6 +126,10 @@ const parseTarget = (raw: string | undefined): SocketAddr => {
 
 const bindHost = process.env["PROXY_BIND_HOST"] ?? DEFAULT_BIND_HOST
 const bindPort = parsePort(process.env["PROXY_BIND_PORT"], DEFAULT_BIND_PORT)
+// PROXY_METRICS_PORT — TCP port for the /metrics endpoint (sip_*
+// Prometheus exposition from MetricsServer). Default 9090.
+const metricsPort = parsePort(process.env["PROXY_METRICS_PORT"], 9090)
+const metricsServerLayer = MetricsServer.layer({ port: metricsPort })
 const advertisedHost = process.env["PROXY_ADVERTISED_HOST"] ?? bindHost
 const advertisedPort = parsePort(process.env["PROXY_ADVERTISED_PORT"], bindPort)
 const ingressConcurrency = Number.parseInt(process.env["PROXY_INGRESS_CONCURRENCY"] ?? "16", 10)
@@ -167,32 +172,39 @@ const buildStaticLayer = () => {
   const target = parseTarget(process.env["PROXY_FORWARD_TARGET"])
   const program = Effect.gen(function* () {
     const proxy = yield* ProxyCore
+    // Force-instantiate MetricsServer so its bound HTTP server is live
+    // before we sleep on Effect.never.
+    yield* MetricsServer
     yield* Effect.logInfo(
       `sip-front-proxy ${PROXY_VERSION} mode=static bound=${proxy.localAddress.ip}:${proxy.localAddress.port} ` +
         `advertised=${proxy.advertisedAddress.ip}:${proxy.advertisedAddress.port} ` +
+        `metrics=:${metricsPort} ` +
         `→ ${target.host}:${target.port}`
     )
     return yield* Effect.never
   })
-  const layer = ProxyCore.Default.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        baseBindLayer,
-        ForwardAllStrategyLive.pipe(
-          Layer.provide(ForwardAllConfig.layer(target))
-        ),
-        // ForwardAll doesn't use the registry for routing decisions, but
-        // ProxyCore needs `WorkerRegistry.lookupByAddress` to classify
-        // worker-sourced traffic as outbound. An empty static registry
-        // makes every lookup return `Option.none` — equivalent to the
-        // pre-loop-fix behaviour, since ForwardAll mode never has a
-        // worker fronted by us.
-        staticRegistryFromString(""),
-        // Provide a no-op WorkerRegistryControl so any future code that
-        // reaches for it in this mode doesn't crash.
-        workerRegistryControlNoopLayer
+  const layer = Layer.mergeAll(
+    ProxyCore.Default.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          baseBindLayer,
+          ForwardAllStrategyLive.pipe(
+            Layer.provide(ForwardAllConfig.layer(target))
+          ),
+          // ForwardAll doesn't use the registry for routing decisions, but
+          // ProxyCore needs `WorkerRegistry.lookupByAddress` to classify
+          // worker-sourced traffic as outbound. An empty static registry
+          // makes every lookup return `Option.none` — equivalent to the
+          // pre-loop-fix behaviour, since ForwardAll mode never has a
+          // worker fronted by us.
+          staticRegistryFromString(""),
+          // Provide a no-op WorkerRegistryControl so any future code that
+          // reaches for it in this mode doesn't crash.
+          workerRegistryControlNoopLayer
+        )
       )
-    )
+    ),
+    metricsServerLayer,
   )
   return { program, layer }
 }
@@ -235,10 +247,12 @@ const buildKubernetesLayer = () => {
     const proxy = yield* ProxyCore
     const probe = yield* HealthProbe
     yield* probe.start
+    yield* MetricsServer
     yield* Effect.logInfo(
       `sip-front-proxy ${PROXY_VERSION} mode=kubernetes ns=${namespace} ` +
         `sts=${statefulSetName} bound=${proxy.localAddress.ip}:${proxy.localAddress.port} ` +
-        `advertised=${proxy.advertisedAddress.ip}:${proxy.advertisedAddress.port}`
+        `advertised=${proxy.advertisedAddress.ip}:${proxy.advertisedAddress.port} ` +
+        `metrics=:${metricsPort}`
     )
     return yield* Effect.never
   })
@@ -286,7 +300,8 @@ const buildKubernetesLayer = () => {
   )
   const layer = Layer.mergeAll(
     ProxyCore.Default.pipe(Layer.provide(lbStrategyLayer)),
-    probeLayer
+    probeLayer,
+    metricsServerLayer,
   ).pipe(Layer.provide(infraLayer))
   return { program, layer }
 }

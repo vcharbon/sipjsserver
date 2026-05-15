@@ -1,0 +1,111 @@
+{
+  "uid": "b2bua-overview",
+  "title": "B2BUA — Overview",
+  "tags": ["sipjsserver", "b2bua"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(b2bua_overload_admit_total, pod)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Active dialogs (proxy estimate)",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(sip_active_dialogs_estimate)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 2, "type": "stat", "title": "New-call admissions / sec",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(b2bua_overload_admit_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Overload rejects / sec",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(b2bua_overload_reject_total{pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 1 }] } } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "Healthy workers (proxy view)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(sip_worker_health{health=\"alive\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 2 }] } } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Admit & reject rate by pod",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "rate(b2bua_overload_admit_total{pod=~\"$pod\"}[1m])", "refId": "A", "legendFormat": "admit {{pod}}" },
+        { "expr": "sum by (pod, reason) (rate(b2bua_overload_reject_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "reject {{pod}} {{reason}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "SIP messages / sec by direction × result (proxy)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (direction, result) (rate(sip_messages_total[1m]))", "refId": "A", "legendFormat": "{{direction}} / {{result}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Overload shed probability (per pod)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_overload_shed_probability{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Overload fraction by signal",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "max by (signal) (b2bua_overload_fraction{pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{signal}}" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1.2 } }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Routing API latency p95 (worker)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "max by (stage) (b2bua_routing_api_latency_p95_ms{pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{stage}}" }],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "UDP drops / sec by reason",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (reason) (rate(b2bua_udp_drops_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{reason}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Routing decisions / sec by kind (proxy)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (kind) (rate(sip_routing_decision_total[1m]))", "refId": "A", "legendFormat": "{{kind}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Event-loop lag p95 (worker)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_loop_lag_ms_p95{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "ms", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 200 }] } } }
+    }
+  ]
+}

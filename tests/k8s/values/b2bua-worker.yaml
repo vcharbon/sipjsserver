@@ -13,6 +13,13 @@ fullnameOverride: b2bua-worker
 
 replicaCount: 2
 
+# vmagent (deploy/observability/kind-addons/vmagent.yaml) scrapes pods
+# carrying these annotations. adminPort=3002 serves /metrics.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "3002"
+  prometheus.io/path: "/metrics"
+
 # Pin worker pods to the app tier nodes.
 nodeSelector:
   tier: app

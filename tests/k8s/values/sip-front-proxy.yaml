@@ -9,6 +9,13 @@ image:
 
 replicaCount: 2
 
+# vmagent (deploy/observability/kind-addons/vmagent.yaml) scrapes pods
+# carrying these annotations. MetricsServer default port is 9090.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+
 # Pin proxy pods to the edge tier nodes (kind worker labels in cluster.yaml).
 nodeSelector:
   tier: edge

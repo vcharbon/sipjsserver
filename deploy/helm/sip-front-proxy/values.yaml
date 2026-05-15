@@ -90,6 +90,10 @@ vip:
 
 resources: {}
 
+# Port where MetricsServer (sip_* Prometheus metrics) binds. Must match
+# whatever the process actually listens on; default is the code default.
+metricsPort: 9090
+
 # RFC 3261 Timer C max INVITE establishment is 180s; +20s safety = 200s
 # (see resilience-model.md timing table).
 terminationGracePeriodSeconds: 200

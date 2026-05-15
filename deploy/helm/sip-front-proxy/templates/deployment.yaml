@@ -108,6 +108,13 @@ spec:
             - name: probe-udp
               containerPort: {{ .Values.healthProbe.bindPort }}
               protocol: UDP
+            # MetricsServer (src/sip-front-proxy/observability/MetricsServer.ts)
+            # listens here. Declared so prometheus-style scrapers
+            # (vmagent) can match the pod's prometheus.io/port annotation
+            # against a real container port.
+            - name: metrics
+              containerPort: {{ .Values.metricsPort | default 9090 }}
+              protocol: TCP
           envFrom:
             - configMapRef:
                 name: {{ include "sip-front-proxy.fullname" . }}

@@ -1,0 +1,115 @@
+{
+  "uid": "sip-front-proxy",
+  "title": "SIP front-proxy — Load balancer",
+  "tags": ["sipjsserver", "proxy", "lb"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(sip_active_dialogs_estimate, pod)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      },
+      {
+        "name": "worker",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(sip_worker_health, worker_id)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Active dialogs",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(sip_active_dialogs_estimate{pod=~\"$pod\"})", "refId": "A" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Workers alive",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "count(sip_worker_health{health=\"alive\"} == 1)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 1 }, { "color": "green", "value": 2 }] } } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Workers dead / draining / not-ready",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "count(sip_worker_health{health=~\"dead|draining|not-ready\"} == 1)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 2 }] } } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "HMAC failures / sec",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum(rate(sip_routing_hmac_failure_total[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "cps", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.01 }] } } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Worker health state (per worker, stacked 0/1)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_worker_health{worker_id=~\"$worker\", health!~\"unknown\"} == 1", "refId": "A", "legendFormat": "{{worker_id}} / {{health}}" }],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Messages / sec by direction × result",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (direction, result) (rate(sip_messages_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{direction}}/{{result}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Messages / sec by method (top 10)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "topk(10, sum by (method_or_status) (rate(sip_messages_total{pod=~\"$pod\"}[1m])))", "refId": "A", "legendFormat": "{{method_or_status}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Routing decisions / sec by kind",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (kind) (rate(sip_routing_decision_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{kind}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Routing duration (p50/p95/p99)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(sip_routing_duration_seconds_bucket{pod=~\"$pod\"}[1m])))", "refId": "A", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(sip_routing_duration_seconds_bucket{pod=~\"$pod\"}[1m])))", "refId": "B", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(sip_routing_duration_seconds_bucket{pod=~\"$pod\"}[1m])))", "refId": "C", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Cancel-lookup outcomes / sec",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sum by (outcome) (rate(sip_cancel_lookup_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{outcome}}" }],
+      "fieldConfig": { "defaults": { "unit": "cps" } }
+    },
+    {
+      "id": 11, "type": "table", "title": "Worker health snapshot",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_worker_health == 1", "refId": "A", "format": "table", "instant": true }],
+      "transformations": [
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "__name__": true, "job": true, "namespace": true, "container": true, "app_kubernetes_io_instance": true, "app_kubernetes_io_name": true, "Value": true, "pod_template_hash": true } } }
+      ]
+    }
+  ]
+}
