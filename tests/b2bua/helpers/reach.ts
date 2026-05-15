@@ -20,7 +20,15 @@
 
 import { isDeepStrictEqual } from "node:util"
 import { executeActions } from "../../../src/b2bua/rules/framework/ActionExecutor.js"
-import type { HandlerResult } from "../../../src/sip/SipRouter.js"
+import type {
+  HandlerResult,
+  CriticalStateEffect,
+  SoftBoundedEffect,
+  BufferedObservabilityEffect,
+  FireAndForgetEffect,
+  OutboundSipEffect,
+  SideEffect,
+} from "../../../src/sip/SipRouter.js"
 import type { RuleAction, RuleContext } from "../../../src/b2bua/rules/framework/RuleDefinition.js"
 import type { Call, Leg, Dialog, StackDialogSchemaType, B2buaDialogExt, InviteTxnHandle } from "../../../src/call/CallModel.js"
 import type { SipHeader, SipRequest, SipResponse, RemoteInfo } from "../../../src/sip/types.js"
@@ -176,6 +184,25 @@ export function runActions(
   const result = executeActions(actions, ctx, ruleId)
   return { after: result.call, result }
 }
+
+/** Concatenate every non-outbound effect slot — convenience for tests that
+ *  treat effects as a flat list (legacy shape). */
+export function allEffects(result: HandlerResult): SideEffect[] {
+  return [
+    ...result.effects.critical,
+    ...result.effects.soft,
+    ...result.effects.buffered,
+    ...result.effects.fireAndForget,
+  ]
+}
+
+/** Alias for `result.effects.outbound` — convenience for tests that previously
+ *  read `result.outbound`. */
+export function allOutbound(result: HandlerResult): ReadonlyArray<OutboundSipEffect> {
+  return result.effects.outbound
+}
+
+export type { CriticalStateEffect, SoftBoundedEffect, BufferedObservabilityEffect, FireAndForgetEffect, OutboundSipEffect, SideEffect }
 
 // ── Fixture builders ───────────────────────────────────────────────────────
 // Minimal Call/Leg/Dialog factories for reach tests. Shared with

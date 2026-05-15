@@ -14,6 +14,7 @@ import { executeRules } from "../../src/b2bua/rules/framework/RuleExecutor.js"
 import type { AnyRuleDefinition } from "../../src/b2bua/rules/framework/RuleDefinition.js"
 import type { Call, Leg, Dialog } from "../../src/call/CallModel.js"
 import type { ResolvedContext, HandlerResult } from "../../src/sip/SipRouter.js"
+import { emptyEffects } from "../../src/sip/SipRouter.js"
 import type { SipRequest, SipHeader, RemoteInfo } from "../../src/sip/types.js"
 import { hydrateRequest } from "../../src/sip/parsers/extract-fields.js"
 import type { AppConfigData } from "../../src/config/AppConfig.js"
@@ -183,12 +184,11 @@ function inertRule(id: string): AnyRuleDefinition {
 const noopFallback = (_ctx: ResolvedContext) =>
   Effect.succeed<HandlerResult>({
     call: _ctx.call,
-    outbound: [],
-    effects: [],
+    effects: emptyEffects,
   })
 
 function countFlush(result: HandlerResult): number {
-  return result.effects.filter((e) => e.type === "flush-redis").length
+  return result.effects.critical.filter((e) => e.type === "flush-redis").length
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

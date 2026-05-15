@@ -12,10 +12,17 @@
 import type { RuleAction, RuleContext, MessageTransform } from "./RuleDefinition.js"
 import { applyBodyUpdate, applyHeaderUpdates } from "./actions/apply.js"
 import { hydrateRequest } from "../../../sip/parsers/extract-fields.js"
-import type { HandlerResult, OutboundEnvelope, SideEffect } from "../../../sip/SipRouter.js"
+import type {
+  HandlerResult,
+  OutboundSipEffect,
+  CriticalStateEffect,
+  SoftBoundedEffect,
+  BufferedObservabilityEffect,
+  FireAndForgetEffect,
+} from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
 import type { TimerEntry, Leg, Dialog, TransferState, EarlyPromoteState, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
-import { replaceTimerById, TERMINATING_TIMEOUT_MS } from "../../../call/timer-helpers.js"
+import { replaceTimerById } from "../../../call/timer-helpers.js"
 import {
   type Call,
   addCdrEvent,
@@ -70,11 +77,34 @@ import { classifyAdmission } from "../../TargetAdmission.js"
 
 // ── Internal working state ─────────────────────────────────────────────────
 
+interface ExecutionEffects {
+  critical: CriticalStateEffect[]
+  outbound: OutboundSipEffect[]
+  soft: SoftBoundedEffect[]
+  buffered: BufferedObservabilityEffect[]
+  fireAndForget: FireAndForgetEffect[]
+}
+
 interface ExecutionState {
   call: Call
-  outbound: OutboundEnvelope[]
-  effects: SideEffect[]
+  effects: ExecutionEffects
   spanEvents: Array<{ name: string; attributes?: Record<string, unknown> }>
+}
+
+function emptyExecutionEffects(): ExecutionEffects {
+  return { critical: [], outbound: [], soft: [], buffered: [], fireAndForget: [] }
+}
+
+/** Merge a fully-typed HandlerEffects record into the mutable working slot. */
+function mergeEffectsInto(
+  target: ExecutionEffects,
+  source: import("../../../sip/SipRouter.js").HandlerEffects,
+): void {
+  if (source.critical.length > 0) target.critical.push(...source.critical)
+  if (source.outbound.length > 0) target.outbound.push(...source.outbound)
+  if (source.soft.length > 0) target.soft.push(...source.soft)
+  if (source.buffered.length > 0) target.buffered.push(...source.buffered)
+  if (source.fireAndForget.length > 0) target.fireAndForget.push(...source.fireAndForget)
 }
 
 /**
@@ -330,10 +360,11 @@ function directionalTags(
 function buildCancelEnvelope(
   leg: Leg,
   labelSuffix: string,
-): OutboundEnvelope | undefined {
+): OutboundSipEffect | undefined {
   const handle = leg.pendingInviteTxn
   if (handle === undefined) return undefined
   return {
+    type: "send-sip",
     message: generateCancel(handle as unknown as InviteClientTransactionHandle),
     destination: handle.destination,
     label: `CANCEL ${leg.legId}${labelSuffix}`,
@@ -354,8 +385,7 @@ export function executeActions(
 ): HandlerResult {
   const state: ExecutionState = {
     call: ctx.call,
-    outbound: [],
-    effects: [],
+    effects: emptyExecutionEffects(),
     spanEvents: [],
   }
 
@@ -365,7 +395,6 @@ export function executeActions(
 
   return {
     call: state.call,
-    outbound: state.outbound,
     effects: state.effects,
     ...(state.spanEvents.length > 0 ? { spanEvents: state.spanEvents } : {}),
   }
@@ -435,7 +464,7 @@ function executeAction(
       executeCancelTimer(action, state)
       break
     case "cancel-all-timers":
-      state.effects.push({ type: "cancel-all-timers" })
+      state.effects.critical.push({ type: "cancel-all-timers" })
       state.call = { ...state.call, timers: [] }
       break
     case "terminate-call":
@@ -504,7 +533,8 @@ function executeRespond(
     ...(body !== undefined ? { body } : {}),
     ...(contentType !== undefined ? { contentType } : {}),
   })
-  state.outbound.push({
+  state.effects.outbound.push({
+    type: "send-sip",
     message: response,
     destination: { host: ctx.event.rinfo.address, port: ctx.event.rinfo.port },
     label: `respond ${status}`,
@@ -828,7 +858,8 @@ function relayRequest(
     finalTarget = routed.target
   }
 
-  state.outbound.push({
+  state.effects.outbound.push({
+    type: "send-sip",
     message: relayed,
     destination: finalTarget,
     label: `relay ${req.method} to ${targetLeg.legId}`,
@@ -1119,7 +1150,8 @@ function relayResponseMsg(
     ? { host: state.call.aLeg.source.address, port: state.call.aLeg.source.port }
     : pendingDestination ?? legTarget(targetLeg)
 
-  state.outbound.push({
+  state.effects.outbound.push({
+    type: "send-sip",
     message: relayed,
     destination,
     label: `relay ${effectiveStatus} to ${targetLeg.legId}`,
@@ -1377,7 +1409,8 @@ function executeAckLeg(
   }
   const routed = applyEgressRouting(ackMsg, dialog, target, legId, ctx)
 
-  state.outbound.push({
+  state.effects.outbound.push({
+    type: "send-sip",
     message: routed.msg,
     destination: routed.target,
     label: `ACK ${legId}`,
@@ -1428,7 +1461,8 @@ function executeSendRequestToLeg(
   }))
 
   const routed = applyEgressRouting(request, dialog, target, legId, ctx)
-  state.outbound.push({
+  state.effects.outbound.push({
+    type: "send-sip",
     message: routed.msg,
     destination: routed.target,
     label: `${method} to ${legId}`,
@@ -1506,7 +1540,8 @@ function executeSendPrackToLeg(
   }))
 
   const routed = applyEgressRouting(request, dialog, target, legId, ctx)
-  state.outbound.push({
+  state.effects.outbound.push({
+    type: "send-sip",
     message: routed.msg,
     destination: routed.target,
     label: `PRACK to ${legId}`,
@@ -1565,7 +1600,7 @@ function executeCreateLeg(
   // will never come.
   const verdict = classifyAdmission(destination.host, ctx.config.workerAllowedTargetSuffixes)
   if (verdict === "reject") {
-    state.effects.push(...terminateCallEffects(state.call))
+    mergeEffectsInto(state.effects, terminateCallEffects(state.call))
     state.spanEvents.push({
       name: "rule_action",
       attributes: {
@@ -1606,8 +1641,8 @@ function executeCreateLeg(
     }
   }
 
-  state.outbound.push(...outbound)
-  state.effects.push(...result.effects)
+  state.effects.outbound.push(...outbound)
+  mergeEffectsInto(state.effects, result.effects)
 }
 
 // ── destroy-leg (composite) ───────────────────────────────────────────────
@@ -1656,7 +1691,8 @@ function executeDestroyLeg(
         sip: newSip,
       }))
       const routed = applyEgressRouting(request, dialog, target, legId, ctx)
-      state.outbound.push({
+      state.effects.outbound.push({
+        type: "send-sip",
         message: routed.msg,
         destination: routed.target,
         label: `BYE ${legId}`,
@@ -1675,7 +1711,7 @@ function executeDestroyLeg(
   } else {
     // CANCEL an early/trying leg
     const env = buildCancelEnvelope(leg, "")
-    if (env !== undefined) state.outbound.push(env)
+    if (env !== undefined) state.effects.outbound.push(env)
     state.call = setByeDisposition(state.call, legId, "cancelled")
     state.call = setLegDisposition(state.call, legId, "cancelling")
   }
@@ -1718,7 +1754,7 @@ function executeCancelLeg(
   if (leg.state === "confirmed") return // caller should have used destroy-leg
 
   const env = buildCancelEnvelope(leg, "")
-  if (env !== undefined) state.outbound.push(env)
+  if (env !== undefined) state.effects.outbound.push(env)
   state.call = setLegDisposition(state.call, legId, "cancelling")
 }
 
@@ -1749,7 +1785,7 @@ function executeScheduleTimer(
   // re-arms the keepalive_timeout that the in-flight 200 OK already
   // cancelled, blocking the next keepalive cycle.
   state.call = { ...state.call, timers: replaceTimerById(state.call.timers, timer) }
-  state.effects.push({ type: "schedule-timer", timer })
+  state.effects.critical.push({ type: "schedule-timer", timer })
 }
 
 // ── terminate-call (composite) ────────────────────────────────────────────
@@ -1791,7 +1827,8 @@ function executeTerminateCall(
           sip: newSip,
         }))
         const routed = applyEgressRouting(request, dialog, target, leg.legId, ctx)
-        state.outbound.push({
+        state.effects.outbound.push({
+          type: "send-sip",
           message: routed.msg,
           destination: routed.target,
           label: `BYE ${leg.legId} (terminate)`,
@@ -1801,7 +1838,7 @@ function executeTerminateCall(
     } else if (leg.state === "trying" || leg.state === "early") {
       if (leg.legId !== "a") {
         const env = buildCancelEnvelope(leg, " (terminate)")
-        if (env !== undefined) state.outbound.push(env)
+        if (env !== undefined) state.effects.outbound.push(env)
       }
     }
   }
@@ -1850,18 +1887,14 @@ function executeBeginTermination(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  // Idempotency: a re-entry while already terminating must not re-issue
-  // cancel-all-timers + reschedule the safety net (the historical bug
-  // that drifted calls indefinitely inside `terminating` whenever a
-  // late keepalive_timeout fired). If the safety timer is still on the
-  // persisted list, the teardown is in flight — nothing to redo.
-  const safetyTimerId = `terminating-timeout-${ctx.callRef}`
-  if (
-    state.call.state === "terminating" &&
-    state.call.timers.some((t) => t.id === safetyTimerId)
-  ) {
-    return
-  }
+  // Phase 5: CallState.update auto-arms the `terminating_timeout`
+  // safety net atomically with the state transition; the explicit
+  // schedule-timer below was retired in Phase 6. The idempotency
+  // guard previously needed here (re-entry while already terminating
+  // would have re-emitted cancel-all-timers + reschedule) is also
+  // retired — `replaceTimerById` inside CallState.update is naturally
+  // idempotent on the safety entry, and re-running cancel-all-timers
+  // on an already-terminating call is harmless (no live timers left).
 
   // RFC 3326 Reason header — verbatim from the action when present.
   // Stamped on every BYE this composite emits so upstream UAs can log
@@ -1896,7 +1929,8 @@ function executeBeginTermination(
           sip: newSip,
         }))
         const routed = applyEgressRouting(request, dialog, target, leg.legId, ctx)
-        state.outbound.push({
+        state.effects.outbound.push({
+          type: "send-sip",
           message: routed.msg,
           destination: routed.target,
           label: `BYE ${leg.legId} (begin-termination)`,
@@ -1908,7 +1942,7 @@ function executeBeginTermination(
       if (leg.legId !== "a") {
         // CANCEL trying/early b-legs
         const env = buildCancelEnvelope(leg, " (begin-termination)")
-        if (env !== undefined) state.outbound.push(env)
+        if (env !== undefined) state.effects.outbound.push(env)
         state.call = setByeDisposition(state.call, leg.legId, "cancelled")
         state.call = setLegState(state.call, leg.legId, "terminated")
       } else {
@@ -1918,23 +1952,16 @@ function executeBeginTermination(
     }
   }
 
-  // Transition to "terminating"
+  // Transition to "terminating". CallState.update will detect the
+  // edge (active → terminating) and atomically install the safety
+  // timer via `replaceTimerById` + `timers.schedule` (Phase 5). No
+  // explicit schedule-timer effect needed here.
   state.call = { ...state.call, state: "terminating" }
 
-  // Cancel all active timers (keepalive, duration, etc.)
-  state.effects.push({ type: "cancel-all-timers" })
-
-  // Schedule 64s safety timer (2x RFC 3261 Timer B/F). Use the
-  // replace-by-id helper even though the idempotency guard above
-  // normally short-circuits a second entry — defensive against future
-  // call sites that bypass `begin-termination` and invoke this directly.
-  const safetyTimer: TimerEntry = {
-    id: safetyTimerId,
-    type: "terminating_timeout",
-    fireAt: ctx.nowMs + TERMINATING_TIMEOUT_MS,
-  }
-  state.call = { ...state.call, timers: replaceTimerById(state.call.timers, safetyTimer) }
-  state.effects.push({ type: "schedule-timer", timer: safetyTimer })
+  // Cancel all active timers (keepalive, duration, etc.). The safety
+  // timer the auto-arm installs is on `fibersMap`, not yet on
+  // `call.timers`, so this does not race it.
+  state.effects.critical.push({ type: "cancel-all-timers" })
 
   // Persist mid-teardown state for crash recovery. CDR is written exactly
   // once when the call transitions to `terminated` — the InvariantEnforcer
@@ -1942,7 +1969,7 @@ function executeBeginTermination(
   // duplicate record per call (one with state="terminating", one with
   // state="terminated"); the second carries the final state, so the first
   // is just billing noise.
-  state.effects.push({ type: "flush-redis" })
+  state.effects.critical.push({ type: "flush-redis" })
 }
 
 // ── send-notify ───────────────────────────────────────────────────────────
@@ -1986,7 +2013,8 @@ function executeSendNotify(
   }))
 
   const routed = applyEgressRouting(request, dialog, target, legId, ctx)
-  state.outbound.push({
+  state.effects.outbound.push({
+    type: "send-sip",
     message: routed.msg,
     destination: routed.target,
     label: `NOTIFY ${legId}`,
@@ -2066,7 +2094,8 @@ function executeSendReinvite(
   }))
 
   const routed = applyEgressRouting(reinvite, dialog, target, legId, ctx)
-  state.outbound.push({
+  state.effects.outbound.push({
+    type: "send-sip",
     message: routed.msg,
     destination: routed.target,
     label: `re-INVITE ${legId}`,
@@ -2151,7 +2180,7 @@ function executeCancelTimer(
 ): void {
   const { type, timerId } = action
   void type
-  state.effects.push({ type: "cancel-timer", id: timerId })
+  state.effects.critical.push({ type: "cancel-timer", id: timerId })
   state.call = { ...state.call, timers: state.call.timers.filter((t) => t.id !== timerId) }
 }
 
@@ -2208,7 +2237,8 @@ function executeSendRaw(
 ): void {
   const { type, message, destination, label } = action
   void type
-  state.outbound.push({
+  state.effects.outbound.push({
+    type: "send-sip",
     message,
     destination: { host: destination.address, port: destination.port },
     label,
@@ -2224,5 +2254,5 @@ function executeReferAsyncHttp(
 ): void {
   const { type, request } = action
   void type
-  state.effects.push({ type: "refer-async-http", callRef: ctx.callRef, request })
+  state.effects.fireAndForget.push({ type: "refer-async-http", callRef: ctx.callRef, request })
 }

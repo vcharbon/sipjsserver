@@ -28,6 +28,7 @@ import { CallLimiter } from "../../src/call/CallLimiter.js"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { EpochCounter } from "../../src/replication/EpochCounter.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
+import { BufferedTerminateWriter } from "../../src/cache/BufferedTerminateWriter.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 import { OverloadController } from "../../src/b2bua/OverloadController.js"
 import { RedisClient } from "../../src/redis/RedisClient.js"
@@ -102,11 +103,19 @@ export function liveStackLayer(opts: {
     Layer.provide(TracerHealthSignal.noop),
   )
   const CdrLayer = CdrWriter.layer.pipe(Layer.provide(AppConfigLayer))
+  // Phase 4 — live stack uses the test config defaults (storageBufferQueueMax: 0)
+  // so this resolves to a passthrough.
+  const BufferedTerminateL = BufferedTerminateWriter.layer.pipe(
+    Layer.provide(CallStateCacheLayer),
+    Layer.provide(AppConfigLayer),
+    Layer.provide(MetricsLayer),
+  )
 
   return B2buaCoreLayer.pipe(
     Layer.provideMerge(UdpLayer),
     Layer.provideMerge(OverloadLayer),
     Layer.provideMerge(CallStateCacheLayer),
+    Layer.provideMerge(BufferedTerminateL),
     Layer.provideMerge(CallLimiterLayer),
     Layer.provideMerge(CallControlLayer),
     Layer.provideMerge(TracingLayer),

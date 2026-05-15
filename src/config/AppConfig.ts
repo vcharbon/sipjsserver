@@ -176,6 +176,44 @@ export const AppConfigData = Schema.Struct({
   /** Cadence of the idle-reclamation sweeper. */
   bufferedSendSweepIntervalMs: Schema.Int,
 
+  // ── BufferedCdrLayer (non-blocking CDR write) ──────────────────────────
+  /**
+   * Bounded queue capacity for the CDR drainer. `0` selects the direct
+   * (un-buffered) writer — used by fake-clock tests to keep CDR writes in
+   * the same fiber as the call termination. Production sets this >0 so
+   * NDJSON `appendFile` cannot stall a worker on disk pressure.
+   * Drop-on-overload is acceptable for CDR — losing a billing line is
+   * preferable to stalling call termination.
+   */
+  cdrBufferQueueMax: Schema.Int,
+
+  // ── BufferedTerminateWriter (non-blocking terminate-path Redis I/O) ────
+  /**
+   * Bounded queue capacity for the terminate-path Redis drainer pool.
+   * `0` selects the direct path (no buffering) — used by fake-clock
+   * tests. Production wraps Redis deleteCall/terminate-putCall here so
+   * a stalled Redis cannot pin the call-eviction step.
+   */
+  storageBufferQueueMax: Schema.Int,
+  /** Drainer fiber count for the terminate-path buffer. */
+  storageBufferDrainers: Schema.Int,
+  /**
+   * Fall-through timeout when the buffer queue is full. State writes
+   * cannot be dropped silently — fall back to a direct call bounded by
+   * this timeout, catchTag(StorageError, log) on failure.
+   */
+  storageDropFallbackMs: Schema.Int,
+
+  // ── Limiter DECR bound (Phase 7 — Trap 4) ──────────────────────────────
+  /**
+   * Per-item timeout for `limiter.decrement` on the terminate path.
+   * The limiter window rotation is self-repairing — a missed decrement
+   * leaks at most one window — so this can stay short. Trap 4 forbids
+   * wrapping DECR in `ensuring`: that would convert a slow Redis hang
+   * into an un-killable call-eviction stall.
+   */
+  limiterDecrementTimeoutMs: Schema.Int,
+
   // ── Tracing ───────────────────────────────────────────────────────────
   /** Header names whose values are redacted in sip.raw_message span attributes. */
   scrubHeaders: Schema.Array(Schema.String),
@@ -329,6 +367,11 @@ function readConfigFromEnv(): AppConfigData {
     bufferedSendIdleTtlMs: parseInt(envOrDefault("BUFFERED_SEND_IDLE_TTL_MS", "5000"), 10),
     bufferedSendMaxPeers: parseInt(envOrDefault("BUFFERED_SEND_MAX_PEERS", "10000"), 10),
     bufferedSendSweepIntervalMs: parseInt(envOrDefault("BUFFERED_SEND_SWEEP_INTERVAL_MS", "1000"), 10),
+    cdrBufferQueueMax: parseInt(envOrDefault("CDR_BUFFER_QUEUE_MAX", "10000"), 10),
+    storageBufferQueueMax: parseInt(envOrDefault("STORAGE_BUFFER_QUEUE_MAX", "10000"), 10),
+    storageBufferDrainers: parseInt(envOrDefault("STORAGE_BUFFER_DRAINERS", "4"), 10),
+    storageDropFallbackMs: parseInt(envOrDefault("STORAGE_DROP_FALLBACK_MS", "1000"), 10),
+    limiterDecrementTimeoutMs: parseInt(envOrDefault("LIMITER_DECREMENT_TIMEOUT_MS", "1000"), 10),
     scrubHeaders: envOrDefault("SCRUB_HEADERS", "Authorization,Proxy-Authorization")
       .split(",")
       .map((h) => h.trim())

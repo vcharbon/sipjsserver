@@ -29,7 +29,7 @@ import { splitTopLevelCommas } from "../../sip/parsers/custom/structured-headers
 import { generateResponse } from "../../sip/generators.js"
 import type { ContactSpec } from "../../sip/generators.js"
 import type { RemoteInfo, SipRequest } from "../../sip/types.js"
-import type { HandlerResult, OutboundEnvelope } from "../../sip/SipRouter.js"
+import type { HandlerResult, OutboundSipEffect } from "../../sip/SipRouter.js"
 import { createBLegFromRoute, terminateCallEffects } from "../../b2bua/helpers.js"
 import { classifyAdmission } from "../../b2bua/TargetAdmission.js"
 import type { CallDecisionEngine } from "../CallDecisionEngine.js"
@@ -46,15 +46,17 @@ const buildAdmissionRejectResult = (
     toTag: newTag(),
     contact: aLegContact,
   })
+  const outbound: OutboundSipEffect[] = [{
+    type: "send-sip",
+    message: rejectResp,
+    destination: { host: rinfo.address, port: rinfo.port },
+    label: `reject 503 (admission: host=${host} not allow-listed)`,
+    legId: "a",
+  }]
+  const term = terminateCallEffects(call)
   return {
     call,
-    outbound: [{
-      message: rejectResp,
-      destination: { host: rinfo.address, port: rinfo.port },
-      label: `reject 503 (admission: host=${host} not allow-listed)`,
-      legId: "a",
-    }] as OutboundEnvelope[],
-    effects: terminateCallEffects(call),
+    effects: { ...term, outbound },
     spanEvents: [{
       name: "route_decision",
       attributes: {
@@ -107,15 +109,17 @@ export function applyRoute(
         toTag: newTag(),
         contact: aLegContact,
       })
+      const outbound: OutboundSipEffect[] = [{
+        type: "send-sip",
+        message: rejectResp,
+        destination: { host: rinfo.address, port: rinfo.port },
+        label: "reject 500 (adapter missing features)",
+        legId: "a",
+      }]
+      const term = terminateCallEffects(args.call)
       return {
         call: args.call,
-        outbound: [{
-          message: rejectResp,
-          destination: { host: rinfo.address, port: rinfo.port },
-          label: "reject 500 (adapter missing features)",
-          legId: "a",
-        }] as OutboundEnvelope[],
-        effects: terminateCallEffects(args.call),
+        effects: { ...term, outbound },
         spanEvents: [{
           name: "route_decision",
           attributes: { "route.action": "error", "route.reason": "missing_features" },
@@ -265,8 +269,7 @@ export function applyRoute(
               )
               return {
                 call: bLegResult.call,
-                outbound: bLegResult.outbound,
-                effects: bLegResult.effects,
+                effects: { ...bLegResult.effects, outbound: bLegResult.outbound },
               } satisfies HandlerResult
             }
           }
@@ -283,15 +286,17 @@ export function applyRoute(
             statusCode: 486,
             reason: "limiter",
           })
+          const rejectOutbound: OutboundSipEffect[] = [{
+            type: "send-sip",
+            message: rejectResp,
+            destination: { host: rinfo.address, port: rinfo.port },
+            label: "reject 486 (limiter)",
+            legId: "a",
+          }]
+          const rejectEffects = terminateCallEffects(rejected)
           return {
             call: rejected,
-            outbound: [{
-              message: rejectResp,
-              destination: { host: rinfo.address, port: rinfo.port },
-              label: "reject 486 (limiter)",
-              legId: "a",
-            }] as OutboundEnvelope[],
-            effects: terminateCallEffects(rejected),
+            effects: { ...rejectEffects, outbound: rejectOutbound },
           } satisfies HandlerResult
         }
         limiterEntries.push({
@@ -327,8 +332,7 @@ export function applyRoute(
 
     return {
       call: bLegResult.call,
-      outbound: bLegResult.outbound,
-      effects: bLegResult.effects,
+      effects: { ...bLegResult.effects, outbound: bLegResult.outbound },
       spanEvents: [{
         name: "route_decision",
         attributes: {

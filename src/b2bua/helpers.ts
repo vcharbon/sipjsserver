@@ -4,7 +4,14 @@
 
 import type { Call, Dialog, InviteTxnHandle, Leg, TimerEntry } from "../call/CallModel.js"
 import { addBLeg, addCdrEvent, makeEmptyDialog, randomInitialCSeq } from "../call/CallModel.js"
-import type { SideEffect, OutboundEnvelope } from "../sip/SipRouter.js"
+import {
+  emptyEffects,
+  type HandlerEffects,
+  type CriticalStateEffect,
+  type SoftBoundedEffect,
+  type BufferedObservabilityEffect,
+  type OutboundSipEffect,
+} from "../sip/SipRouter.js"
 import type { SipRequest } from "../sip/types.js"
 import type { AppConfigData } from "../config/AppConfig.js"
 import { getHeader, newBranch, newTag, stripTag } from "../sip/MessageHelpers.js"
@@ -19,20 +26,16 @@ import { buildCallVia, buildCallContact } from "./stack-identity.js"
 // ---------------------------------------------------------------------------
 // Canonical cleanup effects — used by ALL call termination paths
 // ---------------------------------------------------------------------------
+//
+// Each effect kind belongs to exactly one safety category — see
+// docs/adr/0003-must-run-effects-under-interruption.md. The interpreter
+// (SipRouter.processResult) wraps each slot with its prescribed primitive.
+//   - critical: schedule/cancel timers, flush-redis, remove-call
+//   - soft:     decrement-limiter (self-repairing, bounded by Phase 7)
+//   - buffered: write-cdr (drop-on-overload acceptable per Phase 3)
 
 /**
- * Available SideEffect types (defined in SipRouter.ts, executed in this order by withCall):
- *   1. schedule-timer    — schedule a TimerEntry to fire later
- *   2. cancel-timer      — cancel a specific timer by ID (e.g. `no-answer-{callRef}-{legId}`)
- *   3. cancel-all-timers — cancel every timer for the call
- *   4. decrement-limiter — release a limiter slot (limiterId + window)
- *   5. write-cdr         — flush CDR events to the writer
- *   6. flush-redis       — persist call state changes to Redis
- *   7. remove-call       — delete the call from state (must be last)
- */
-
-/**
- * Returns the FULL canonical list of side effects for immediate call termination.
+ * Returns the FULL canonical effects record for immediate call termination.
  * Used by termination paths that skip the "terminating" state because no
  * outstanding BYE transactions need resolution:
  *   - Initial INVITE rejection (503/486)
@@ -42,17 +45,18 @@ import { buildCallVia, buildCallContact } from "./stack-identity.js"
  * Paths that send outbound BYEs should use beginTerminationEffects() instead
  * and defer final cleanup to finalCleanupEffects() when all legs resolve.
  */
-export function terminateCallEffects(call: Call): SideEffect[] {
-  return [
+export function terminateCallEffects(call: Call): HandlerEffects {
+  const soft: SoftBoundedEffect[] = call.limiterEntries.map((e) => ({
+    type: "decrement-limiter" as const,
+    limiterId: e.limiterId,
+    window: e.originWindow,
+  }))
+  const critical: CriticalStateEffect[] = [
     { type: "cancel-all-timers" },
-    ...call.limiterEntries.map((e) => ({
-      type: "decrement-limiter" as const,
-      limiterId: e.limiterId,
-      window: e.originWindow
-    })),
-    { type: "write-cdr" },
-    { type: "remove-call" }
+    { type: "remove-call" },
   ]
+  const buffered: BufferedObservabilityEffect[] = [{ type: "write-cdr" }]
+  return { ...emptyEffects, critical, soft, buffered }
 }
 
 /**
@@ -72,7 +76,7 @@ export function terminateCallEffects(call: Call): SideEffect[] {
  * @param callRef - needed to build the terminating_timeout timer ID
  * @param nowMs - current wall-clock time for timer fireAt
  */
-export function beginTerminationEffects(callRef: string, nowMs: number): SideEffect[] {
+export function beginTerminationEffects(callRef: string, nowMs: number): HandlerEffects {
   // 64s = 2× RFC 3261 Timer B/F (32s). Gives plenty of margin for the
   // far side to respond to our BYE before we force-clean.
   const TERMINATING_TIMEOUT_MS = 64_000
@@ -81,11 +85,12 @@ export function beginTerminationEffects(callRef: string, nowMs: number): SideEff
     type: "terminating_timeout",
     fireAt: nowMs + TERMINATING_TIMEOUT_MS,
   }
-  return [
+  const critical: CriticalStateEffect[] = [
     { type: "cancel-all-timers" },
     { type: "schedule-timer", timer: safetyTimer },
     { type: "flush-redis" },
   ]
+  return { ...emptyEffects, critical }
 }
 
 /**
@@ -96,16 +101,17 @@ export function beginTerminationEffects(callRef: string, nowMs: number): SideEff
  * Also decrements limiters — deferred to this point so that a call in
  * "terminating" state still holds its limiter slot until fully cleaned up.
  */
-export function finalCleanupEffects(call: Call): SideEffect[] {
-  return [
+export function finalCleanupEffects(call: Call): HandlerEffects {
+  const soft: SoftBoundedEffect[] = call.limiterEntries.map((e) => ({
+    type: "decrement-limiter" as const,
+    limiterId: e.limiterId,
+    window: e.originWindow,
+  }))
+  const critical: CriticalStateEffect[] = [
     { type: "cancel-all-timers" },
-    ...call.limiterEntries.map((e) => ({
-      type: "decrement-limiter" as const,
-      limiterId: e.limiterId,
-      window: e.originWindow
-    })),
     { type: "remove-call" },
   ]
+  return { ...emptyEffects, critical, soft }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +164,7 @@ function stripTagWithFlag(headerValue: string): { value: string; stripped: boole
  */
 export function createBLegFromRoute(
   opts: CreateBLegOptions
-): { call: Call; outbound: OutboundEnvelope[]; effects: SideEffect[]; warnings: string[] } {
+): { call: Call; outbound: OutboundSipEffect[]; effects: HandlerEffects; warnings: string[] } {
   const { call, baseInvite, route, config, nowMs } = opts
   const legNumber = call.bLegs.length + 1
   const legId = `b-${legNumber}`
@@ -187,7 +193,7 @@ export function createBLegFromRoute(
   const requestUri = route.new_ruri ?? baseInvite?.uri
   const isEmergency = call.emergency === true
 
-  const outbound: OutboundEnvelope[] = []
+  const outbound: OutboundSipEffect[] = []
   let pendingInviteTxn: InviteTxnHandle | undefined
 
   if (baseInvite !== undefined) {
@@ -338,6 +344,7 @@ export function createBLegFromRoute(
     }
 
     outbound.push({
+      type: "send-sip",
       message: bLegInvite,
       destination: wireDestination,
       label: `send ${legId} INVITE`,
@@ -397,10 +404,11 @@ export function createBLegFromRoute(
   }
   updated = { ...updated, timers: [...updated.timers, noAnswerTimer] }
 
-  const effects: SideEffect[] = [
+  const critical: CriticalStateEffect[] = [
     { type: "schedule-timer", timer: noAnswerTimer },
-    { type: "flush-redis" }
+    { type: "flush-redis" },
   ]
+  const effects: HandlerEffects = { ...emptyEffects, critical }
 
   return { call: updated, outbound, effects, warnings }
 }

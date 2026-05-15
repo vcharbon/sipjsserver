@@ -118,9 +118,9 @@ describe("ActionExecutor create-leg admission gate", () => {
 
     const result = executeActions(actions, ctx, "test-rule")
 
-    expect(result.outbound.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
     // terminate effects include 'remove-call'
-    expect(result.effects.some((e) => e.type === "remove-call")).toBe(true)
+    expect(result.effects.critical.some((e) => e.type === "remove-call")).toBe(true)
     // span event reflects the rejection
     expect(result.spanEvents?.some((e) => e.name === "rule_action" && e.attributes?.["rule.outcome"] === "admission_reject")).toBe(true)
   })
@@ -139,8 +139,8 @@ describe("ActionExecutor create-leg admission gate", () => {
     const result = executeActions(actions, ctx, "test-rule")
 
     // IP literal admitted: b-leg INVITE outbound emitted, no terminate.
-    expect(result.outbound.length).toBeGreaterThan(0)
-    expect(result.effects.some((e) => e.type === "remove-call")).toBe(false)
+    expect(result.effects.outbound.length).toBeGreaterThan(0)
+    expect(result.effects.critical.some((e) => e.type === "remove-call")).toBe(false)
   })
 
   test("wildcard `*` in allow-list lets any host through", () => {
@@ -156,7 +156,7 @@ describe("ActionExecutor create-leg admission gate", () => {
 
     const result = executeActions(actions, ctx, "test-rule")
 
-    expect(result.outbound.length).toBeGreaterThan(0)
-    expect(result.effects.some((e) => e.type === "remove-call")).toBe(false)
+    expect(result.effects.outbound.length).toBeGreaterThan(0)
+    expect(result.effects.critical.some((e) => e.type === "remove-call")).toBe(false)
   })
 })

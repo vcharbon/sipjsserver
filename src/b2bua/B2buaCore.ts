@@ -30,7 +30,7 @@
  */
 
 import { Effect, Layer } from "effect"
-import { SipRouter, describeEvent, type HandlerRegistry } from "../sip/SipRouter.js"
+import { SipRouter, describeEvent, emptyEffects, type HandlerRegistry } from "../sip/SipRouter.js"
 import { TransactionLayer } from "../sip/TransactionLayer.js"
 import { CallState } from "../call/CallState.js"
 import { TimerService } from "../call/TimerService.js"
@@ -74,12 +74,12 @@ const noopFallback: HandlerRegistry["inDialog"] = (ctx) => Effect.gen(function* 
   )
 
   if (ctx.event.type !== "sip") {
-    return { call: ctx.call, outbound: [], effects: [] }
+    return { call: ctx.call, effects: emptyEffects }
   }
 
   const msg = ctx.event.message
   if (msg.type !== "request" || msg.method === "ACK") {
-    return { call: ctx.call, outbound: [], effects: [] }
+    return { call: ctx.call, effects: emptyEffects }
   }
 
   const contact = buildCallContact({
@@ -95,13 +95,16 @@ const noopFallback: HandlerRegistry["inDialog"] = (ctx) => Effect.gen(function* 
   })
   return {
     call: ctx.call,
-    outbound: [{
-      message: response,
-      destination: { host: ctx.event.rinfo.address, port: ctx.event.rinfo.port },
-      label: `respond 501 (unhandled ${msg.method})`,
-      legId: ctx.leg.legId,
-    }],
-    effects: [],
+    effects: {
+      ...emptyEffects,
+      outbound: [{
+        type: "send-sip" as const,
+        message: response,
+        destination: { host: ctx.event.rinfo.address, port: ctx.event.rinfo.port },
+        label: `respond 501 (unhandled ${msg.method})`,
+        legId: ctx.leg.legId,
+      }],
+    },
   }
 })
 

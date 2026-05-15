@@ -279,6 +279,22 @@ export interface OtelPipelineMetrics {
   readonly tracerDisabledTotal: () => Record<string, number>
 }
 
+/** BufferedCdrLayer counters (Phase 3 — non-blocking CDR write). */
+export interface CdrBufferMetrics {
+  readonly submitDroppedTotal: () => number
+  readonly queueDepth: () => number
+  readonly queueCapacity: number
+}
+
+/** BufferedTerminateWriter counters (Phase 4 — terminate-path Redis I/O). */
+export interface StorageBufferMetrics {
+  readonly fallthroughTotal: () => number
+  readonly fallthroughErrorTotal: () => number
+  readonly queueDepth: () => number
+  readonly queueCapacity: number
+  readonly drainerCount: number
+}
+
 export interface MetricsRegistryState {
   udp: UdpTransportMetrics | undefined
   overload: OverloadControllerMetrics | undefined
@@ -297,6 +313,10 @@ export interface MetricsRegistryState {
   workerReadiness: WorkerReadinessMetrics | undefined
   /** OTel BSP queue depth / drop counters (Slice 5). */
   otelPipeline: OtelPipelineMetrics | undefined
+  /** BufferedCdrLayer queue depth + drop counters (Phase 3). */
+  cdrBuffer: CdrBufferMetrics | undefined
+  /** BufferedTerminateWriter queue depth + fallthrough counters (Phase 4). */
+  storageBuffer: StorageBufferMetrics | undefined
   /** Per-worker metrics snapshots, indexed by worker index. */
   workers: WorkerMetricsSnapshot[]
   /** Broadcast an IPC message to all workers (set by Dispatcher in cluster mode). */
@@ -319,6 +339,8 @@ export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, Metrics
     replicationBootstrap: undefined,
     workerReadiness: undefined,
     otelPipeline: undefined,
+    cdrBuffer: undefined,
+    storageBuffer: undefined,
     workers: [],
     broadcastToWorkers: undefined,
     adapterErrors: {

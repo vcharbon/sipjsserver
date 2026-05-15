@@ -171,8 +171,8 @@ describe("ActionExecutor b-leg outbound-proxy invariant", () => {
       ]
       const result = executeActions(actions, ctx, "test-rule")
 
-      expect(result.outbound.length).toBe(1)
-      const env = result.outbound[0]!
+      expect(result.effects.outbound.length).toBe(1)
+      const env = result.effects.outbound[0]!
       expect(env.destination).toEqual({ host: PROXY_HOST, port: PROXY_PORT })
       const routes = getAllHeaders(env.message.headers, "Route")
       expect(routes.length).toBe(1)
@@ -196,8 +196,8 @@ describe("ActionExecutor b-leg outbound-proxy invariant", () => {
       ]
       const result = executeActions(actions, ctx, "test-rule")
 
-      expect(result.outbound.length).toBe(1)
-      const env = result.outbound[0]!
+      expect(result.effects.outbound.length).toBe(1)
+      const env = result.effects.outbound[0]!
       // Pod-direct: destination is the leg's remoteTarget, no Route added.
       expect(env.destination).toEqual({ host: "192.168.1.200", port: 5060 })
       const routes = getAllHeaders(env.message.headers, "Route")
@@ -222,8 +222,8 @@ describe("ActionExecutor b-leg outbound-proxy invariant", () => {
       ]
       const result = executeActions(actions, ctx, "test-rule")
 
-      expect(result.outbound.length).toBe(1)
-      const env = result.outbound[0]!
+      expect(result.effects.outbound.length).toBe(1)
+      const env = result.effects.outbound[0]!
       // dialog routeSet wins — destination is the routeSet's loose-route URI,
       // NOT b2bOutboundProxy.
       expect(env.destination).toEqual({ host: dialogRouteHost, port: dialogRoutePort })
@@ -254,8 +254,8 @@ describe("ActionExecutor b-leg outbound-proxy invariant", () => {
       ]
       const result = executeActions(actions, ctx, "test-rule")
 
-      expect(result.outbound.length).toBe(1)
-      const env = result.outbound[0]!
+      expect(result.effects.outbound.length).toBe(1)
+      const env = result.effects.outbound[0]!
       expect(env.destination).toEqual({ host: PROXY_HOST, port: PROXY_PORT })
       const routes = getAllHeaders(env.message.headers, "Route")
       expect(routes.length).toBe(1)
@@ -279,8 +279,8 @@ describe("ActionExecutor b-leg outbound-proxy invariant", () => {
       ]
       const result = executeActions(actions, ctx, "test-rule")
 
-      expect(result.outbound.length).toBe(1)
-      const routes = getAllHeaders(result.outbound[0]!.message.headers, "Route")
+      expect(result.effects.outbound.length).toBe(1)
+      const routes = getAllHeaders(result.effects.outbound[0]!.message.headers, "Route")
       // Exactly one `;outbound` occurrence.
       const occurrences = routes[0]!.value.match(/;outbound(?:[;>]|$)/g) ?? []
       expect(occurrences.length).toBe(1)
@@ -303,8 +303,8 @@ describe("ActionExecutor b-leg outbound-proxy invariant", () => {
       ]
       const result = executeActions(actions, ctx, "test-rule")
 
-      expect(result.outbound.length).toBe(1)
-      const env = result.outbound[0]!
+      expect(result.effects.outbound.length).toBe(1)
+      const env = result.effects.outbound[0]!
       // a-leg goes pod-direct to alice — no proxy fallback for a-leg.
       expect(env.destination).toEqual({ host: "192.168.1.100", port: 5060 })
       const routes = getAllHeaders(env.message.headers, "Route")

@@ -115,8 +115,8 @@ describe("applyRoute admission gate", () => {
       })
 
       // 503 envelope back to upstream UAS source
-      expect(result.outbound.length).toBe(1)
-      const env = result.outbound[0]!
+      expect(result.effects.outbound.length).toBe(1)
+      const env = result.effects.outbound[0]!
       expect(env.message.type).toBe("response")
       if (env.message.type === "response") {
         expect(env.message.status).toBe(503)
@@ -124,7 +124,7 @@ describe("applyRoute admission gate", () => {
       expect(env.destination).toEqual({ host: rinfo.address, port: rinfo.port })
 
       // terminate effects emitted (remove-call is part of the canonical set)
-      expect(result.effects.some((e) => e.type === "remove-call")).toBe(true)
+      expect(result.effects.critical.some((e) => e.type === "remove-call")).toBe(true)
       // span event flagged with admission_reject
       expect(
         result.spanEvents?.some(
@@ -159,7 +159,7 @@ describe("applyRoute admission gate", () => {
       })
 
       // No 503: outbound has the b-leg INVITE, not a rejection.
-      const responses = result.outbound.filter((o) => o.message.type === "response")
+      const responses = result.effects.outbound.filter((o) => o.message.type === "response")
       expect(responses.length).toBe(0)
       expect(
         result.spanEvents?.some(

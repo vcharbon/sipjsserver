@@ -242,3 +242,16 @@ const runScoped = <A, E>(eff: Effect.Effect<A, E, Scope.Scope>): Effect.Effect<A
 ```
 
 Pick `Data.TaggedError` when the caller needs to branch on the failure, `Effect.orDie` when they don't.
+## Must-run patterns (uninterruptible regions, finalizers, scope cleanup)
+
+| Wrapper                              | Body must be                                       |
+|--------------------------------------|----------------------------------------------------|
+| `Effect.uninterruptibleMask(...)`  | sync JS or non-blocking submit                     |
+| `Effect.ensuring(finalizer)`       | sync JS or non-blocking submit                     |
+| `Effect.onExit((exit) => ...)`     | sync JS or non-blocking submit                     |
+| `Semaphore.withPermits(1)(release)`| sync JS (the v4 release IS sync)                   |
+| Layer / Scope finalizer              | sync JS or non-blocking submit                     |
+
+Blocking IO (Redis call, NDJSON `appendFile`, DNS-resolving `dgram.send`) inside any of these positions creates an un-killable fiber. Route the IO through a buffered drainer pool — see [BufferedUdpEndpoint](../src/sip/BufferedUdpEndpoint.ts) (template), [BufferedCdrLayer](../src/cdr/BufferedCdrLayer.ts), and [BufferedTerminateWriter](../src/cache/BufferedTerminateWriter.ts).
+
+Read [docs/adr/0003-must-run-effects-under-interruption.md](adr/0003-must-run-effects-under-interruption.md) before modifying the rule framework, the SipRouter consumer loop, or call-lifecycle code.

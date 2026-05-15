@@ -34,6 +34,7 @@ import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
 import { TracingService } from "../../src/tracing/TracingService.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { B2buaCoreLayer } from "../../src/b2bua/B2buaCore.js"
+import { BufferedTerminateWriter } from "../../src/cache/BufferedTerminateWriter.js"
 import { DrainingState } from "../../src/b2bua/DrainingState.js"
 import { WorkerReadiness } from "../../src/cache/WorkerReadiness.js"
 import { MockCallControlLayer } from "../fullcall/framework/MockCallControlLayer.js"
@@ -157,10 +158,18 @@ export function b2buaWorkerStackLayer(opts: {
     CdrLayer,
   ).pipe(Layer.provideMerge(AppConfigLayer))
 
+  // Phase 4: BufferedTerminateWriter — fake-clock tests get the
+  // passthrough variant via `storageBufferQueueMax: 0` in the test
+  // config defaults.
+  const BufferedTerminateLayer = BufferedTerminateWriter.layer.pipe(
+    Layer.provide(Leaves),
+  )
+
   const MidServices = Layer.mergeAll(
     UdpTransport.layer,
     OverloadController.layer,
     LimiterLayer,
+    BufferedTerminateLayer,
   ).pipe(Layer.provideMerge(Leaves))
 
   // Tests don't run `ReadyGate`, so default to `ready=true` — otherwise

@@ -7,7 +7,12 @@
 
 import { Effect } from "effect"
 import type { SipHeader, SipRequest } from "../sip/types.js"
-import type { HandlerResult, OutboundEnvelope, Handler } from "../sip/SipRouter.js"
+import type {
+  HandlerResult,
+  OutboundSipEffect,
+  Handler,
+} from "../sip/SipRouter.js"
+import { emptyEffects } from "../sip/SipRouter.js"
 import {
   getHeader,
   getHeaders,
@@ -65,7 +70,7 @@ export const handleInitialInvite: Handler = (ctx) =>
     const { call, callRef, event, config, nowMs } = ctx
 
     if (event.type !== "sip" || event.message.type !== "request") {
-      return { call, outbound: [], effects: [] } satisfies HandlerResult
+      return { call, effects: emptyEffects } satisfies HandlerResult
     }
 
     const req = event.message
@@ -105,14 +110,17 @@ export const handleInitialInvite: Handler = (ctx) =>
         toTag: newTag(),
         contact: aLegContact,
       })
-      const outbound: OutboundEnvelope[] = [{
+      const outbound: OutboundSipEffect[] = [{
+        type: "send-sip",
         message: rejectResp,
         destination: { host: rinfo.address, port: rinfo.port },
         label: "reject 503 (call control unavailable)",
         legId: "a",
       }]
+      const term = terminateCallEffects(call)
       return {
-        call, outbound, effects: terminateCallEffects(call),
+        call,
+        effects: { ...term, outbound },
         spanEvents: [{ name: "route_decision", attributes: { "route.action": "error", "route.reason": "call_control_unavailable" } }],
       } satisfies HandlerResult
     }
@@ -133,15 +141,18 @@ export const handleInitialInvite: Handler = (ctx) =>
         ? { toTag: newTag(), extraHeaders }
         : { toTag: newTag(), contact: aLegContact, extraHeaders }
       const rejectResp = generateResponse(req, code, reason, responseOpts)
-      const outbound: OutboundEnvelope[] = [{
+      const outbound: OutboundSipEffect[] = [{
+        type: "send-sip",
         message: rejectResp,
         destination: { host: rinfo.address, port: rinfo.port },
         label: `reject ${code}`,
         legId: "a",
       }]
       const updated = addCdrEvent(call, { type: "reject", timestamp: nowMs, legId: "a", statusCode: code, reason })
+      const term = terminateCallEffects(updated)
       return {
-        call: updated, outbound, effects: terminateCallEffects(updated),
+        call: updated,
+        effects: { ...term, outbound },
         spanEvents: [{ name: "route_decision", attributes: { "route.action": "reject", "route.reject_code": code, "route.reject_reason": reason } }],
       } satisfies HandlerResult
     }

@@ -21,6 +21,7 @@ import { SipRouter } from "./sip/SipRouter.js"
 import { AppConfig, type AppConfigData } from "./config/AppConfig.js"
 import { CallState } from "./call/CallState.js"
 import { PartitionedRelayStorage } from "./cache/PartitionedRelayStorage.js"
+import { BufferedTerminateWriter } from "./cache/BufferedTerminateWriter.js"
 import { PeerCacheClientLayer } from "./cache/PeerCacheClient.js"
 import { WorkerOrdinal } from "./cache/PeerCachePort.js"
 import { PeerEndpointResolver } from "./cache/PeerEndpointResolver.js"
@@ -40,6 +41,7 @@ import {
 } from "./replication/PeerScanBootstrap.js"
 import { KvBackend } from "./storage/KvBackend.js"
 import { CdrWriter } from "./cdr/CdrWriter.js"
+import { BufferedCdrLayer } from "./cdr/BufferedCdrLayer.js"
 import { RedisClient } from "./redis/RedisClient.js"
 import { LimiterRedisClient } from "./redis/LimiterRedisClient.js"
 import { UdpTransport } from "./sip/UdpTransport.js"
@@ -130,8 +132,13 @@ const CallStateCacheLayer = Layer.unwrap(
   Layer.provide(EpochCounterLayer)
 )
 
-const CdrLayer = CdrWriter.layer.pipe(
-  Layer.provide(AppConfigLayer)
+// Production wraps the file-backed CdrWriter with BufferedCdrLayer so a
+// slow disk cannot stall call termination. Fake-clock tests opt out via
+// `cdrBufferQueueMax: 0` (BufferedCdrLayer falls through to the inner).
+const CdrLayer = BufferedCdrLayer.pipe(
+  Layer.provide(CdrWriter.layer.pipe(Layer.provide(AppConfigLayer))),
+  Layer.provide(AppConfigLayer),
+  Layer.provide(MetricsRegistryLayer),
 )
 
 const OverloadControllerLayer = OverloadController.layer.pipe(
@@ -232,6 +239,16 @@ const UdpLayer = UdpTransport.layer.pipe(
 // Composed B2BUA layer (core + environment deps)
 // ---------------------------------------------------------------------------
 
+// Phase 4: terminate-path Redis I/O is buffered behind
+// `BufferedTerminateWriter`. Callsites in CallState use this for
+// `submitTerminateDelete` / `submitTerminatePut`; admission and
+// hot-dialog flushes still hit `PartitionedRelayStorage` directly.
+const BufferedTerminateLayer = BufferedTerminateWriter.layer.pipe(
+  Layer.provide(CallStateCacheLayer),
+  Layer.provide(AppConfigLayer),
+  Layer.provide(MetricsRegistryLayer),
+)
+
 // DrainingState is NOT provided inline here — it is hoisted to the
 // outer `standaloneMain` composition so HttpLayer can also see the
 // same instance for the `/ready` route gating.
@@ -240,6 +257,7 @@ const SipLayer = B2buaCoreLayer.pipe(
   Layer.provide(UdpLayer),
   Layer.provide(OverloadControllerLayer),
   Layer.provide(CallStateCacheLayer),
+  Layer.provide(BufferedTerminateLayer),
   Layer.provide(CallLimiterLayer),
   Layer.provide(CallControlLayer),
   Layer.provide(TracingLayer),
@@ -258,6 +276,7 @@ const SipLayer = B2buaCoreLayer.pipe(
 const CallStateLayer = CallState.layer.pipe(
   Layer.provide(AppConfigLayer),
   Layer.provide(CallStateCacheLayer),
+  Layer.provide(BufferedTerminateLayer),
   Layer.provide(CdrLayer),
   Layer.provide(CallLimiterLayer),
   Layer.provide(MetricsRegistryLayer),

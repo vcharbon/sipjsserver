@@ -145,8 +145,31 @@ export interface ResolvedContext {
   readonly nowMs: number
 }
 
-/** Outbound message envelope returned by handlers. */
-export interface OutboundEnvelope {
+// ── Typed effect categories (Phase 1 — structural must-run guarantees) ────
+//
+// Each effect kind belongs to exactly one safety category. The interpreter
+// (processResult) wraps each category with its prescribed Effect primitive
+// (uninterruptibleMask / interruptible / bounded-timeout / non-blocking
+// submit / forkIn). Adding a new effect kind without categorising it is a
+// compile error. See docs/adr/0003-must-run-effects-under-interruption.md.
+
+/**
+ * State-mutation / timer / Redis-eviction effects whose body must complete
+ * even under interruption. Bodies are sync JS or non-blocking submits to
+ * buffered drainer pools (BufferedCdrLayer / BufferedStorageLayer); the
+ * interpreter wraps the whole batch in a small `uninterruptibleMask`.
+ */
+export type CriticalStateEffect =
+  | { readonly type: "schedule-timer"; readonly timer: TimerEntry }
+  | { readonly type: "cancel-timer"; readonly id: string }
+  | { readonly type: "cancel-all-timers" }
+  | { readonly type: "flush-redis" }
+  | { readonly type: "remove-call" }
+
+/** Outbound SIP send. Dispatched via TransactionLayer.send/sendRaw — already
+ *  buffered in production via BufferedUdpEndpoint. Stays interruptible. */
+export interface OutboundSipEffect {
+  readonly type: "send-sip"
   readonly message: SipRequest | SipResponse
   readonly destination: { readonly host: string; readonly port: number }
   readonly label: string
@@ -154,27 +177,63 @@ export interface OutboundEnvelope {
   readonly legId?: string
 }
 
-/** Side effects returned by handlers. */
-export type SideEffect =
-  | { readonly type: "schedule-timer"; readonly timer: TimerEntry }
-  | { readonly type: "cancel-timer"; readonly id: string }
-  | { readonly type: "cancel-all-timers" }
+/**
+ * Backwards-compatible alias for the outbound envelope type. Plain SIP send
+ * envelopes carry the `type: "send-sip"` discriminator under the typed-effect
+ * design. Constructors that omit the discriminator are still rejected.
+ */
+export type OutboundEnvelope = OutboundSipEffect
+
+/** Self-repairing effects (limiter DECR) that get an explicit short timeout
+ *  + per-item catchTag. Trap 4: never wrap in `ensuring`, that converts a
+ *  slow leak into a worker stall. */
+export type SoftBoundedEffect =
   | { readonly type: "decrement-limiter"; readonly limiterId: string; readonly window: number }
+
+/** Observability effects routed through buffered drainer pools (CDR write).
+ *  Drop-on-overload acceptable: prefer dropping a CDR over stalling call
+ *  termination. */
+export type BufferedObservabilityEffect =
   | { readonly type: "write-cdr" }
-  | { readonly type: "remove-call" }
-  | { readonly type: "flush-redis" }
-  /**
-   * Fork /call/refer, then re-enter withCall with an internal-event carrying
-   * the HTTP outcome. State is persisted before effects run, so the resulting
-   * internal-event sees the up-to-date transfer state.
-   */
+
+/**
+ * Fork /call/refer, then re-enter withCall with an internal-event carrying
+ * the HTTP outcome. State is persisted before effects run, so the resulting
+ * internal-event sees the up-to-date transfer state.
+ */
+export type FireAndForgetEffect =
   | { readonly type: "refer-async-http"; readonly callRef: string; readonly request: CallReferRequestType }
+
+/** Typed-object effects payload. Each slot is wrapped by its category's safe
+ *  primitive in the interpreter. */
+export interface HandlerEffects {
+  readonly critical: ReadonlyArray<CriticalStateEffect>
+  readonly outbound: ReadonlyArray<OutboundSipEffect>
+  readonly soft: ReadonlyArray<SoftBoundedEffect>
+  readonly buffered: ReadonlyArray<BufferedObservabilityEffect>
+  readonly fireAndForget: ReadonlyArray<FireAndForgetEffect>
+}
+
+/** Type-erased flat union — used by helpers that don't care about category. */
+export type SideEffect =
+  | CriticalStateEffect
+  | SoftBoundedEffect
+  | BufferedObservabilityEffect
+  | FireAndForgetEffect
+
+/** Empty effects record — start here when assembling a HandlerResult. */
+export const emptyEffects: HandlerEffects = {
+  critical: [],
+  outbound: [],
+  soft: [],
+  buffered: [],
+  fireAndForget: [],
+}
 
 /** Result returned by handlers — pure data, no side effects. */
 export interface HandlerResult {
   readonly call: Call
-  readonly outbound: ReadonlyArray<OutboundEnvelope>
-  readonly effects: ReadonlyArray<SideEffect>
+  readonly effects: HandlerEffects
   /** Optional span events emitted on the current processing span (e.g. route_decision). */
   readonly spanEvents?: ReadonlyArray<{ readonly name: string; readonly attributes?: Record<string, unknown> }>
 }
@@ -386,148 +445,133 @@ export class SipRouter extends ServiceMap.Service<
 
       const processResult = Effect.fnUntraced(
         function* (callRef: string, result: HandlerResult, handlers: HandlerRegistry, nowMs: number) {
-          // Persist updated call state BEFORE sending any messages — upholds
-          // the "state updates before sending" invariant. Via/Contact stamping
-          // and INVITE/ACK branch capture now happen at generator call-sites
-          // in handlers, so no pre-send mutation is needed here.
+          // Persist updated call state BEFORE running any effects — upholds
+          // the "state updates before sending" invariant AND auto-arms the
+          // safety timer when entering `terminating` (Phase 5). Via/Contact
+          // stamping happens at handler call-site time, not here.
           yield* callState.update(callRef, () => result.call)
 
-          // Pre-pass: drain timer-control effects BEFORE outbound. A handler
-          // that transitions a call into `terminating` emits both an outbound
-          // BYE *and* a `schedule-timer(terminating_timeout +64 s)` safety net.
-          // The whole `processResult` is wrapped in
-          // `Effect.timeoutOrElse(timerHandlerTimeoutMs)` by TimerService — if
-          // the outbound send takes longer than the budget (event-loop freeze,
-          // slow UDP write), the abort fires *after* `callState.update` but
-          // before the unprocessed schedule-timer effect ever reaches
-          // `timers.schedule`. The in-memory call sits in `terminating` with no
-          // safety fiber, and only the 60-s orphan sweep eventually rescues it
-          // — long enough to leak BYEs into other tests' traces. Running timer
-          // effects here installs the safety fiber before any slow yield, so
-          // an abort can no longer orphan the call. See
-          // tests/sip/terminating-safety-timer-armed-before-outbound.test.ts.
-          for (const effect of result.effects) {
+          // ── Critical: must run, even under interruption ────────────────
+          // Wrapped in `uninterruptibleMask`. Bodies are sync JS or
+          // non-blocking submits to buffered drainer pools (Phase 3+4):
+          //   - schedule/cancel/cancel-all-timers → sync MutableHashMap ops
+          //   - flush-redis → BufferedTerminateWriter.submitTerminatePut
+          //   - remove-call → BufferedTerminateWriter.submitTerminateDelete
+          // Trap 5: any blocking IO in this position would create an
+          // un-killable fiber. See docs/adr/0003-…
+          const applyCritical = (effect: typeof result.effects.critical[number]): Effect.Effect<void> => {
             switch (effect.type) {
               case "schedule-timer": {
                 const handler = (cr: string, tt: TimerType, lid: string | undefined) =>
                   timerHandler(handlers, cr, tt, lid)
-                yield* timers.schedule(callRef, effect.timer, handler)
-                break
+                return timers.schedule(callRef, effect.timer, handler)
               }
               case "cancel-timer":
-                yield* timers.cancel(effect.id)
-                break
+                return timers.cancel(effect.id)
               case "cancel-all-timers":
-                yield* timers.cancelAll(callRef)
-                break
-              default:
-                break
-            }
-          }
-
-          // Send outbound messages (pure output, no state mutation).
-          for (const env of result.outbound) {
-            const msg = env.message
-            const isRequest = msg.type === "request"
-
-            yield* Effect.logDebug(`SIP OUT -> ${env.destination.host}:${env.destination.port} [${env.label}] ${messageSummary(msg)}`)
-            yield* Effect.logDebug(serialize(msg).toString('utf-8'))
-
-            // Emit send span for tracing
-            if (result.call.sampled === true) {
-              const sendName = msg.type === "request"
-                ? `sip.send.${msg.method}`
-                : `sip.send.${msg.status}`
-              const sendAttrs: Record<string, unknown> = {
-                "sip.call_ref": callRef,
-                "net.peer.addr": `${env.destination.host}:${env.destination.port}`,
-                "sip.raw_message": tracing.scrubMessage(serialize(msg).toString("utf-8")),
-              }
-              if (msg.type === "request") {
-                sendAttrs["sip.method"] = msg.method
-              } else {
-                sendAttrs["sip.status_code"] = msg.status
-              }
-              yield* tracing.emitSendSpan({ call: result.call, name: sendName, attributes: sendAttrs })
-            }
-
-            // ACK for 2xx is a one-shot — no transaction management (RFC 3261 §17.1.1.2).
-            // CANCEL is fire-and-forget: it reuses the INVITE's Via branch (RFC 3261 §9.1),
-            // and creating a CANCEL client transaction would overwrite the INVITE client
-            // transaction in the branch-keyed txn map. Retransmission is unnecessary —
-            // the peer's INVITE server transaction (or our no-answer timer) will time out
-            // if the CANCEL is lost. The 200 OK / 487 responses are routed by CSeq method
-            // in TransactionLayer.handleInboundResponse.
-            if (isRequest && (msg.method === "ACK" || msg.method === "CANCEL")) {
-              yield* txnLayer.sendRaw(serialize(msg), env.destination.port, env.destination.host)
-            } else {
-              const txnType = isRequest
-                ? (msg.method === "INVITE" ? "invite" as const : "non-invite" as const)
-                : "response" as const
-              yield* txnLayer.send(msg, env.destination, txnType)
-            }
-          }
-
-          // Post-pass: drain the remaining side effects. Timer-control effects
-          // already ran above so the safety net is in place; everything left
-          // is either Redis/CDR bookkeeping or the async REFER fork.
-          for (const effect of result.effects) {
-            switch (effect.type) {
-              case "schedule-timer":
-              case "cancel-timer":
-              case "cancel-all-timers":
-                // Handled in the pre-pass above.
-                break
-              case "decrement-limiter":
-                yield* limiter.decrement(effect.limiterId, effect.window).pipe(
-                  Effect.catchTag("RedisError", (e) =>
-                    Effect.logError(`Failed to decrement limiter ${effect.limiterId}: ${e.reason}`)
-                  )
-                )
-                break
-              case "write-cdr":
-                yield* cdr.write(result.call).pipe(
-                  Effect.catchCause((cause) =>
-                    Effect.logError(`Failed to write CDR for ${callRef}`, cause)
-                  )
-                )
-                break
+                return timers.cancelAll(callRef)
               case "flush-redis":
-                yield* callState.flushToRedis(callRef).pipe(
-                  Effect.catchTag("RedisError", (e) =>
-                    Effect.logError(`Failed to flush ${callRef} to Redis: ${e.reason}`)
-                  )
-                )
-                break
+                return callState.flushToRedis(callRef)
               case "remove-call":
-                // Emit tombstone for non-sampled calls at teardown
-                if (result.call.sampled !== true && result.call.traceId !== undefined) {
-                  yield* tracing.emitTombstone({
-                    call: result.call,
-                    durationMs: nowMs - result.call.createdAt,
-                    finalStatus: result.call.state,
-                  })
+                return Effect.gen(function* () {
+                  if (result.call.sampled !== true && result.call.traceId !== undefined) {
+                    yield* tracing.emitTombstone({
+                      call: result.call,
+                      durationMs: nowMs - result.call.createdAt,
+                      finalStatus: result.call.state,
+                    })
+                  }
+                  yield* callState.remove(callRef)
+                })
+            }
+          }
+          yield* Effect.uninterruptibleMask((_restore) =>
+            Effect.forEach(result.effects.critical, applyCritical, { discard: true }),
+          )
+
+          // ── Outbound: interruptible; transport already buffered in prod ─
+          const applyOutbound = (env: typeof result.effects.outbound[number]): Effect.Effect<void> =>
+            Effect.gen(function* () {
+              const msg = env.message
+              const isRequest = msg.type === "request"
+
+              yield* Effect.logDebug(`SIP OUT -> ${env.destination.host}:${env.destination.port} [${env.label}] ${messageSummary(msg)}`)
+              yield* Effect.logDebug(serialize(msg).toString("utf-8"))
+
+              if (result.call.sampled === true) {
+                const sendName = msg.type === "request"
+                  ? `sip.send.${msg.method}`
+                  : `sip.send.${msg.status}`
+                const sendAttrs: Record<string, unknown> = {
+                  "sip.call_ref": callRef,
+                  "net.peer.addr": `${env.destination.host}:${env.destination.port}`,
+                  "sip.raw_message": tracing.scrubMessage(serialize(msg).toString("utf-8")),
                 }
-                yield* callState.remove(callRef).pipe(
-                  Effect.catchTag("RedisError", (e) =>
-                    Effect.logError(`Failed to remove ${callRef}: ${e.reason}`)
-                  )
+                if (msg.type === "request") sendAttrs["sip.method"] = msg.method
+                else sendAttrs["sip.status_code"] = msg.status
+                yield* tracing.emitSendSpan({ call: result.call, name: sendName, attributes: sendAttrs })
+              }
+
+              // ACK for 2xx and CANCEL bypass transaction management
+              // (RFC 3261 §17.1.1.2 + §9.1). See pre-Phase-2 comments.
+              if (isRequest && (msg.method === "ACK" || msg.method === "CANCEL")) {
+                yield* txnLayer.sendRaw(serialize(msg), env.destination.port, env.destination.host)
+              } else {
+                const txnType = isRequest
+                  ? (msg.method === "INVITE" ? "invite" as const : "non-invite" as const)
+                  : "response" as const
+                yield* txnLayer.send(msg, env.destination, txnType)
+              }
+            })
+          yield* Effect.forEach(result.effects.outbound, applyOutbound, { discard: true })
+
+          // ── Soft-bounded: limiter DECR with explicit short timeout
+          // (Trap 4). Limiter window rotation is self-repairing — a
+          // missed DECR leaks at most one window — so a stalled Redis
+          // here can be safely cut short. Wrapping in `ensuring` would
+          // convert a slow leak into a worker stall. ──
+          const applySoftBounded = (effect: typeof result.effects.soft[number]): Effect.Effect<void> =>
+            limiter.decrement(effect.limiterId, effect.window).pipe(
+              Effect.timeoutOrElse({
+                duration: Duration.millis(config.limiterDecrementTimeoutMs),
+                orElse: () =>
+                  Effect.logError(
+                    `Limiter decrement timed out (${effect.limiterId}, ${config.limiterDecrementTimeoutMs}ms)`,
+                  ),
+              }),
+              Effect.catchTag("RedisError", (e) =>
+                Effect.logError(`Failed to decrement limiter ${effect.limiterId}: ${e.reason}`),
+              ),
+            )
+          yield* Effect.forEach(result.effects.soft, applySoftBounded, { discard: true })
+
+          // ── Buffered: CDR. Phase 3's BufferedCdrLayer makes write
+          // non-blocking by construction (queue offer + drainer pool). ──
+          const applyBuffered = (effect: typeof result.effects.buffered[number]): Effect.Effect<void> => {
+            switch (effect.type) {
+              case "write-cdr":
+                return cdr.write(result.call).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logError(`Failed to write CDR for ${callRef}`, cause),
+                  ),
                 )
-                break
+            }
+          }
+          yield* Effect.forEach(result.effects.buffered, applyBuffered, { discard: true })
+
+          // ── Fire-and-forget: async REFER, forked into the layer scope. ─
+          const applyFork = (effect: typeof result.effects.fireAndForget[number]): Effect.Effect<void> => {
+            switch (effect.type) {
               case "refer-async-http": {
-                // Fork /call/refer, then re-enter withCall with an internal-event
-                // carrying the HTTP outcome. State was already persisted above,
-                // so the consuming rule sees the up-to-date transfer state when
-                // the result arrives.
                 const referReq = effect.request
                 const asyncCallRef = effect.callRef
-                yield* Effect.forkIn(
+                return Effect.forkIn(
                   Effect.gen(function* () {
                     const resp = yield* callControl.callRefer(referReq).pipe(
                       Effect.map((r) => ({ ok: true as const, resp: r })),
                       Effect.catchTag("CallDecisionError", (e) =>
-                        Effect.succeed({ ok: false as const, reason: e.detail })
-                      )
+                        Effect.succeed({ ok: false as const, reason: e.detail }),
+                      ),
                     )
                     const outcome = resp.ok ? resp.resp.action : "error"
                     const payload = resp.ok ? resp.resp : { error: resp.reason }
@@ -541,11 +585,11 @@ export class SipRouter extends ServiceMap.Service<
                     yield* withCall(handlers, internalEvent)
                   }),
                   layerScope,
-                )
-                break
+                ).pipe(Effect.asVoid)
               }
             }
           }
+          yield* Effect.forEach(result.effects.fireAndForget, applyFork, { discard: true })
         }
       )
 

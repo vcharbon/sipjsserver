@@ -87,6 +87,15 @@ export function testAppConfigDefaults(overrides?: Partial<AppConfigData>): AppCo
     bufferedSendIdleTtlMs: 3_600_000,
     bufferedSendMaxPeers: 10_000,
     bufferedSendSweepIntervalMs: 600_000,
+    // 0 = direct (un-buffered) CDR writer for fake-clock determinism.
+    // Production sets >0 so disk pressure can't stall the worker.
+    cdrBufferQueueMax: 0,
+    // Same opt-out for the terminate-path Redis buffer. Fake-clock
+    // tests want every storage delete in the same fiber as the call.
+    storageBufferQueueMax: 0,
+    storageBufferDrainers: 4,
+    storageDropFallbackMs: 1000,
+    limiterDecrementTimeoutMs: 1000,
     traceTombstoneEnabled: false,
     replicationBootstrapTimeoutMs: 30_000,
     ...overrides,

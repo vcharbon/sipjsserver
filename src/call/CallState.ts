@@ -20,7 +20,8 @@
  * Semaphore is released before async cache flush.
  */
 
-import { Clock, Effect, Layer, MutableHashMap, Option, Ref, Schema, Semaphore, ServiceMap, Stream } from "effect"
+import { Clock, Duration, Effect, Layer, MutableHashMap, Option, Ref, Schema, Semaphore, ServiceMap, Stream } from "effect"
+import { BufferedTerminateWriter } from "../cache/BufferedTerminateWriter.js"
 import {
   PartitionedRelayStorage,
   type PartitionRole,
@@ -128,10 +129,20 @@ export class CallState extends ServiceMap.Service<
     readonly update: (callRef: string, fn: (call: Call) => Call) => Effect.Effect<void>
     /** Get call without serialisation (read-only, from memory only). */
     readonly peek: (callRef: string) => Effect.Effect<Call | undefined>
-    /** Flush a call to the cache. Memory entry stays. */
-    readonly flushToRedis: (callRef: string) => Effect.Effect<void, RedisError>
-    /** Remove a call from memory and schedule cache cleanup. */
-    readonly remove: (callRef: string) => Effect.Effect<void, RedisError>
+    /**
+     * Flush a call to the cache. Memory entry stays.
+     *
+     * Phase 2/4: routed through `BufferedTerminateWriter` so the SipRouter
+     * consumer never blocks on Redis. Errors surface in the writer's
+     * structured logging + `storageBuffer.fallthroughErrorTotal` metric.
+     */
+    readonly flushToRedis: (callRef: string) => Effect.Effect<void>
+    /**
+     * Remove a call from memory and schedule cache cleanup.
+     *
+     * Phase 2/4: cache delete routed through `BufferedTerminateWriter`.
+     */
+    readonly remove: (callRef: string) => Effect.Effect<void>
     /**
      * Last-resort cleanup for one specific call — same recovery actions as
      * the orphan sweep but driven on demand. Used by the safety-net
@@ -161,6 +172,12 @@ export class CallState extends ServiceMap.Service<
     CallState,
     Effect.gen(function* () {
       const storage = yield* PartitionedRelayStorage
+      // Phase 4: terminate-path Redis I/O is routed through the
+      // BufferedTerminateWriter so a stalled Redis cannot pin the
+      // SipRouter consumer fiber on call eviction. Admission and
+      // hot-dialog flushes still go through `storage` directly —
+      // back-pressure on those paths is desirable.
+      const terminateWriter = yield* BufferedTerminateWriter
       const config = yield* AppConfig
       const cdr = yield* CdrWriter
       const limiter = yield* CallLimiter
@@ -417,9 +434,7 @@ export class CallState extends ServiceMap.Service<
           if (decoded.state === "terminating") {
             yield* Effect.logWarning(`loadCall skipping terminating call ${callRef} from cache — stuck after crash, deleting`)
             yield* cancelTxnsForCallRef(callRef)
-            yield* storage
-              .deleteCall(role, primary, callRef, callIndexKeys(decoded))
-              .pipe(Effect.mapError(toRedisErr))
+            yield* terminateWriter.submitTerminateDelete(role, primary, callRef, callIndexKeys(decoded))
           }
           return undefined
         }
@@ -552,12 +567,16 @@ export class CallState extends ServiceMap.Service<
         // peer's `bak:{self}:`; reverse (role==="bak") lands in the
         // returning primary's `pri:{primary}:` after its ReadyGate drain.
         const direction = directionFor(role)
-        yield* storage
-          .putCall(role, primary, callRef, json, indexes, ttl, {
-            peer: peerOpt,
-            direction,
-          })
-          .pipe(Effect.mapError(toRedisErr))
+        // Phase 2 + Phase 4: route every flush through the buffered
+        // writer so the SipRouter consumer never blocks on Redis. Hot
+        // paths still get back-pressure via the queue + fall-through;
+        // terminate paths get the un-stallable guarantee that closes
+        // the production incident (Phase 5 safety net + non-blocking
+        // body inside the critical-effects mask in processResult).
+        yield* terminateWriter.submitTerminatePut(
+          role, primary, callRef, json, indexes, ttl,
+          { peer: peerOpt, direction },
+        )
 
         // Slice 6: replication is implicit in the Lua write above —
         // when `peerOpt` is set, the storage layer's atomic script
@@ -630,12 +649,10 @@ export class CallState extends ServiceMap.Service<
         // call and goes through the 481 reject path rather than firing
         // against a vanished call (the orphan-transaction leak).
         yield* cancelTxnsForCallRef(callRef)
-        yield* storage
-          .deleteCall(role, primary, callRef, indexes, {
-            peer: peerOpt,
-            direction,
-          })
-          .pipe(Effect.mapError(toRedisErr))
+        yield* terminateWriter.submitTerminateDelete(role, primary, callRef, indexes, {
+          peer: peerOpt,
+          direction,
+        })
       })
 
       const resolveFromSipKey = Effect.fnUntraced(function* (
@@ -754,9 +771,12 @@ export class CallState extends ServiceMap.Service<
             // "drop its timers" on every code path.
             yield* timers.cancelAll(decoded.callRef)
             yield* cancelTxnsForCallRef(decoded.callRef)
-            yield* storage
-              .deleteCall("pri", selfOrdinal, decoded.callRef, callIndexKeys(decoded))
-              .pipe(Effect.mapError(toRedisErr))
+            yield* terminateWriter.submitTerminateDelete(
+              "pri",
+              selfOrdinal,
+              decoded.callRef,
+              callIndexKeys(decoded),
+            )
             continue
           }
 
@@ -851,7 +871,19 @@ export class CallState extends ServiceMap.Service<
         // (would double-decrement on takeover races).
         if (wasTerminating && role === "pri") {
           for (const entry of promoted.limiterEntries) {
+            // Phase 7 / Trap 4: explicit short timeout. Limiter window
+            // rotation is self-repairing — a missed DECR leaks at most
+            // one window. Wrapping in `ensuring` would convert a slow
+            // Redis hang into a stalled force-purge.
             yield* limiter.decrement(entry.limiterId, entry.originWindow).pipe(
+              Effect.timeoutOrElse({
+                duration: Duration.millis(config.limiterDecrementTimeoutMs),
+                orElse: () =>
+                  Effect.logError(
+                    `Force-purge limiter decrement timed out for ${callRef} ` +
+                      `(limiter=${entry.limiterId}, ${config.limiterDecrementTimeoutMs}ms)`,
+                  ),
+              }),
               Effect.catchTag("RedisError", (e) =>
                 Effect.logError(
                   `Force-purge limiter decrement failed for ${callRef} ` +
@@ -893,13 +925,10 @@ export class CallState extends ServiceMap.Service<
         const indexes = callIndexKeys(promoted)
         const peerOpt = propagatePeerFor(role, primary, promoted._topology)
         const direction = directionFor(role)
-        yield* storage
-          .deleteCall(role, primary, callRef, indexes, { peer: peerOpt, direction })
-          .pipe(
-            Effect.catchTag("PartitionedRelayStorageError", (e) =>
-              Effect.logError(`Force-purge Redis delete failed for ${callRef}: ${e.reason}`)
-            )
-          )
+        yield* terminateWriter.submitTerminateDelete(role, primary, callRef, indexes, {
+          peer: peerOpt,
+          direction,
+        })
       })
 
       const forcePurge = Effect.fnUntraced(function* (callRef: string, reason: string) {

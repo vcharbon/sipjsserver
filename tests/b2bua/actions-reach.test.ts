@@ -27,7 +27,7 @@ import type { RuleAction } from "../../src/b2bua/rules/framework/RuleDefinition.
 import type { Call, Leg } from "../../src/call/CallModel.js"
 import type { SipRequest } from "../../src/sip/types.js"
 import { hydrateRequest } from "../../src/sip/parsers/extract-fields.js"
-import { diffCall, makeDialog, makeALegDialog, makeLeg, makeCall, makeCtx, make200InviteFromB } from "./helpers/reach.js"
+import { diffCall, makeDialog, makeALegDialog, makeLeg, makeCall, makeCtx, make200InviteFromB, allEffects } from "./helpers/reach.js"
 
 // ── update-leg-state ────────────────────────────────────────────────────────
 
@@ -319,9 +319,9 @@ describe("cancel-leg reach", () => {
     expect(result.call.timers).toBe(call.timers)
 
     // One outbound CANCEL envelope, no side-effects.
-    expect(result.outbound.length).toBe(1)
-    expect(result.outbound[0]!.label).toContain("CANCEL b-1")
-    expect(result.effects.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(1)
+    expect(result.effects.outbound[0]!.label).toContain("CANCEL b-1")
+    expect(allEffects(result).length).toBe(0)
   })
 
   test("no-op on a confirmed leg (caller should use destroy-leg)", () => {
@@ -333,7 +333,7 @@ describe("cancel-leg reach", () => {
     const result = executeActions([{ type: "cancel-leg", legId: "b-1" }], ctx, "test-rule")
 
     expect(result.call).toBe(call)
-    expect(result.outbound.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
   })
 
   test("no-op on a terminated leg", () => {
@@ -345,7 +345,7 @@ describe("cancel-leg reach", () => {
     const result = executeActions([{ type: "cancel-leg", legId: "b-1" }], ctx, "test-rule")
 
     expect(result.call).toBe(call)
-    expect(result.outbound.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
   })
 })
 
@@ -370,8 +370,8 @@ describe("terminate-leg reach", () => {
     expect(result.call.activePeer).toBe(call.activePeer) // peer NOT cleared — terminate-leg is narrow
     expect(result.call.state).toBe(call.state)
     expect(result.call.timers).toBe(call.timers)
-    expect(result.outbound.length).toBe(0)
-    expect(result.effects.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
+    expect(allEffects(result).length).toBe(0)
   })
 
   test("sets state + byeDisposition when both are named", () => {
@@ -390,7 +390,7 @@ describe("terminate-leg reach", () => {
     expect(outB.byeDisposition).toBe("bye_received")
 
     expect(result.call.activePeer).toBe(call.activePeer)
-    expect(result.outbound.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
   })
 })
 
@@ -419,8 +419,8 @@ describe("merge reach", () => {
     expect(result.call.timers).toBe(call.timers)
     expect(result.call.state).toBe(call.state)
 
-    expect(result.outbound.length).toBe(0)
-    expect(result.effects.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
+    expect(allEffects(result).length).toBe(0)
   })
 })
 
@@ -442,8 +442,8 @@ describe("split reach", () => {
     expect(result.call.tagMap).toBe(call.tagMap)
     expect(result.call.timers).toBe(call.timers)
 
-    expect(result.outbound.length).toBe(0)
-    expect(result.effects.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
+    expect(allEffects(result).length).toBe(0)
   })
 
   test("no-op when splitting a leg that isn't part of the current pair", () => {
@@ -486,9 +486,9 @@ describe("destroy-leg reach (composite)", () => {
     expect(result.call.tagMap).toBe(call.tagMap)
 
     // Exactly one BYE outbound, no side-effects.
-    expect(result.outbound.length).toBe(1)
-    expect(result.outbound[0]!.label).toBe("BYE b-1")
-    expect(result.effects.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(1)
+    expect(result.effects.outbound[0]!.label).toBe("BYE b-1")
+    expect(allEffects(result).length).toBe(0)
   })
 
   test("cancelling branch: no outbound + byeDisposition='cancelled' + state='terminated'", () => {
@@ -511,7 +511,7 @@ describe("destroy-leg reach (composite)", () => {
     expect(result.call.activePeer).toBeNull()
 
     // No SIP emitted — CANCEL is already in flight from the earlier cancel-leg.
-    expect(result.outbound.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
   })
 
   test("trying/early branch: CANCEL outbound + disposition='cancelling' + byeDisposition='cancelled' + state='terminated'", () => {
@@ -528,8 +528,8 @@ describe("destroy-leg reach (composite)", () => {
     expect(outB.disposition).toBe("cancelling")
     expect(result.call.activePeer).toBeNull()
 
-    expect(result.outbound.length).toBe(1)
-    expect(result.outbound[0]!.label).toContain("CANCEL b-1")
+    expect(result.effects.outbound.length).toBe(1)
+    expect(result.effects.outbound[0]!.label).toContain("CANCEL b-1")
   })
 
   test("already-terminated leg is a strict no-op (call reference-equal)", () => {
@@ -541,7 +541,7 @@ describe("destroy-leg reach (composite)", () => {
     const result = executeActions([{ type: "destroy-leg", legId: "b-1" }], ctx, "test-rule")
 
     expect(result.call).toBe(call)
-    expect(result.outbound.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
   })
 })
 
@@ -569,20 +569,21 @@ describe("begin-termination reach (composite)", () => {
     // activePeer deliberately preserved so the final BYE 200 relay still routes.
     expect(result.call.activePeer).toEqual(call.activePeer)
 
-    // Safety timer appended to call.timers.
-    expect(result.call.timers.length).toBe(call.timers.length + 1)
-    const safety = result.call.timers[result.call.timers.length - 1]!
-    expect(safety.type).toBe("terminating_timeout")
+    // Phase 6: the safety timer is no longer appended to call.timers
+    // here — `CallState.update` arms it atomically with the state
+    // transition (Phase 5) when the in-memory map sees the
+    // active→terminating edge. This test runs `executeActions`
+    // directly without going through `CallState.update`, so the
+    // safety entry simply doesn't appear on the working copy.
+    expect(result.call.timers.length).toBe(call.timers.length)
 
-    // Effects: cancel-all-timers, schedule-timer, flush-redis. CDR is written
-    // exactly once when the call reaches "terminated" (InvariantEnforcer
-    // injects write-cdr then) — emitting it here too produced a duplicate
-    // record per call.
-    const effectTypes = result.effects.map((e) => e.type)
-    expect(effectTypes).toEqual(["cancel-all-timers", "schedule-timer", "flush-redis"])
+    // Effects: cancel-all-timers + flush-redis only (Phase 6 retired
+    // the schedule-timer for `terminating_timeout`).
+    const effectTypes = allEffects(result).map((e) => e.type)
+    expect(effectTypes).toEqual(["cancel-all-timers", "flush-redis"])
 
     // Two BYE envelopes.
-    const labels = result.outbound.map((o) => o.label)
+    const labels = result.effects.outbound.map((o) => o.label)
     expect(labels).toContain("BYE a (begin-termination)")
     expect(labels).toContain("BYE b-1 (begin-termination)")
   })
@@ -606,7 +607,7 @@ describe("begin-termination reach (composite)", () => {
     expect(outB.byeDisposition).toBe("cancelled")
     expect(outB.state).toBe("terminated")
 
-    const labels = result.outbound.map((o) => o.label)
+    const labels = result.effects.outbound.map((o) => o.label)
     expect(labels).toContain("CANCEL b-1 (begin-termination)")
     expect(labels).not.toContain("BYE a (begin-termination)")
   })
@@ -627,7 +628,7 @@ describe("begin-termination reach (composite)", () => {
     const result = executeActions([{ type: "begin-termination" }], ctx, "test-rule")
 
     // Neither leg gets a fresh SIP message from begin-termination.
-    expect(result.outbound.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
 
     // byeDisposition of already-marked legs preserved.
     const outA = result.call.aLeg
@@ -648,7 +649,7 @@ describe("begin-termination reach (composite)", () => {
   // further out. As long as a stray timeout fired every 60s, the safety
   // net never expired and the call drifted indefinitely inside
   // `terminating`, only ever cleaned up by the 60-s orphan sweep.
-  test("idempotency: re-entering while already 'terminating' with safety timer present is a no-op", () => {
+  test("re-entering while already 'terminating' does not emit a fresh safety-timer schedule", () => {
     const aLeg: Leg = { ...makeLeg("a", "call-1", "tagA", makeALegDialog("alice-tag", "tagA")), state: "confirmed" }
     const bLeg: Leg = { ...makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog("bob-tag")), state: "confirmed" }
     const call = makeCall(aLeg, bLeg)
@@ -656,22 +657,30 @@ describe("begin-termination reach (composite)", () => {
     const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
     const first = executeActions([{ type: "begin-termination" }], ctx, "test-rule")
 
-    // Sanity: first invocation transitioned + scheduled the safety timer.
+    // Phase 6: the safety timer is auto-installed by CallState.update,
+    // not appended to call.timers by the action. No timer should
+    // appear here because we're calling executeActions directly
+    // (no CallState.update in the path).
     expect(first.call.state).toBe("terminating")
-    expect(first.call.timers.filter((t) => t.type === "terminating_timeout").length).toBe(1)
+    expect(first.call.timers.filter((t) => t.type === "terminating_timeout").length).toBe(0)
 
-    // Re-invoke begin-termination on the already-terminating call — same
-    // path the keepalive_timeout loop used to take. Output must be inert:
-    // no new outbound, no new effects, no fresh timer.
+    // Re-invoke begin-termination on the already-terminating call. The
+    // dangerous historical behaviour was rescheduling the safety timer
+    // 64 s further out on every late keepalive_timeout firing. Phase 6
+    // retired the schedule-timer emission entirely; cancel-all-timers
+    // + flush-redis are idempotent at the runtime level.
     const ctx2 = makeCtx(first.call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"), 1_700_000_060_000)
     const second = executeActions([{ type: "begin-termination" }], ctx2, "test-rule")
 
-    expect(second.outbound.length).toBe(0)
-    expect(second.effects.length).toBe(0)
-    // Safety timer count unchanged (fireAt of the existing entry MUST NOT be pushed out).
-    const safetyTimers = second.call.timers.filter((t) => t.type === "terminating_timeout")
-    expect(safetyTimers.length).toBe(1)
-    expect(safetyTimers[0]!.fireAt).toBe(first.call.timers.find((t) => t.type === "terminating_timeout")!.fireAt)
+    // No SIP because both legs already have byeDisposition set.
+    expect(second.effects.outbound.length).toBe(0)
+    // Critical effects re-emitted but they're inert at runtime.
+    const safetyScheduleEmissions = second.effects.critical.filter(
+      (e) =>
+        e.type === "schedule-timer" &&
+        (e as { type: "schedule-timer"; timer: { type: string } }).timer.type === "terminating_timeout",
+    )
+    expect(safetyScheduleEmissions.length).toBe(0)
   })
 
   // The replace-by-id helper drops any prior entry with the same id
@@ -724,7 +733,7 @@ describe("terminate-call reach (composite)", () => {
     expect(result.call.aLeg.state).toBe("terminated")
     expect(result.call.bLegs[0]!.state).toBe("terminated")
 
-    const labels = result.outbound.map((o) => o.label)
+    const labels = result.effects.outbound.map((o) => o.label)
     // Confirmed a-leg → BYE.
     expect(labels).toContain("BYE a (terminate)")
     // Trying b-leg → CANCEL.
@@ -739,7 +748,7 @@ describe("terminate-call reach (composite)", () => {
     const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
     const result = executeActions([{ type: "terminate-call" }], ctx, "test-rule")
 
-    expect(result.outbound.length).toBe(0)
+    expect(result.effects.outbound.length).toBe(0)
     expect(result.call.state).toBe("terminated")
     expect(result.call.activePeer).toBeNull()
   })
@@ -752,7 +761,7 @@ describe("terminate-call reach (composite)", () => {
     const ctx = makeCtx(call, aLeg, undefined, "from-a", make200InviteFromB("bob-tag"))
     const result = executeActions([{ type: "terminate-call" }], ctx, "test-rule")
 
-    const labels = result.outbound.map((o) => o.label)
+    const labels = result.effects.outbound.map((o) => o.label)
     // Only the b-leg BYE is emitted; the a-leg in "trying" is not CANCELed
     // (executeTerminateCall only CANCELs non-a trying/early legs).
     expect(labels.some((l) => l.startsWith("CANCEL"))).toBe(false)
@@ -800,8 +809,8 @@ describe("send-reinvite reach", () => {
     )
 
     // Exactly one outbound re-INVITE carrying the supplied SDP.
-    expect(result.outbound).toHaveLength(1)
-    const env = result.outbound[0]!
+    expect(result.effects.outbound).toHaveLength(1)
+    const env = result.effects.outbound[0]!
     expect(env.label).toBe("re-INVITE b-1")
     expect(env.legId).toBe("b-1")
     const msg = env.message
@@ -845,8 +854,8 @@ describe("send-reinvite reach", () => {
       "test-rule",
     )
 
-    expect(result.outbound).toHaveLength(1)
-    const req = result.outbound[0]!.message as SipRequest
+    expect(result.effects.outbound).toHaveLength(1)
+    const req = result.effects.outbound[0]!.message as SipRequest
     expect(req.body.byteLength).toBe(0)
     const cl = req.headers.find((h) => h.name.toLowerCase() === "content-length")
     expect(cl?.value).toBe("0")
@@ -864,7 +873,7 @@ describe("send-reinvite reach", () => {
       "test-rule",
     )
     expect(result.call).toBe(call)
-    expect(result.outbound).toHaveLength(0)
+    expect(result.effects.outbound).toHaveLength(0)
   })
 
   test("terminated leg → no-op (no re-INVITE emitted)", () => {
@@ -885,7 +894,7 @@ describe("send-reinvite reach", () => {
       ctx,
       "test-rule",
     )
-    expect(result.outbound).toHaveLength(0)
+    expect(result.effects.outbound).toHaveLength(0)
     expect(result.call).toBe(call)
   })
 })

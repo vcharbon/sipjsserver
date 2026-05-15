@@ -17,6 +17,7 @@
 
 import { Effect } from "effect"
 import type { ResolvedContext, HandlerResult } from "../../../sip/SipRouter.js"
+import { emptyEffects } from "../../../sip/SipRouter.js"
 import type { TimerEntry } from "../../../call/CallModel.js"
 
 export const handleLimiterRefresh = (
@@ -28,7 +29,7 @@ export const handleLimiterRefresh = (
     // No-op if the call is already shutting down — refresh has no value
     // and we don't want to schedule another tick.
     if (call.state === "terminated" || call.state === "terminating") {
-      return { call, outbound: [], effects: [] }
+      return { call, effects: emptyEffects }
     }
 
     // Migrate limiter counts from origin windows to the current window
@@ -59,7 +60,6 @@ export const handleLimiterRefresh = (
 
     return {
       call: updated,
-      outbound: [],
-      effects: [{ type: "schedule-timer", timer: nextTimer }],
+      effects: { ...emptyEffects, critical: [{ type: "schedule-timer", timer: nextTimer }] },
     }
   })

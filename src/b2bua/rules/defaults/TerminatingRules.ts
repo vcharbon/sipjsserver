@@ -12,7 +12,7 @@
  */
 
 import { Effect, Schema } from "effect"
-import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
+import type { RuleDefinition } from "../framework/RuleDefinition.js"
 
 // ── resolve-bye-response ──────────────────────────────────
 
@@ -89,16 +89,24 @@ export const resolveCrossByeRule: RuleDefinition<undefined, undefined> = {
   },
 }
 
-// ── terminating-safety-timeout ────────────────────────────
+// ── terminating-safety-timeout (canary) ───────────────────────────────
 
 /**
- * Safety net: force all unresolved legs to bye_timeout when the 64s
- * terminating_timeout fires. Prevents permanent call leaks from lost
- * BYE responses.
+ * Phase 5 + 6: the structural safety net is now installed by
+ * `CallState.update` whenever a call transitions into `terminating`,
+ * and its handler calls `forcePurge(callRef, "safety_timer")` directly
+ * (see SipRouter.timerHandler). Reaching this rule means the structural
+ * path didn't recover the call — every confirmed transition into
+ * `terminating` should pass through CallState's auto-arm path before
+ * the rule chain runs.
+ *
+ * Kept active as a canary: a single firing in production would prove
+ * the structural invariant is broken (auto-arm bypassed, or the
+ * timer's handler crashed without reaching forcePurge).
  */
 export const terminatingSafetyTimeoutRule: RuleDefinition<undefined, undefined> = {
   id: "terminating-safety-timeout",
-  name: "Terminating Safety Timeout",
+  name: "Terminating Safety Timeout (canary)",
   alwaysActive: true,
   stateSchema: Schema.Undefined,
   paramsSchema: Schema.Undefined,
@@ -111,19 +119,12 @@ export const terminatingSafetyTimeoutRule: RuleDefinition<undefined, undefined> 
 
   init: () => undefined,
 
-  handle: (ctx) => {
-    const actions: RuleAction[] = []
-
-    // Force-resolve all legs that haven't reached a terminal disposition
-    for (const leg of [ctx.call.aLeg, ...ctx.call.bLegs]) {
-      if (leg.state === "terminated") continue
-      const bd = leg.byeDisposition
-      if (bd === undefined || bd === "bye_sent") {
-        actions.push({ type: "terminate-leg", legId: leg.legId, byeDisposition: "bye_timeout" })
-      }
-    }
-
-    return Effect.succeed({ actions, state: undefined })
-  },
+  handle: (ctx) =>
+    Effect.gen(function* () {
+      yield* Effect.logWarning(
+        `[terminating-safety-timeout canary] structural safety net missed; rule-chain fell through for call ${ctx.callRef}`,
+      )
+      return { actions: [], state: undefined }
+    }),
 }
 

@@ -19,6 +19,7 @@ import { DrainingState } from "./DrainingState.js"
 import { AppConfig, type AppConfigData } from "../config/AppConfig.js"
 import { CallLimiter } from "../call/CallLimiter.js"
 import { PartitionedRelayStorage } from "../cache/PartitionedRelayStorage.js"
+import { BufferedTerminateWriter } from "../cache/BufferedTerminateWriter.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
 import { TracingService } from "../tracing/TracingService.js"
 import { TracerHealthSignal } from "../observability/tracer-health.js"
@@ -95,6 +96,11 @@ export const defaultEmbeddedAppConfig: AppConfigData = {
   bufferedSendIdleTtlMs: 5_000,
   bufferedSendMaxPeers: 10_000,
   bufferedSendSweepIntervalMs: 1_000,
+  cdrBufferQueueMax: 0,
+  storageBufferQueueMax: 0,
+  storageBufferDrainers: 4,
+  storageDropFallbackMs: 1000,
+  limiterDecrementTimeoutMs: 1000,
   otelMaxAttributeValueLength: 32_768,
   traceTombstoneEnabled: false,
   replicationBootstrapTimeoutMs: 30_000,
@@ -197,12 +203,21 @@ export const b2buaEmbeddedLayer = (opts: B2buaEmbeddedOptions): B2buaLayer => {
   // wired further down satisfies StackIdentity.Default's only dep.
   const StackIdentityL = StackIdentity.Default
 
+  // Phase 4 — embedded callers get a passthrough `BufferedTerminateWriter`
+  // (config sentinel `storageBufferQueueMax: 0` defaults to direct).
+  const BufferedTerminateL = BufferedTerminateWriter.layer.pipe(
+    Layer.provide(CacheL),
+    Layer.provide(AppConfigL),
+    Layer.provide(MetricsL),
+  )
+
   return B2buaCoreLayer.pipe(
     Layer.provideMerge(StackIdentityL),
     Layer.provide(AppConfigL),
     Layer.provide(UdpL),
     Layer.provide(OverloadL),
     Layer.provide(CacheL),
+    Layer.provide(BufferedTerminateL),
     Layer.provide(LimiterL),
     Layer.provide(opts.callDecision),
     Layer.provide(TracingL),

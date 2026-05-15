@@ -12,27 +12,47 @@ import { TestClock } from "effect/testing"
 import { AppConfig } from "../../src/config/AppConfig.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
+import { BufferedTerminateWriter } from "../../src/cache/BufferedTerminateWriter.js"
 import { CallState } from "../../src/call/CallState.js"
 import { TimerService } from "../../src/call/TimerService.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
 import { NoOpCdrLayer } from "./networkLeaves.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 
-const limiterLayer = CallLimiter.memoryLayer.pipe(Layer.provideMerge(AppConfig.layer))
+// Override the env-derived config so terminate-path Redis I/O stays
+// synchronous (`storageBufferQueueMax: 0` selects the BufferedTerminateWriter
+// passthrough). The remove()/orphan-sweep tests below assert immediate
+// cache deletion, which would race the drainer fiber under the buffered
+// path. Production sets >0; test-determinism wants 0.
+const TestAppConfigLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const envCfg = yield* AppConfig
+    return Layer.succeed(AppConfig, { ...envCfg, storageBufferQueueMax: 0 })
+  }).pipe(Effect.provide(AppConfig.layer))
+)
+
+const limiterLayer = CallLimiter.memoryLayer.pipe(Layer.provideMerge(TestAppConfigLayer))
 // Slice 1.5: CallState now drops timer fibers as part of every cleanup
 // path (remove / orphan sweep / force-purge), so it depends on
 // TimerService. Provide the same MetricsRegistry instance to both so
 // timer counters and call-state buckets land in one place.
 const timerLayer = TimerService.layer.pipe(
   Layer.provide(MetricsRegistry.layer),
-  Layer.provide(AppConfig.layer),
+  Layer.provide(TestAppConfigLayer),
 )
 // CallState's orphan-sweep decrement path needs the SAME CallLimiter instance
 // the test asserts against, so expose it upstream via `provideMerge`.
 // Slice 4 endurance hardening: CallState now publishes terminating-bucket
 // metrics into the registry, so a registry instance must be in scope.
+const bufferedTerminateLayer = BufferedTerminateWriter.layer.pipe(
+  Layer.provide(PartitionedRelayStorage.memoryLayer),
+  Layer.provide(TestAppConfigLayer),
+  Layer.provide(MetricsRegistry.layer),
+)
+
 const callStateLayer = CallState.layer.pipe(
   Layer.provide(PartitionedRelayStorage.memoryLayer),
+  Layer.provide(bufferedTerminateLayer),
   Layer.provide(NoOpCdrLayer),
   Layer.provide(MetricsRegistry.layer),
   Layer.provide(timerLayer),

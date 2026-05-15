@@ -68,6 +68,8 @@ When adding a test: if it can run under TestClock, put it in the fake-clock file
 
 When writing or modifying SIP manipulation code, list every relevant RFC rule the UAC and/or UAS must honour in the plan before coding. When the user describes a custom encoding or data format, ask clarifying questions before implementing.
 
+When modifying any of `src/b2bua/rules/framework/RuleExecutor.ts`, `src/b2bua/rules/framework/ActionExecutor.ts`, `src/b2bua/rules/framework/RuleDefinition.ts`, `src/sip/SipRouter.ts:processResult`, `src/call/CallState.ts:update`, or `src/call/CallState.ts:forcePurge*`, read [docs/adr/0003-must-run-effects-under-interruption.md](docs/adr/0003-must-run-effects-under-interruption.md) FIRST. The interpreter's safety contract is load-bearing and easy to break silently.
+
 ## Progressive reading guide
 
 Load these only when the task touches the area:
@@ -85,3 +87,4 @@ Load these only when the task touches the area:
 | LB-proxy HA / shared VIP / keepalived / VRRP | [docs/lb-proxy-ha.md](docs/lb-proxy-ha.md) |
 | Authoring multi-agent SIP scenarios (hybrid kind harness) | [docs/test-api-external.md](docs/test-api-external.md) |
 | Replication / call cache backup mechanism |        [docs/replication/call-cache-backup.md](../replication/call-cache-backup.md) |
+| Must-run effect categories + buffered IO contract | [docs/adr/0003-must-run-effects-under-interruption.md](docs/adr/0003-must-run-effects-under-interruption.md) |

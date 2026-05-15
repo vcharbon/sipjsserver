@@ -150,10 +150,13 @@ function logByeDispositionViolations(
 // updateDialog helpers, so reference equality is sound.
 function appendAutoFlush(callBefore: Call, result: HandlerResult): HandlerResult {
   if (result.call === callBefore) return result
-  if (result.effects.some((e) => e.type === "flush-redis")) return result
+  if (result.effects.critical.some((e) => e.type === "flush-redis")) return result
   return {
     ...result,
-    effects: [...result.effects, { type: "flush-redis" }],
+    effects: {
+      ...result.effects,
+      critical: [...result.effects.critical, { type: "flush-redis" }],
+    },
   }
 }
 
@@ -274,8 +277,16 @@ export function executeRules(
               const merged = addRuleAttribution(
                 {
                   call: baseResult.call,
-                  outbound: [...preResult.outbound, ...baseResult.outbound],
-                  effects: [...preResult.effects, ...baseResult.effects],
+                  effects: {
+                    critical: [...preResult.effects.critical, ...baseResult.effects.critical],
+                    outbound: [...preResult.effects.outbound, ...baseResult.effects.outbound],
+                    soft: [...preResult.effects.soft, ...baseResult.effects.soft],
+                    buffered: [...preResult.effects.buffered, ...baseResult.effects.buffered],
+                    fireAndForget: [
+                      ...preResult.effects.fireAndForget,
+                      ...baseResult.effects.fireAndForget,
+                    ],
+                  },
                   spanEvents: [...(preResult.spanEvents ?? []), ...(baseResult.spanEvents ?? [])],
                 },
                 id,

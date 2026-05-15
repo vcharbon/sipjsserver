@@ -160,9 +160,9 @@ describe("ActionExecutor Content-Length correctness", () => {
       ]
 
       const result = executeActions(actions, ctx, "test-rule")
-      expect(result.outbound.length).toBe(1)
+      expect(result.effects.outbound.length).toBe(1)
 
-      const out = result.outbound[0]!.message
+      const out = result.effects.outbound[0]!.message
       expect(out.body).toEqual(newSdpBody)
       expect(getHeaderValue(out.headers, "Content-Length")).toBe(String(newSdpBody.byteLength))
     })
@@ -174,9 +174,9 @@ describe("ActionExecutor Content-Length correctness", () => {
       ]
 
       const result = executeActions(actions, ctx, "test-rule")
-      expect(result.outbound.length).toBe(1)
+      expect(result.effects.outbound.length).toBe(1)
 
-      const out = result.outbound[0]!.message
+      const out = result.effects.outbound[0]!.message
       expect(out.body.byteLength).toBe(0)
       expect(getHeaderValue(out.headers, "Content-Length")).toBe("0")
     })
@@ -214,9 +214,9 @@ describe("ActionExecutor Content-Length correctness", () => {
       ]
 
       const result = executeActions(actions, ctx, "test-rule")
-      expect(result.outbound.length).toBe(1)
+      expect(result.effects.outbound.length).toBe(1)
 
-      const out = result.outbound[0]!.message
+      const out = result.effects.outbound[0]!.message
       expect(out.body.byteLength).toBe(0)
       expect(getHeaderValue(out.headers, "Content-Length")).toBe("0")
     })
@@ -228,9 +228,9 @@ describe("ActionExecutor Content-Length correctness", () => {
       ]
 
       const result = executeActions(actions, ctx, "test-rule")
-      expect(result.outbound.length).toBe(1)
+      expect(result.effects.outbound.length).toBe(1)
 
-      const out = result.outbound[0]!.message
+      const out = result.effects.outbound[0]!.message
       expect(out.body).toEqual(newSdpBody)
       expect(getHeaderValue(out.headers, "Content-Length")).toBe(String(newSdpBody.byteLength))
     })
@@ -267,9 +267,9 @@ describe("ActionExecutor Content-Length correctness", () => {
       ]
 
       const result = executeActions(actions, ctx, "test-rule")
-      expect(result.outbound.length).toBe(1)
+      expect(result.effects.outbound.length).toBe(1)
 
-      const out = result.outbound[0]!.message
+      const out = result.effects.outbound[0]!.message
       expect(out.body).toEqual(infoBody)
       expect(getHeaderValue(out.headers, "Content-Length")).toBe(String(infoBody.byteLength))
     })
@@ -281,9 +281,9 @@ describe("ActionExecutor Content-Length correctness", () => {
       ]
 
       const result = executeActions(actions, ctx, "test-rule")
-      expect(result.outbound.length).toBe(1)
+      expect(result.effects.outbound.length).toBe(1)
 
-      const out = result.outbound[0]!.message
+      const out = result.effects.outbound[0]!.message
       expect(out.body.byteLength).toBe(0)
       expect(getHeaderValue(out.headers, "Content-Length")).toBe("0")
     })
