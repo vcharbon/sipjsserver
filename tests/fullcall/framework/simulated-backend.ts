@@ -215,7 +215,7 @@ export function createSimulatedTransport(opts?: {
           ? proxyB2bFakeStackLayer({ config, simulateMissingOutboundProxy })
           : sut === "registrarFrontProxy"
             ? registrarFrontProxyFakeStackLayer({ config })
-            : fakeStackLayer({ config })
+            : fakeStackLayer({ config, realClock: opts?.realClock === true })
 
   const mockState: MockTransportState = {
     agents: new Map(),
@@ -498,11 +498,25 @@ export function createSimulatedTransport(opts?: {
       //      migration, keepalive interval, ...) so verifyCleanState sees
       //      a clean stack.
       //
-      // Under realClock there's no virtual clock to advance — pumpAll's
-      // built-in 20ms real-clock probe handles the same role.
+      // Under realClock there's no virtual clock to advance — poll
+      // `CallState.concurrent` until the post-BYE rule chain has fired
+      // (it writes the CDR and removes the call in the same path, so
+      // quiescence implies the CDR-completeness assertion will succeed).
+      // HA SUTs hide per-worker CallState behind the cluster — they opt
+      // into skipFinalSweep, so this branch isn't reached for them.
       Effect.gen(function* () {
         if (opts?.realClock) {
-          yield* Effect.sleep("100 millis")
+          const cs = mockState.callStateRef
+          if (cs !== undefined) {
+            const deadline = Date.now() + 2000
+            while (Date.now() < deadline) {
+              const { concurrent } = yield* cs.stats()
+              if (concurrent === 0) return
+              yield* Effect.sleep("20 millis")
+            }
+          } else {
+            yield* Effect.sleep("100 millis")
+          }
           return
         }
         // Phase A: drain transit + immediate responses.

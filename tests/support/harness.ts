@@ -303,7 +303,13 @@ export function createSimulatedRunner(opts?: {
       console.log(formatReport(result))
       recordResult(result, outputDir)
       assertScenarioPassed(result)
-      yield* assertCleanCallTermination(scenario.name)
+      // Scenarios that opt into skipFinalSweep deliberately leave state
+      // dirty (e.g. one peer walked away without a BYE), so the CDR /
+      // CallState assertions don't apply — the interpreter already
+      // skips settle/verifyCleanState in that mode; mirror that here.
+      if (!scenario.skipFinalSweep) {
+        yield* assertCleanCallTermination(scenario.name)
+      }
     })
     const layer = transport.stackLayer
     return runScoped(

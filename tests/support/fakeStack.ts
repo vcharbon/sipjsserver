@@ -69,12 +69,24 @@ export { NoOpCdrLayer, NoOpTracingLayer }
 export function fakeStackLayer(opts: {
   readonly config: AppConfigData
   readonly transitDelayMs?: number
+  /**
+   * When true, omit `PumpableClockLayer` so the stack inherits the
+   * surrounding runtime's real `Clock.Clock`. The simulated SUTs reuse
+   * this layer for the rare real-clock scenarios (parallel limiter
+   * tests, keepalive-with-real-timeouts) — under real wall clock,
+   * pulling PumpableClock into scope makes `SignalingNetwork.simulated`'s
+   * transit-delay `Effect.sleep` block forever on a virtual clock no
+   * one advances, so packets are never delivered.
+   */
+  readonly realClock?: boolean
 }) {
   const NetworkLayer = SignalingNetwork.simulated({
     transitDelayMs: opts.transitDelayMs ?? DEFAULT_TRANSIT_DELAY_MS,
   })
-  return b2buaWorkerStackLayer({ config: opts.config }).pipe(
+  const base = b2buaWorkerStackLayer({ config: opts.config }).pipe(
     Layer.provideMerge(NetworkLayer),
-    Layer.provideMerge(PumpableClockLayer),
   )
+  return opts.realClock === true
+    ? base
+    : base.pipe(Layer.provideMerge(PumpableClockLayer))
 }
