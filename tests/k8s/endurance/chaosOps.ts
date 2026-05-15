@@ -45,17 +45,37 @@ export type ChaosEventType =
   | "node-shutdown-app"
   | "node-shutdown-edge"
   | "proxy-cutoff-vrrp"
+  // Network-chaos catalog (2026-05-15): admitted under the new "any
+  // impact modelled by ExpectedImpact" rule. See docs/k8s-endurance.md
+  // §"Expected-impact mechanism" + ADR-0002 amendment.
+  | "worker-cut-from-proxy-hard"
+  | "worker-cut-from-peers-hard"
+  | "worker-cut-from-limiter-redis-hard"
+  | "worker-isolate-all-hard"
+  | "worker-cut-from-proxy-loss30"
+  | "proxy-full-isolate"
+  | "non-emergency-burst"
 
-// Chaos catalog rule: only events whose proper handling has zero or
-// near-zero traffic impact. `proxy-cutoff-vrrp` qualifies — with
-// nopreempt + strict-ARP the original master keeps the VIP, peer just
-// sees a silent partner. `proxy-cutoff-ingress` (blackhole UDP/5060 on
-// the active node) and `proxy-cutoff-workers` (blackhole egress to the
-// pod CIDR) were considered but rejected: ingress has no realistic prod
-// analog and no clean handling path; workers depends on a working
-// chk_proxy script to cede the VIP, which the current keepalived
-// sidecar doesn't run cleanly. Re-introduce only when both have a
-// detection path with sub-second failover.
+/** All ChaosEventType values as an array; single source of truth. */
+export const ALL_CHAOS_EVENT_TYPES: ReadonlyArray<ChaosEventType> = [
+  "worker-pod-graceful",
+  "worker-pod-kill9",
+  "proxy-pod-graceful",
+  "proxy-pod-kill9",
+  "limiter-redis-graceful",
+  "limiter-redis-kill9",
+  "node-shutdown-app",
+  "node-shutdown-edge",
+  "proxy-cutoff-vrrp",
+  "worker-cut-from-proxy-hard",
+  "worker-cut-from-peers-hard",
+  "worker-cut-from-limiter-redis-hard",
+  "worker-isolate-all-hard",
+  "worker-cut-from-proxy-loss30",
+  "proxy-full-isolate",
+  "non-emergency-burst",
+]
+
 export type ProxyCutoffKind = "vrrp"
 
 export interface ChaosOutcome {
@@ -89,6 +109,14 @@ const NODE_OUTAGE_SEC = 60
 
 /** Bounded outage duration for proxy network cutoffs. */
 const PROXY_CUTOFF_SEC = 30
+
+/** Bounded outage duration for worker network-isolation cuts. */
+export const NETWORK_CUT_DURATION_SEC = 30
+
+/** Burst event duration (sipp ad-hoc Job runtime). */
+export const BURST_DURATION_SEC = 60
+/** Burst CAPS — non-emergency INVITEs sent against the proxy VIP. */
+export const BURST_CAPS = 200
 
 export interface KillPodEventOpts {
   readonly namespace: string
@@ -601,4 +629,281 @@ export const readLimiterInflight = (
     )
     const n = parseInt(result, 10)
     return Number.isFinite(n) ? n : 0
+  })
+
+/* ------------------------------------------------------------------ */
+/* Network-chaos primitive (iptables FORWARD rules on every kind node) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Which peer class(es) to isolate the target pod from.
+ *
+ * For a worker target:
+ *   - "proxy" — both proxy pods
+ *   - "peers" — every OTHER worker pod (the replication peer set)
+ *   - "limiter-redis" — the shared limiter Redis pod
+ *   - "all" — everything else in the cluster (drops all FORWARD for
+ *     the target pod's IP, regardless of remote peer)
+ *
+ * For a proxy target only "all" is meaningful — partial-loss /
+ * asymmetric cuts on the proxy do not model anything real (VRRP either
+ * holds the VIP or it doesn't).
+ */
+export type NetworkChaosPeerSet =
+  | "proxy"
+  | "peers"
+  | "limiter-redis"
+  | "all"
+
+export type NetworkChaosIntensity =
+  | { readonly kind: "hard" }
+  /** Drop a fraction of packets via iptables `-m statistic`. 0..1. */
+  | { readonly kind: "loss"; readonly probability: number }
+
+export interface NetworkChaosOpts {
+  readonly namespace: string
+  readonly type: ChaosEventType
+  /** Pod label selector for the target — WORKER_LABEL or PROXY_LABEL. */
+  readonly targetLabel: string
+  readonly peerSets: ReadonlyArray<NetworkChaosPeerSet>
+  readonly intensity: NetworkChaosIntensity
+  readonly durationSec?: number
+}
+
+/**
+ * Fire a network-isolation chaos event: install iptables FORWARD rules
+ * on every kind node that drop traffic between the target pod and the
+ * resolved peer-set IPs, sleep `durationSec`, then remove them.
+ *
+ * The "hard" intensity uses a plain `-j DROP`. The "loss" intensity
+ * adds `-m statistic --mode random --probability <p>` so only a
+ * fraction of packets are dropped; the connection appears alive but
+ * UDP retransmits pile up. iptables removes the need for tc qdisc
+ * machinery in v1.
+ *
+ * Rule cleanup is best-effort: if the orchestrator dies between fire
+ * and recover, the leftover rules can be torn down manually with
+ * `iptables -D INPUT/FORWARD -m comment --comment 'endurance-net-chaos'`.
+ */
+export const networkChaosEvent = (
+  opts: NetworkChaosOpts,
+  rand: () => number,
+): Effect.Effect<ChaosOutcome, ChaosOpsError> =>
+  Effect.gen(function* () {
+    const durationSec = opts.durationSec ?? NETWORK_CUT_DURATION_SEC
+    const targets = yield* listPods(opts.namespace, opts.targetLabel)
+    const readyTargets = targets.filter((p) => p.ready && p.ip !== "")
+    if (readyTargets.length < 2) {
+      return yield* new ChaosOpsError({
+        op: opts.type,
+        target: opts.targetLabel,
+        reason: `only ${readyTargets.length} ready target pod(s); need ≥2 (one survives the cut)`,
+      })
+    }
+    const idx = Math.floor(rand() * readyTargets.length)
+    const target = readyTargets[idx]
+    if (target === undefined) {
+      return yield* new ChaosOpsError({
+        op: opts.type,
+        target: opts.targetLabel,
+        reason: `random pick failed (idx=${idx}, len=${readyTargets.length})`,
+      })
+    }
+
+    const peerIps = yield* resolvePeerIps(opts.namespace, opts.peerSets, target.name)
+
+    const nodes = yield* listAllKindNodes().pipe(
+      Effect.mapError(
+        (msg) =>
+          new ChaosOpsError({ op: opts.type, target: target.name, reason: msg }),
+      ),
+    )
+    if (nodes.length === 0) {
+      return yield* new ChaosOpsError({
+        op: opts.type,
+        target: target.name,
+        reason: "no kind nodes resolved",
+      })
+    }
+
+    const rules = buildIptablesRules(target.ip, peerIps, opts.intensity)
+    if (rules.length === 0) {
+      return yield* new ChaosOpsError({
+        op: opts.type,
+        target: target.name,
+        reason: `peer-set resolved to zero peer IPs (peerSets=${opts.peerSets.join(",")})`,
+      })
+    }
+
+    const tFire = new Date()
+    yield* Effect.logInfo(
+      `chaos[${opts.type}] target=${target.name} (ip=${target.ip}) peers=${peerIps.length} nodes=${nodes.length} rules=${rules.length} dur=${durationSec}s`,
+    )
+    // Install on every node — same-node traffic may go via the kindnet
+    // bridge (subject to FORWARD when bridge-nf is on), cross-node
+    // traffic transits the docker bridge and is forwarded by the host;
+    // installing everywhere covers both paths without resolving which
+    // node each peer lives on.
+    yield* installRules(nodes, rules, "-A").pipe(
+      Effect.mapError(
+        (msg) =>
+          new ChaosOpsError({ op: opts.type, target: target.name, reason: msg }),
+      ),
+    )
+
+    // Recovery branch always runs, even on interruption, so the rules
+    // don't survive an orchestrator crash.
+    const cleanup = installRules(nodes, rules, "-D").pipe(
+      Effect.matchEffect({
+        onSuccess: () => Effect.void,
+        onFailure: (msg) =>
+          Effect.logWarning(`chaos[${opts.type}] cleanup failed (best-effort): ${msg}`),
+      }),
+    )
+
+    yield* Effect.sleep(`${durationSec} seconds`).pipe(Effect.ensuring(cleanup))
+
+    const tRecovered = new Date()
+    return {
+      type: opts.type,
+      target: target.name,
+      tFire,
+      tRecovered,
+      readyBefore: readyTargets.length,
+      readyAfter: readyTargets.length,
+    }
+  })
+
+const resolvePeerIps = (
+  namespace: string,
+  peerSets: ReadonlyArray<NetworkChaosPeerSet>,
+  targetPodName: string,
+): Effect.Effect<ReadonlyArray<string>, ChaosOpsError> =>
+  Effect.gen(function* () {
+    const out: Array<string> = []
+    for (const set of peerSets) {
+      if (set === "all") {
+        // "all" means "drop every FORWARD packet for this pod's IP" —
+        // implemented by passing an empty peer-IP list (see
+        // buildIptablesRules).
+        return []
+      }
+      const label =
+        set === "proxy"
+          ? PROXY_LABEL
+          : set === "limiter-redis"
+            ? LIMITER_REDIS_LABEL
+            : WORKER_LABEL
+      const pods = yield* listPods(namespace, label)
+      for (const p of pods) {
+        if (p.ip === "") continue
+        // "peers" excludes the target worker itself.
+        if (set === "peers" && p.name === targetPodName) continue
+        out.push(p.ip)
+      }
+    }
+    return out
+  })
+
+/**
+ * Build the iptables rule fragments (everything after the chain).
+ * Each fragment is symmetric (target↔peer) and tagged with a comment
+ * so we can audit / cleanup leftovers.
+ *
+ * Empty `peerIps` ⇒ "isolate the pod entirely" — install a wildcard
+ * drop on FORWARD for that source AND destination.
+ */
+const buildIptablesRules = (
+  targetIp: string,
+  peerIps: ReadonlyArray<string>,
+  intensity: NetworkChaosIntensity,
+): ReadonlyArray<ReadonlyArray<string>> => {
+  const statMatch =
+    intensity.kind === "loss"
+      ? ["-m", "statistic", "--mode", "random", "--probability", intensity.probability.toFixed(3)]
+      : []
+  const comment = ["-m", "comment", "--comment", "endurance-net-chaos"]
+  const rules: Array<ReadonlyArray<string>> = []
+  if (peerIps.length === 0) {
+    // "all": catch every FORWARD packet for the pod IP in both
+    // directions.
+    rules.push(["FORWARD", "-s", targetIp, ...statMatch, ...comment, "-j", "DROP"])
+    rules.push(["FORWARD", "-d", targetIp, ...statMatch, ...comment, "-j", "DROP"])
+    return rules
+  }
+  for (const peer of peerIps) {
+    rules.push([
+      "FORWARD",
+      "-s",
+      targetIp,
+      "-d",
+      peer,
+      ...statMatch,
+      ...comment,
+      "-j",
+      "DROP",
+    ])
+    rules.push([
+      "FORWARD",
+      "-s",
+      peer,
+      "-d",
+      targetIp,
+      ...statMatch,
+      ...comment,
+      "-j",
+      "DROP",
+    ])
+  }
+  return rules
+}
+
+const installRules = (
+  nodes: ReadonlyArray<string>,
+  rules: ReadonlyArray<ReadonlyArray<string>>,
+  action: "-A" | "-D",
+): Effect.Effect<void, string> =>
+  Effect.gen(function* () {
+    for (const node of nodes) {
+      for (const rule of rules) {
+        const args = ["exec", node, "iptables", action, ...rule]
+        // -D may fail if a previous fire already cleaned up; tolerate.
+        yield* exec("docker", args, { timeoutMs: 10_000 }).pipe(
+          Effect.matchEffect({
+            onSuccess: () => Effect.void,
+            onFailure: (e) =>
+              action === "-D"
+                ? Effect.logDebug(
+                    `iptables -D on ${node} non-fatal: ${e.stderr.trim() || e.stdout.trim()}`,
+                  )
+                : Effect.fail(
+                    `iptables -A on ${node} failed: ${e.stderr.trim() || e.stdout.trim()}`,
+                  ),
+          }),
+        )
+      }
+    }
+  })
+
+const listAllKindNodes = (): Effect.Effect<ReadonlyArray<string>, string> =>
+  Effect.gen(function* () {
+    const result = yield* exec(
+      "kubectl",
+      [
+        "get",
+        "nodes",
+        "-o",
+        "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+      ],
+      { timeoutMs: 10_000 },
+    ).pipe(
+      Effect.matchEffect({
+        onSuccess: (r) => Effect.succeed(r.stdout),
+        onFailure: (e) => Effect.fail(`kubectl get nodes failed: ${e.message}`),
+      }),
+    )
+    return result
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
   })

@@ -103,20 +103,18 @@ export const scaleStatefulSet = (namespace: string, name: string, replicas: numb
   })
 
 export const waitForPodReady = (namespace: string, podName: string, timeoutSec = 60) =>
-  Effect.gen(function* () {
-    yield* exec(
-      "kubectl",
-      [
-        "-n",
-        namespace,
-        "wait",
-        "--for=condition=ready",
-        `--timeout=${timeoutSec}s`,
-        `pod/${podName}`,
-      ],
-      { timeoutMs: (timeoutSec + 10) * 1000 },
-    )
-  })
+  exec(
+    "kubectl",
+    [
+      "-n",
+      namespace,
+      "wait",
+      "--for=condition=ready",
+      `--timeout=${timeoutSec}s`,
+      `pod/${podName}`,
+    ],
+    { timeoutMs: (timeoutSec + 10) * 1000 },
+  )
 
 /**
  * Run a command inside a pod and return stdout.

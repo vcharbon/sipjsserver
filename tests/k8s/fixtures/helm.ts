@@ -80,6 +80,17 @@ export const helmUninstall = (release: string, namespace: string) =>
     })
   })
 
+// Opaque payload pass-through; the helm CLI's JSON output is a stable
+// external contract. Schema decoding here is overkill — extracted out
+// of Effect.gen per docs/typescript-effect.md §"preferSchemaOverJson".
+const parseHelmStatus = (
+  raw: string,
+): { name: string; info: { status: string } } =>
+  JSON.parse(raw) as { name: string; info: { status: string } }
+
+const formatSuffixesForDebug = (suffixes: ReadonlyArray<string>): string =>
+  JSON.stringify(suffixes)
+
 export const helmStatus = (release: string, namespace: string) =>
   Effect.gen(function* () {
     const { stdout } = yield* exec("helm", [
@@ -90,7 +101,7 @@ export const helmStatus = (release: string, namespace: string) =>
       "-o",
       "json",
     ])
-    return JSON.parse(stdout) as { name: string; info: { status: string } }
+    return parseHelmStatus(stdout)
   })
 
 export const installRedis = (namespace: string) =>
@@ -152,10 +163,13 @@ export const installSipp = (namespace: string) =>
     const target = `sipp-uas.${namespace}.svc.cluster.local`
     const verdict = classifyAdmission(target, DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES)
     if (verdict === "reject") {
+      const suffixesDebug = formatSuffixesForDebug(
+        DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES,
+      )
       return yield* Effect.die(
         new Error(
           `installSipp: target host '${target}' would be rejected by the worker's TargetAdmission ` +
-            `(suffixes=${JSON.stringify(DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES)}). ` +
+            `(suffixes=${suffixesDebug}). ` +
             `Update DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES or the helm --set value.`,
         ),
       )

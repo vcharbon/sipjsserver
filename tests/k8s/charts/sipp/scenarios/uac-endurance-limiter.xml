@@ -31,6 +31,7 @@
       Contact: sip:sipp@[local_ip]:[local_port]
       Max-Forwards: 70
       Subject: K8s endurance limiter probe
+      Resource-Priority: esnet.0
       X-Api-Call: [xapi]
       Content-Type: application/sdp
       Content-Length: [len]

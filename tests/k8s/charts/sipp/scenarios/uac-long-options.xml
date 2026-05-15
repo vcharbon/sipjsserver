@@ -49,6 +49,7 @@
       Contact: sip:sipp@[local_ip]:[local_port]
       Max-Forwards: 70
       Subject: K8s endurance long-call (OPTIONS keepalive)
+      Resource-Priority: esnet.0
       Content-Type: application/sdp
       Content-Length: [len]
 

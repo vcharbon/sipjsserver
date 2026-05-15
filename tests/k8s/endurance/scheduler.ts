@@ -50,15 +50,29 @@ export interface SchedulerOpts {
 }
 
 const DEFAULT_WEIGHTS: Record<ChaosEventType, number> = {
-  "worker-pod-graceful": 13,
+  "worker-pod-graceful": 5,
   "worker-pod-kill9": 13,
-  "proxy-pod-graceful": 10,
-  "proxy-pod-kill9": 10,
-  "proxy-cutoff-vrrp": 5,
+  "proxy-pod-graceful": 3,
+  "proxy-pod-kill9": 3,
+  "proxy-cutoff-vrrp": 3,
   "limiter-redis-graceful": 2.5,
   "limiter-redis-kill9": 2.5,
-  "node-shutdown-app": 17,
-  "node-shutdown-edge": 17,
+  "node-shutdown-app": 10,
+  "node-shutdown-edge": 10,
+  // Network-chaos catalog. Weights set after per-event validation —
+  // see docs/plan/2026-05-15-validate-new-chaos-events-sliced.md.
+  // Two events remain at 0 pending investigation:
+  //   - `proxy-full-isolate`: VIP fail-over doesn't trigger
+  //     (keepalived `nopreempt`); total outage for cut duration.
+  //   - `non-emergency-burst`: emergency-priority shield leaks ~10%
+  //     on baseline; analyzer can't read the burst Job's traces.
+  "worker-cut-from-proxy-hard": 5,
+  "worker-cut-from-peers-hard": 3,
+  "worker-cut-from-limiter-redis-hard": 5,
+  "worker-isolate-all-hard": 2,
+  "worker-cut-from-proxy-loss30": 3,
+  "proxy-full-isolate": 0,
+  "non-emergency-burst": 0,
 }
 
 /**

@@ -101,7 +101,7 @@ const probeMetrics = (
       const text = yield* podExec(NAMESPACE, pod.name, [
         "wget",
         "-qO-",
-        `http://localhost:${port}/metrics`,
+        `http://127.0.0.1:${port}/metrics`,
       ]).pipe(
         Effect.catchTag("ExecError", (e) =>
           Effect.fail(

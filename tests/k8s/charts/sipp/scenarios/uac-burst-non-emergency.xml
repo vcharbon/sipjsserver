@@ -1,16 +1,19 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!--
-  Endurance background "short-hold" UAC: INVITE → 200 → ACK → 30s
-  hold → BYE. No call limiter, no in-dialog OPTIONS (calls complete
-  well before B2BUA's 900s keepalive timer).
+  Non-emergency overload burst — INVITE / (200 or 4xx/5xx) / 1s / BYE.
 
-  Hold is hardcoded to 30000ms because sipp's `[$variable]` macro does
-  not expand inside `<pause milliseconds="...">` attributes — it only
-  works in `<send>` CDATA bodies. Endurance harness keeps the hold
-  literal here; the orchestrator does not pass -set hold_ms.
+  Sent at 200 CAPS for ~60 s during a `non-emergency-burst` chaos
+  event. No `Resource-Priority` header — the baseline streams DO have
+  it, so the three overload tiers will shed THIS burst's calls first.
+
+  The scenario tolerates either a 200 (successful) or any of the
+  typical reject codes (503 overload, 480/486 admission-control)
+  terminating the call. The 1 s hold matches an "extremely short call"
+  so successful calls churn fast and the per-call rate doesn't drift
+  away from the offered CAPS.
 -->
-<scenario name="K8s UAC endurance short-hold — INVITE / 200 / hold / BYE">
+<scenario name="K8s UAC non-emergency burst — INVITE / hold / BYE">
 
   <send retrans="500">
     <![CDATA[
@@ -22,8 +25,7 @@
       CSeq: 1 INVITE
       Contact: sip:sipp@[local_ip]:[local_port]
       Max-Forwards: 70
-      Subject: K8s endurance short-hold
-      Resource-Priority: esnet.0
+      Subject: K8s endurance non-emergency burst
       Content-Type: application/sdp
       Content-Length: [len]
 
@@ -39,6 +41,9 @@
 
   <recv response="100" optional="true"/>
   <recv response="180" optional="true"/>
+  <recv response="503" optional="true" next="rejected"/>
+  <recv response="480" optional="true" next="rejected"/>
+  <recv response="486" optional="true" next="rejected"/>
   <recv response="200" rtd="true" rrs="true"/>
 
   <send>
@@ -56,7 +61,7 @@
     ]]>
   </send>
 
-  <pause milliseconds="30000"/>
+  <pause milliseconds="1000"/>
 
   <send retrans="500">
     <![CDATA[
@@ -75,6 +80,6 @@
 
   <recv response="200" crlf="true"/>
 
-  <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
-  <CallLengthRepartition value="100, 1000, 10000, 30000, 60000"/>
+  <label id="rejected"/>
+
 </scenario>

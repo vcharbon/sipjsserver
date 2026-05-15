@@ -18,12 +18,10 @@ import { clusterDown } from "../fixtures/cluster.js"
 import { WORKER_VALUES_ENDURANCE } from "../fixtures/helm.js"
 import { upFull } from "../scripts/up-full.js"
 import {
-  killPodEvent,
-  nodeShutdownEvent,
-  proxyCutoffEvent,
+  ALL_CHAOS_EVENT_TYPES,
   type ChaosEventType,
-  type ChaosOutcome,
 } from "./chaosOps.js"
+import { dispatchChaos } from "./dispatchChaos.js"
 import {
   appendNdjsonRows,
   captureForensicsBeforeKill,
@@ -93,6 +91,22 @@ interface CliArgs {
    * work — see docs/lb-proxy-ha.md.
    */
   readonly proxyTarget?: string
+  /**
+   * Long-running baseline campaign with zero chaos. The orchestrator
+   * still does BRINGUP, WARMUP, SOAK-START GATE, and sipp streams +
+   * recorder; it just doesn't fire any scheduled chaos events. The
+   * run does not auto-terminate — operator stops it with SIGINT or
+   * runs the `test:k8s:chaos` sub-command to inject events. Used as
+   * the inner-loop iteration entry point (see docs/k8s-endurance.md
+   * §"Iteration workflow").
+   */
+  readonly noChaos: boolean
+  /**
+   * Abort the chaos loop on the first ExpectedImpact rule that
+   * breaches with `severity: "fail"`. Default off — analyzer collects
+   * every breach and emits the run-end verdict.
+   */
+  readonly stopAtFirstFailure: boolean
 }
 
 const DEFAULTS = {
@@ -170,6 +184,8 @@ const parseArgs = (argv: ReadonlyArray<string>): CliArgs => {
     ),
     noAnalyze: flags.has("no-analyze"),
     proxyChaosDisabled: flags.has("proxy-chaos-disabled"),
+    noChaos: flags.has("no-chaos"),
+    stopAtFirstFailure: flags.has("stop-at-first-failure"),
     ...(args.has("chaos-weights")
       ? { chaosWeights: parseChaosWeights(args.get("chaos-weights")!) }
       : {}),
@@ -177,17 +193,9 @@ const parseArgs = (argv: ReadonlyArray<string>): CliArgs => {
   }
 }
 
-const VALID_CHAOS_TYPES: ReadonlySet<string> = new Set<ChaosEventType>([
-  "worker-pod-graceful",
-  "worker-pod-kill9",
-  "proxy-pod-graceful",
-  "proxy-pod-kill9",
-  "limiter-redis-graceful",
-  "limiter-redis-kill9",
-  "node-shutdown-app",
-  "node-shutdown-edge",
-  "proxy-cutoff-vrrp",
-])
+const VALID_CHAOS_TYPES: ReadonlySet<string> = new Set<ChaosEventType>(
+  ALL_CHAOS_EVENT_TYPES,
+)
 
 const parseChaosWeights = (raw: string): Partial<Record<ChaosEventType, number>> => {
   const out: Partial<Record<ChaosEventType, number>> = {}
@@ -278,6 +286,19 @@ const main = (argv: ReadonlyArray<string>) =>
       ).pipe(Effect.orDie)
 
     yield* writeMeta()
+
+    // `.active` pointer so the `test:k8s:chaos` sub-command can find
+    // this campaign's artifact dir without an explicit `--artifact-dir`.
+    // Best-effort: a stale `.active` from a previous orchestrator
+    // crash is overwritten here.
+    const activePointerPath = path.resolve(
+      "test-results",
+      "k8s-endurance",
+      ".active",
+    )
+    yield* Effect.tryPromise(() =>
+      fs.writeFile(activePointerPath, artifactDir + "\n", "utf8"),
+    ).pipe(Effect.ignore)
 
     /* ----- BRINGUP ------------------------------------------------- */
     // Endurance always starts from a freshly recreated cluster (ADR-0002).
@@ -394,22 +415,14 @@ const main = (argv: ReadonlyArray<string>) =>
       // --chaos-weights is an exclusive allow-list: unlisted event types
       // get weight 0. --proxy-chaos-disabled stays a coarse one-shot
       // toggle that zeroes proxy-side events on top of the defaults.
-      const allChaosTypes: ReadonlyArray<ChaosEventType> = [
-        "worker-pod-graceful",
-        "worker-pod-kill9",
-        "proxy-pod-graceful",
-        "proxy-pod-kill9",
-        "limiter-redis-graceful",
-        "limiter-redis-kill9",
-        "node-shutdown-app",
-        "node-shutdown-edge",
-        "proxy-cutoff-vrrp",
-      ]
+      // --no-chaos zeroes the whole schedule (baseline-only campaign,
+      // used as the inner-loop iteration entry point — operator fires
+      // events with the `test:k8s:chaos` sub-command).
       const buildExplicitWeights = (
         explicit: Partial<Record<ChaosEventType, number>>,
       ): Record<ChaosEventType, number> => {
         const out = {} as Record<ChaosEventType, number>
-        for (const t of allChaosTypes) out[t] = explicit[t] ?? 0
+        for (const t of ALL_CHAOS_EVENT_TYPES) out[t] = explicit[t] ?? 0
         return out
       }
       const explicitWeights: Partial<Record<ChaosEventType, number>> | undefined =
@@ -423,27 +436,39 @@ const main = (argv: ReadonlyArray<string>) =>
                 "node-shutdown-edge": 0,
               }
             : undefined
-      const schedule = args.smoke
-        ? buildSmokeSchedule()
-        : buildSchedule({
-            seed: args.seed,
-            chaosMinIntervalSec: args.chaosMinIntervalSec,
-            chaosMaxIntervalSec: args.chaosMaxIntervalSec,
-            soakDurationSec: args.durationSec,
-            ...(explicitWeights !== undefined && { weights: explicitWeights }),
-          })
+      const schedule: ReadonlyArray<ScheduledEvent> = args.noChaos
+        ? []
+        : args.smoke
+          ? buildSmokeSchedule()
+          : buildSchedule({
+              seed: args.seed,
+              chaosMinIntervalSec: args.chaosMinIntervalSec,
+              chaosMaxIntervalSec: args.chaosMaxIntervalSec,
+              soakDurationSec: args.durationSec,
+              ...(explicitWeights !== undefined && { weights: explicitWeights }),
+            })
       ;(meta as { chaosEventsScheduled: number }).chaosEventsScheduled =
         schedule.length
       yield* writeMeta()
 
-      yield* runChaosLoop({
-        artifactDir,
-        schedule,
-        tSoakStart,
-        durationSec: args.durationSec,
-        seed: args.seed,
-        meta,
-      })
+      if (args.noChaos) {
+        // Baseline campaign — block in SOAK without firing any events.
+        // The operator stops the run with SIGINT once they've iterated
+        // their fill via the `test:k8s:chaos` sub-command.
+        yield* Effect.logInfo(
+          `phase=SOAK (--no-chaos: sipp baseline for ${args.durationSec}s, no scheduled events)`,
+        )
+        yield* Effect.sleep(`${args.durationSec} seconds`)
+      } else {
+        yield* runChaosLoop({
+          artifactDir,
+          schedule,
+          tSoakStart,
+          durationSec: args.durationSec,
+          seed: args.seed,
+          meta,
+        })
+      }
 
       const tSoakEnd = new Date()
       meta.phase.tSoakEnd = tSoakEnd.toISOString()
@@ -622,7 +647,12 @@ const fireChaosEvent = (
       `chaos[${event.index}] fire ${event.type} (relativeSec=${event.relativeSec})`,
     )
     const tFire = new Date()
-    const result = yield* dispatchChaos(event.type, rand, artifactDir).pipe(
+    const result = yield* dispatchChaos(event.type, rand, {
+      namespace: NAMESPACE,
+      artifactDir,
+      captureForensicsBeforeKill: (ns, podName) =>
+        captureForensicsBeforeKill(ns, podName, artifactDir),
+    }).pipe(
       Effect.matchEffect({
         onSuccess: (r) => Effect.succeed({ ok: true as const, outcome: r }),
         onFailure: (e) =>
@@ -661,30 +691,9 @@ const fireChaosEvent = (
     return true
   })
 
-const dispatchChaos = (
-  type: ChaosEventType,
-  rand: () => number,
-  artifactDir: string,
-): Effect.Effect<ChaosOutcome, { readonly message: string }> => {
-  switch (type) {
-    case "node-shutdown-app":
-      return nodeShutdownEvent({ namespace: NAMESPACE, tier: "app" }, rand)
-    case "node-shutdown-edge":
-      return nodeShutdownEvent({ namespace: NAMESPACE, tier: "edge" }, rand)
-    case "proxy-cutoff-vrrp":
-      return proxyCutoffEvent({ namespace: NAMESPACE, kind: "vrrp" }, rand)
-    default:
-      return killPodEvent(
-        {
-          namespace: NAMESPACE,
-          type,
-          captureForensicsBeforeKill: (ns, podName) =>
-            captureForensicsBeforeKill(ns, podName, artifactDir),
-        },
-        rand,
-      )
-  }
-}
+// Dispatcher lives in `./dispatchChaos.ts` so the iteration sub-command
+// (`run-chaos.ts`) can re-use it without importing this orchestrator
+// (which executes its own main() on load).
 
 Effect.runPromise(
   main(process.argv.slice(2)).pipe(

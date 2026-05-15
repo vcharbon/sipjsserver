@@ -58,7 +58,10 @@ interface CallTrack {
   records: Array<MsgRecord>
 }
 
-const SEPARATOR_RE = /^-+\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s*$/
+// sipp v3.x writes ISO-8601 (`YYYY-MM-DDTHH:MM:SS.ssssssZ`); earlier
+// builds wrote the older space-separated local-time form. Accept both
+// so the parser survives a sipp upgrade without silently losing data.
+const SEPARATOR_RE = /^-+\s+(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z?\s*$/
 const DIRECTION_RE = /^UDP message (sent|received)\b/
 const REQUEST_START_RE = /^([A-Z]+)\s+\S+\s+SIP\/2\.0\s*$/
 const RESPONSE_START_RE = /^SIP\/2\.0\s+(\d{3})\b/

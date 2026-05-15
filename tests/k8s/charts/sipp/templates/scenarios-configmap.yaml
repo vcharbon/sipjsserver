@@ -23,3 +23,5 @@ data:
 {{ .Files.Get "scenarios/uac-endurance-short.xml" | indent 4 }}
   uac-endurance-limiter.xml: |-
 {{ .Files.Get "scenarios/uac-endurance-limiter.xml" | indent 4 }}
+  uac-burst-non-emergency.xml: |-
+{{ .Files.Get "scenarios/uac-burst-non-emergency.xml" | indent 4 }}

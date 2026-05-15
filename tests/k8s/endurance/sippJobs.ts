@@ -21,6 +21,7 @@ import { Data, Effect } from "effect"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
+import { BURST_CAPS, BURST_DURATION_SEC, type ChaosOutcome } from "./chaosOps.js"
 import { exec } from "../fixtures/exec.js"
 import { FRONT_PROXY_VIP_TARGET } from "../fixtures/frontProxyTarget.js"
 import { execInPod, kubectlCp } from "../fixtures/kubectl.js"
@@ -395,6 +396,58 @@ const findJobPod = (
       return yield* new SippDaemonError({ job: jobName, reason: "no pod for sipp Job" })
     }
     return result
+  })
+
+/**
+ * Fire a non-emergency overload burst — a one-shot sipp Job pumping
+ * BURST_CAPS calls/s of the `uac-burst-non-emergency.xml` scenario
+ * against the proxy VIP for BURST_DURATION_SEC, then stops.
+ *
+ * The burst's INVITEs carry no `Resource-Priority` header, so they
+ * land in the dispatcher's `normalNewCall` class queue and are shed
+ * by Tier-1/2/3 once those tiers' thresholds trip. The three baseline
+ * streams (which DO carry `Resource-Priority: esnet.0`) sail through
+ * unaffected — the expected-impact spec for this event captures that.
+ *
+ * Returns a `ChaosOutcome` with tFire/tRecovered bracketing the
+ * burst's lifetime. The Job's trace artifacts (msg.log.gz,
+ * screen.log, err.log, stat.csv) land at
+ * `<artifactDir>/sipp/<burstJobName>/` so the analyzer can score
+ * the burst's 503-rate / failure-rate against the expected impact.
+ */
+export const nonEmergencyBurstEvent = (opts: {
+  readonly namespace: string
+  readonly runId: string
+  readonly artifactDir: string
+}): Effect.Effect<ChaosOutcome, SippDaemonError> =>
+  Effect.gen(function* () {
+    const tFire = new Date()
+    const burstName = `burst-${tFire.getTime()}`
+    yield* Effect.logInfo(
+      `chaos[non-emergency-burst] starting sipp burst (${BURST_CAPS} CAPS for ${BURST_DURATION_SEC}s, name=${burstName})`,
+    )
+    const handle = yield* startSippDaemon({
+      namespace: opts.namespace,
+      name: burstName.slice(0, 50),
+      scenario: "uac-burst-non-emergency.xml",
+      cps: BURST_CAPS,
+      artifactDir: opts.artifactDir,
+    })
+    // Best-effort: even if waitSippRunning fails, the burst still
+    // runs (sipp can be Running before the watcher catches it).
+    yield* waitSippRunning(opts.namespace, handle.name, 30).pipe(Effect.ignore)
+    yield* Effect.sleep(`${BURST_DURATION_SEC} seconds`).pipe(
+      Effect.ensuring(handle.stop.pipe(Effect.ignore)),
+    )
+    const tRecovered = new Date()
+    return {
+      type: "non-emergency-burst",
+      target: burstName,
+      tFire,
+      tRecovered,
+      readyBefore: 0,
+      readyAfter: 0,
+    }
   })
 
 /**

@@ -33,6 +33,14 @@ import {
   type ChaosImpactWindow,
   type PhaseBounds,
 } from "./categorize.js"
+import type { ChaosEventType } from "./chaosOps.js"
+import {
+  aggregateImpact,
+  evaluateEvent,
+  type EventEvalResult,
+  type LimiterSample,
+  type RunOutcomeKind,
+} from "./evaluateImpact.js"
 
 const FORENSIC_SAMPLE_CAP_PER_CATEGORY = 100
 
@@ -152,6 +160,31 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
 
   const perEvent = buildPerEventBreakdown(categorized, impactWindows)
 
+  // ExpectedImpact evaluation per fired chaos event.
+  const limiterSamples: ReadonlyArray<LimiterSample> = limiter.map((r) => ({
+    tScrape: new Date(r.tScrape),
+    inflight: r.inflight,
+  }))
+  const streamJobNames = streamDirs
+  const eventEvals: Array<EventEvalResult> = []
+  for (let i = 0; i < chaos.length; i++) {
+    const c = chaos[i]
+    if (c === undefined) continue
+    if (c.status !== "executed" || c.tRecovered === undefined) continue
+    eventEvals.push(
+      evaluateEvent(
+        i,
+        {
+          type: c.type as ChaosEventType,
+          tFire: new Date(c.tFire),
+          tRecovered: new Date(c.tRecovered),
+        },
+        { outcomes, limiter: limiterSamples, streamJobNames },
+      ),
+    )
+  }
+  const impactAggregate = aggregateImpact(eventEvals)
+
   // Verdict computation.
   const counters: Record<CallCategory, { ok: number; failed: number }> = {
     STEADY: { ok: 0, failed: 0 },
@@ -177,11 +210,19 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
 
   const steadyFail = counters.STEADY.failed > 0
   const limiterLeak = limiterStability.exceededCap
-  const verdictOutcome: "PASS" | "FAIL" | "INCOMPLETE" = isIncomplete
-    ? "INCOMPLETE"
-    : steadyFail || limiterLeak
-      ? "FAIL"
-      : "PASS"
+  // ExpectedImpact may downgrade the run to WARN (warn-severity
+  // breaches or stubbed events) or up to FAIL (fail-severity breaches
+  // on top of any STEADY/limiter regression).
+  let verdictOutcome: "PASS" | "WARN" | "FAIL" | "INCOMPLETE"
+  if (isIncomplete) {
+    verdictOutcome = "INCOMPLETE"
+  } else if (steadyFail || limiterLeak || impactAggregate.outcome === "FAIL") {
+    verdictOutcome = "FAIL"
+  } else if (impactAggregate.outcome === "WARN") {
+    verdictOutcome = "WARN"
+  } else {
+    verdictOutcome = "PASS"
+  }
 
   const verdict = {
     outcome: verdictOutcome,
@@ -194,6 +235,11 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
       skipped: meta?.chaosEventsSkipped ?? chaos.filter((c) => c.status === "skipped").length,
     },
     perEvent,
+    expectedImpact: {
+      outcome: impactAggregate.outcome,
+      counts: impactAggregate.counts,
+      events: impactAggregate.events,
+    },
   }
 
   await fs.writeFile(
@@ -209,7 +255,8 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
   console.log(
     `analyze: ${verdictOutcome} | STEADY ok=${counters.STEADY.ok} fail=${counters.STEADY.failed}` +
       ` | limiter cap=${limiterStability.cap} max=${limiterStability.maxInflight} exceeded=${limiterStability.exceededCap}` +
-      ` | events executed=${verdict.chaos.executed} skipped=${verdict.chaos.skipped}`,
+      ` | events executed=${verdict.chaos.executed} skipped=${verdict.chaos.skipped}` +
+      ` | impact ${impactAggregate.outcome} pass=${impactAggregate.counts.pass} warn=${impactAggregate.counts.warn} fail=${impactAggregate.counts.fail} stub-events=${impactAggregate.counts.eventsWithoutSpec}`,
   )
 }
 
@@ -304,6 +351,49 @@ const writeReport = async (
   }
   lines.push("")
 
+  if (verdict.expectedImpact !== undefined) {
+    lines.push(`## Expected-impact evaluation\n`)
+    const ei = verdict.expectedImpact as {
+      outcome: RunOutcomeKind
+      counts: {
+        pass: number
+        warn: number
+        fail: number
+        noData: number
+        eventsWithoutSpec: number
+      }
+      events: ReadonlyArray<EventEvalResult>
+    }
+    lines.push(`- outcome=${ei.outcome}`)
+    lines.push(`- rules pass=${ei.counts.pass}`)
+    lines.push(`- rules warn=${ei.counts.warn}`)
+    lines.push(`- rules fail=${ei.counts.fail}`)
+    lines.push(`- rules no-data=${ei.counts.noData}`)
+    lines.push(`- events without spec (stubs)=${ei.counts.eventsWithoutSpec}\n`)
+    if (ei.events.length > 0) {
+      lines.push(`### Per-rule breakdown\n`)
+      lines.push(`| event# | type | status | severity | metric | bound | observed | n | window |`)
+      lines.push(`| --: | --- | --- | --- | --- | --- | --- | --: | --- |`)
+      for (const ev of ei.events) {
+        if (!ev.hasSpec) {
+          lines.push(
+            `| ${ev.eventIndex} | ${ev.type} | TODO | warn | — | — | — | 0 | (spec stub) |`,
+          )
+          continue
+        }
+        for (const r of ev.rules) {
+          const metric = describeMetric(r.metric)
+          const bound = describeBound(r.bound)
+          const observed = r.observedValue === undefined ? "—" : formatNumber(r.observedValue)
+          lines.push(
+            `| ${ev.eventIndex} | ${ev.type} | ${r.status} | ${r.severity} | ${metric} | ${bound} | ${observed} | ${r.sampleSize} | ${r.windowStart}..${r.windowEnd} |`,
+          )
+        }
+      }
+      lines.push("")
+    }
+  }
+
   lines.push(`## Top failure pointers\n`)
   lines.push(
     `Forensics for individual failed calls live under \`forensics/<Call-ID>.txt\`. Use the \`forensic --call-id <id>\` subcommand for ad-hoc lookups.\n`,
@@ -364,6 +454,39 @@ const writeForensicsForFailures = async (
 }
 
 const sanitizeCid = (cid: string): string => cid.replace(/[^A-Za-z0-9._@-]/g, "_")
+
+const describeMetric = (m: EventEvalResult["rules"][number]["metric"]): string => {
+  switch (m.kind) {
+    case "failureRate":
+      return m.codes !== undefined
+        ? `failureRate(${m.stream}, codes=[${m.codes.join(",")}])`
+        : `failureRate(${m.stream})`
+    case "midDialogFailureRate":
+      return m.codes !== undefined
+        ? `midDialogFailureRate(${m.stream}, codes=[${m.codes.join(",")}])`
+        : `midDialogFailureRate(${m.stream})`
+    case "stream503Rate":
+      return `stream503Rate(${m.stream})`
+    case "limiterInflight":
+      return "limiterInflight"
+    case "concurrentCalls":
+      return `concurrentCalls(${m.stream})`
+  }
+}
+
+const describeBound = (b: EventEvalResult["rules"][number]["bound"]): string => {
+  switch (b.kind) {
+    case "lessThan":
+      return `< ${b.value}`
+    case "greaterThan":
+      return `> ${b.value}`
+    case "around":
+      return `${b.target} ± ${b.tolerance}`
+  }
+}
+
+const formatNumber = (n: number): string =>
+  Math.abs(n) < 1 ? n.toFixed(4) : n.toFixed(2)
 
 /**
  * Emit one CSV per (metric name × pod) for analyst plotting. Reads

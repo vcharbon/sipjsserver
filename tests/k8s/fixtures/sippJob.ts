@@ -192,13 +192,11 @@ export const runSippJob = (opts: SippRunOpts): Effect.Effect<SippRunResult, Sipp
     const logs = logsResult.stdout
 
     if (status === "timeout") {
-      return yield* Effect.fail(
-        new SippJobError({
-          job: opts.name,
-          reason: `did not terminate within ${waitTimeoutSec}s`,
-          logs,
-        }),
-      )
+      return yield* new SippJobError({
+        job: opts.name,
+        reason: `did not terminate within ${waitTimeoutSec}s`,
+        logs,
+      })
     }
 
     // When capturing traces sipp's screen output is in `screen.log`
@@ -214,13 +212,11 @@ export const runSippJob = (opts: SippRunOpts): Effect.Effect<SippRunResult, Sipp
 
     const stats = parseSippStats(parseSource)
     if (stats === null) {
-      return yield* Effect.fail(
-        new SippJobError({
-          job: opts.name,
-          reason: "could not parse SIPp statistics from logs",
-          logs,
-        }),
-      )
+      return yield* new SippJobError({
+        job: opts.name,
+        reason: "could not parse SIPp statistics from logs",
+        logs,
+      })
     }
 
     if (tracePaths === undefined) {
