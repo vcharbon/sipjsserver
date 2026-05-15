@@ -4,7 +4,11 @@
 
 import { NodeHttpServer } from "@effect/platform-node"
 import { Clock, Effect, Layer } from "effect"
-import { HttpRouter, HttpServerResponse } from "effect/unstable/http"
+import {
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerResponse,
+} from "effect/unstable/http"
 import { createServer } from "node:http"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { writeHeapSnapshot } from "node:v8"
@@ -20,26 +24,36 @@ import { addReplLogRoutes, ReplLogServer } from "../replication/ReplLogServer.js
 import { getByeDispositionInvariantViolationCount } from "../b2bua/rules/framework/ByeDispositionInvariant.js"
 
 
-/** Start a V8 CPU profile in the current process, write to dir after durationMs. */
-function profileProcess(dir: string, durationMs: number, label: string): void {
-  ;(async () => {
-    try {
-      const { Session } = await import("node:inspector/promises")
-      const session = new Session()
-      session.connect()
-      await session.post("Profiler.enable")
-      await session.post("Profiler.start")
-      await new Promise<void>(r => setTimeout(r, durationMs))
-      const { profile } = await session.post("Profiler.stop")
-      await session.post("Profiler.disable")
-      session.disconnect()
-      const file = `${dir}/cpu-${label}-${process.pid}-${Date.now()}.cpuprofile`
-      writeFileSync(file, JSON.stringify(profile))
-      console.log(`[${label}] CPU profile written: ${file}`)
-    } catch (err) {
-      console.error(`[${label}] CPU profile failed:`, err)
-    }
-  })()
+/**
+ * Start a V8 CPU profile in the current process, write to dir after
+ * durationMs. Returns the file path on success, or `null` if the
+ * inspector failed. Awaiting the promise is required for the
+ * orchestrator's pre-kill capture path; fire-and-forget callers can
+ * just discard it.
+ */
+async function profileProcess(
+  dir: string,
+  durationMs: number,
+  label: string,
+): Promise<string | null> {
+  try {
+    const { Session } = await import("node:inspector/promises")
+    const session = new Session()
+    session.connect()
+    await session.post("Profiler.enable")
+    await session.post("Profiler.start")
+    await new Promise<void>((r) => setTimeout(r, durationMs))
+    const { profile } = await session.post("Profiler.stop")
+    await session.post("Profiler.disable")
+    session.disconnect()
+    const file = `${dir}/cpu-${label}-${process.pid}-${Date.now()}.cpuprofile`
+    writeFileSync(file, JSON.stringify(profile))
+    console.log(`[${label}] CPU profile written: ${file}`)
+    return file
+  } catch (err) {
+    console.error(`[${label}] CPU profile failed:`, err)
+    return null
+  }
 }
 
 function buildStatusBlocks(registry: MetricsRegistryState) {
@@ -407,7 +421,7 @@ function renderPrometheus(
     header(
       "b2bua_replication_bootstrap_entries_imported_total",
       "counter",
-      "Scan entries imported into local `pri:{self}:*` per source peer.",
+      "Calls retrieved from each source peer during boot bootstrap (1 entry = 1 call replicated into the local `pri:{self}:*` partition).",
     )
     const imported = b.entriesImportedTotal()
     for (const [peer, value] of Object.entries(imported)) {
@@ -423,6 +437,20 @@ function renderPrometheus(
     for (const [peer, samples] of Object.entries(durations)) {
       const last = samples.length > 0 ? samples[samples.length - 1]! : 0
       m("b2bua_replication_bootstrap_duration_ms", last, { peer })
+    }
+  }
+
+  // ── Worker-readiness transition (cold-boot context-load time) ──────
+  if (reg.workerReadiness) {
+    const ms = reg.workerReadiness.readyInMs()
+    const reason = reg.workerReadiness.readyReason()
+    if (ms !== undefined && reason !== undefined) {
+      header(
+        "b2bua_worker_ready_in_ms",
+        "gauge",
+        "Wall-clock ms from worker process boot to Ready=true. `reason=all_caught_up` is the happy path (every peer's bootstrap caught up before T_max); `reason=t_max_timeout` means the controller flipped Ready by ceiling — the proxy may route to this worker before its state is fully restored. See ReadinessController.ts.",
+      )
+      m("b2bua_worker_ready_in_ms", ms, { reason })
     }
   }
 
@@ -646,23 +674,58 @@ export const StatusServerLayer: Layer.Layer<
         yield* router.add(
           "POST",
           "/debug/cpu-profile",
-          Effect.sync(() => {
-            const dir = "/tmp/cpuprofiles"
-            const durationMs = 10_000
-            try {
-              mkdirSync(dir, { recursive: true })
-            } catch { /* ignore */ }
-            // Profile master process in background (don't block response)
-            profileProcess(dir, durationMs, "master")
-            // Broadcast to workers
-            registry.broadcastToWorkers?.({ type: "cpu-profile", dir, durationMs })
-            return HttpServerResponse.json({
+          Effect.gen(function* () {
+            const req = yield* HttpServerRequest.HttpServerRequest
+            const url = new URL(req.url, "http://localhost")
+            // Reuse the heapdumps emptyDir so a CPU profile survives
+            // container restart and rides the same `kubectl cp` path
+            // operators already wired for heap snapshots.
+            const dir = existsSync("/heapdumps")
+              ? "/heapdumps"
+              : "/tmp/cpuprofiles"
+            const durationMs = (() => {
+              const raw = url.searchParams.get("seconds")
+              const parsed = raw === null ? NaN : Number.parseInt(raw, 10)
+              return Number.isFinite(parsed) && parsed > 0
+                ? parsed * 1_000
+                : 10_000
+            })()
+            const wait = url.searchParams.get("wait") === "1"
+            yield* Effect.sync(() => {
+              try {
+                mkdirSync(dir, { recursive: true })
+              } catch {
+                /* ignore */
+              }
+            })
+            registry.broadcastToWorkers?.({
+              type: "cpu-profile",
+              dir,
+              durationMs,
+            })
+            if (wait) {
+              // Pre-kill capture: caller needs the file on disk before
+              // we issue a kill, so block until profileProcess resolves.
+              const file = yield* Effect.promise(() =>
+                profileProcess(dir, durationMs, "master"),
+              )
+              return HttpServerResponse.jsonUnsafe({
+                status: file === null ? "failed" : "completed",
+                master: file,
+                durationMs,
+                dir,
+                workersBroadcast: registry.broadcastToWorkers !== undefined,
+              })
+            }
+            // Fire-and-forget for ad-hoc operator use.
+            void profileProcess(dir, durationMs, "master")
+            return HttpServerResponse.jsonUnsafe({
               status: "profiling_started",
               durationMs,
               dir,
               workersBroadcast: registry.broadcastToWorkers !== undefined,
             })
-          }).pipe(Effect.flatten)
+          }),
         )
 
         yield* addCallControlRoutes(router)

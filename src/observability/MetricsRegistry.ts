@@ -254,6 +254,20 @@ export interface ReplicationBootstrapMetrics {
 }
 
 /**
+ * Worker-readiness transition metric. Recorded exactly once per
+ * worker incarnation when the ReadinessController flips `Ready=true`.
+ * Consumers correlate `readyInMs` with bootstrap-duration / restored-call
+ * counts to spot regressions in cold-boot time. The `reason` slot is
+ * `all_caught_up` (every alive peer reached `everCaughtUp` before T_max)
+ * or `t_max_timeout` (the controller flipped Ready by ceiling, with a
+ * WARN log naming the un-caught peers — see ReadinessController.ts).
+ */
+export interface WorkerReadinessMetrics {
+  readonly readyInMs: () => number | undefined
+  readonly readyReason: () => "all_caught_up" | "t_max_timeout" | undefined
+}
+
+/**
  * Optional OTel pipeline surface — populated by the BSP wrapper
  * introduced in Slice 5. Holds queue-depth and drop counters that
  * the upstream `BatchSpanProcessor` does not expose publicly.
@@ -279,6 +293,8 @@ export interface MetricsRegistryState {
   sipRouter: SipRouterMetrics | undefined
   /** Peer-scan-bootstrap success / failure / duration counters. */
   replicationBootstrap: ReplicationBootstrapMetrics | undefined
+  /** Worker-readiness transition (ms from boot to Ready, with reason). */
+  workerReadiness: WorkerReadinessMetrics | undefined
   /** OTel BSP queue depth / drop counters (Slice 5). */
   otelPipeline: OtelPipelineMetrics | undefined
   /** Per-worker metrics snapshots, indexed by worker index. */
@@ -301,6 +317,7 @@ export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, Metrics
     callState: undefined,
     sipRouter: undefined,
     replicationBootstrap: undefined,
+    workerReadiness: undefined,
     otelPipeline: undefined,
     workers: [],
     broadcastToWorkers: undefined,

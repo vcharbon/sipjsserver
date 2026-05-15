@@ -244,6 +244,72 @@ const WATCHDOG_RESET = 0.30
  * `wget --tries=1 --timeout=30` gives the worker up to 30s to walk the
  * heap; for ~300Mi RSS that's well under the budget.
  */
+/**
+ * Parse the `master` field out of `/debug/heap-snapshot` /
+ * `/debug/cpu-profile?wait=1` responses. Both endpoints respond with a
+ * JSON payload of the same shape (`{ master: string, ... }`); a
+ * malformed body or missing field returns `undefined` so the caller can
+ * skip the cp/rm step gracefully.
+ */
+const parseDumpFilePath = (raw: string): string | undefined => {
+  try {
+    const parsed = JSON.parse(raw) as { master?: string }
+    return typeof parsed.master === "string" && parsed.master.length > 0
+      ? parsed.master
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Copy the freshly-written dump out of the pod into
+ * `<artifactDir>/<destSubdir>/<pod>/<basename>` and unlink the source
+ * inside the pod. Any failure is logged but never raised — the
+ * watchdog/periodic/pre-kill paths must be best-effort. This is what
+ * keeps the worker's `/heapdumps` emptyDir from filling its 2 GiB
+ * `sizeLimit` and triggering pod eviction mid-run.
+ */
+const copyAndCleanupDump = (
+  namespace: string,
+  podName: string,
+  podPath: string,
+  artifactDir: string,
+  destSubdir: "heapdumps" | "cpuprofiles",
+): Effect.Effect<void, never> =>
+  Effect.gen(function* () {
+    const destDir = path.join(artifactDir, destSubdir, podName)
+    yield* mkdirp(destDir).pipe(Effect.orElseSucceed(() => undefined))
+    const basename = path.basename(podPath)
+    const destPath = path.join(destDir, basename)
+    yield* exec("kubectl", [
+      "-n",
+      namespace,
+      "cp",
+      `${podName}:${podPath}`,
+      destPath,
+      "-c",
+      "worker",
+    ]).pipe(
+      Effect.matchEffect({
+        onSuccess: () =>
+          execInPod(namespace, podName, "worker", ["rm", "-f", podPath]).pipe(
+            Effect.matchEffect({
+              onSuccess: () => Effect.void,
+              onFailure: (e) =>
+                Effect.logWarning(
+                  `recorder: rm ${podName}:${podPath} failed: ${String(e)}`,
+                ),
+            }),
+          ),
+        onFailure: (e) =>
+          Effect.logWarning(
+            `recorder: kubectl cp ${podName}:${podPath} failed (file kept on pod): ${String(e)}`,
+          ),
+      }),
+    )
+  })
+
 const triggerHeapSnapshot = (
   namespace: string,
   podName: string,
@@ -265,17 +331,89 @@ const triggerHeapSnapshot = (
         onFailure: () => Effect.succeed(""),
       }),
     )
+    const filePath = parseDumpFilePath(result)
     yield* appendNdjsonRows(path.join(artifactDir, "heapdump-triggers.ndjson"), [
       {
         tTriggered: new Date().toISOString(),
         pod: podName,
         reason,
-        // Truncated server response (file path JSON or empty on
-        // failure) — useful for post-hoc debugging when the
-        // /heapdumps directory comes back empty.
         response: result.slice(0, 500),
       },
     ])
+    if (filePath !== undefined) {
+      yield* copyAndCleanupDump(namespace, podName, filePath, artifactDir, "heapdumps")
+    }
+  })
+
+/**
+ * POST `/debug/cpu-profile?wait=1&seconds=N` and block until the
+ * server returns the file path. Used by the chaos harness right
+ * before issuing a kill so we always have a CPU profile of the
+ * pre-kill steady state on disk. Best-effort — if the endpoint
+ * times out (e.g. the worker is already wedged) we return without
+ * raising so the kill itself proceeds.
+ */
+const triggerCpuProfile = (
+  namespace: string,
+  podName: string,
+  artifactDir: string,
+  reason: string,
+  seconds: number,
+): Effect.Effect<void, never> =>
+  Effect.gen(function* () {
+    const url = `http://localhost:3002/debug/cpu-profile?wait=1&seconds=${seconds}`
+    const result = yield* execInPod(namespace, podName, "worker", [
+      "wget",
+      "--tries=1",
+      // Generous timeout so a 10 s profile actually completes; the
+      // server blocks until the V8 inspector returns. +5 s slack for
+      // disk write + JSON serialise.
+      `--timeout=${seconds + 5}`,
+      "-q",
+      "-O-",
+      "--post-data=",
+      url,
+    ]).pipe(
+      Effect.matchEffect({
+        onSuccess: (r) => Effect.succeed(r.stdout.trim()),
+        onFailure: () => Effect.succeed(""),
+      }),
+    )
+    const filePath = parseDumpFilePath(result)
+    yield* appendNdjsonRows(path.join(artifactDir, "cpu-profile-triggers.ndjson"), [
+      {
+        tTriggered: new Date().toISOString(),
+        pod: podName,
+        reason,
+        seconds,
+        response: result.slice(0, 500),
+      },
+    ])
+    if (filePath !== undefined) {
+      yield* copyAndCleanupDump(namespace, podName, filePath, artifactDir, "cpuprofiles")
+    }
+  })
+
+/**
+ * Public alias used by the chaos harness — captures both a heap
+ * snapshot and a CPU profile, in that order, and only resolves once
+ * both files are out of the pod. The caller may then issue a kill.
+ */
+export const captureForensicsBeforeKill = (
+  namespace: string,
+  podName: string,
+  artifactDir: string,
+  cpuSeconds = 10,
+): Effect.Effect<void, never> =>
+  Effect.gen(function* () {
+    yield* triggerHeapSnapshot(namespace, podName, artifactDir, "pre-kill")
+    yield* triggerCpuProfile(
+      namespace,
+      podName,
+      artifactDir,
+      "pre-kill",
+      cpuSeconds,
+    )
   })
 
 /**

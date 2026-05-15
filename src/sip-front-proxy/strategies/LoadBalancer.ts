@@ -55,7 +55,10 @@
 
 import { Clock, Effect, Layer, Option, ServiceMap } from "effect"
 import type { SipMessage } from "../../sip/types.js"
-import { ProxyMetrics } from "../observability/Metrics.js"
+import {
+  type FreshPodAgeBucket,
+  ProxyMetrics,
+} from "../observability/Metrics.js"
 import {
   type RouteParams,
   RoutingStrategy,
@@ -180,6 +183,13 @@ const callIdOf = (msg: SipMessage): string | undefined => {
 
 const sameAddr = (a: SocketAddr, b: SocketAddr): boolean =>
   a.host === b.host && a.port === b.port
+
+const bucketFreshPodAge = (ageMs: number): FreshPodAgeBucket => {
+  if (ageMs < 20_000) return "0-20s"
+  if (ageMs < 60_000) return "20-60s"
+  if (ageMs < 300_000) return "60-300s"
+  return "gte300s"
+}
 
 /** Find the worker entry whose address matches `target` in the snapshot. */
 const findByAddress = (
@@ -435,7 +445,8 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           const firstSeenAtMs = primary.firstSeenAtMs
           if (firstSeenAtMs !== undefined) {
             const nowMs = yield* Clock.currentTimeMillis
-            if (nowMs - firstSeenAtMs < freshPodGuardMs) {
+            const age = nowMs - firstSeenAtMs
+            if (age < freshPodGuardMs) {
               const promoted = yield* tryBackup(wBakRaw)
               if (promoted._tag === "forwardBackup") {
                 yield* metrics.recordDecodeForwardPromoted(
@@ -444,7 +455,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
                 yield* Effect.logInfo(
                   `[LoadBalancer] decode_forward → decode_forward_backup` +
                     ` (from=unobserved-fresh-pod primary=${primary.id}` +
-                    ` age=${nowMs - firstSeenAtMs}ms guard=${freshPodGuardMs}ms` +
+                    ` age=${age}ms guard=${freshPodGuardMs}ms` +
                     ` callId=${callId})`
                 )
                 return promoted
@@ -452,6 +463,23 @@ export const LoadBalancerStrategyLive: Layer.Layer<
               // No usable backup — fall through to the normal alive
               // forward; better to try the (likely) empty primary than
               // to drop the request.
+            }
+            yield* metrics.recordFreshPodForward(bucketFreshPodAge(age))
+            // The freshPodGuardMs window has expired but the worker is
+            // still in its early-life period (3× guard) AND we couldn't
+            // promote to backup. The proxy is trusting the K8s Ready
+            // signal alone — there has been no positive proof that the
+            // worker has rehydrated its state yet. Worth a WARN so the
+            // operator can correlate against downstream 481 spikes.
+            // See docs/plan/2026-05-14-post-proxy-graceful-481-wave-investigation.md §6.4.4.
+            if (age >= freshPodGuardMs && age < freshPodGuardMs * 3) {
+              yield* Effect.logWarning(
+                `[LoadBalancer] decode_forward to early-life primary` +
+                  ` (primary=${primary.id} age=${age}ms guard=${freshPodGuardMs}ms` +
+                  ` callId=${callId}) — guard expired but pod is still` +
+                  ` within 3×guard; downstream may 481 if state is not` +
+                  ` rehydrated yet`,
+              )
             }
           }
           return DecodeResult.forward(primary.address)

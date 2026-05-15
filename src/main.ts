@@ -429,9 +429,20 @@ const runReplicationConsumer = (
     // WorkerReadiness once T_min has elapsed and every alive peer
     // is `everCaughtUp`. T_max ceiling fires Ready=true even with
     // un-caught peers (logged WARN).
+    let workerReadyInMs: number | undefined
+    let workerReadyReason: "all_caught_up" | "t_max_timeout" | undefined
+    metricsRegistry.workerReadiness = {
+      readyInMs: () => workerReadyInMs,
+      readyReason: () => workerReadyReason,
+    }
     const controller = makeReadinessController({
       observeState: supervisor.observe,
       markReady: (ready) => readiness.markReady(ready),
+      recordReady: (elapsedMs, reason) =>
+        Effect.sync(() => {
+          workerReadyInMs = elapsedMs
+          workerReadyReason = reason
+        }),
     })
 
     // Peer-scan-bootstrap (echo-removal slice §3). Snapshot the peer

@@ -1,7 +1,13 @@
 import { Effect } from "effect"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
+import { classifyAdmission } from "../../../src/b2bua/TargetAdmission.js"
 import { exec } from "./exec.js"
+
+// Default suffix list the worker uses unless overridden via
+// WORKER_ALLOWED_TARGET_SUFFIXES. Mirrors the production default in
+// src/config/AppConfig.ts. Keep in sync.
+const DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES = [".svc.cluster.local"]
 
 const here = dirname(fileURLToPath(import.meta.url))
 export const REPO_ROOT = resolve(here, "../../..")
@@ -133,9 +139,32 @@ export const installProxyHostMode = (namespace: string) =>
   })
 
 export const installSipp = (namespace: string) =>
-  helmInstall({
-    release: "sipp",
-    chart: SIPP_CHART,
-    namespace,
-    waitTimeoutSec: 60,
+  Effect.gen(function* () {
+    // The b2bua worker's TargetAdmission rejects b-leg destinations
+    // whose host is neither an IP literal nor matches the suffix
+    // allow-list. The mock call-control returns whatever
+    // `callControl.target.host` is set to, so we install the chart
+    // with the in-namespace FQDN — which ends in `.svc.cluster.local`
+    // and clears the default admission gate. The chart's values.yaml
+    // keeps the bare-name default (`sipp-uas`) for human readability;
+    // this --set ensures every k8s test installs a host that survives
+    // the admission rule introduced by commit aeaedde2.
+    const target = `sipp-uas.${namespace}.svc.cluster.local`
+    const verdict = classifyAdmission(target, DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES)
+    if (verdict === "reject") {
+      return yield* Effect.die(
+        new Error(
+          `installSipp: target host '${target}' would be rejected by the worker's TargetAdmission ` +
+            `(suffixes=${JSON.stringify(DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES)}). ` +
+            `Update DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES or the helm --set value.`,
+        ),
+      )
+    }
+    yield* helmInstall({
+      release: "sipp",
+      chart: SIPP_CHART,
+      namespace,
+      setValues: [["callControl.target.host", target]],
+      waitTimeoutSec: 60,
+    })
   })

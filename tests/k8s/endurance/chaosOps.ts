@@ -99,6 +99,20 @@ export interface KillPodEventOpts {
     | "proxy-pod-kill9"
     | "limiter-redis-graceful"
     | "limiter-redis-kill9"
+  /**
+   * When set, the chaos op POSTs `/debug/heap-snapshot` and
+   * `/debug/cpu-profile?wait=1` to the target pod (worker only — proxy
+   * and limiter Redis pods don't expose `/debug`) and waits for both
+   * files to be `kubectl cp`-d into the artifact dir before issuing
+   * the kill. Skipped silently for non-worker targets and for the
+   * `kill9` variant on workers (the SIGKILL'd process can't serve a
+   * snapshot anyway). Best-effort: any failure inside the capture path
+   * is logged and the kill proceeds.
+   */
+  readonly captureForensicsBeforeKill?: (
+    namespace: string,
+    podName: string,
+  ) => Effect.Effect<void, never>
 }
 
 /**
@@ -139,6 +153,20 @@ export const killPodEvent = (
       })
     }
     const target: PodInfo = targetSpec
+
+    // Pre-kill forensics capture: only meaningful for worker pods
+    // (where the StatusServer with /debug routes runs) and only
+    // useful for the graceful path (kill9 takes the process out
+    // before it can serve the snapshot).
+    if (
+      opts.captureForensicsBeforeKill !== undefined &&
+      opts.type === "worker-pod-graceful"
+    ) {
+      yield* Effect.logInfo(
+        `chaos[${opts.type}] capturing pre-kill forensics on ${target.name}`,
+      )
+      yield* opts.captureForensicsBeforeKill(opts.namespace, target.name)
+    }
 
     const tFire = yield* killPod(opts.namespace, target.name, mode).pipe(
       Effect.mapError(

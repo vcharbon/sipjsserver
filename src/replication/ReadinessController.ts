@@ -61,6 +61,19 @@ export interface ReadinessControllerConfig {
    * implementation, but the controller fires it only on transition.
    */
   readonly markReady: (ready: boolean) => Effect.Effect<void>
+  /**
+   * Invoked exactly once on the Booting/Bootstrapping → Ready
+   * transition with the wall-clock elapsed since boot and the
+   * disambiguating reason. Wired by `main.ts` to populate
+   * `MetricsRegistry.workerReadiness` so the Prometheus scrape can
+   * surface "how long it took to load context on last reboot" — the
+   * single number that exposes regressions in cold-boot time. Optional
+   * for tests that don't care about the metric.
+   */
+  readonly recordReady?: (
+    elapsedMs: number,
+    reason: "all_caught_up" | "t_max_timeout",
+  ) => Effect.Effect<void>
   /** Tick interval. Defaults to 100ms. */
   readonly tickIntervalMs?: number
   /** Min wait before flipping Ready. Defaults to 3000ms. */
@@ -157,13 +170,21 @@ export const makeReadinessController = (
           if (everReady) return
           everReady = true
           MutableRef.set(stateRef, "Ready")
+          yield* Effect.logInfo(
+            `ReadinessController: Ready in ${elapsed}ms (reason=all_caught_up, peers=${totalAlive})`
+          )
+          if (config.recordReady !== undefined) {
+            yield* config.recordReady(elapsed, "all_caught_up")
+          }
           yield* config.markReady(true)
           return
         }
 
         if (elapsed >= tMaxMs) {
           // T_max ceiling — flip Ready with a WARN naming the
-          // not-yet-caught peers.
+          // not-yet-caught peers. This is the "switched to active by
+          // timeout, not by positive evidence" path the operator must
+          // see loud in logs and dashboards.
           if (everReady) return
           const stalled: Array<string> = []
           for (const peer of alive) {
@@ -173,10 +194,13 @@ export const makeReadinessController = (
             }
           }
           yield* Effect.logWarning(
-            `ReadinessController: T_max=${tMaxMs}ms ceiling reached; flipping Ready with un-caught peers: [${stalled.join(", ")}]`
+            `ReadinessController: T_max=${tMaxMs}ms ceiling reached; flipping Ready with un-caught peers: [${stalled.join(", ")}] (reason=t_max_timeout, elapsed=${elapsed}ms)`
           )
           everReady = true
           MutableRef.set(stateRef, "Ready")
+          if (config.recordReady !== undefined) {
+            yield* config.recordReady(elapsed, "t_max_timeout")
+          }
           yield* config.markReady(true)
         }
       })

@@ -30,7 +30,11 @@ import {
   type ChaosEventType,
   type ChaosOutcome,
 } from "./chaosOps.js"
-import { appendNdjsonRows, startRecorder } from "./recorder.js"
+import {
+  appendNdjsonRows,
+  captureForensicsBeforeKill,
+  startRecorder,
+} from "./recorder.js"
 import {
   buildSchedule,
   buildSmokeSchedule,
@@ -332,15 +336,18 @@ const main = (argv: ReadonlyArray<string>) =>
     // `resources.limits.memory`. The recorder uses this to fire the
     // RSS watchdog (heap-snapshot at 50% / 65%) so we capture the
     // leaking heap before the cgroup OOM-killer destroys it. Periodic
-    // snapshots every 60s give a leak-progression series for
-    // heap-diffing once the run finishes.
+    // snapshots every 1h give a coarse leak-progression series; each
+    // snapshot is `kubectl cp`-d out and removed from /heapdumps right
+    // after capture, so the volume's 2 GiB sizeLimit is no longer a
+    // ticking eviction timer. Aggressive 60 s cadence belongs to active
+    // leak hunts only — see docs/plan/2026-05-14-post-proxy-graceful-481-wave-investigation.md §6.4.1.
     const WORKER_MEM_LIMIT_BYTES = 1024 * 1024 * 1024
     const recorder = yield* startRecorder({
       namespace: NAMESPACE,
       artifactDir,
       limiterProbeId: LIMITER_PROBE_ID,
       workerMemLimitBytes: WORKER_MEM_LIMIT_BYTES,
-      periodicHeapSnapshotMs: 60_000,
+      periodicHeapSnapshotMs: 3_600_000,
     })
 
     /* ----- launch sipp streams ------------------------------------ */
@@ -655,7 +662,7 @@ const fireChaosEvent = (
       `chaos[${event.index}] fire ${event.type} (relativeSec=${event.relativeSec})`,
     )
     const tFire = new Date()
-    const result = yield* dispatchChaos(event.type, rand).pipe(
+    const result = yield* dispatchChaos(event.type, rand, artifactDir).pipe(
       Effect.matchEffect({
         onSuccess: (r) => Effect.succeed({ ok: true as const, outcome: r }),
         onFailure: (e) =>
@@ -697,6 +704,7 @@ const fireChaosEvent = (
 const dispatchChaos = (
   type: ChaosEventType,
   rand: () => number,
+  artifactDir: string,
 ): Effect.Effect<ChaosOutcome, { readonly message: string }> => {
   switch (type) {
     case "node-shutdown-app":
@@ -706,7 +714,15 @@ const dispatchChaos = (
     case "proxy-cutoff-vrrp":
       return proxyCutoffEvent({ namespace: NAMESPACE, kind: "vrrp" }, rand)
     default:
-      return killPodEvent({ namespace: NAMESPACE, type }, rand)
+      return killPodEvent(
+        {
+          namespace: NAMESPACE,
+          type,
+          captureForensicsBeforeKill: (ns, podName) =>
+            captureForensicsBeforeKill(ns, podName, artifactDir),
+        },
+        rand,
+      )
   }
 }
 

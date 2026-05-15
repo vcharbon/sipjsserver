@@ -130,6 +130,26 @@ const baseDecodeForwardPromoted = Metric.counter(
   }
 )
 
+/**
+ * Counts every `decode_forward` to a primary whose `firstSeenAtMs` is
+ * still inside the early-life window — bucketed by the pod's age in
+ * seconds. The 0–20 s bucket should always be **zero** when the Slice
+ * E3 fresh-pod guard is configured to ≥ 20 s; non-zero values there
+ * mean a request slipped through the guard. The 20–60 s bucket
+ * captures requests that the guard explicitly admitted; correlate
+ * with downstream 481 spikes to decide whether the guard is too
+ * permissive. See LoadBalancer.ts and
+ * docs/plan/2026-05-14-post-proxy-graceful-481-wave-investigation.md §6.4.4.
+ */
+const baseFreshPodForward = Metric.counter(
+  "sipfp_routing_fresh_pod_forward_total",
+  {
+    description:
+      "decode_forward decisions targeting a primary whose age since the proxy first observed it is in the named bucket (age_bucket=0-20s/20-60s/60-300s/gte300s). Non-zero in the 0-20s bucket indicates the freshPodGuard window slipped a request through.",
+    incremental: true,
+  }
+)
+
 const baseCancelLookup = Metric.counter("sip_cancel_lookup_total", {
   description:
     "CancelBranchLru outcomes: hit / miss / expired_sweep. The first two come from lookups, the last from the sweep fiber.",
@@ -185,6 +205,15 @@ export type CancelLookupOutcome = "hit" | "miss" | "expired_sweep"
 export type DecodeForwardPromotionReason =
   | "not-ready"
   | "unobserved-fresh-pod"
+
+/**
+ * Age bucket for `recordFreshPodForward`. Bounded to four buckets so
+ * scrape cardinality stays trivial. The 0-20s bucket should never be
+ * non-zero in production; 20-60s is the early-life window the guard
+ * lets through; 60-300s is "first 5 min of pod life"; gte300s means
+ * "pod has been around long enough that this is a normal forward".
+ */
+export type FreshPodAgeBucket = "0-20s" | "20-60s" | "60-300s" | "gte300s"
 
 // ---------------------------------------------------------------------------
 // Service surface
@@ -246,6 +275,16 @@ export interface ProxyMetricsApi {
    */
   readonly recordDecodeForwardPromoted: (
     from: DecodeForwardPromotionReason
+  ) => Effect.Effect<void>
+
+  /**
+   * Increment `sipfp_routing_fresh_pod_forward_total{age_bucket=…}` when a
+   * `decode_forward` lands on a primary inside the named age bucket. Always
+   * incremented (regardless of bucket) so dashboards can compute a ratio of
+   * fresh-pod forwards over all forwards.
+   */
+  readonly recordFreshPodForward: (
+    bucket: FreshPodAgeBucket,
   ) => Effect.Effect<void>
 
   /** Update the active-dialogs estimate. */
@@ -354,6 +393,14 @@ function buildApi(): ProxyMetricsApi {
       1
     )
 
+  const recordFreshPodForward = (
+    bucket: FreshPodAgeBucket,
+  ): Effect.Effect<void> =>
+    Metric.update(
+      Metric.withAttributes(baseFreshPodForward, { age_bucket: bucket }),
+      1,
+    )
+
   const setActiveDialogsEstimate = (count: number): Effect.Effect<void> =>
     Metric.update(activeDialogsEstimate, count)
 
@@ -365,6 +412,7 @@ function buildApi(): ProxyMetricsApi {
     setWorkerHealth,
     recordCancelLookup,
     recordDecodeForwardPromoted,
+    recordFreshPodForward,
     setActiveDialogsEstimate,
   }
 }
