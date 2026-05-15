@@ -14,15 +14,9 @@
 import { Data, Effect, References } from "effect"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import { clusterDown, clusterUp } from "../fixtures/cluster.js"
-import {
-  installProxy,
-  installRedis,
-  installSipp,
-  installWorker,
-  WORKER_VALUES_ENDURANCE,
-} from "../fixtures/helm.js"
-import { buildAndLoad } from "../fixtures/images.js"
+import { clusterDown } from "../fixtures/cluster.js"
+import { WORKER_VALUES_ENDURANCE } from "../fixtures/helm.js"
+import { upFull } from "../scripts/up-full.js"
 import {
   killPodEvent,
   nodeShutdownEvent,
@@ -81,7 +75,6 @@ interface CliArgs {
   readonly chaosMinIntervalSec: number
   readonly chaosMaxIntervalSec: number
   readonly seed: number
-  readonly reuseCluster: boolean
   readonly smoke: boolean
   readonly runId: string
   readonly noAnalyze: boolean
@@ -170,7 +163,6 @@ const parseArgs = (argv: ReadonlyArray<string>): CliArgs => {
       get("chaos-max-interval", `${DEFAULTS.chaosMaxIntervalSec}s`),
     ),
     seed: parseInt(get("seed", String(Date.now())), 10),
-    reuseCluster: flags.has("reuse-cluster"),
     smoke,
     runId: get(
       "run-id",
@@ -288,48 +280,16 @@ const main = (argv: ReadonlyArray<string>) =>
     yield* writeMeta()
 
     /* ----- BRINGUP ------------------------------------------------- */
-    // Default policy: ALWAYS destroy and recreate the kind cluster
-    // (and rebuild images) before a run, regardless of smoke vs full
-    // endurance. This is non-negotiable for analyzer correctness — a
-    // prior run can leave dangling call state in worker memory and
-    // sidecar Redis, which the next run inherits and the orphan
-    // sweeper cannot drain fast enough; the second run then collapses
-    // ~10 min into SOAK with `current` calls climbing and successes
-    // going to zero before any chaos has fired. Confirmed in
-    // `docs/k8s-endurance.md` §"Troubleshooting" and observed in run
-    // endurance-2026-05-09t18-38-55-758z (post-replication-fix 1h).
-    //
-    // `--reuse-cluster` exists ONLY for tight inner-loop development
-    // where you knowingly accept that cluster state is whatever the
-    // last run left behind. It must NEVER be used to chain
-    // independent runs (e.g. smoke followed by 1h) — the contamination
-    // is silent and looks like a system bug.
-    if (!args.reuseCluster) {
-      yield* Effect.logInfo("phase=BRINGUP (down-then-up)")
-      yield* clusterDown.pipe(Effect.ignore)
-      yield* clusterUp
-      // Build + side-load b2bua + sipp + redis-sidecar images into the
-      // fresh kind cluster — without this the Helm installs below fail
-      // with ErrImagePull.
-      yield* buildAndLoad
-      yield* installRedis(NAMESPACE)
-      yield* installSipp(NAMESPACE)
-      // Layer the endurance-specific overlay on top of the base
-      // worker values so memory limits + heap-snapshot diagnostics
-      // are active for every endurance run. The memleak harness uses
-      // its own overlay and is not affected.
-      yield* installWorker(NAMESPACE, { extraValues: [WORKER_VALUES_ENDURANCE] })
-      yield* installProxy(NAMESPACE)
-    } else {
-      yield* Effect.logWarning(
-        "phase=BRINGUP (--reuse-cluster: skipped) — DEV-ONLY shortcut: " +
-          "in-memory worker state and sidecar Redis carry over from " +
-          "the previous run. Do NOT chain a fresh run on top of " +
-          "another (e.g. smoke→1h) with this flag — orphan-sweep " +
-          "contamination causes silent collapse mid-SOAK. See " +
-          "docs/k8s-endurance.md §Troubleshooting."
-      )
-    }
+    // Endurance always starts from a freshly recreated cluster (ADR-0002).
+    // The heavy lifting — host observability stack, kind-addons,
+    // image rebuild + side-load, chart install, sanity gate — lives in
+    // upFull and is shared with the inner-loop `npm run test:k8s:up`
+    // path. A failed sanity here aborts the run before the artifact
+    // dir starts filling, exactly the class of "bad launch" the gate
+    // exists to prevent.
+    yield* Effect.logInfo("phase=BRINGUP (down → upFull)")
+    yield* clusterDown.pipe(Effect.ignore)
+    yield* upFull({ extraWorkerValues: [WORKER_VALUES_ENDURANCE] })
 
     /* ----- start recorders ---------------------------------------- */
     // 1Gi mirrors `tests/k8s/values/b2bua-worker.endurance.yaml`'s

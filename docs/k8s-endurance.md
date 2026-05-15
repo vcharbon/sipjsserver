@@ -1,52 +1,79 @@
-# K8s Endurance Test (operator guide)
+# Robustness test (K8s endurance) — operator guide
 
-Long-duration soak (5–24h) at moderate load with semi-random chaos
-injection. Used **manually before major releases** — not part of CI.
-Source layout under [tests/k8s/endurance/](../tests/k8s/endurance/).
+The canonical pre-release robustness gate. Long-duration soak
+(10 min – 24 h) at moderate load with semi-random chaos injection.
+Run manually before major releases; not part of CI.
 
-For the full design rationale see
+For *why* this is the canonical gate (and how it relates to the
+narrower failover suite) see
+[ADR-0002](adr/0002-endurance-as-canonical-robustness-gate.md). For
+inner-loop / invariant-suite operator notes see
+[docs/K8S_test.md](K8S_test.md). For the full design rationale see
 [`docs/plan/long-endurence-tests-session-hidden-graham.md`](plan/long-endurence-tests-session-hidden-graham.md).
+
+## Role of this test
+
+The endurance run is the **canonical robustness gate**:
+
+- Always starts from a freshly recreated kind cluster (no opt-out).
+- Always rebuilds and side-loads images.
+- Always applies the observability collector
+  (vmagent/fluent-bit/node-exporter/kube-state-metrics) so every pod is
+  scraped from second one.
+- Always runs a real representative call + `/metrics` probe before
+  SOAK begins — fails the run immediately if the cluster is
+  half-broken.
+- Covers every failover case the standalone failover suite exercises
+  (worker pod kill graceful/kill-9, proxy pod kill graceful/kill-9)
+  *plus* VRRP cutoff and node shutdown, on top of sustained load.
+
+The narrower [failover zoom-in suite](#appendix-failover-zoom-in)
+exists only as a debugging tool to iterate on one specific
+`(state-at-kill × kill-mode)` cell — not as a regression gate.
 
 ## TL;DR
 
 ```bash
-# 10-min self-test — run this first to validate the harness
+# 10-min self-test — run this first to validate the harness.
 npm run test:k8s:endurance:smoke -- --caps 20
 
-# Real run — defaults to 6h SOAK at 45 CAPS, ~6h 38min wall time
+# Real run — defaults to 6h SOAK at 45 CAPS, ~6h 38min wall time.
 npm run test:k8s:endurance -- --caps 20 --duration 1h
 
-# 24h pre-release run with explicit seed for reproducibility
+# 24h pre-release run with explicit seed for reproducibility.
 npm run test:k8s:endurance -- --duration 24h --seed 12345
 ```
 
-Artifacts land under `test-results/k8s-endurance/<runId>/` and the
-analyzer is invoked automatically at the end (unless `--no-analyze`).
+Artifacts land under `test-results/k8s-endurance/<runId>/`; the analyzer
+runs automatically at the end (unless `--no-analyze`).
 
 ## Pre-flight checks
 
-Before kicking off a multi-hour run:
+Most of the historical checklist is now enforced by the bring-up
+script itself. Operator-side concerns that remain:
 
-- [ ] **≥30 GB free disk** on the artifact volume. 24 h of sipp traces
-  + pod logs come out to ~5–15 GB; gzipped sipp traces shrink to a
-  few GB but live emptyDir usage on each sipp pod can reach 6 GB
-  before stop time.
-- [ ] **≥16 GB RAM** for kind cluster + sipp pods + orchestrator.
 - [ ] **WSL sleep disabled** (Windows hosts). A WSL sleep mid-run kills
   the kind cluster and ends the run with no recovery. Suggested:
   `[boot] systemd=true` in `/etc/wsl.conf` and disable Windows sleep
-  while the run is active.
-- [ ] **Docker daemon healthy** and not under load from other workloads.
-- [ ] **Images built**: `npm run test:k8s:images`.
-- [ ] **Clean kind cluster name available**: BRINGUP tears down any
-  existing `sip-e2e` cluster, but if that fails (orphan docker
-  containers from a previous crash), `npm run test:k8s:down` first
-  is a safer reset.
+  while the run is active. Not script-enforceable cleanly.
+- [ ] **Other workloads quiet**. Docker daemon should not be under
+  load from unrelated builds during the run.
+
+What used to be operator-side checklist items, now hard-guarded in
+[tests/k8s/scripts/up-full.ts](../tests/k8s/scripts/up-full.ts):
+
+- ≥30 GiB free on the artifact volume (`test-results/`).
+- Docker daemon reachable.
+- Images rebuilt + side-loaded (no more "did I forget `test:k8s:images`?").
+- Observability collector applied (no more "the dashboards are empty for
+  this run because vmagent wasn't deployed").
+- A real REGISTER + INVITE + reroute call succeeds end-to-end before
+  SOAK starts.
 
 The orchestrator does not auto-resume on its own crash. If your host
 goes to sleep at hour 18, the partial artifact dir is still
-analyzable (`outcome: INCOMPLETE` in the verdict), but you must
-re-run from scratch to get a clean PASS/FAIL.
+analyzable (`outcome: INCOMPLETE` in the verdict) but you must re-run
+from scratch to get a clean PASS/FAIL.
 
 ## CLI flags
 
@@ -60,56 +87,23 @@ re-run from scratch to get a clean PASS/FAIL.
 --chaos-min-interval <N>                        (default 5m)
 --chaos-max-interval <N>                        (default 15m)
 --seed <N>                 deterministic chaos  (default = now-ms)
---reuse-cluster            skip BRINGUP — DEV ONLY, see warning below
 --smoke                    10-min self-test mode
 --run-id <name>            artifact dir name    (default timestamp)
 --no-analyze               skip ANALYZE phase
 ```
 
-### ⚠️ Rule: do NOT use `--reuse-cluster` for verdict-bearing runs
-
-**Default policy: every endurance run — smoke or full — must start
-from a freshly destroyed and recreated kind cluster.** The runner
-already does this on the default path; `--reuse-cluster` is the only
-way to bypass it and exists *exclusively* for inner-loop development
-where you accept that cluster state is whatever the last run left
-behind.
-
-It must NEVER be used in any of these situations, all of which
-produce silent verdict-corrupting contamination:
-
-- **Chaining independent runs** (e.g. smoke → 1h, or run #1 → run
-  #2). The earlier run's long-stream calls and limiter-probe state
-  remain in worker memory and sidecar Redis. The follow-on run's
-  orphan sweeper cannot drain it fast enough; ~5–10 min into SOAK
-  the worker chokes, `currentCall` accumulates, successes go to 0
-  before any chaos has fired, and per-event "during/after" buckets
-  attribute the collapse to whichever chaos event happens to fire
-  next. Confirmed in run
-  `endurance-2026-05-09t18-38-55-758z` (post-replication-fix 1h
-  reusing a smoke cluster: 64% STEADY failure caused entirely by
-  contamination, not by the system under test).
-- **Investigating a regression or chasing a verdict.** If you don't
-  know whether the last run left dirty state, the only safe answer
-  is to recreate.
-- **Comparing two runs / reproducing a result.** Different leftover
-  state from each prior run = different baselines.
-
-Acceptable uses (narrow):
-- Iterating on the orchestrator code itself when you've just
-  observed a clean exit and want to skip the ~2–3 min BRINGUP cost.
-- Re-running ANALYZE alone on a cluster you control (see
-  `--no-analyze` + the `analyze-endurance.ts` recipes below).
-
-When in doubt, run without the flag. The 2–3 minute BRINGUP cost is
-cheap insurance; a corrupted 1-hour or 6-hour verdict is not.
+The cluster is **always** torn down and recreated at the start of every
+endurance run. There is no `--reuse-cluster` flag — verdict-bearing
+runs cannot inherit state from a previous run. The original
+contamination modes that motivated this policy are recorded in
+[ADR-0002](adr/0002-endurance-as-canonical-robustness-gate.md).
 
 ## What the run does
 
 | # | Phase | Default | Purpose |
 |---|-------|---------|---------|
-| 1 | BRINGUP | ~3 min | Tear down + recreate kind cluster, install all charts. **Always run on the default path.** Skipped only under `--reuse-cluster` (DEV-ONLY — see warning under "CLI flags"). |
-| 2 | WARMUP | 5 min | Sipp streams start, no chaos. Verifies steady state before chaos. |
+| 1 | BRINGUP | ~3–4 min | `clusterDown` then `upFull`: host stack + cluster + kind-addons + images + charts + sanity gate. Always runs. |
+| 2 | WARMUP | 5 min | Sipp streams start, no chaos. Verifies steady state. |
 | 3 | SOAK-START SANITY GATE | 60 s | Confirms each sipp stream has ≥1 successful call. Aborts early if not. |
 | 4 | SOAK | `--duration` | Chaos schedule active. |
 | 5 | COOLDOWN | 5 min | No new chaos events; let last event's recovery clear. |
@@ -236,23 +230,29 @@ but do not gate PASS/FAIL.
 ## Subcommand recipes
 
 ```bash
-# Re-run analysis on an existing artifact dir
+# Re-run analysis on an existing artifact dir.
 npm run test:k8s:endurance:analyze -- test-results/k8s-endurance/<runId>
 
-# Generate a forensic file for one specific Call-ID
-npm run test:k8s:endurance:analyze -- forensic --call-id <id> test-results/k8s-endurance/<runId>
+# Forensic for one specific Call-ID.
+npm run test:k8s:endurance:analyze -- forensic --call-id <id> \
+  test-results/k8s-endurance/<runId>
 
-# Slice all timelines to a specific time window
-npm run test:k8s:endurance:analyze -- window 2026-05-04T15:00:00Z..2026-05-04T16:00:00Z test-results/k8s-endurance/<runId>
+# Slice all timelines to a specific time window.
+npm run test:k8s:endurance:analyze -- window \
+  2026-05-04T15:00:00Z..2026-05-04T16:00:00Z \
+  test-results/k8s-endurance/<runId>
 
-# Print path(s) to a metric's CSV(s)
-npm run test:k8s:endurance:analyze -- metric process_resident_memory_bytes test-results/k8s-endurance/<runId>
+# Path(s) to a metric's CSV(s).
+npm run test:k8s:endurance:analyze -- metric \
+  process_resident_memory_bytes \
+  test-results/k8s-endurance/<runId>
 
-# List the worst chaos events by per-window failures
-npm run test:k8s:endurance:analyze -- top-failures test-results/k8s-endurance/<runId>
+# Worst chaos events by per-window failures.
+npm run test:k8s:endurance:analyze -- top-failures \
+  test-results/k8s-endurance/<runId>
 
-# html report
-npm run test:k8s:endurance:render -- test-results/k8s-endurance/enduranc
+# HTML report.
+npm run test:k8s:endurance:render -- test-results/k8s-endurance/<runId>
 ```
 
 ## Reproducibility
@@ -294,39 +294,76 @@ differ by seconds; the schedule itself is exact.
    boundaries are missing, the cluster or orchestrator probably died;
    investigate `pod-logs/` and the host syslog.
 
-4. **No data in `metrics/<pod>.ndjson`**: `/metrics` server may not
-   be wired in `bin/proxy.ts` yet (see `proxyMetrics.ts` note). The
-   limiter probe + chaos timeline + per-call data are all
-   independent of `/metrics` so the verdict is still meaningful.
+4. **BRINGUP fails at the sanity gate**: the post-up sanity check
+   prints `kubectl get pods -o wide`, `kubectl describe pod` for any
+   non-Ready pod, and the last 50 lines of proxy + worker logs. Read
+   those first. Common causes: stale Redis sidecar PVCs from a prior
+   manual install in `sip-test`, a leftover host SIPp process holding
+   port 5060, a host-stack docker-compose container that died and
+   wasn't restarted.
 
-5. **`ABORT_PRE_SOAK_SANITY: stream 'endurance-limiter-…' has no
-   live or completed calls`** after a `--reuse-cluster` retry that
-   followed an interrupted run: the previous run's sipp Job pods
-   keep firing INVITEs after the orchestrator exits, and rejected
-   limiter calls leak in-flight credit into the limiter Redis.
-   Within seconds the limiter pins above its cap and rejects
-   *every* new call from the new run's probe stream — the sanity
-   gate samples `successful=0` and `currentCall=0` and aborts.
-   Same shape can hit the short stream when the leftover load
-   saturates the workers.
+---
 
-   Cleanup before retrying:
+## Appendix: failover zoom-in
 
-   ```bash
-   # 1. Drop every leftover sipp Job (and its pod). Job-name prefix
-   #    is the runId; deleting the Job cascade-deletes the pod.
-   kubectl -n sip-test get jobs -o name \
-     | grep '^job\.batch/endurance-' \
-     | xargs -r kubectl -n sip-test delete
+The failover suite is a **debugging tool**, not a regression gate.
+Use it to iterate on a specific `(state-at-kill × kill-mode)` cell
+without paying the full robustness-run cost (~5 min vs ~6 h). The
+robustness run already covers every cell exercised here.
 
-   # 2. Clear the shared-limiter Redis. Default key prefix is
-   #    `sipas:limiter:` (see src/config/AppConfig.ts).
-   kubectl -n sip-test exec deploy/redis -- sh -c \
-     "redis-cli --scan --pattern 'sipas:limiter:*' | xargs -r redis-cli del"
-   ```
+The 7 tests covering 1 promoted scenario + 6 failover scenarios:
 
-   Alternative — and the only correct answer for any verdict-bearing
-   run: drop `--reuse-cluster` entirely so BRINGUP recreates the
-   kind cluster from scratch. Costs ~2–3 min more per attempt but
-   guarantees clean state. See the rule under "CLI flags" above —
-   `--reuse-cluster` exists only for inner-loop dev iteration.
+| File | Phase | Kill mode | Lifecycle |
+|------|-------|-----------|-----------|
+| `proxy-drain.test.ts` | regression | graceful drain | `uac-hold.xml` (3 s pause) |
+| `proxy-failover-lb-delete.test.ts` | 2a | `delete --grace=0 --force` (proxy) | `uac-basic.xml` |
+| `proxy-failover-lb-killdash9.test.ts` | 2b | `kill -9 1` in proxy container | `uac-basic.xml` |
+| `proxy-failover-worker-delete-hold.test.ts` | 3a-B | `delete --grace=0 --force` (worker) | `uac-hold-failover.xml` (10 s pause) |
+| `proxy-failover-worker-killdash9-hold.test.ts` | 3b-B | `kill -9 1` in worker container | `uac-hold-failover.xml` |
+| `proxy-failover-worker-delete-pingpong.test.ts` | 3a-C | `delete --grace=0 --force` (worker) | `uac-pingpong.xml` |
+| `proxy-failover-worker-killdash9-pingpong.test.ts` | 3b-C | `kill -9 1` in worker container | `uac-pingpong.xml` |
+
+```bash
+# Whole suite (sequential by design; ~5 min).
+npm run test:k8s:failover
+
+# Single scenario.
+npx vitest run -c vitest.config.k8s.ts tests/k8s/proxy-failover-lb-delete.test.ts
+```
+
+Tuning knobs (env-var overridable):
+
+| Variable | Default (3a-B / 2a/2b) | Default (3a-C / 3b-C "pingpong") |
+|---------|-----------------------|----------------------------------|
+| `K8S_FAILOVER_CPS`      | 20  | (uses `K8S_FAILOVER_CPS_C`, default 10) |
+| `K8S_FAILOVER_RAMP_S`   | 5   | (uses `K8S_FAILOVER_RAMP_S_C`, default 15) |
+| `K8S_FAILOVER_POSTKILL_S` | 10 | (uses `K8S_FAILOVER_POSTKILL_S_C`, default 30) |
+
+Every run writes an archive under `test-results/k8s-failover/<runId>/`.
+The first thing to look at is `summary.txt`:
+
+```bash
+ls -1t test-results/k8s-failover/
+cat test-results/k8s-failover/<runId>/summary.txt
+```
+
+The hard gate is `unaffected.failed == 0` — the entire `unaffected`
+row's `establish-failed`, `bye-timeout`, and `mid-dialog-error` cells
+must all be zero. Survival in the other rows is logged but not
+asserted at the failover-suite level. Cross-run trends:
+
+```bash
+npx tsx tests/k8s/scripts/failover-summary.ts
+npx tsx tests/k8s/scripts/failover-summary.ts --filter phase-3
+```
+
+Archive cleanup (manual; archives are kept by default):
+
+```bash
+bash tests/k8s/scripts/failover-cleanup.sh             # report, no delete
+bash tests/k8s/scripts/failover-cleanup.sh --keep 10   # prompts before deleting
+bash tests/k8s/scripts/failover-cleanup.sh --keep 10 --yes
+```
+
+Known issues — see
+[docs/todos/K8S_FAILOVER_FOLLOWUPS.md](todos/K8S_FAILOVER_FOLLOWUPS.md).
