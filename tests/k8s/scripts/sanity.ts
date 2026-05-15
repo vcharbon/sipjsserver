@@ -16,7 +16,7 @@
  * "bad launch" without re-typing kubectl by hand.
  */
 
-import { Data, Duration, Effect, LogLevel, References } from "effect"
+import { Data, Duration, Effect, References } from "effect"
 import { exec, ExecError } from "../fixtures/exec.js"
 import { listPods, podExec, podLogs } from "../fixtures/kubectl.js"
 
@@ -58,12 +58,12 @@ const runE2eOnce = Effect.gen(function* () {
 
 const runE2eWithRetries = Effect.gen(function* () {
   for (let attempt = 1; attempt <= E2E_ATTEMPTS; attempt++) {
-    const result = yield* runE2eOnce.pipe(Effect.either)
-    if (result._tag === "Right") {
+    const result = yield* runE2eOnce.pipe(Effect.result)
+    if (result._tag === "Success") {
       yield* Effect.logInfo(`sanity: e2e passed on attempt ${attempt}`)
       return
     }
-    const err = result.left
+    const err = result.failure
     const detail = err instanceof ExecError ? err.message : String(err)
     if (attempt === E2E_ATTEMPTS) {
       return yield* new SanityError({
@@ -179,7 +179,7 @@ export const sanity = Effect.gen(function* () {
   Effect.catchTag("SanityError", (e) =>
     Effect.gen(function* () {
       yield* dumpDiagnostics
-      return yield* Effect.fail(e)
+      return yield* e
     }),
   ),
 )
@@ -187,7 +187,7 @@ export const sanity = Effect.gen(function* () {
 const isMain = import.meta.url === `file://${process.argv[1]}`
 if (isMain) {
   Effect.runPromise(
-    sanity.pipe(Effect.provideService(References.MinimumLogLevel, LogLevel.Info)),
+    sanity.pipe(Effect.provideService(References.MinimumLogLevel, "Info")),
   ).then(
     () => process.exit(0),
     (err) => {

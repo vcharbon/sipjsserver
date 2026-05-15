@@ -1,4 +1,4 @@
-import { Effect, LogLevel, References } from "effect"
+import { Effect, References } from "effect"
 import { clusterExists, clusterUp } from "../fixtures/cluster.js"
 
 const program = Effect.gen(function* () {
@@ -12,7 +12,7 @@ const program = Effect.gen(function* () {
 
 Effect.runPromise(
   program.pipe(
-    Effect.provideService(References.MinimumLogLevel, LogLevel.Info),
+    Effect.provideService(References.MinimumLogLevel, "Info"),
   ),
 ).then(
   () => process.exit(0),

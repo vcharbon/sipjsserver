@@ -1,9 +1,9 @@
-import { Effect, LogLevel, References } from "effect"
+import { Effect, References } from "effect"
 import { buildAndLoad } from "../fixtures/images.js"
 
 Effect.runPromise(
   buildAndLoad.pipe(
-    Effect.provideService(References.MinimumLogLevel, LogLevel.Info),
+    Effect.provideService(References.MinimumLogLevel, "Info"),
   ),
 ).then(
   () => process.exit(0),

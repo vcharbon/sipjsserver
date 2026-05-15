@@ -13,7 +13,7 @@
  * [docs/k8s-endurance.md].
  */
 
-import { Data, Effect, LogLevel, References } from "effect"
+import { Data, Effect, References } from "effect"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
 import { clusterUp } from "../fixtures/cluster.js"
@@ -168,7 +168,7 @@ export const upFull = (opts: UpFullOptions = {}) =>
 const isMain = import.meta.url === `file://${process.argv[1]}`
 if (isMain) {
   Effect.runPromise(
-    upFull().pipe(Effect.provideService(References.MinimumLogLevel, LogLevel.Info)),
+    upFull().pipe(Effect.provideService(References.MinimumLogLevel, "Info")),
   ).then(
     () => process.exit(0),
     (err) => {

@@ -1,4 +1,4 @@
-import { Effect, LogLevel, References } from "effect"
+import { Effect, References } from "effect"
 import {
   installProxy,
   installRedis,
@@ -31,7 +31,7 @@ const program = Effect.gen(function* () {
 })
 
 Effect.runPromise(
-  program.pipe(Effect.provideService(References.MinimumLogLevel, LogLevel.Info)),
+  program.pipe(Effect.provideService(References.MinimumLogLevel, "Info")),
 ).then(
   () => process.exit(0),
   (err) => {
