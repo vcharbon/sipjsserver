@@ -1,6 +1,6 @@
 # 0002 — Endurance is the canonical robustness gate; failover is a historical sub-case
 
-**Status:** accepted (2026-05-15)
+**Status:** accepted (2026-05-15); amended 2026-05-15 — see "2026-05-15 amendment" below
 
 ## Context
 
@@ -24,3 +24,24 @@ Two K8s test surfaces grew up in parallel: the failover suite (`npm run test:k8s
 - `--reuse-cluster` is gone; the inner-loop orchestrator-iteration use case it served is covered by an undocumented `tests/k8s/scripts/up.ts` helper that the regular `up-full` path supersedes for any verdict-bearing run.
 - The failover suite moves from `docs/K8S_test.md §7` to an appendix of `docs/k8s-endurance.md`, explicitly framed as a sub-case. Future engineers reading the suite-list will see one gate, not two.
 - Reversing this decision means re-introducing two parallel surfaces, with the maintenance burden that motivated this ADR in the first place. The structural cost makes it a deliberate choice to revisit rather than a drift.
+
+## 2026-05-15 amendment — chaos catalog admission rule
+
+The original ADR locked the chaos catalog to events whose proper handling has *near-zero traffic impact* — `proxy-cutoff-workers` and `proxy-cutoff-ingress` were explicitly rejected on that basis. That rule is now retired.
+
+New rule: **an event is admissible iff its impact on running traffic is explicitly modelled in an `ExpectedImpact` spec.** The spec lives in `tests/k8s/endurance/expectedImpact.ts` keyed by `ChaosEventType` and combines:
+
+- *Tolerance rules* (verdict mask): "during this window, the metric may be as bad as X." Breach above X fails the verdict; everything below is absorbed and the verdict still PASSes.
+- *Chaos-effectiveness assertions*: "the chaos primitive must visibly affect metric Y." A silently-no-op chaos event fails the assertion and surfaces in the report.
+- *Recovery assertions*: "Z seconds after `tRecovered`, the metric must return to baseline." Catches "the cut left the system in a degraded state that didn't self-heal."
+
+Motivation: the catalog was getting brittle. Failure modes that have real-world analogs (worker isolated from proxy, partial-loss links, overload bursts from misbehaving customers) were excluded because their *expected* traffic impact wasn't zero. Capturing that expectation explicitly is more honest and turns the catalog from "things that are silent" into "things whose behaviour we can defend against regression in."
+
+Consequences:
+
+- The previously-rejected `proxy-cutoff-workers` is admitted under the new rule as `worker-cut-from-proxy-hard` (plus three more `worker-cut-from-*` variants and a triple cut), each with its own ExpectedImpact spec.
+- A new `non-emergency-burst` event spawns an ad-hoc sipp Job at 200 CAPS without a `Resource-Priority` header for 60 s, exercising all three overload tiers. The existing baseline scenarios are marked `Resource-Priority: esnet.0` so they're unaffected by the burst.
+- A new `proxy-full-isolate` event complements `proxy-cutoff-vrrp`: VRRP-only drops test split-brain handling under `nopreempt`, full isolation tests clean VIP fail-over.
+- A new `--no-chaos` mode + `npm run test:k8s:chaos` sub-command exist as the inner-loop iteration entry points: baseline campaign runs long-running, chaos events fire on demand into the running campaign via a separate process that owns the chaos primitive + analyzer + verdict end-to-end. Transport is the shared artifact dir (no HTTP). This lets us edit chaos / ExpectedImpact code and re-fire without bouncing the cluster.
+
+Reversing this amendment means going back to the old admission rule, dropping all worker-network-isolation events from the catalog, and removing the ExpectedImpact infrastructure. Plausible if the false-positive cost of structured impact specs ever outweighs the coverage gain — but the structural cost makes it a deliberate decision to revisit, not a drift.
