@@ -392,6 +392,39 @@ export class SipRouter extends ServiceMap.Service<
           // in handlers, so no pre-send mutation is needed here.
           yield* callState.update(callRef, () => result.call)
 
+          // Pre-pass: drain timer-control effects BEFORE outbound. A handler
+          // that transitions a call into `terminating` emits both an outbound
+          // BYE *and* a `schedule-timer(terminating_timeout +64 s)` safety net.
+          // The whole `processResult` is wrapped in
+          // `Effect.timeoutOrElse(timerHandlerTimeoutMs)` by TimerService — if
+          // the outbound send takes longer than the budget (event-loop freeze,
+          // slow UDP write), the abort fires *after* `callState.update` but
+          // before the unprocessed schedule-timer effect ever reaches
+          // `timers.schedule`. The in-memory call sits in `terminating` with no
+          // safety fiber, and only the 60-s orphan sweep eventually rescues it
+          // — long enough to leak BYEs into other tests' traces. Running timer
+          // effects here installs the safety fiber before any slow yield, so
+          // an abort can no longer orphan the call. See
+          // tests/sip/terminating-safety-timer-armed-before-outbound.test.ts.
+          for (const effect of result.effects) {
+            switch (effect.type) {
+              case "schedule-timer": {
+                const handler = (cr: string, tt: TimerType, lid: string | undefined) =>
+                  timerHandler(handlers, cr, tt, lid)
+                yield* timers.schedule(callRef, effect.timer, handler)
+                break
+              }
+              case "cancel-timer":
+                yield* timers.cancel(effect.id)
+                break
+              case "cancel-all-timers":
+                yield* timers.cancelAll(callRef)
+                break
+              default:
+                break
+            }
+          }
+
           // Send outbound messages (pure output, no state mutation).
           for (const env of result.outbound) {
             const msg = env.message
@@ -435,20 +468,15 @@ export class SipRouter extends ServiceMap.Service<
             }
           }
 
-          // 3-7. Execute side effects in fixed order
+          // Post-pass: drain the remaining side effects. Timer-control effects
+          // already ran above so the safety net is in place; everything left
+          // is either Redis/CDR bookkeeping or the async REFER fork.
           for (const effect of result.effects) {
             switch (effect.type) {
-              case "schedule-timer": {
-                const handler = (cr: string, tt: TimerType, lid: string | undefined) =>
-                  timerHandler(handlers, cr, tt, lid)
-                yield* timers.schedule(callRef, effect.timer, handler)
-                break
-              }
+              case "schedule-timer":
               case "cancel-timer":
-                yield* timers.cancel(effect.id)
-                break
               case "cancel-all-timers":
-                yield* timers.cancelAll(callRef)
+                // Handled in the pre-pass above.
                 break
               case "decrement-limiter":
                 yield* limiter.decrement(effect.limiterId, effect.window).pipe(
