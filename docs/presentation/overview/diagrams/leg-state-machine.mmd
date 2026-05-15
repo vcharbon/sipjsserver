@@ -1,0 +1,23 @@
+flowchart LR
+    Start((●))
+    Trying[trying]
+    Early[early]
+    Confirmed[confirmed]
+    Terminated[terminated]
+    Done(((●)))
+
+    Start -->|INVITE sent| Trying
+    Trying -->|1xx with To-tag| Early
+    Trying -->|2xx| Confirmed
+    Early -->|2xx| Confirmed
+    Trying -->|"3xx-6xx / cancel"| Terminated
+    Early -->|"3xx-6xx / cancel"| Terminated
+    Confirmed -->|"BYE / timeout"| Terminated
+    Terminated --> Done
+
+    style Start fill:#94A3B8,stroke:#94A3B8,color:#0F172A
+    style Done fill:#0F172A,stroke:#94A3B8,color:#F1F5F9
+    style Trying fill:#1E293B,stroke:#22D3EE,color:#22D3EE,stroke-width:2px
+    style Early fill:#1E293B,stroke:#FBBF24,color:#FBBF24,stroke-width:2px
+    style Confirmed fill:#1E293B,stroke:#34D399,color:#34D399,stroke-width:2px
+    style Terminated fill:#1E293B,stroke:#F472B6,color:#F472B6,stroke-width:2px

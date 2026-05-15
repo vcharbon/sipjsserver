@@ -1,0 +1,18 @@
+flowchart TD
+    Call["Call<br/>callRef = aLegCallId + aLegFromTag<br/>state: active → terminating → terminated"]
+
+    Call --> ALeg["aLeg (legId = 'a')<br/>state · disposition"]
+    Call --> BLegs["bLegs[ ]: b-1, b-2, b-3 …<br/>(forking, failover)"]
+    Call --> Peer["activePeer: { legA, legB } | null<br/>structurally enforces 1↔1 peering"]
+    Call --> TagMap["tagMap[ ]: { aTag, bLegId, bTag }<br/>B2BUA owns a-facing tags"]
+
+    ALeg --> ADialog["dialogs[ ]: one per remote toTag<br/>toTag · contact · routeSet<br/>localCSeq · remoteCSeq<br/>inboundPendingRequests"]
+    BLegs --> BDialog["dialogs[ ] per b-leg<br/>(same shape)"]
+
+    style Call fill:#1E293B,stroke:#22D3EE,color:#F1F5F9,stroke-width:2px
+    style ALeg fill:#1E293B,stroke:#FBBF24,color:#F1F5F9
+    style BLegs fill:#1E293B,stroke:#FBBF24,color:#F1F5F9
+    style Peer fill:#1E293B,stroke:#F472B6,color:#F1F5F9
+    style TagMap fill:#1E293B,stroke:#F472B6,color:#F1F5F9
+    style ADialog fill:#0B1120,stroke:#94A3B8,color:#F1F5F9
+    style BDialog fill:#0B1120,stroke:#94A3B8,color:#F1F5F9

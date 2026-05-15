@@ -1,0 +1,18 @@
+sequenceDiagram
+    autonumber
+    participant A as Alice
+    participant P as Proxy
+    participant W3 as worker-3
+    participant W7 as worker-7 (backup)
+    Note over A,W7: Normal in-dialog routing (BYE)
+    A->>P: BYE with Route header
+    Note over P: strip Route per §16.4<br/>verify HMAC vs (current, previous) keys<br/>resolve w=worker-3 → WorkerEntry
+    P->>W3: BYE
+    W3-->>A: 200 OK
+
+    Note over A,W7: Failure mode: worker-3 dead
+    A->>P: BYE (same cookie)
+    Note over P: keepalive marks worker-3 DEAD<br/>fallback to w_bak=7
+    P->>W7: BYE
+    Note over W7: hydrate from bak:{worker-3}:call:{ref}<br/>on own sidecar redis
+    W7-->>A: 200 OK

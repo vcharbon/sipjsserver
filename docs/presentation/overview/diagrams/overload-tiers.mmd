@@ -1,0 +1,32 @@
+flowchart TB
+    Pkt[UDP packet arrives]
+
+    subgraph T1["TIER 1 — Pre-parse byte brake · UdpTransport"]
+        direction LR
+        T1Note["activates when recv-queue &gt; 70% of 100 · byte-scans for INVITE + emergency marker<br/>new non-emergency INVITE under pressure → template 503 (no parse, no fiber)<br/>everything else (in-dialog, ACK, BYE, responses, emergency) passes"]
+    end
+
+    subgraph T2["TIER 2 — Per-worker class queues · Dispatcher"]
+        direction LR
+        T2A["emergency<br/>500 · drop oldest + page"]
+        T2B["inDialog<br/>400 · drop oldest + mark overloaded"]
+        T2C["normalNew<br/>100 · drop newest + send 503"]
+        T2A --- T2B --- T2C
+    end
+
+    subgraph T3["TIER 3 — Token bucket + adaptive shedder · OverloadController"]
+        direction LR
+        T3Note["bucket: rate 500/s · burst 1000 · emergency force-consumes &amp; bypasses shedder<br/>shed probability = max( loop-lag, active-calls, queue-depth, routing-API p95 )"]
+    end
+
+    Routing[routing API · CallLimiter · handler runs]
+
+    Pkt --> T1 --> T2 --> T3 --> Routing
+
+    style Pkt fill:#0B1120,stroke:#94A3B8,color:#F1F5F9
+    style T1Note fill:transparent,stroke:transparent,color:#F1F5F9
+    style T2A fill:#1E293B,stroke:#F472B6,color:#F1F5F9
+    style T2B fill:#1E293B,stroke:#FBBF24,color:#F1F5F9
+    style T2C fill:#1E293B,stroke:#22D3EE,color:#F1F5F9
+    style T3Note fill:transparent,stroke:transparent,color:#F1F5F9
+    style Routing fill:#1E293B,stroke:#34D399,color:#F1F5F9,stroke-width:2px

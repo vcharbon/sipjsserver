@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant A as Alice
+    participant P as Proxy
+    participant W as Worker
+    participant B as Backend
+    participant Bob as Bob
+    A->>P: INVITE
+    Note over P: HRW select worker-N<br/>insert HMAC Record-Route
+    P->>W: INVITE
+    W->>B: POST /call/new
+    B-->>W: dest · headers · limiters · rules
+    Note over W: create Call + aLeg + b-1<br/>flush Redis sidecar<br/>check-and-incr limiters<br/>start no-answer timer 30s
+    W->>Bob: INVITE (b-leg)
+    P-->>A: 100 Trying
+    Bob-->>W: 180 / 200
+    W-->>P: 180 / 200
+    P-->>A: 180 / 200
+    A->>P: ACK
+    P->>W: ACK (cookie → N)
+    W->>Bob: ACK

@@ -1,0 +1,1057 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SIP B2BUA — Architecture & Replication</title>
+
+  <!-- Reveal.js core -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+
+  <!-- Font Awesome for icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <!-- Custom styles -->
+  <link rel="stylesheet" href="styles.css">
+
+  <!-- Chart.js for data visualization -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+</head>
+<body>
+  <button id="fullscreen-btn" aria-label="Toggle fullscreen" title="Toggle fullscreen (F)">
+    <i class="fa-solid fa-expand"></i>
+  </button>
+
+  <div class="reveal">
+    <div class="slides">
+
+      <section id="title" class="section-divider" data-state="is-section-divider">
+        <div class="hero">
+          <h1>SIP B2BUA</h1>
+          <p class="tagline">Distributed Telephony · Effect-TS · Redis Replication</p>
+          <p class="subline">Architecture · SIP Stack Behavior · Call Pinning · State Replication</p>
+        </div>
+      </section>
+
+      <section id="slide-2">
+        <h2>What it is</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px; flex: 1;">
+            <div>
+              <p class="text-lg"><strong>SIP Back-to-Back User Agent</strong> — a programmable telephony switch that terminates and re-originates SIP dialogs.</p>
+              <ul>
+                <li>Listens on UDP SIP (port 5060)</li>
+                <li>Calls an HTTP backend to decide call routing</li>
+                <li>Bridges two legs (a-leg, b-leg) with full header rewriting</li>
+                <li>Operates as a stateful B2BUA, not a stateless proxy</li>
+              </ul>
+            </div>
+            <div>
+              <div class="card cyan" style="margin-bottom: 14px;">
+                <p class="card-title">Two deployment modes</p>
+                <p class="text-sm">Standalone production server, or embedded library with custom <code>CallDecisionEngine</code></p>
+              </div>
+              <div class="card amber" style="margin-bottom: 14px;">
+                <p class="card-title">Multi-agent test framework</p>
+                <p class="text-sm">In-process registrar drives <code>alice.register()</code> / <code>bob.register()</code> scenarios against real PBX/SBC</p>
+              </div>
+              <div class="card rose">
+                <p class="card-title">Built on Effect v4</p>
+                <p class="text-sm">Typed errors, structured concurrency, deterministic TestClock testing</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-3">
+        <h2>The problem it solves</h2>
+        <div class="content">
+          <p class="text-lg" style="margin-bottom: 18px;">A B2BUA hides Alice from Bob (and Bob from Alice) so the operator can <strong>impose policy</strong> between them — routing, header rewriting, billing, failover, regulatory controls.</p>
+
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 20px;">
+            <div class="card cyan">
+              <p class="card-title">Routing</p>
+              <p class="text-sm">Per-call destination chosen by HTTP backend on every <code>POST /call/new</code></p>
+            </div>
+            <div class="card amber">
+              <p class="card-title">Failover</p>
+              <p class="text-sm">Multiple b-legs per call: <code>b-1</code>, <code>b-2</code>… probe in sequence on no-answer / SIP failure</p>
+            </div>
+            <div class="card rose">
+              <p class="card-title">Isolation</p>
+              <p class="text-sm">Independent CSeq, tag, Call-ID spaces. Each leg sees only its peer's surface</p>
+            </div>
+            <div class="card green">
+              <p class="card-title">Limiters</p>
+              <p class="text-sm">Per-customer windowed call counters, check-and-increment on INVITE</p>
+            </div>
+            <div class="card cyan">
+              <p class="card-title">Emergency</p>
+              <p class="text-sm">Resource-Priority: esnet / wps / q735 → bypass shedding, fast-path through overload tiers</p>
+            </div>
+            <div class="card amber">
+              <p class="card-title">Survival</p>
+              <p class="text-sm">Worker death does not drop in-flight calls — backup serves the dialog</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="divider-1" class="section-divider" data-state="is-section-divider">
+        <h1>Architecture</h1>
+        <p>Two tiers · Stateless edge · Stateful workers · Two Redis topologies</p>
+      </section>
+
+      <section id="slide-5">
+        <h2>Two-tier topology</h2>
+        <div class="content">
+          <div class="diagram-wrap"><img src="diagrams/topology.svg" alt="Two-tier topology"></div>
+        </div>
+      </section>
+
+      <section id="slide-6">
+        <h2>Tech stack</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+            <div>
+              <h3>Runtime</h3>
+              <ul>
+                <li><strong>Node.js</strong> ≥ 20, TypeScript strict</li>
+                <li><strong>Effect v4 beta</strong> (pinned <code>4.0.0-beta.43</code>) — typed errors, fibers, layers, TestClock</li>
+                <li><strong>JsSIP</strong> grammar for parsing only — B2BUA logic is bespoke</li>
+                <li><strong>Plain UDP sockets</strong> — no Node TCP/TLS yet</li>
+              </ul>
+              <h3 style="margin-top: 14px;">Storage</h3>
+              <ul>
+                <li><strong>Redis</strong> sidecar per worker pod (sub-ms localhost)</li>
+                <li><strong>Redis</strong> shared cluster instance (CallLimiter only)</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Orchestration</h3>
+              <ul>
+                <li><strong>Kubernetes</strong> — proxies as Deployment, workers as StatefulSet</li>
+                <li><strong>keepalived</strong> sidecar for proxy VIP (VRRP)</li>
+                <li><strong>kind</strong> + sipp for end-to-end smoke tests</li>
+              </ul>
+              <h3 style="margin-top: 14px;">Observability</h3>
+              <ul>
+                <li><strong>OpenTelemetry</strong> tracing rules per call</li>
+                <li><code>GET /status</code> and <code>GET /metrics</code> (Prometheus)</li>
+                <li><code>/debug/heap-snapshot</code> for OOM forensics</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-7">
+        <h2>Key architectural decisions</h2>
+        <div class="content">
+          <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-body">
+              <p class="step-title">Stateless proxy, stateful workers</p>
+              <p class="step-desc">Edge owns the UDP socket and routing decision. All call state lives on workers. Proxy can be killed and respawned without consulting any peer.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-body">
+              <p class="step-title">HMAC Record-Route cookie for call pinning</p>
+              <p class="step-desc">In-dialog traffic is bound to its worker by a signed cookie inserted at INVITE time. No proxy-side routing table, no per-call lookup. Survives proxy restart.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-body">
+              <p class="step-title">Rendezvous (HRW) hashing, not modular</p>
+              <p class="step-desc">On worker pool change, HRW moves only 1/N of calls. Modular hashing reshuffles (N-1)/N.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">4</div>
+            <div class="step-body">
+              <p class="step-title">Two-Redis topology — sidecar + cluster</p>
+              <p class="step-desc">Per-pod sidecar for hot-path call state (localhost latency). Shared Redis only for CallLimiter (global counters need consensus, latency-tolerant).</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">5</div>
+            <div class="step-body">
+              <p class="step-title">INAP-inspired declarative rule framework</p>
+              <p class="step-desc">All SIP behavior expressed as rules returning typed actions. ActionExecutor enforces SIP invariants. Rules never write SIP messages directly.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num">6</div>
+            <div class="step-body">
+              <p class="step-title">Single-owner invariant on call partition</p>
+              <p class="step-desc">A call's primary worker is fixed at INVITE time and never reassigned. Backups serve and replicate back, but the partition reference stays with the primary.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-8">
+        <h2>Two distinct Redis topologies</h2>
+        <div class="content">
+          <p style="margin-bottom: 12px;">Different access patterns demand different placements. Mixing them was an early design mistake.</p>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; flex: 1;">
+            <div class="card cyan" style="display: flex; flex-direction: column;">
+              <p class="card-title">Per-pod sidecar Redis</p>
+              <p class="text-sm" style="margin-bottom: 8px;"><span class="badge cyan">HOT PATH</span></p>
+              <ul class="text-sm">
+                <li>Co-located with each B2BUA worker (same pod)</li>
+                <li>UNIX socket / localhost — sub-millisecond writes</li>
+                <li>Holds <strong>all call context</strong>: <code>pri:N:call:*</code>, <code>bak:P:call:*</code>, <code>idx:*</code>, <code>propagate:*</code>, <code>epoch:N</code></li>
+                <li>Worker is the <strong>only</strong> writer to its own sidecar</li>
+                <li>Crash = sidecar wipes with the pod; recovery pulls from peers</li>
+              </ul>
+            </div>
+            <div class="card amber" style="display: flex; flex-direction: column;">
+              <p class="card-title">Cluster-shared Redis</p>
+              <p class="text-sm" style="margin-bottom: 8px;"><span class="badge amber">CONSENSUS</span></p>
+              <ul class="text-sm">
+                <li>Single shared instance across all workers</li>
+                <li>Holds <strong>CallLimiter only</strong> — windowed customer counters</li>
+                <li>Needs global view; one worker per call is not enough</li>
+                <li>Latency-tolerant — bounded check-and-increment, not on every packet</li>
+                <li>Loss = transient limiter inaccuracy, not call loss</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-sm text-muted" style="margin-top: 10px;"><strong>Rule of thumb:</strong> data that must be local for SIP timing → sidecar. Data that must be global for correctness → shared.</p>
+        </div>
+      </section>
+
+      <section id="divider-2" class="section-divider" data-state="is-section-divider">
+        <h1>SIP Stack Behavior</h1>
+        <p>Call / Leg / Dialog · Header rewriting · Rule framework</p>
+      </section>
+
+      <section id="slide-10">
+        <h2>Call / Leg / Dialog hierarchy</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1.3fr 1fr; gap: 24px; flex: 1; min-height: 0;">
+            <div class="diagram-wrap"><img src="diagrams/call-hierarchy.svg" alt="Call/Leg/Dialog hierarchy"></div>
+            <div>
+              <h3>Why three levels?</h3>
+              <ul class="text-sm">
+                <li><strong>Call</strong> — the operator concept. One CDR, one limiter charge, one routing decision.</li>
+                <li><strong>Leg</strong> — the SIP transaction concept. One Call-ID and From-tag per leg; failover spawns <code>b-2</code>.</li>
+                <li><strong>Dialog</strong> — the RFC 3261 dialog. Multiple per leg during forking; one survives.</li>
+              </ul>
+              <p class="text-sm text-muted" style="margin-top: 12px;">Every framework primitive (<code>merge</code>, <code>split</code>, <code>destroy-leg</code>, <code>add-tag-mapping</code>) operates at exactly one of these levels.</p>
+            </div>
+          </div>
+          <p class="footnote">docs/CallModel.md:36–67</p>
+        </div>
+      </section>
+
+      <section id="slide-11">
+        <h2>Leg state machine</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; flex: 1; min-height: 0;">
+            <div class="diagram-wrap"><img src="diagrams/leg-state-machine.svg" alt="Leg state machine"></div>
+            <div>
+              <h3>State invariants</h3>
+              <ul class="text-sm">
+                <li><code>trying</code>: INVITE sent, no provisional with tag</li>
+                <li><code>early</code>: 1xx with To-tag, no 2xx</li>
+                <li><code>confirmed</code>: 2xx received, ACK sent</li>
+                <li><code>terminated</code>: BYE exchanged, timer expired, or failure response</li>
+              </ul>
+              <h3 style="margin-top: 12px;">Disposition (independent axis)</h3>
+              <ul class="text-sm">
+                <li><code>pending</code> · <code>bridged</code> · <code>cancelling</code> · <code>rejected</code></li>
+              </ul>
+            </div>
+          </div>
+          <p class="footnote">docs/CallModel.md:82–88</p>
+        </div>
+      </section>
+
+      <section id="slide-12">
+        <h2>Initial INVITE — end-to-end flow</h2>
+        <div class="content">
+          <div class="diagram-wrap" style="flex: 1;"><img src="diagrams/invite-flow.svg" alt="INVITE sequence flow"></div>
+          <p class="text-sm text-muted" style="margin-top: 6px;"><strong>On no-answer or 4xx-6xx from b-1:</strong> POST <code>/call/failure</code> → spawn <code>b-2</code> with new Call-ID. Alice sees one continuous early dialog.</p>
+        </div>
+      </section>
+
+      <section id="slide-13">
+        <h2>Header rewriting at the B2BUA boundary</h2>
+        <div class="content">
+          <table style="font-size: 13pt;">
+            <thead>
+              <tr><th style="width: 16%;">Header</th><th style="width: 38%;">A-leg (Alice ↔ Worker)</th><th style="width: 46%;">B-leg (Worker ↔ Bob)</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Via</strong></td>
+                <td>Worker stamps <code>;cr=&lt;ref&gt;;lg=a</code></td>
+                <td>Worker stamps <code>;cr=&lt;ref&gt;;lg=b-1</code> · Proxy adds top Via</td>
+              </tr>
+              <tr>
+                <td><strong>Contact</strong></td>
+                <td colspan="2"><code>&lt;sip:b2bua@&lt;ip&gt;:&lt;port&gt;;callRef=…;leg=&lt;legId&gt;&gt;</code> · adds <code>;emerg=1</code> for emergency</td>
+              </tr>
+              <tr>
+                <td><strong>Record-Route</strong></td>
+                <td colspan="2">Inserted by <strong>proxy</strong>: <code>&lt;sip:proxy:5060;w=&lt;wId&gt;;v=2;kid=…;sig=&lt;HMAC&gt;;lr&gt;</code></td>
+              </tr>
+              <tr>
+                <td><strong>Call-ID</strong></td>
+                <td>Alice's original preserved</td>
+                <td>Generated <code>&lt;legNum&gt;-&lt;aLegCid&gt;-&lt;host&gt;</code> (e.g. <code>1-abc@…</code>)</td>
+              </tr>
+              <tr>
+                <td><strong>From / To</strong></td>
+                <td colspan="2">Independent tag spaces. <code>TagMapping[]</code> tracks <code>{aTag, bLegId, bTag}</code></td>
+              </tr>
+              <tr>
+                <td><strong>CSeq</strong></td>
+                <td colspan="2">Independent per leg. CANCEL/ACK-for-2xx reuse INVITE's CSeq number (RFC 3261)</td>
+              </tr>
+              <tr>
+                <td><strong>Route</strong></td>
+                <td>Stripped per §16.4</td>
+                <td>Worker may add <code>Route: &lt;sip:proxy:5060;lr;outbound&gt;</code></td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="footnote">docs/b2bua-sip-headers.md · Via :62–68 · Contact :76–80 · Record-Route :225–235</p>
+        </div>
+      </section>
+
+      <section id="slide-14">
+        <h2>Tag isolation &amp; dialog correlation</h2>
+        <div class="content">
+          <p class="text-lg" style="margin-bottom: 12px;">Alice and Bob live in <strong>independent dialog spaces</strong>. The B2BUA bridges them via a translation table.</p>
+          <div class="diagram-wrap" style="flex: 1;"><img src="diagrams/tag-isolation.svg" alt="Tag isolation"></div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 10px;">
+            <div>
+              <h3>What this buys</h3>
+              <ul class="text-sm">
+                <li>Alice cannot drive Bob's transaction state directly</li>
+                <li>Forking: <code>b-1</code>, <code>b-2</code> add entries; only the bridged one's <code>aTag</code> reaches Alice</li>
+                <li>Re-INVITE/UPDATE relay is just a tag-table lookup</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Where it's enforced</h3>
+              <ul class="text-sm">
+                <li><code>add-tag-mapping</code> primitive on dialog confirmation</li>
+                <li><code>activePeer</code> structurally enforces 1↔1 peering</li>
+                <li><code>InvariantEnforcer</code> rejects rule outputs that break dialog isolation</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-15">
+        <h2>Defaults &amp; timers</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;">
+            <div class="card cyan">
+              <p class="card-title">No-answer</p>
+              <span class="stat-value">30s</span>
+              <p class="text-sm text-muted" style="margin-top: 6px;">Per-leg. Fires <code>no-answer-failover</code> → POST <code>/call/failure</code> → next b-leg or terminate.</p>
+            </div>
+            <div class="card cyan">
+              <p class="card-title">Keepalive</p>
+              <span class="stat-value">15min</span>
+              <p class="text-sm text-muted" style="margin-top: 6px;">In-dialog OPTIONS to peer. Detects half-open dialogs. Timeout triggers leg cleanup.</p>
+            </div>
+            <div class="card cyan">
+              <p class="card-title">Max call duration</p>
+              <span class="stat-value">2hr</span>
+              <p class="text-sm text-muted" style="margin-top: 6px;">Global guard. Fires <code>max-duration</code> rule → BYE both legs → terminate.</p>
+            </div>
+            <div class="card amber">
+              <p class="card-title">Redis flush</p>
+              <span class="stat-value">2s</span>
+              <p class="text-sm text-muted" style="margin-top: 6px;">Idle debounce. Coalesces successive state mutations into one write.</p>
+            </div>
+            <div class="card amber">
+              <p class="card-title">Terminating safety</p>
+              <span class="stat-value">64s</span>
+              <p class="text-sm text-muted" style="margin-top: 6px;">Forced promotion to <code>terminated</code> if BYE chain hasn't resolved (SIP T1·64).</p>
+            </div>
+            <div class="card rose">
+              <p class="card-title">Limiter window</p>
+              <span class="stat-value">300s</span>
+              <p class="text-sm text-muted" style="margin-top: 6px;">Per-customer windowed counter. 3 active windows · TTL 1200s.</p>
+            </div>
+          </div>
+          <p class="footnote">docs/CallModel.md:317–336</p>
+        </div>
+      </section>
+
+      <section id="divider-3" class="section-divider" data-state="is-section-divider">
+        <h1>SIP Front Proxy</h1>
+        <p>Stateless edge · HMAC call pinning · Shared VIP HA</p>
+      </section>
+
+      <section id="slide-17">
+        <h2>Proxy responsibilities</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+            <div>
+              <h3>Inbound — UAC side</h3>
+              <ul>
+                <li>Owns UDP :5060 socket (shared VIP)</li>
+                <li><strong>Distributes initial INVITEs</strong> via HRW hashing on Call-ID</li>
+                <li>Inserts HMAC-signed Record-Route cookie</li>
+                <li>Decodes cookie on in-dialog requests, forwards to pinned worker</li>
+                <li>CANCEL correlation via TTL'd LRU on <code>(Call-ID, CSeq)</code></li>
+              </ul>
+            </div>
+            <div>
+              <h3>Outbound — UAS side</h3>
+              <ul>
+                <li>Forwards worker-originated requests to peer</li>
+                <li>Adds its own top Via with own branch — replies route back</li>
+                <li>Source-IP discipline: forwarded SIP uses <strong>VIP</strong>, OPTIONS health probes use <strong>per-proxy node IP</strong></li>
+              </ul>
+              <h3 style="margin-top: 12px;">What it never does</h3>
+              <ul>
+                <li>Hold per-call state — restart loses zero calls</li>
+                <li>Consult a routing table — cookie is self-describing</li>
+                <li>Coordinate with the other proxy — both probe workers independently</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-18">
+        <h2>Call pinning — Rendezvous (HRW) hashing</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 20px; flex: 1;">
+            <div class="diagram small">
+<span class="hl-cyan">rendezvousSelect(callId, workers):</span>
+  best = null
+  bestScore = 0
+
+  <span class="hl-muted">// Healthy peers only</span>
+  for w in workers where w.health == 'alive':
+      key   = callId + ":" + w.id
+      digest = SHA-1(key)
+      score  = uint64(digest[0..8])      <span class="hl-amber">// top 8 bytes</span>
+
+      if score &gt; bestScore:
+          bestScore = score
+          best      = w
+
+  return best</div>
+            <div>
+              <h3>Why not <code>fnv1a(callId) % N</code>?</h3>
+              <ul class="text-sm">
+                <li>Modular: adding/removing a worker reshards <strong>(N-1)/N</strong> of calls</li>
+                <li>HRW: only <strong>1/N</strong> of calls move on membership change</li>
+                <li>Critical when scaling pool from 3→4 nodes during traffic</li>
+              </ul>
+              <h3 style="margin-top: 14px;">Pool stability</h3>
+              <ul class="text-sm">
+                <li>Workers are a StatefulSet — pod ordinals <code>worker-0..N</code> survive restarts</li>
+                <li>Deployment's random suffixes would invalidate every cookie</li>
+                <li>HRW scoring depends only on stable <code>worker.id</code></li>
+              </ul>
+            </div>
+          </div>
+          <p class="footnote">docs/b2bua-sip-headers.md:212–222 · selectForNewDialog</p>
+        </div>
+      </section>
+
+      <section id="slide-19">
+        <h2>The HMAC stickiness cookie</h2>
+        <div class="content">
+          <div class="diagram small" style="margin-bottom: 12px;">
+<span class="hl-muted">Encoded into the Record-Route URI:</span>
+  Record-Route: &lt;sip:proxy:5060<span class="hl-cyan">;w=worker-3</span><span class="hl-amber">;v=2</span>;<span class="hl-cyan">w_pri=3</span>;<span class="hl-cyan">w_bak=7</span><span class="hl-rose">;kid=a3f1...</span><span class="hl-green">;sig=K7n…</span>;lr&gt;</div>
+          <table style="font-size: 13pt;">
+            <thead><tr><th style="width: 14%;">Param</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td><code>w</code></td><td>Worker pod name (StatefulSet ordinal, e.g. <code>worker-3</code>)</td></tr>
+              <tr><td><code>v</code></td><td>Cookie format version (2 includes <code>w_bak</code>)</td></tr>
+              <tr><td><code>w_pri</code>/<code>w_bak</code></td><td>Primary &amp; backup ordinals — fixed at INVITE, never reassigned</td></tr>
+              <tr><td><code>kid</code></td><td>HMAC key id — first 16 hex of SHA-1(keyBytes); supports rotation</td></tr>
+              <tr><td><code>sig</code></td><td>HMAC-SHA256 truncated to 128 bits (RFC 4868 §2.6), base64url</td></tr>
+            </tbody>
+          </table>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 10px;">
+            <div class="card amber">
+              <p class="card-title">Why HMAC?</p>
+              <p class="text-sm">Cookie is sent back by Alice/Bob. Without signing, a malicious UA could rewrite <code>w=</code> and redirect another customer's call.</p>
+            </div>
+            <div class="card cyan">
+              <p class="card-title">Key rotation</p>
+              <p class="text-sm">Verify against <code>(current, previous)</code> pair. 1h overlap allows safe rotation without dropping in-flight dialogs.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-20">
+        <h2>In-dialog routing — the cookie in action</h2>
+        <div class="content">
+          <div class="diagram-wrap" style="flex: 1;"><img src="diagrams/in-dialog-routing.svg" alt="In-dialog routing and failure mode"></div>
+        </div>
+      </section>
+
+      <section id="slide-21">
+        <h2>Proxy HA — shared VIP via keepalived</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; flex: 1; min-height: 0;">
+            <div class="diagram-wrap"><img src="diagrams/proxy-ha.svg" alt="Proxy HA shared VIP"></div>
+            <div>
+              <div class="card cyan" style="margin-bottom: 10px;">
+                <p class="card-title">Failover budget</p>
+                <span class="stat-value" style="font-size: 28pt;">&lt; 2s</span>
+                <p class="text-sm text-muted">Hold-down 1.5s + gARP 100–300ms · SIP T2 is 4s</p>
+              </div>
+              <div class="card amber" style="margin-bottom: 10px;">
+                <p class="card-title">Survives</p>
+                <p class="text-sm">Cookies · worker state · liveness map</p>
+              </div>
+              <div class="card rose">
+                <p class="card-title">Lost</p>
+                <p class="text-sm">In-flight tx timers · CancelBranchLru (32s)</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-22">
+        <h2>Worker health detection &amp; routing matrix</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1fr 1.4fr; gap: 18px;">
+            <div>
+              <h3>OPTIONS keepalive</h3>
+              <ul class="text-sm">
+                <li>Interval: <strong>1s</strong></li>
+                <li>Timeout: <strong>1.5s</strong></li>
+                <li>Miss threshold: <strong>2</strong></li>
+                <li>Worst-case detection lag: <strong>~2s</strong></li>
+              </ul>
+              <h3 style="margin-top: 12px;">Four health states</h3>
+              <ul class="text-sm">
+                <li><span class="badge green">alive</span> normal routing target</li>
+                <li><span class="badge amber">draining</span> shedding new INVITEs, accepting in-dialog</li>
+                <li><span class="badge rose">dead</span> remove from rotation</li>
+                <li><span class="badge muted">unknown</span> initial state — hysteresis room before promoting to <em>alive</em></li>
+              </ul>
+            </div>
+            <div>
+              <h3>Per-message routing rules</h3>
+              <table style="font-size: 13pt;">
+                <thead><tr><th>Msg type</th><th>alive</th><th>draining</th><th>dead</th></tr></thead>
+                <tbody>
+                  <tr><td>Initial INVITE</td><td>HRW</td><td>HRW skip</td><td>HRW skip</td></tr>
+                  <tr><td>In-dialog reINV/UPD</td><td>cookie</td><td>cookie</td><td>fallback after grace</td></tr>
+                  <tr><td>ACK on 2xx</td><td>cookie</td><td>cookie</td><td>cookie (exempt)</td></tr>
+                  <tr><td>CANCEL</td><td>cookie</td><td>cookie</td><td>cookie (exempt)</td></tr>
+                  <tr><td>BYE</td><td>cookie</td><td>cookie</td><td>fallback after grace</td></tr>
+                  <tr><td>OPTIONS keepalive</td><td>probe</td><td>probe</td><td>probe</td></tr>
+                </tbody>
+              </table>
+              <p class="text-sm text-muted" style="margin-top: 8px;"><strong>Drain grace:</strong> 5s default for in-dialog fallback. ACK &amp; CANCEL are <em>always</em> sent to original worker — only it holds the INVITE transaction.</p>
+            </div>
+          </div>
+          <p class="footnote">docs/sip-front-proxy/resilience-model.md</p>
+        </div>
+      </section>
+
+      <section id="divider-4" class="section-divider" data-state="is-section-divider">
+        <h1>B2BUA Worker</h1>
+        <p>Pipeline · Rule framework · Action primitives</p>
+      </section>
+
+      <section id="slide-24">
+        <h2>Worker pipeline</h2>
+        <div class="content">
+          <div class="diagram-wrap" style="margin-bottom: 12px; flex: 0 0 auto; height: 220px;"><img src="diagrams/worker-pipeline.svg" alt="Worker pipeline"></div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px;">
+            <div>
+              <h3>Per-call serialization</h3>
+              <ul class="text-sm">
+                <li>One <code>Effect.Semaphore(1)</code> per <code>callRef</code></li>
+                <li>Rule matching, mutation, Redis flush, outbound send all run sequentially per call</li>
+                <li>Proxy guarantees affinity → no distributed lock needed</li>
+                <li>Different calls run on different fibers → unbounded concurrency across calls</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Layer responsibilities</h3>
+              <ul class="text-sm">
+                <li><strong>TransactionLayer</strong> — RFC 3261 client/server transactions, retransmission</li>
+                <li><strong>RuleExecutor</strong> — specificity-scored rule dispatch, custom-rule overlay</li>
+                <li><strong>ActionExecutor</strong> — only thing that mutates call state &amp; emits SIP</li>
+                <li><strong>InvariantEnforcer</strong> — catches rules trying to break SIP semantics</li>
+              </ul>
+            </div>
+          </div>
+          <p class="footnote">docs/AdvancedCallModel.md:18–34</p>
+        </div>
+      </section>
+
+      <section id="slide-25">
+        <h2>The rule framework</h2>
+        <div class="content">
+          <p style="margin-bottom: 12px;">All call processing is declarative: a rule is a <code>match</code> descriptor plus an effect that returns typed <strong>actions</strong>. The framework owns SIP semantics; rules own business decisions.</p>
+          <div class="diagram small">
+<span class="hl-cyan">interface Rule {</span>
+  name: string
+  match: <span class="hl-amber">Match</span>       <span class="hl-muted">// discriminated union by kind:</span>
+                       <span class="hl-muted">//   request | response | timer | timeout | cancelled | internal-event</span>
+  overrides?:    string[]
+  composesWith?: string[]
+  run: (ctx: CallContext) =&gt; Effect&lt;<span class="hl-rose">Action[]</span>, CallError, Deps&gt;
+<span class="hl-cyan">}</span></div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 14px;">
+            <div>
+              <h3>Specificity-scored dispatch</h3>
+              <ul class="text-sm">
+                <li>Each rule's <code>match</code> contributes a score for incoming event</li>
+                <li>Highest score wins. Ties → registration error unless <code>overrides:</code> or <code>composesWith:</code> declared</li>
+                <li>Forces explicit conflict resolution at registration time, not at runtime</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Built-in vs custom</h3>
+              <ul class="text-sm">
+                <li><strong>Default lifecycle rules:</strong> <code>relay-options</code>, <code>relay-bye</code>, <code>relay-ack</code>, <code>handle-cancel</code>, <code>route-failure</code>, <code>no-answer-failover</code>, <code>max-duration</code></li>
+                <li><strong>Corner cases:</strong> <code>cancel-200-crossing</code>, <code>retransmit-200</code>, <code>reinvite-glare</code> (491)</li>
+                <li><strong>Custom rules:</strong> activated per-call via HTTP <code>/call/new</code> response — REFER, 183-to-200, MRF planned</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-26">
+        <h2>Action types — primitive vs composite</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1;">
+            <div class="card cyan" style="display: flex; flex-direction: column;">
+              <p class="card-title">Primitive actions</p>
+              <p class="text-sm text-muted" style="margin-bottom: 6px;">Reach equals declared parameters — enforced by <code>actions-reach-diff.test.ts</code>.</p>
+              <table style="font-size: 12pt;">
+                <tbody>
+                  <tr><td><code>cancel-leg</code></td><td>send CANCEL on a leg</td></tr>
+                  <tr><td><code>merge</code></td><td>set activePeer</td></tr>
+                  <tr><td><code>split</code></td><td>clear activePeer</td></tr>
+                  <tr><td><code>confirm-dialog</code></td><td>promote dialog</td></tr>
+                  <tr><td><code>update-leg-state</code></td><td>state transition</td></tr>
+                  <tr><td><code>stamp-dialog-to-tag</code></td><td>record remote tag</td></tr>
+                  <tr><td><code>add-tag-mapping</code></td><td>insert tagMap entry</td></tr>
+                  <tr><td><code>terminate-leg</code></td><td>leg → terminated</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="card amber" style="display: flex; flex-direction: column;">
+              <p class="card-title">Composite actions</p>
+              <p class="text-sm text-muted" style="margin-bottom: 6px;">Bundles of primitives audited under "Slice C".</p>
+              <table style="font-size: 12pt;">
+                <tbody>
+                  <tr><td><code>destroy-leg</code></td><td>terminate + cleanup</td></tr>
+                  <tr><td><code>begin-termination</code></td><td>BYE both legs</td></tr>
+                  <tr><td><code>terminate-call</code></td><td>full teardown + CDR</td></tr>
+                </tbody>
+              </table>
+              <h3 style="margin-top: 10px; font-size: 17pt;">Framework guarantees</h3>
+              <ul class="text-sm">
+                <li>Auto-promotes <code>terminating → terminated</code></li>
+                <li>Timer cleanup, limiter refresh, CDR write</li>
+                <li>Rules cannot construct raw SIP messages</li>
+              </ul>
+            </div>
+          </div>
+          <p class="footnote">docs/AdvancedCallModel.md:139–291</p>
+        </div>
+      </section>
+
+      <section id="divider-5" class="section-divider" data-state="is-section-divider">
+        <h1>Replication</h1>
+        <p>Single-owner invariant · Dual-Redis backup · /replog protocol</p>
+      </section>
+
+      <section id="slide-28">
+        <h2>Why replicate? The failure model</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px;">
+            <div>
+              <h3>What we can't do</h3>
+              <ul class="text-sm">
+                <li><strong>Cross-pod Redis replication</strong> — too slow on SIP hot path; INVITE → 200 OK is &lt; 200ms, can't wait for cross-AZ ack</li>
+                <li><strong>Shared cluster Redis</strong> for call state — single-point latency, contention, blast radius</li>
+                <li><strong>Cold rehydrate from CDR</strong> — CDRs are append-only, missing live state (CSeq, dialog routes)</li>
+              </ul>
+            </div>
+            <div>
+              <h3>What we chose</h3>
+              <ul class="text-sm">
+                <li><strong>Sidecar-to-sidecar pull replication</strong></li>
+                <li>Primary writes locally (sub-ms), pulls happen async over HTTP</li>
+                <li>Per-call <strong>(primary, backup)</strong> pair fixed at INVITE time</li>
+                <li>Backup keeps a shadow body, serves if primary dies</li>
+                <li>Recovery: replays from peer logs at boot</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card rose" style="margin-top: 14px;">
+            <p class="card-title">Critical timing constraint</p>
+            <p class="text-sm">Primary restart must complete <strong>within <code>callContextTtlSec</code></strong> (default 30 min = keepalive × 2). After TTL, the backup body expires — call lost on next message.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-29">
+        <h2>The single-owner invariant</h2>
+        <div class="content">
+          <blockquote>
+            A call's primary owner is fixed at INVITE time and <strong>never changes</strong> for the call's lifetime.
+            <cite>docs/replication/call-cache-backup.md:20–46</cite>
+          </blockquote>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 10px;">
+            <div>
+              <h3>What this means</h3>
+              <ul class="text-sm">
+                <li>Proxy stamps <code>w_pri</code> and <code>w_bak</code> into the cookie at INVITE time</li>
+                <li>Those ordinals travel with the call from INVITE through BYE, regardless of which worker physically handled any message</li>
+                <li><code>pri:{P}:call:{ref}</code> is written <strong>only</strong> by worker P, ever</li>
+              </ul>
+              <h3 style="margin-top: 12px;">Why?</h3>
+              <ul class="text-sm">
+                <li>Avoids partition-flip races (two workers both think they own a call)</li>
+                <li>Reverse-propagate is a single, well-defined direction</li>
+                <li>"Who is authoritative?" is a constant-time lookup</li>
+              </ul>
+            </div>
+            <div>
+              <h3>"Backup never promotes" — what it really means</h3>
+              <p class="text-sm" style="margin-bottom: 8px;"><span class="badge rose">NOT</span> backup refuses to serve</p>
+              <p class="text-sm" style="margin-bottom: 8px;"><span class="badge green">YES</span> backup serves traffic, bumps <code>callGen</code>, writes new state to <code>bak:{primary}:call:{ref}</code> on its own sidecar</p>
+              <p class="text-sm" style="margin-bottom: 8px;"><span class="badge green">YES</span> updates flow back via <code>propagate:{B}-&gt;{A}</code> so primary recovers them on return</p>
+              <p class="text-sm"><span class="badge rose">NEVER</span> backup moves the call body into <code>pri:{B}:</code> — partition reference stays with A forever</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-30">
+        <h2>Storage layout per worker sidecar</h2>
+        <div class="content">
+          <p style="margin-bottom: 6px;">Each worker N's sidecar Redis holds these namespaces:</p>
+          <table style="font-size: 12pt;" class="tight">
+            <thead><tr><th style="width: 34%;">Key</th><th>Contents</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><code style="color: var(--primary-color)">pri:{N}:call:{ref}</code></td>
+                <td>JSON body for calls where N is primary · carries <code>callGen</code>, <code>written_at_ms</code>, <code>_topology={wPri,wBak}</code>, full Call shape</td>
+              </tr>
+              <tr>
+                <td><code style="color: var(--secondary-color)">bak:{P}:call:{ref}</code></td>
+                <td>JSON body for calls where N backs up primary P · same shape, one entry per peer primary</td>
+              </tr>
+              <tr>
+                <td><code style="color: var(--tertiary-color)">idx:{indexKey} → callRef</code></td>
+                <td>SIP-derived secondary index (Call-ID, dialog tags) · pure function of call body · <strong>never on the wire</strong></td>
+              </tr>
+              <tr>
+                <td><code style="color: var(--success-color)">propagate:{N}→{P}:gen:{entryGen}</code></td>
+                <td>Sorted set per channel · members <code>U:{bodyKey}</code> / <code>D:{bodyKey}</code> · <code>entryGen=0</code> mirror, <code>=g</code> originating</td>
+              </tr>
+              <tr>
+                <td><code style="color: var(--success-color)">seq:{N}→{P}:gen:{entryGen}</code></td>
+                <td>Per-bucket counter, INCR'd on each write</td>
+              </tr>
+              <tr>
+                <td><code style="color: var(--muted-color)">epoch:N</code></td>
+                <td>Worker boot counter (K8s downward API restartCount + boot-ms fallback)</td>
+              </tr>
+              <tr>
+                <td><code style="color: var(--muted-color)">replpos:{peer}</code></td>
+                <td>Puller bookkeeping per peer: <code>{ epoch, lastSeq }</code></td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="text-sm text-muted" style="margin-top: 8px;"><strong>Invariant:</strong> indexes are derived from the body — every receiver re-derives via <code>callIndexKeysFromUnknown</code>. Wire protocol is index-schema-agnostic.</p>
+        </div>
+      </section>
+
+      <section id="slide-31">
+        <h2>Replication topology — write &amp; pull paths</h2>
+        <div class="content">
+          <div class="diagram-wrap" style="flex: 1;"><img src="diagrams/replication-topology.svg" alt="Replication topology"></div>
+          <p class="text-sm text-muted" style="margin-top: 6px;"><strong>Cycle warning:</strong> A's originating write goes to B → B's puller mirrors it back into <code>propagate:B→A</code> with <code>entryGen=0</code> → A's puller rejects (mirror entries excluded for warm pullers, included only for cold recovery).</p>
+        </div>
+      </section>
+
+      <section id="slide-32">
+        <h2>The wire protocol — <code>/replog</code> long-poll</h2>
+        <div class="content">
+          <div class="diagram tiny" style="margin-bottom: 10px;">
+<span class="hl-cyan">GET /replog?caller=worker-A&amp;gen=42&amp;counter=15&amp;chunk_size=64</span>   <span class="hl-muted">→ application/x-ndjson, streamed</span>
+
+<span class="hl-amber">DataFrame</span> (one per replicated mutation):           <span class="hl-rose">NoopFrame</span> (heartbeat + caught-up signal):
+{                                                  { "type": "noop",
+  "type": "data",                                    "gen": 42, "counter": 15,
+  "gen": 42, "counter": 16,                          "latency_ms": 0 }
+  "op": "update",       <span class="hl-muted">// create|update|delete</span>
+  "partition": "pri",   <span class="hl-muted">// flipped on apply</span>
+  "callRef": "abc123",
+  "body": { "callGen": 5, "written_at_ms": …, "_topology": {…}, … },
+  "body_ttl_remaining_sec": 540, "latency_ms": 12
+}</div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+            <div>
+              <h3>Long-poll semantics</h3>
+              <ul class="text-sm">
+                <li>Puller opens a stream per peer; server holds it open</li>
+                <li>Each new write → server emits a DataFrame</li>
+                <li>Idle → periodic NoopFrame proves liveness, advances watermark</li>
+                <li>First Noop flips <code>everCaughtUp = true</code> → <code>WorkerReadiness.markReady(true)</code></li>
+              </ul>
+            </div>
+            <div>
+              <h3>Watermark &amp; resumption</h3>
+              <ul class="text-sm">
+                <li>Puller persists <code>{epoch, lastSeq}</code> in <code>replpos:{peer}</code></li>
+                <li>Reconnect sends last-seen <code>(gen, counter)</code></li>
+                <li>Server walks <code>propagate</code> sets from that position</li>
+                <li>Cold start = <code>(0, 0)</code> → full backfill</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="slide-33">
+        <h2>The cycle-break — <code>entryGen = 0</code> sentinel</h2>
+        <div class="content">
+          <p style="margin-bottom: 10px;"><strong>The naïve cycle:</strong> A writes → B applies + writes outgoing-to-A → A pulls → re-applies → forever.</p>
+          <div class="diagram small">
+<span class="hl-amber">Two kinds of entries live in propagate:</span>
+
+  <span class="hl-cyan">Originating writes</span>      entryGen = <span class="hl-cyan">self.incarnationGen</span>  (e.g. 42)   ← real call mutations
+  <span class="hl-rose">Mirror writes</span>            entryGen = <span class="hl-rose">0</span>                          ← entries the puller created when applying
+
+<span class="hl-amber">What the puller does when receiving a frame:</span>
+
+  apply(frame):
+    targetPartition = frame.partition == "pri" ? <span class="hl-cyan">"bak"</span> : <span class="hl-cyan">"pri"</span>     <span class="hl-muted">// PARTITION FLIP</span>
+    targetOwner     = (targetPartition == "bak") ? frame.source : self
+
+    kv.channelWriteUpdate({
+      entryGen: <span class="hl-rose">0</span>,                <span class="hl-muted">// always mirror — never my own incarnationGen</span>
+      channel:  `propagate:{self}-&gt;{frame.source}`,
+      bodyKey:  `${targetPartition}:${targetOwner}:call:${frame.callRef}`,
+      bodyValue: serializeBody(frame.body),
+      indexes:  callIndexKeysFromUnknown(frame.body).map(…)
+    })
+
+<span class="hl-amber">When A pulls B's outgoing-to-A with watermark (B.incarnationGen, lastCounter):</span>
+
+  Bucket gen=<span class="hl-rose">0</span>:                  skipped — all (0, *) ≤ A's watermark    ✓ <span class="hl-success">cycle broken</span>
+  Bucket gen=<span class="hl-cyan">B.incarnationGen</span>:    contains only B's originating writes  ← A applies these</div>
+          <p class="text-sm text-muted" style="margin-top: 10px;"><strong>Same mechanism powers cold recovery.</strong> Fresh A boots with watermark <code>(0, 0)</code> → bucket gen=0 is now &gt; watermark → puller pulls ALL mirrors → repopulates <code>pri:{A}:</code> from B's shadow copies.</p>
+        </div>
+      </section>
+
+      <section id="slide-34">
+        <h2>Failover scenarios &amp; the <code>callGen</code> gate</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+            <div>
+              <h3>Per-call content gate</h3>
+              <p class="text-sm" style="margin-bottom: 6px;">Wire <code>(gen, counter)</code> isn't enough — cross-direction writes on the same call need a content-level tiebreaker.</p>
+              <div class="diagram small">
+<span class="hl-cyan">apply(frame):</span>
+  local    = kv.bodyGet(targetBodyKey)
+  localGen = local ? parseCallGen(local) : <span class="hl-amber">-∞</span>
+  <span class="hl-rose">if frame.body.callGen ≤ localGen: skip</span>
+  else: write</div>
+              <ul class="text-sm" style="margin-top: 6px;">
+                <li>Bumped only by primary-originating writes (RMW)</li>
+                <li>Puller preserves <code>callGen</code> verbatim</li>
+                <li>Cold recovery (<code>-∞</code>) accepts any incoming</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Scenario table</h3>
+              <table style="font-size: 11pt;">
+                <thead><tr><th>Failure</th><th>Outcome</th></tr></thead>
+                <tbody>
+                  <tr><td>Backup gone mid-stream</td><td>Primary writes locally; resumes on return</td></tr>
+                  <tr><td>Primary sidecar wipes</td><td>epoch bump; pulls at (0,0); gen=0 mirrors repopulate</td></tr>
+                  <tr><td>Backup sidecar wipes</td><td>Pulls originating buckets at (0,0); rebuilds <code>bak:</code></td></tr>
+                  <tr><td>Primary briefly out, backup serves BYE</td><td>Backup writes bumped <code>callGen</code>; gate makes it win</td></tr>
+                  <tr><td>Both primaries down at once</td><td>L3 / AZ-level loss — accepted</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <p class="footnote">docs/replication/architecture.md:96–301</p>
+        </div>
+      </section>
+
+      <section id="divider-6" class="section-divider" data-state="is-section-divider">
+        <h1>Overload Protection</h1>
+        <p>Three-tier defence · Byte brake · Token bucket · Emergency bypass</p>
+      </section>
+
+      <section id="slide-36">
+        <h2>Three-tier defence</h2>
+        <div class="content">
+          <div class="diagram-wrap" style="flex: 1;"><img src="diagrams/overload-tiers.svg" alt="Three-tier overload protection"></div>
+          <p class="text-sm text-muted" style="margin-top: 8px;"><strong>Order matters.</strong> Tier 1 protects parser CPU. Tier 2 protects worker fairness across classes. Tier 3 protects against tail-latency cascades.</p>
+        </div>
+      </section>
+
+      <section id="slide-37">
+        <h2>Emergency call propagation</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 18px;">
+            <div>
+              <h3>Detection</h3>
+              <ul class="text-sm">
+                <li>Initial INVITE carries <code>Resource-Priority: esnet.0|wps.0|q735.0</code></li>
+                <li><code>InitialInviteHandler</code> sets <code>call.emergency = true</code></li>
+                <li><code>SipRouter</code> stamps <code>;emerg=1</code> on outbound Contact, <code>;em=1</code> on Via</li>
+              </ul>
+              <h3 style="margin-top: 12px;">Why stamp on every outbound?</h3>
+              <ul class="text-sm">
+                <li>In-dialog packets must be recognizable by Tier 1's byte-scan</li>
+                <li>Tier 1 sees <code>;em=1</code> in the buffer → bypass 503 template</li>
+                <li>No JsSIP parse needed to make the priority decision</li>
+              </ul>
+            </div>
+            <div>
+              <h3>Bypass map</h3>
+              <table style="font-size: 13pt;">
+                <thead><tr><th>Stage</th><th>Emergency</th></tr></thead>
+                <tbody>
+                  <tr><td>Tier 1 byte brake</td><td>passes through</td></tr>
+                  <tr><td>Tier 2 queue</td><td>own class, 500 deep, paged on drop</td></tr>
+                  <tr><td>Tier 3 token bucket</td><td>force-consume, bypass shedder</td></tr>
+                  <tr><td>CallLimiter</td><td>exempt by backend policy</td></tr>
+                </tbody>
+              </table>
+              <div class="card amber" style="margin-top: 12px;">
+                <p class="card-title">Defaults that matter</p>
+                <ul class="text-sm">
+                  <li>CPS bucket size: <strong>1000</strong></li>
+                  <li>CPS bucket rate: <strong>500/s</strong></li>
+                  <li>Loop-lag soft/hard: <strong>50ms / 200ms</strong></li>
+                  <li>Routing-API soft/hard p95: <strong>200ms / 1000ms</strong></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="divider-7" class="section-divider" data-state="is-section-divider">
+        <h1>Closing</h1>
+        <p>What we built · Where the leverage lives</p>
+      </section>
+
+      <section id="slide-39">
+        <h2>Recap — what makes this system work</h2>
+        <div class="content">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            <div>
+              <h3>Separation of concerns</h3>
+              <ul class="text-sm">
+                <li>Stateless edge for routing &amp; pinning</li>
+                <li>Stateful workers for SIP semantics</li>
+                <li>Declarative rules for call behavior</li>
+                <li>Two Redis topologies for two access patterns</li>
+              </ul>
+              <h3 style="margin-top: 14px;">Discipline of invariants</h3>
+              <ul class="text-sm">
+                <li>Single-owner partition reference</li>
+                <li>1↔1 leg peering via <code>activePeer</code></li>
+                <li>Reach equals parameters for primitive actions</li>
+                <li>Indexes derived, never sent on wire</li>
+              </ul>
+            </div>
+            <div>
+              <h3>What replication buys</h3>
+              <ul class="text-sm">
+                <li>Worker death does not drop in-flight calls</li>
+                <li>Sidecar wipe recovers from peers within 30s P99</li>
+                <li>Backups serve traffic, never split-brain primary</li>
+                <li>Wire protocol is index-schema-agnostic</li>
+              </ul>
+              <h3 style="margin-top: 14px;">What's accepted lost</h3>
+              <ul class="text-sm">
+                <li>Both primary &amp; backup simultaneously dead (AZ-level)</li>
+                <li>Primary restart longer than <code>callContextTtl</code> (~30 min)</li>
+                <li>In-flight tx timers on a dying proxy</li>
+              </ul>
+            </div>
+          </div>
+          <p class="text-center text-muted text-sm" style="margin-top: 24px;">docs/AdvancedCallModel.md · docs/replication/architecture.md · docs/sip-front-proxy/resilience-model.md · docs/lb-proxy-ha.md</p>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js-plugins@latest/chart/plugin.js"></script>
+  <script>
+    // Hide UI chrome in export/print mode
+    if (window.location.search.includes('export') || window.location.search.includes('print-pdf')) {
+      document.body.classList.add('export-mode');
+    }
+
+    // Fullscreen toggle
+    (function () {
+      const btn = document.getElementById('fullscreen-btn');
+      const icon = btn.querySelector('i');
+      btn.addEventListener('click', () => {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen();
+        }
+      });
+      document.addEventListener('fullscreenchange', () => {
+        icon.className = document.fullscreenElement
+          ? 'fa-solid fa-compress'
+          : 'fa-solid fa-expand';
+      });
+    })();
+
+    Reveal.initialize({
+      width: 1280,
+      height: 720,
+      margin: 0,
+      controls: true,
+      progress: true,
+      slideNumber: 'c/t',
+      hash: true,
+      transition: 'slide',
+      center: false,
+      plugins: [ RevealChart ],
+      chart: {
+        defaults: Object.assign({
+          color: 'rgba(0, 0, 0, 0.8)',
+          borderColor: 'rgba(0, 0, 0, 0.8)',
+          devicePixelRatio: 2
+        }, window.location.search.includes('export') ? { animation: false } : {})
+      }
+    });
+  </script>
+</body>
+</html>

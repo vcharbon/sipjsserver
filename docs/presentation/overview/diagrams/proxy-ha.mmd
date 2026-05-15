@@ -1,0 +1,23 @@
+flowchart TB
+    VIP[/"Shared VIP: 10.0.0.50"/]
+
+    subgraph A["proxy-A pod (ACTIVE · owns VIP)"]
+        KA["keepalived<br/>state: ACTIVE<br/>advert_int 0.5s"]
+        PA["sip-front-proxy<br/>:5060"]
+        KA --> PA
+    end
+
+    subgraph B["proxy-B pod (BACKUP)"]
+        KB["keepalived<br/>state: BACKUP<br/>advert_int 0.5s"]
+        PB["sip-front-proxy<br/>:5060"]
+        KB --> PB
+    end
+
+    VIP --> A
+    KA <-. "VRRP multicast" .-> KB
+
+    style VIP fill:#0B1120,stroke:#22D3EE,color:#22D3EE,stroke-width:2px
+    style KA fill:#1E293B,stroke:#34D399,color:#F1F5F9
+    style KB fill:#1E293B,stroke:#94A3B8,color:#F1F5F9
+    style PA fill:#1E293B,stroke:#22D3EE,color:#F1F5F9
+    style PB fill:#1E293B,stroke:#22D3EE,color:#F1F5F9

@@ -1,0 +1,32 @@
+flowchart LR
+    UDP[UDP packet]
+    TL[TransactionLayer]
+    RE[RuleExecutor]
+    AE[ActionExecutor]
+    IE[InvariantEnforcer]
+    SR[SipRouter]
+    UDP --> TL --> RE --> AE --> IE --> SR
+
+    TL_DESC["parse, dedupe,<br/>CSeq/branch tracking"]
+    RE_DESC["match by<br/>specificity score"]
+    AE_DESC["translate typed actions<br/>into SIP message ops"]
+    IE_DESC["check SIP rules<br/>(RFC 3261)"]
+    SR_DESC["outbound UDP send"]
+
+    TL -.- TL_DESC
+    RE -.- RE_DESC
+    AE -.- AE_DESC
+    IE -.- IE_DESC
+    SR -.- SR_DESC
+
+    style UDP fill:#0B1120,stroke:#94A3B8,color:#F1F5F9
+    style TL fill:#1E293B,stroke:#22D3EE,color:#F1F5F9,stroke-width:2px
+    style RE fill:#1E293B,stroke:#FBBF24,color:#F1F5F9,stroke-width:2px
+    style AE fill:#1E293B,stroke:#F472B6,color:#F1F5F9,stroke-width:2px
+    style IE fill:#1E293B,stroke:#34D399,color:#F1F5F9,stroke-width:2px
+    style SR fill:#1E293B,stroke:#22D3EE,color:#F1F5F9,stroke-width:2px
+    style TL_DESC fill:transparent,stroke:transparent,color:#94A3B8
+    style RE_DESC fill:transparent,stroke:transparent,color:#94A3B8
+    style AE_DESC fill:transparent,stroke:transparent,color:#94A3B8
+    style IE_DESC fill:transparent,stroke:transparent,color:#94A3B8
+    style SR_DESC fill:transparent,stroke:transparent,color:#94A3B8

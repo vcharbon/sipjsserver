@@ -1,0 +1,18 @@
+flowchart LR
+    subgraph A["A-leg dialog (Alice ↔ B2BUA)"]
+        direction TB
+        AHead["Call-ID: abc@alice<br/>From-tag: alice-tag-X<br/>To-tag: b2bua-genB-2<br/>CSeq: 12 INVITE"]
+    end
+    subgraph B["B-leg dialog (B2BUA ↔ Bob)"]
+        direction TB
+        BHead["Call-ID: 1-abc@b2bua-0<br/>From-tag: b2bua-genA-7<br/>To-tag: bob-tag-Z<br/>CSeq: 8 INVITE"]
+    end
+    A <-->|B2BUA| B
+
+    Map["tagMap[]: aTag=alice-tag-X · bLegId=b-1 · bTag=bob-tag-Z"]
+    A -.-> Map
+    B -.-> Map
+
+    style AHead fill:#1E293B,stroke:#22D3EE,color:#F1F5F9
+    style BHead fill:#1E293B,stroke:#FBBF24,color:#F1F5F9
+    style Map fill:#0B1120,stroke:#F472B6,color:#F1F5F9

@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 620" font-family="Inter, sans-serif" font-size="13">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94A3B8"/>
+    </marker>
+    <marker id="arrCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#22D3EE"/>
+    </marker>
+    <marker id="arrAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#FBBF24"/>
+    </marker>
+  </defs>
+
+  <!-- Legend for call assignments at top (above the cross-box arrow) -->
+  <g transform="translate(20, 14)">
+    <text fill="#94A3B8" font-size="11">Call assignments:</text>
+    <text x="135" fill="#22D3EE" font-size="11">Call ABC → w_pri=A, w_bak=B</text>
+    <text x="370" fill="#FBBF24" font-size="11">Call XYZ → w_pri=B, w_bak=A</text>
+    <text x="605" fill="#F472B6" font-size="11">Call PQR → w_pri=A, w_bak=C</text>
+  </g>
+
+  <!-- ============ Worker A box (left) ============ -->
+  <g transform="translate(20, 70)">
+    <rect width="360" height="500" rx="8" fill="#1E293B" stroke="#22D3EE" stroke-width="2"/>
+    <text x="180" y="26" text-anchor="middle" fill="#22D3EE" font-weight="700" font-size="15">worker A · sidecar redis</text>
+
+    <!-- Storage rows -->
+    <g transform="translate(20, 60)">
+      <text fill="#F1F5F9" font-family="JetBrains Mono, monospace" font-size="12">
+        <tspan x="0" dy="0" fill="#22D3EE">pri:A:call:ABC</tspan><tspan dx="6" fill="#94A3B8">— primary</tspan>
+      </text>
+      <text y="22" fill="#F1F5F9" font-family="JetBrains Mono, monospace" font-size="12">
+        <tspan x="0" fill="#F472B6">pri:A:call:PQR</tspan><tspan dx="6" fill="#94A3B8">— primary</tspan>
+      </text>
+      <text y="48" fill="#F1F5F9" font-family="JetBrains Mono, monospace" font-size="12">
+        <tspan x="0" fill="#FBBF24">bak:B:call:XYZ</tspan><tspan dx="6" fill="#94A3B8">— shadow of B</tspan>
+      </text>
+    </g>
+
+    <line x1="20" y1="160" x2="340" y2="160" stroke="#334155" stroke-dasharray="3 3"/>
+    <text x="20" y="180" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="11">outbound replication channels:</text>
+    <g transform="translate(20, 200)">
+      <text fill="#F1F5F9" font-family="JetBrains Mono, monospace" font-size="11">
+        <tspan x="0" fill="#22D3EE">propagate:A→B</tspan>
+      </text>
+      <text y="20" fill="#F1F5F9" font-family="JetBrains Mono, monospace" font-size="11">
+        <tspan x="0" fill="#22D3EE">propagate:A→C</tspan>
+      </text>
+    </g>
+
+    <line x1="20" y1="270" x2="340" y2="270" stroke="#334155" stroke-dasharray="3 3"/>
+    <g transform="translate(20, 290)">
+      <rect width="320" height="60" rx="4" fill="#0B1120" stroke="#34D399"/>
+      <text x="160" y="22" text-anchor="middle" fill="#34D399" font-weight="600" font-size="13">PullerFiber</text>
+      <text x="160" y="42" text-anchor="middle" fill="#94A3B8" font-size="11">pulls /replog from B, C</text>
+    </g>
+
+    <text x="20" y="380" fill="#94A3B8" font-size="11">epoch:A · replpos:{B,C}</text>
+    <text x="20" y="402" fill="#94A3B8" font-size="11">idx:* (SIP-derived secondary indexes)</text>
+    <text x="20" y="424" fill="#94A3B8" font-size="11">incarnationGen = K8s restartCount</text>
+  </g>
+
+  <!-- ============ Worker B box (middle) ============ -->
+  <g transform="translate(410, 70)">
+    <rect width="360" height="500" rx="8" fill="#1E293B" stroke="#FBBF24" stroke-width="2"/>
+    <text x="180" y="26" text-anchor="middle" fill="#FBBF24" font-weight="700" font-size="15">worker B · sidecar redis</text>
+
+    <g transform="translate(20, 60)">
+      <text fill="#F1F5F9" font-family="JetBrains Mono, monospace" font-size="12">
+        <tspan x="0" fill="#FBBF24">pri:B:call:XYZ</tspan><tspan dx="6" fill="#94A3B8">— primary</tspan>
+      </text>
+      <text y="22" fill="#F1F5F9" font-family="JetBrains Mono, monospace" font-size="12">
+        <tspan x="0" fill="#22D3EE">bak:A:call:ABC</tspan><tspan dx="6" fill="#94A3B8">— shadow of A</tspan>
+      </text>
+    </g>
+
+    <line x1="20" y1="160" x2="340" y2="160" stroke="#334155" stroke-dasharray="3 3"/>
+    <text x="20" y="180" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="11">outbound replication channels:</text>
+    <g transform="translate(20, 200)">
+      <text fill="#F1F5F9" font-family="JetBrains Mono, monospace" font-size="11">
+        <tspan x="0" fill="#FBBF24">propagate:B→A</tspan>
+      </text>
+    </g>
+
+    <line x1="20" y1="270" x2="340" y2="270" stroke="#334155" stroke-dasharray="3 3"/>
+    <g transform="translate(20, 290)">
+      <rect width="320" height="60" rx="4" fill="#0B1120" stroke="#34D399"/>
+      <text x="160" y="22" text-anchor="middle" fill="#34D399" font-weight="600" font-size="13">PullerFiber</text>
+      <text x="160" y="42" text-anchor="middle" fill="#94A3B8" font-size="11">pulls /replog from A</text>
+    </g>
+
+    <text x="20" y="380" fill="#94A3B8" font-size="11">epoch:B · replpos:{A}</text>
+    <text x="20" y="402" fill="#94A3B8" font-size="11">idx:*</text>
+  </g>
+
+  <!-- ============ Worker C box (right) ============ -->
+  <g transform="translate(800, 70)">
+    <rect width="360" height="500" rx="8" fill="#1E293B" stroke="#F472B6" stroke-width="2"/>
+    <text x="180" y="26" text-anchor="middle" fill="#F472B6" font-weight="700" font-size="15">worker C · sidecar redis</text>
+
+    <g transform="translate(20, 60)">
+      <text fill="#F1F5F9" font-family="JetBrains Mono, monospace" font-size="12">
+        <tspan x="0" fill="#F472B6">bak:A:call:PQR</tspan><tspan dx="6" fill="#94A3B8">— shadow of A</tspan>
+      </text>
+    </g>
+
+    <line x1="20" y1="120" x2="340" y2="120" stroke="#334155" stroke-dasharray="3 3"/>
+    <text x="20" y="140" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="11">no outbound channels needed</text>
+    <text x="20" y="160" fill="#94A3B8" font-family="JetBrains Mono, monospace" font-size="11">(C has no primaries on A/B yet)</text>
+
+    <line x1="20" y1="270" x2="340" y2="270" stroke="#334155" stroke-dasharray="3 3"/>
+    <g transform="translate(20, 290)">
+      <rect width="320" height="60" rx="4" fill="#0B1120" stroke="#34D399"/>
+      <text x="160" y="22" text-anchor="middle" fill="#34D399" font-weight="600" font-size="13">PullerFiber</text>
+      <text x="160" y="42" text-anchor="middle" fill="#94A3B8" font-size="11">pulls /replog from A</text>
+    </g>
+
+    <text x="20" y="380" fill="#94A3B8" font-size="11">epoch:C · replpos:{A}</text>
+  </g>
+
+  <!-- ============ Replication arrows between boxes ============ -->
+
+  <!-- A → B (replication of pri:A:call:ABC to bak:A:call:ABC on B) -->
+  <path d="M 380 220 C 395 220, 395 220, 410 220" stroke="#22D3EE" stroke-width="2" fill="none" marker-end="url(#arrCyan)"/>
+  <text x="395" y="215" text-anchor="middle" fill="#22D3EE" font-size="10">A→B</text>
+
+  <!-- B → A (replication of pri:B:call:XYZ to bak:B:call:XYZ on A) -->
+  <path d="M 410 250 C 395 250, 395 250, 380 250" stroke="#FBBF24" stroke-width="2" fill="none" marker-end="url(#arrAmber)"/>
+  <text x="395" y="270" text-anchor="middle" fill="#FBBF24" font-size="10">B→A</text>
+
+  <!-- A → C (replication of pri:A:call:PQR to bak:A:call:PQR on C) - routed above worker B -->
+  <path d="M 200 70 C 200 45, 980 45, 980 70" stroke="#22D3EE" stroke-width="2" fill="none" marker-end="url(#arrCyan)"/>
+  <text x="590" y="38" text-anchor="middle" fill="#22D3EE" font-size="11">A→C  (propagate:A→C · entryGen = A.incarnationGen)</text>
+</svg>
