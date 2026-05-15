@@ -165,3 +165,125 @@ export const buildAndLoad = Effect.gen(function* () {
   yield* ensureRedisImage
   yield* ensureKeepalivedImage
 })
+
+const kindNodes = Effect.gen(function* () {
+  const { stdout } = yield* exec("kind", ["get", "nodes", "--name", CLUSTER_NAME])
+  return stdout.split("\n").map((s) => s.trim()).filter((s) => s.length > 0)
+})
+
+/**
+ * Snapshot a node's containerd image store as a Set of `repo:tag` keys.
+ * Each row is recorded twice — once with its full `docker.io/library/...`
+ * prefix and once stripped — so callers can match against either form
+ * (`sipp:dev` vs `docker.io/library/sipp:dev`).
+ */
+const nodeImageTags = (node: string) =>
+  Effect.gen(function* () {
+    const { stdout } = yield* exec("docker", ["exec", node, "crictl", "images"], {
+      timeoutMs: 30_000,
+    })
+    const tags = new Set<string>()
+    const lines = stdout.split("\n")
+    for (const line of lines.slice(1)) {
+      const cols = line.trim().split(/\s+/)
+      if (cols.length < 2) continue
+      const repo = cols[0]
+      const tag = cols[1]
+      if (!repo || !tag || tag === "TAG") continue
+      tags.add(`${repo}:${tag}`)
+      const short = repo.replace(/^docker\.io\/library\//, "")
+      if (short !== repo) tags.add(`${short}:${tag}`)
+    }
+    return tags
+  })
+
+const hostHasImage = (ref: string) =>
+  exec("docker", ["image", "inspect", ref], { timeoutMs: 10_000 }).pipe(
+    Effect.map(() => true),
+    Effect.catchTag("ExecError", () => Effect.succeed(false)),
+  )
+
+/**
+ * `docker save` once then `ctr images import` onto each named node.
+ * Used for the multi-arch sidecars (redis, keepalived) where plain
+ * `kind load docker-image` rejects the OCI index. Same mechanism as
+ * `ensureRedisImage` / `ensureKeepalivedImage`, but scoped to the
+ * subset of nodes that are actually missing the image.
+ */
+const tarImportToNodes = (
+  imageRef: string,
+  hostTarPath: string,
+  nodeTarPath: string,
+  nodes: ReadonlyArray<string>,
+) =>
+  Effect.gen(function* () {
+    if (nodes.length === 0) return
+    if (!(yield* hostHasImage(imageRef))) {
+      yield* Effect.logInfo(`docker pull ${imageRef}`)
+      yield* exec("docker", ["pull", imageRef], { timeoutMs: 5 * 60 * 1000 })
+    }
+    yield* Effect.logInfo(`docker save ${imageRef} -> ${hostTarPath}`)
+    yield* exec("docker", ["save", imageRef, "-o", hostTarPath], {
+      timeoutMs: 5 * 60 * 1000,
+    })
+    for (const node of nodes) {
+      yield* Effect.logInfo(`loading ${imageRef} into ${node}`)
+      yield* exec("docker", ["cp", hostTarPath, `${node}:${nodeTarPath}`], {
+        timeoutMs: 60_000,
+      })
+      yield* exec(
+        "docker",
+        ["exec", node, "ctr", "-n", "k8s.io", "images", "import", nodeTarPath],
+        { timeoutMs: 5 * 60 * 1000 },
+      )
+    }
+  })
+
+/**
+ * Precondition for `install-stack`: verify every kind node has the
+ * four images the charts reference, and reload only what's missing.
+ * Common after a host reboot — host docker still has the built tags
+ * but the kind nodes' containerd store was wiped. Idempotent.
+ */
+export const ensureImagesLoaded = Effect.gen(function* () {
+  const nodes = yield* kindNodes
+  if (nodes.length === 0) return
+
+  const perNode = new Map<string, Set<string>>()
+  for (const node of nodes) {
+    perNode.set(node, yield* nodeImageTags(node))
+  }
+  const missingNodesFor = (ref: string) =>
+    nodes.filter((n) => !perNode.get(n)!.has(ref))
+
+  const missingSipjs = missingNodesFor(IMAGE_TAG)
+  if (missingSipjs.length > 0) {
+    yield* Effect.logInfo(
+      `${IMAGE_TAG} missing on ${missingSipjs.length}/${nodes.length} node(s); loading`,
+    )
+    if (!(yield* hostHasImage(IMAGE_TAG))) yield* dockerBuild
+    yield* kindLoad
+  }
+
+  const missingSipp = missingNodesFor(SIPP_IMAGE_TAG)
+  if (missingSipp.length > 0) {
+    yield* Effect.logInfo(
+      `${SIPP_IMAGE_TAG} missing on ${missingSipp.length}/${nodes.length} node(s); loading`,
+    )
+    if (!(yield* hostHasImage(SIPP_IMAGE_TAG))) yield* dockerBuildSipp
+    yield* kindLoadSipp
+  }
+
+  yield* tarImportToNodes(
+    REDIS_IMAGE,
+    "/tmp/redis-sidecar-image.tar",
+    "/redis-sidecar-image.tar",
+    missingNodesFor(REDIS_IMAGE),
+  )
+  yield* tarImportToNodes(
+    KEEPALIVED_IMAGE,
+    "/tmp/keepalived-sidecar-image.tar",
+    "/keepalived-sidecar-image.tar",
+    missingNodesFor(KEEPALIVED_IMAGE),
+  )
+})

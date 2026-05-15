@@ -1,0 +1,8 @@
+# Work artefacts produced under any sub-presentation directory.
+# The HTML, CSS, and diagram sources (.mmd / .svg) stay tracked.
+
+# Generated PDFs (decktape, print-to-PDF, etc.)
+*.pdf
+
+# Screenshot review folders (timestamped per capture run)
+screenshots/

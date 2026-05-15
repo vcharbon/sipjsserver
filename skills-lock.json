@@ -1,6 +1,18 @@
 {
   "version": 1,
   "skills": {
+    "caveman": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/productivity/caveman/SKILL.md",
+      "computedHash": "934433479903febc585bf6deb5f0cebc63137e3f86b7babe0aab1ecb94d6d7a4"
+    },
+    "diagnose": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/diagnose/SKILL.md",
+      "computedHash": "15939a26f86edec2d4862042b8564e5a062cb81d04e047a0cea6305c8830b5f5"
+    },
     "effect-ts-anti-patterns": {
       "source": "mrevanzak/effect-ts-skills",
       "sourceType": "github",
@@ -25,6 +37,35 @@
       "source": "mrevanzak/effect-ts-skills",
       "sourceType": "github",
       "computedHash": "82078eb45f19052ceadd0c2fd26c09022b720c83899c4bcea15a8ecc359e75e1"
+    },
+    "grill-with-docs": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/grill-with-docs/SKILL.md",
+      "computedHash": "1adf321072f53cce3dcaf5357d91b8230d4aa647bb8a51756745337a6ee567b8"
+    },
+    "handoff": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/productivity/handoff/SKILL.md",
+      "computedHash": "d543685cbfb0c64b7bc51a8dc3465975528da9b64f987f863765973b2f3867ab"
+    },
+    "improve-codebase-architecture": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
+      "computedHash": "c77b86b4332919499608f9af1880074e1fec65a59b95c70c27a9f39cd137865e"
+    },
+    "revealjs": {
+      "source": "smithery.ai",
+      "sourceType": "well-known",
+      "computedHash": "9cb12cf3e2adce08accb72fb7db7edfb75f9eebd840b47e9c9a47b29b5392892"
+    },
+    "zoom-out": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/zoom-out/SKILL.md",
+      "computedHash": "8357aeaece3b709c442eab67e64b86844e05e2f1ea95b109565eba50b6def36e"
     }
   }
 }

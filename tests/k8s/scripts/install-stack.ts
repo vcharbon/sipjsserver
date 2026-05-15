@@ -5,11 +5,16 @@ import {
   installSipp,
   installWorker,
 } from "../fixtures/helm.js"
+import { ensureImagesLoaded } from "../fixtures/images.js"
 
 const ns = process.argv[2] ?? "sip-test"
 
 const program = Effect.gen(function* () {
   yield* Effect.logInfo(`installing stack into namespace=${ns}`)
+  // Reload any chart-referenced images that are missing from the kind
+  // nodes' containerd store. Common after a host reboot — host docker
+  // still has the tags but the nodes' image stores were wiped.
+  yield* ensureImagesLoaded
   // Two Redis topologies coexist:
   //   - tests/k8s/charts/redis/  → cluster-shared, used ONLY by the
   //     CallLimiter (LimiterRedisClient → REDIS://redis:6379). Installed

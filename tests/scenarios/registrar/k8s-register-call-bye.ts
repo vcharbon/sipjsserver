@@ -70,6 +70,10 @@ export const k8sRegisterCallBye = (opts: K8sRegisterCallByeOpts) =>
               destination: opts.proxyCoreAdvertised,
               new_ruri: bobRuri,
             }),
+            // Force full OTel sampling for this scenario regardless of
+            // the worker's TRACE_SAMPLE_RATE env; honored at SipRouter
+            // call creation (see docs/tracing-design.md).
+            "X-Full-Trace-Sample-Rate": "1.0",
           },
         }),
       },
