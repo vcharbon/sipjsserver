@@ -25,6 +25,24 @@ import { AppConfig } from "../config/AppConfig.js"
 const RedisConstructor = IoRedis.default
 type RedisInstance = InstanceType<typeof RedisConstructor>
 
+/**
+ * Per-connection ioredis options the call sites care about. Kept as a
+ * structural subset so we don't depend on ioredis internal types — only
+ * the knobs we actively configure are exposed.
+ *
+ * `lazyConnect: true` is enforced unconditionally inside `makeRedisOps`;
+ * callers MUST NOT override it (the layer's acquire path drives the
+ * initial connect explicitly).
+ */
+export interface RedisConnectionOptions {
+  /** Per-command timeout in ms. Fails the command with `RedisError` on expiry. */
+  readonly commandTimeout?: number
+  /** When false, commands issued while disconnected reject immediately instead of buffering until reconnect. */
+  readonly enableOfflineQueue?: boolean
+  /** Max ioredis internal retries per command. Bound this so a single command can't exceed its commandTimeout via retry loop. */
+  readonly maxRetriesPerRequest?: number
+}
+
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -61,7 +79,8 @@ export interface RedisOps {
 export const makeRedisOps = (
   url: string,
   prefix: string,
-  label: string
+  label: string,
+  options: RedisConnectionOptions = {}
 ): Effect.Effect<RedisOps, never, Scope.Scope> =>
   Effect.gen(function* () {
     // Capture parent runtime services so the ioredis event listeners
@@ -71,7 +90,10 @@ export const makeRedisOps = (
     const parentServices = yield* Effect.services<never>()
     const client: RedisInstance = yield* Effect.acquireRelease(
       Effect.callback<RedisInstance>((resume) => {
-        const redis = new RedisConstructor(url, { lazyConnect: true })
+        const redis = new RedisConstructor(url, {
+          lazyConnect: true,
+          ...options,
+        })
         redis.connect()
           .then(() => resume(Effect.succeed(redis)))
           .catch((err: unknown) => resume(Effect.die(err)))

@@ -18,7 +18,7 @@
  * limiter miss: it always yields a concrete HandlerResult (either failover
  * b-leg, or 486 reject).
  */
-import { Effect } from "effect"
+import { Duration, Effect, Exit } from "effect"
 import type { Call } from "../../call/CallModel.js"
 import { addCdrEvent } from "../../call/CallModel.js"
 import type { CallLimiter } from "../../call/CallLimiter.js"
@@ -92,6 +92,38 @@ export function applyRoute(
     host: routing.destination.host,
     port: routing.destination.port ?? 5060,
   }
+
+  // Strong invariant: a successful limiter INCR is matched by exactly one
+  // DECR. On the happy path (call admitted) the DECR fires from the
+  // terminate flow via InvariantEnforcer reading `Call.limiterEntries`.
+  // On every error path BEFORE the call state is durably stamped with
+  // those entries, this local list lets us roll the INCRs back eagerly
+  // — either inside the rejection branch (limit-hit on a later iteration)
+  // or via the outer `tapErrorCause` (defect / Cause-failure anywhere
+  // after the INCR). Without this, an INCR'd entry that never makes it
+  // onto the Call would leak the cluster counter (cause (2b) of the
+  // 2026-05-15 cascade post-mortem, post-Stage-1 residual).
+  const successfulIncrements: Array<{ limiterId: string; originWindow: number }> = []
+  const eagerDecrement = (): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      for (const e of successfulIncrements) {
+        yield* limiter.decrement(e.limiterId, e.originWindow).pipe(
+          Effect.timeoutOrElse({
+            duration: Duration.millis(config.limiterDecrementTimeoutMs),
+            orElse: () =>
+              Effect.logWarning(
+                `applyRoute eager-DECR timed out for ${e.limiterId} ` +
+                  `(${config.limiterDecrementTimeoutMs}ms)`,
+              ),
+          }),
+          Effect.catchTag("RedisError", (re) =>
+            Effect.logWarning(
+              `applyRoute eager-DECR failed for ${e.limiterId}: ${re.reason}`,
+            ),
+          ),
+        )
+      }
+    })
 
   return Effect.gen(function* () {
     // ── Feature activations ────────────────────────────────────────────────
@@ -195,18 +227,39 @@ export function applyRoute(
     }
 
     // ── Limiter acquisition ────────────────────────────────────────────────
-    const limiterEntries: Array<{ limiterId: string; limit: number; originWindow: number }> = []
+    // Typed channels (see CallLimiter.LimiterDecision / LimiterBackendError):
+    //   - success channel: `Allowed` or `Rejected` (both normal outcomes)
+    //   - error channel:   `RedisError` (ioredis surfaced an error within
+    //                      its 100 ms commandTimeout) or `LimiterTimeout`
+    //                      (outer Effect-level 150 ms safety net fired).
+    // Both error arms map to a fail-open admission tagged
+    // `incrementSucceeded: false`. The cleanup paths (force-purge,
+    // rule-path decrement) MUST skip the matching DECR for those entries
+    // — otherwise the counter drifts negative (cause (2b) in the plan).
+    type LimiterAdmission =
+      | { readonly _tag: "Admitted"; readonly currentWindow: number; readonly incrementSucceeded: boolean }
+      | { readonly _tag: "RejectedByLimiter" }
+    const limiterEntries: Array<{ limiterId: string; limit: number; originWindow: number; incrementSucceeded: boolean }> = []
     if (routing.call_limiter) {
       for (const entry of routing.call_limiter) {
-        const result = yield* limiter.checkAndIncrement(entry.id, entry.limit).pipe(
-          Effect.catchTag("RedisError", (e) =>
-            Effect.logError(`Failed to acquire limiter ${entry.id}: ${e.reason}`).pipe(
-              Effect.as(undefined as { allowed: boolean; currentWindow: number } | undefined),
-            ),
+        const admission = yield* limiter.checkAndIncrement(entry.id, entry.limit).pipe(
+          Effect.map((d): LimiterAdmission =>
+            d._tag === "Allowed"
+              ? { _tag: "Admitted", currentWindow: d.currentWindow, incrementSucceeded: true }
+              : { _tag: "RejectedByLimiter" },
           ),
+          Effect.catchTags({
+            RedisError: (e) =>
+              Effect.logWarning(`limiter ${entry.id} unavailable: ${e.reason}`).pipe(
+                Effect.as<LimiterAdmission>({ _tag: "Admitted", currentWindow: 0, incrementSucceeded: false }),
+              ),
+            LimiterTimeout: (e) =>
+              Effect.logWarning(`limiter ${entry.id} timed out (${e.budgetMs}ms)`).pipe(
+                Effect.as<LimiterAdmission>({ _tag: "Admitted", currentWindow: 0, incrementSucceeded: false }),
+              ),
+          }),
         )
-        if (result === undefined) continue
-        if (!result.allowed) {
+        if (admission._tag === "RejectedByLimiter") {
           yield* Effect.logDebug(`Call ${args.call.callRef} rejected by limiter ${entry.id}`)
 
           // Try /call/failure for potential failover.
@@ -230,6 +283,9 @@ export function applyRoute(
                 yield* Effect.logWarning(
                   `[admission] reject host=${failureResp.destination.host} reason=non-ip-non-suffixed callRef=${args.call.callRef} path=failover`,
                 )
+                // Eager DECR — failover-admission-reject won't pin the
+                // successful prior INCRs to a persisted call.
+                yield* eagerDecrement()
                 return buildAdmissionRejectResult(
                   args.call,
                   req,
@@ -241,9 +297,13 @@ export function applyRoute(
               // Failover: skip this limiter and try a different route.
               // aLegInvite is already populated at call creation (SipRouter) —
               // we just thread the callback context through.
+              // Carry prior successful INCRs onto the failover call so
+              // they DECR on terminate (the iff invariant: any INCR
+              // recorded is matched by exactly one DECR).
               const failoverCall: Call = {
                 ...args.call,
                 callbackContext: failureResp.callback_context ?? routing.callback_context,
+                limiterEntries,
               }
               const bLegResult = createBLegFromRoute({
                 call: failoverCall,
@@ -275,11 +335,15 @@ export function applyRoute(
           }
 
           // No failover available — 486 Busy Here.
+          // Attach prior successful INCRs as limiterEntries on the
+          // rejected call so `terminateCallEffects` emits a
+          // decrement-limiter for each. The current entry (the one that
+          // returned `Rejected`) is NOT included — its INCR never landed.
           const rejectResp = generateResponse(req, 486, "Busy Here", {
             toTag: newTag(),
             contact: aLegContact,
           })
-          const rejected = addCdrEvent(args.call, {
+          const rejected = addCdrEvent({ ...args.call, limiterEntries }, {
             type: "reject",
             timestamp: nowMs,
             legId: "a",
@@ -299,10 +363,22 @@ export function applyRoute(
             effects: { ...rejectEffects, outbound: rejectOutbound },
           } satisfies HandlerResult
         }
+        // Track the successful INCR for the eager-DECR safety net BEFORE
+        // pushing onto `limiterEntries` — the call state may never be
+        // durably stamped if the post-loop body fails/defects (Path 3 in
+        // the cascade-fix plan). `successfulIncrements` is the canonical
+        // record for that rollback.
+        if (admission.incrementSucceeded) {
+          successfulIncrements.push({
+            limiterId: entry.id,
+            originWindow: admission.currentWindow,
+          })
+        }
         limiterEntries.push({
           limiterId: entry.id,
           limit: entry.limit,
-          originWindow: result.currentWindow,
+          originWindow: admission.currentWindow,
+          incrementSucceeded: admission.incrementSucceeded,
         })
       }
       updated = { ...updated, limiterEntries }
@@ -341,5 +417,18 @@ export function applyRoute(
         },
       }],
     } satisfies HandlerResult
-  })
+  }).pipe(
+    // Path 3 — any non-success exit (Cause-level failure, defect, fiber
+    // interrupt) after a successful INCR would leave Redis incremented
+    // but the call state never durably stamped with `limiterEntries`.
+    // Eager-DECR every successful INCR before the failure propagates.
+    // `Effect.onExit` does not swallow the cause — it just runs the
+    // finalizer and then re-emits the same exit. `successfulIncrements`
+    // is the canonical record (only entries with
+    // `incrementSucceeded === true`); fail-open admissions are never
+    // pushed there and so are never DECR'd.
+    Effect.onExit((exit) =>
+      Exit.isFailure(exit) ? eagerDecrement() : Effect.void,
+    ),
+  )
 }

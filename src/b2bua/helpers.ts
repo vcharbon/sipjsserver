@@ -46,11 +46,18 @@ import { buildCallVia, buildCallContact } from "./stack-identity.js"
  * and defer final cleanup to finalCleanupEffects() when all legs resolve.
  */
 export function terminateCallEffects(call: Call): HandlerEffects {
-  const soft: SoftBoundedEffect[] = call.limiterEntries.map((e) => ({
-    type: "decrement-limiter" as const,
-    limiterId: e.limiterId,
-    window: e.originWindow,
-  }))
+  // Skip entries whose INCR never landed (fail-open admission). Decrementing
+  // those would drift the cluster-wide counter negative. See
+  // `CallLimiterState.incrementSucceeded` and ADR-0003 / cascade-fix plan.
+  // Older replicated entries omit the flag (`undefined`) and reflect
+  // successful INCRs — only explicit `false` means skip.
+  const soft: SoftBoundedEffect[] = call.limiterEntries
+    .filter((e) => e.incrementSucceeded !== false)
+    .map((e) => ({
+      type: "decrement-limiter" as const,
+      limiterId: e.limiterId,
+      window: e.originWindow,
+    }))
   const critical: CriticalStateEffect[] = [
     { type: "cancel-all-timers" },
     { type: "remove-call" },
@@ -102,11 +109,14 @@ export function beginTerminationEffects(callRef: string, nowMs: number): Handler
  * "terminating" state still holds its limiter slot until fully cleaned up.
  */
 export function finalCleanupEffects(call: Call): HandlerEffects {
-  const soft: SoftBoundedEffect[] = call.limiterEntries.map((e) => ({
-    type: "decrement-limiter" as const,
-    limiterId: e.limiterId,
-    window: e.originWindow,
-  }))
+  // See `terminateCallEffects` — skip fail-open admissions.
+  const soft: SoftBoundedEffect[] = call.limiterEntries
+    .filter((e) => e.incrementSucceeded !== false)
+    .map((e) => ({
+      type: "decrement-limiter" as const,
+      limiterId: e.limiterId,
+      window: e.originWindow,
+    }))
   const critical: CriticalStateEffect[] = [
     { type: "cancel-all-timers" },
     { type: "remove-call" },

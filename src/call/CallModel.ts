@@ -370,7 +370,22 @@ export const CallLimiterState = Schema.Struct({
   limiterId: Schema.String,
   limit: Schema.Int,
   /** Rounded timestamp when this call's count was INCRed */
-  originWindow: Schema.Number
+  originWindow: Schema.Number,
+  /**
+   * Whether the corresponding INCR on the limiter Redis actually succeeded.
+   *
+   * When the limiter is unreachable (`RedisError` / `LimiterTimeout`), the
+   * call is admitted fail-open but no counter was bumped — so the matching
+   * `DECR` on termination MUST be skipped. Without this flag, every
+   * fail-open admission leaks one decrement and the cluster-wide counter
+   * drifts negative (cause (2b) in the 2026-05-15 cascade fix plan).
+   *
+   * Optional so older replicated entries still load: pre-fix entries
+   * didn't carry the flag, and they all reflect successful INCRs (the
+   * pre-fix code couldn't admit without one). Decrement-skip logic
+   * therefore checks for the explicit `false` value, not the truthiness.
+   */
+  incrementSucceeded: Schema.optional(Schema.Boolean)
 })
 
 export type CallLimiterState = typeof CallLimiterState.Type

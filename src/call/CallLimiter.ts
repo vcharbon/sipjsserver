@@ -7,10 +7,45 @@
  * TTL on each key ensures auto-cleanup if refresh stops (crash recovery).
  */
 
-import { Clock, Effect, Layer, MutableHashMap, Option, ServiceMap } from "effect"
+import { Clock, Duration, Effect, Layer, MutableHashMap, Option, Schema, ServiceMap } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { LimiterRedisClient } from "../redis/LimiterRedisClient.js"
 import type { RedisError } from "../redis/RedisClient.js"
+
+// ---------------------------------------------------------------------------
+// Service-level types: typed decision + typed backend error
+// ---------------------------------------------------------------------------
+
+/**
+ * Outer Effect-level timeout for `checkAndIncrement`. Defense-in-depth
+ * behind ioredis `commandTimeout: 100` (configured on the limiter
+ * connection). The 50 ms gap guarantees the ioredis-level timeout wins
+ * under normal pathology; this outer net only fires if ioredis itself
+ * misbehaves (command lost in some unrecoverable state). See plan
+ * `docs/plan/to-review-and-properly-swift-moler.md` Q4.
+ */
+const LIMITER_BUDGET_MS = 150 as const
+
+/**
+ * Typed admission decision returned by `checkAndIncrement` on a healthy
+ * limiter. `Rejected` is a success-channel outcome (the caller sends
+ * 486/failover) — only the absence of a decision lives in the error channel.
+ */
+export type LimiterDecision =
+  | { readonly _tag: "Allowed"; readonly currentWindow: number }
+  | { readonly _tag: "Rejected" }
+
+/**
+ * Typed backend failure for `checkAndIncrement`. Caller is expected to
+ * `catchTag` both arms and synthesize an "admit-no-tag" admission that
+ * skips the matching `DECR` on cleanup.
+ */
+export class LimiterTimeout extends Schema.TaggedErrorClass<LimiterTimeout>()(
+  "LimiterTimeout",
+  { budgetMs: Schema.Int },
+) {}
+
+export type LimiterBackendError = RedisError | LimiterTimeout
 
 // ---------------------------------------------------------------------------
 // Lua scripts
@@ -71,8 +106,18 @@ return redis.call('DECR', KEYS[1])
 export class CallLimiter extends ServiceMap.Service<
   CallLimiter,
   {
-    /** Check and increment. Returns true if allowed, false if rejected. */
-    readonly checkAndIncrement: (limiterId: string, limit: number) => Effect.Effect<{ allowed: boolean; currentWindow: number }, RedisError>
+    /**
+     * Atomic check-and-increment, bounded to {@link LIMITER_BUDGET_MS}.
+     *
+     * - Success channel: `LimiterDecision` — `Allowed` or `Rejected`. Both
+     *   are normal outcomes (`Rejected` means cap hit; caller sends 486 /
+     *   tries failover).
+     * - Error channel: `RedisError` (ioredis surfaced an error within the
+     *   commandTimeout) or `LimiterTimeout` (outer Effect-level safety net
+     *   fired). The caller is expected to `catchTags` both arms and
+     *   synthesize a fail-open admission with `incrementSucceeded: false`.
+     */
+    readonly checkAndIncrement: (limiterId: string, limit: number) => Effect.Effect<LimiterDecision, LimiterBackendError>
     /** Decrement the counter for a call that used the given origin window. */
     readonly decrement: (limiterId: string, originWindow: number) => Effect.Effect<void, RedisError>
     /** Refresh: migrate count from origin window to current window. */
@@ -106,7 +151,7 @@ export class CallLimiter extends ServiceMap.Service<
         return keys
       }
 
-      const checkAndIncrement = Effect.fnUntraced(function* (
+      const checkAndIncrementInner = Effect.fnUntraced(function* (
         limiterId: string,
         limit: number
       ) {
@@ -115,8 +160,22 @@ export class CallLimiter extends ServiceMap.Service<
         const keys = windowKeysFor(limiterId, currentWin)
         const result = yield* redis.eval(CHECK_AND_INCREMENT_LUA, keys, [limit, ttl])
         const count = Number(result)
-        return { allowed: count >= 0, currentWindow: currentWin }
+        return count >= 0
+          ? ({ _tag: "Allowed", currentWindow: currentWin } as const)
+          : ({ _tag: "Rejected" } as const)
       })
+
+      // Outer Effect-level timeout — defense in depth behind the limiter
+      // Redis client's `commandTimeout: 100`. Only fires if ioredis fails
+      // to surface its own timeout (unrecoverable command state). The
+      // 50 ms gap guarantees the inner timeout wins under normal failure.
+      const checkAndIncrement = (limiterId: string, limit: number): Effect.Effect<LimiterDecision, LimiterBackendError> =>
+        checkAndIncrementInner(limiterId, limit).pipe(
+          Effect.timeoutOrElse({
+            duration: Duration.millis(LIMITER_BUDGET_MS),
+            orElse: () => Effect.fail(new LimiterTimeout({ budgetMs: LIMITER_BUDGET_MS })),
+          }),
+        )
 
       const decrement = Effect.fnUntraced(function* (
         limiterId: string,
@@ -237,7 +296,7 @@ const buildMemoryLimiterImpl = (
     const ms = sec * 1000
     const currentWin = computeWindowFromSec(sec)
 
-    return yield* Effect.sync(() => {
+    return yield* Effect.sync((): LimiterDecision => {
       sweep(ms)
 
       let total = 0
@@ -248,14 +307,14 @@ const buildMemoryLimiterImpl = (
       }
 
       if (total >= limit) {
-        return { allowed: false, currentWindow: currentWin }
+        return { _tag: "Rejected" }
       }
 
       const k = keyFor(limiterId, currentWin)
       const existing = MutableHashMap.get(store, k)
       const newCount = Option.isSome(existing) ? existing.value.count + 1 : 1
       MutableHashMap.set(store, k, { count: newCount, expiresAtMs: ms + ttlSec * 1000 })
-      return { allowed: true, currentWindow: currentWin }
+      return { _tag: "Allowed", currentWindow: currentWin }
     })
   })
 

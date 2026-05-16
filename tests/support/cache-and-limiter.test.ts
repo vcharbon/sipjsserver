@@ -97,9 +97,9 @@ describe("CallLimiter.memoryLayer", () => {
       const r1 = yield* lim.checkAndIncrement("foo", 2)
       const r2 = yield* lim.checkAndIncrement("foo", 2)
       const r3 = yield* lim.checkAndIncrement("foo", 2)
-      expect(r1.allowed).toBe(true)
-      expect(r2.allowed).toBe(true)
-      expect(r3.allowed).toBe(false)
+      expect(r1._tag).toBe("Allowed")
+      expect(r2._tag).toBe("Allowed")
+      expect(r3._tag).toBe("Rejected")
 
       // Advance past all active windows worth of time
       const advanceSec = config.limiterWindowSeconds * config.limiterActiveWindows + 1
@@ -108,7 +108,7 @@ describe("CallLimiter.memoryLayer", () => {
       // Old window counts should no longer contribute (TTL is much longer than
       // window*active, but the *summed* windows have rolled out of the active set)
       const r4 = yield* lim.checkAndIncrement("foo", 2)
-      expect(r4.allowed).toBe(true)
+      expect(r4._tag).toBe("Allowed")
     }).pipe(Effect.provide(limiterLayer))
   )
 
@@ -118,7 +118,9 @@ describe("CallLimiter.memoryLayer", () => {
       const config = yield* AppConfig
 
       const first = yield* lim.checkAndIncrement("bar", 5)
-      expect(first.allowed).toBe(true)
+      expect(first._tag).toBe("Allowed")
+      // narrow for currentWindow access
+      if (first._tag !== "Allowed") throw new Error("expected Allowed")
 
       // Roll over one window
       yield* TestClock.adjust(`${config.limiterWindowSeconds + 1} seconds`)
@@ -128,7 +130,7 @@ describe("CallLimiter.memoryLayer", () => {
 
       // After refresh, the count lives in the new window and still counts toward limit
       const r = yield* lim.checkAndIncrement("bar", 1)
-      expect(r.allowed).toBe(false) // already 1 in current → at limit
+      expect(r._tag).toBe("Rejected") // already 1 in current → at limit
     }).pipe(Effect.provide(limiterLayer))
   )
 })
@@ -179,11 +181,12 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
 
       // 1. Admit a call against a fresh limiter id — count = 1, limit = 1.
       const admitted = yield* lim.checkAndIncrement("orphan-sweep-leak", 1)
-      expect(admitted.allowed).toBe(true)
+      expect(admitted._tag).toBe("Allowed")
+      if (admitted._tag !== "Allowed") throw new Error("expected Allowed")
 
       // 2. Confirm the limiter is saturated (no further admissions).
       const denied = yield* lim.checkAndIncrement("orphan-sweep-leak", 1)
-      expect(denied.allowed).toBe(false)
+      expect(denied._tag).toBe("Rejected")
 
       // 3. Build a `terminating` call that holds the limiter slot —
       //    mirrors the on-the-wire state between BYE-arrival and the
@@ -197,6 +200,7 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
           limiterId: "orphan-sweep-leak",
           limit: 1,
           originWindow: admitted.currentWindow,
+          incrementSucceeded: true,
         }],
       }
       yield* state.create(stuck)
@@ -207,7 +211,7 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
 
       // 5. Limiter slot must be released — a fresh admission proves it.
       const after = yield* lim.checkAndIncrement("orphan-sweep-leak", 1)
-      expect(after.allowed).toBe(true)
+      expect(after._tag).toBe("Allowed")
     }).pipe(Effect.provide(callStateLayer))
   )
 })

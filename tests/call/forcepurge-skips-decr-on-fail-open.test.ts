@@ -1,17 +1,20 @@
 /**
- * Phase 7 of docs/plan/2026-05-15-StructuralEffectGuarantees-moth.md.
+ * Stage 2 of docs/plan/to-review-and-properly-swift-moler.md.
  *
- * `forcePurgeOne` calls `limiter.decrement` for every limiter slot the
- * purged call held. A stalled Redis here used to wedge force-purge
- * indefinitely. Trap 4 + Phase 7: wrap each DECR in
- * `Effect.timeoutOrElse({ duration: limiterDecrementTimeoutMs })` so a
- * slow leak (acceptable per limiter window rotation semantics) cannot
- * become a stalled worker fiber.
+ * When a limiter entry is admitted fail-open (Redis unreachable at INCR
+ * time, recorded as `incrementSucceeded: false`), the matching DECR on
+ * termination MUST be skipped — otherwise the cluster-wide counter
+ * drifts negative (cause (2b) in the 2026-05-15 cascade post-mortem).
+ *
+ * This test sets up a `terminating` call with two limiter entries:
+ *   - one with `incrementSucceeded: true`   → must DECR
+ *   - one with `incrementSucceeded: false`  → must NOT DECR
+ * Triggers `forcePurge` and asserts the limiter saw exactly one
+ * decrement.
  */
 
 import { describe, expect, it } from "@effect/vitest"
-import { TestClock } from "effect/testing"
-import { Effect, Fiber, Layer, MutableHashMap, Schema, ServiceMap } from "effect"
+import { Effect, Layer, Stream } from "effect"
 import { AppConfig } from "../../src/config/AppConfig.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
 import { CallState } from "../../src/call/CallState.js"
@@ -25,11 +28,6 @@ import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
 import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
-import { Stream } from "effect"
-
-void Schema
-void ServiceMap
-void MutableHashMap
 
 const makeLeg = (callId: string, fromTag: string): Leg => ({
   legId: "a",
@@ -42,12 +40,17 @@ const makeLeg = (callId: string, fromTag: string): Leg => ({
   byeDisposition: "bye_sent",
 })
 
-const makeTerminatingCall = (callId: string, fromTag: string): Call => ({
+const makeTerminatingCallWithMixedEntries = (callId: string, fromTag: string): Call => ({
   callRef: `${callId}|${fromTag}`,
   aLeg: makeLeg(callId, fromTag),
   bLegs: [],
   activePeer: null,
-  limiterEntries: [{ limiterId: "lim-1", limit: 1, originWindow: 0, incrementSucceeded: true }],
+  limiterEntries: [
+    // healthy INCR — must DECR on terminate
+    { limiterId: "lim-ok", limit: 1, originWindow: 0, incrementSucceeded: true },
+    // fail-open admission — INCR never landed, must NOT DECR
+    { limiterId: "lim-fail-open", limit: 1, originWindow: 0, incrementSucceeded: false },
+  ],
   timers: [],
   cdrEvents: [],
   state: "terminating",
@@ -60,28 +63,26 @@ const makeTerminatingCall = (callId: string, fromTag: string): Call => ({
   tagMap: [],
 })
 
-/** A CallLimiter whose `decrement` blocks forever — to exercise the timeout. */
-function makeBlockingLimiter(): {
+/** CallLimiter stub that records which limiterIds saw a DECR. */
+function makeCountingLimiter(): {
   layer: Layer.Layer<CallLimiter>
-  decrementCount: () => number
+  decrementedIds: () => ReadonlyArray<string>
 } {
-  let decrementCount = 0
+  const decremented: string[] = []
   const api: CallLimiter["Service"] = {
     checkAndIncrement: () => Effect.succeed({ _tag: "Allowed", currentWindow: 0 } as const),
-    decrement: () =>
-      Effect.callback<void>((_resume) => {
-        decrementCount++
-        // Never resume — simulates a hung Redis.
+    decrement: (limiterId: string) =>
+      Effect.sync(() => {
+        decremented.push(limiterId)
       }),
     refresh: () => Effect.succeed(0),
   } as unknown as CallLimiter["Service"]
   return {
     layer: Layer.succeed(CallLimiter, api),
-    decrementCount: () => decrementCount,
+    decrementedIds: () => decremented.slice(),
   }
 }
 
-/** No-op storage stub. */
 const noopStorage: Layer.Layer<PartitionedRelayStorage> = Layer.succeed(
   PartitionedRelayStorage,
   {
@@ -99,14 +100,11 @@ const noopCdr: Layer.Layer<CdrWriter> = Layer.succeed(CdrWriter, {
   readAll: Effect.succeed([]),
 } as unknown as CdrWriter["Service"])
 
-describe("forcePurgeOne — limiter decrement is bounded", () => {
-  it.effect("hung limiter.decrement does not pin force-purge", () => {
-    const config = testAppConfigDefaults({
-      limiterDecrementTimeoutMs: 100,
-    })
+describe("forcePurge — skips DECR on fail-open entries", () => {
+  it.effect("decrement called only for incrementSucceeded === true entries", () => {
+    const config = testAppConfigDefaults({ limiterDecrementTimeoutMs: 100 })
     const AppCfg = Layer.succeed(AppConfig, config)
-
-    const blocking = makeBlockingLimiter()
+    const counting = makeCountingLimiter()
 
     const TimerL = TimerService.layer.pipe(
       Layer.provide(MetricsRegistry.layer),
@@ -123,30 +121,20 @@ describe("forcePurgeOne — limiter decrement is bounded", () => {
       Layer.provide(noopCdr),
       Layer.provide(MetricsRegistry.layer),
       Layer.provide(TimerL),
-      Layer.provide(blocking.layer),
+      Layer.provide(counting.layer),
       Layer.provide(AppCfg),
     )
 
     return Effect.gen(function* () {
       const state = yield* CallState
-      const call = makeTerminatingCall("call-bound", "tagBound")
+      const call = makeTerminatingCallWithMixedEntries("call-mix", "tagMix")
       yield* state.create(call)
+      yield* state.forcePurge(call.callRef, "test-fail-open-skip")
 
-      // Force-purge with a hung limiter — the timeout MUST cut the
-      // decrement short and let the purge complete.
-      const purgeFiber = yield* Effect.forkChild(
-        state.forcePurge(call.callRef, "test"),
-      )
-
-      // Advance past the limiter timeout window.
-      yield* TestClock.adjust("200 millis")
-
-      // The purge fiber should now have completed.
-      const exit = yield* Fiber.await(purgeFiber)
-      expect(exit._tag).toBe("Success")
-
-      // limiter.decrement was attempted exactly once.
-      expect(blocking.decrementCount()).toBe(1)
+      const observed = counting.decrementedIds()
+      expect(observed).toEqual(["lim-ok"])
+      // explicit negative: the fail-open entry must NOT have been DECRed
+      expect(observed.includes("lim-fail-open")).toBe(false)
     }).pipe(Effect.provide(CallStateL))
   })
 })

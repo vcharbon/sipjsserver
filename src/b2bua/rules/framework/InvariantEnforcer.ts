@@ -45,9 +45,16 @@ export function enforceInvariants(before: Call, result: HandlerResult): HandlerR
     critical.unshift({ type: "cancel-all-timers" })
   }
 
-  // 2. LIMITER GUARANTEE: ensure all limiter entries are decremented
+  // 2. LIMITER GUARANTEE: ensure all limiter entries are decremented —
+  // except entries whose INCR never landed (fail-open admission). For
+  // those, the limiter's cluster-wide counter was never bumped, so the
+  // matching DECR would drift it negative. See CallLimiterState's
+  // `incrementSucceeded` doc-comment and plan Q4. Older replicated
+  // entries omit the flag (`undefined`) and reflect successful INCRs —
+  // only an explicit `false` means "skip the DECR".
   const existingDecrements = new Set(soft.map((e) => e.limiterId))
   for (const entry of after.limiterEntries) {
+    if (entry.incrementSucceeded === false) continue
     if (!existingDecrements.has(entry.limiterId)) {
       soft.push({ type: "decrement-limiter", limiterId: entry.limiterId, window: entry.originWindow })
     }

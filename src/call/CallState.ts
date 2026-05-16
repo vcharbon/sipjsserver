@@ -871,6 +871,11 @@ export class CallState extends ServiceMap.Service<
         // (would double-decrement on takeover races).
         if (wasTerminating && role === "pri") {
           for (const entry of promoted.limiterEntries) {
+            // Skip DECR if the matching INCR never landed (fail-open
+            // admission, see CallLimiterState.incrementSucceeded).
+            // Older replicated entries omit the flag (`undefined`) and
+            // reflect successful INCRs — only explicit `false` means skip.
+            if (entry.incrementSucceeded === false) continue
             // Phase 7 / Trap 4: explicit short timeout. Limiter window
             // rotation is self-repairing — a missed DECR leaks at most
             // one window. Wrapping in `ensuring` would convert a slow
