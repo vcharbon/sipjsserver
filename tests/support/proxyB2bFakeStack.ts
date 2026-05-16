@@ -40,6 +40,7 @@ import {
   type SocketAddr,
   workerRegistryControlSimulatedAdapterLayer,
   WorkerId,
+  WorkerLoadObserver,
 } from "../../src/sip-front-proxy/index.js"
 import { PeerFabric } from "../../src/cache/PeerFabric.js"
 import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
@@ -432,7 +433,10 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
     bindPort: HA_PROBE_BIND.port,
     intervalMs: 2_000,
     threshold: 3,
-  }).pipe(Layer.provideMerge(ControlAdapter))
+  }).pipe(
+    Layer.provide(WorkerLoadObserver.layer()),
+    Layer.provideMerge(ControlAdapter),
+  )
 
   // Auto-start the probe at layer-materialization time. Its tick
   // loop is forked into the layer's scope (see HealthProbe.ts), so

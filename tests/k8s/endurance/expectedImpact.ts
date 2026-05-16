@@ -496,43 +496,60 @@ export const EXPECTED_IMPACT: Record<ChaosEventType, ExpectedImpact> = {
     ],
   },
   /**
-   * 60 s × 200 CAPS burst of non-emergency INVITEs. Tests that the
-   * overload shedders trip (tier-1 byte-brake + tier-2 class-queue)
+   * 60 s × 200 CAPS burst of non-emergency INVITEs. Tests the
+   * five-gate overload model (see [docs/adr/0006-overload-five-gate-and-aimd.md])
    * AND that baseline emergency streams are NOT collaterally shed.
    *
-   * Observed (2026-05-15, first fire):
-   *   - Burst created 1323 INVITEs in 60 s (sipp's actual send rate
-   *     21 cps — capped well below the 200 CAPS target, suggesting
-   *     send-side back-pressure on the UAC). 414 succeeded, 309
-   *     failed, 600 still in flight at evaluation.
-   *   - Shedder drops are SILENT (130 FailedMaxUDPRetrans, NO 503
-   *     responses in the burst's msg.log). The pre-authored rule
-   *     "stream503Rate(burst-) > 0.50" is therefore wrong — chaos-
-   *     effectiveness must use `failureRate` not `stream503Rate`.
+   * History:
+   *   - 2026-05-15: shedder drops were SILENT (FailedMaxUDPRetrans, no
+   *     503). 10% emergency-stream leak. Pre-rework rule was
+   *     `failureRate(burst) > 0.20 (warn)` and `failureRate(short)
+   *     < 0.15 (fail)` to match observed behaviour without lying.
+   *   - 2026-05-16: post-rework (slices 1-9). Rules tightened to match
+   *     the Plan §Slice 7 prediction for a fully-working shield.
+   *     Burst MUST be majority-rejected (proxy-self gate + LB AIMD
+   *     bucket fire on every burst INVITE the LB can't admit).
+   *     Emergency MUST stay below 2% — the design goal.
    */
   "non-emergency-burst": {
     description:
-      "Non-emergency INVITE burst (200 CAPS × 60 s). Shedders trip silently (no 503); emergency baseline streams should be unaffected.",
+      "Non-emergency INVITE burst. Gates 2/4 shed the burst; emergency + limiter baselines + in-dialog traffic stay unaffected. Non-regression shape: 0 emergency-new failures AND 0 in-dialog errors.",
     rules: [
       {
         description:
-          "Chaos-effectiveness — burst stream sees substantial failure rate (shedders drop excess load)",
+          "Chaos-effectiveness — burst MUST be majority-rejected (proxy-self ELU/CPS gate + per-(LB,worker) AIMD bucket).",
         window: { anchor: "tFire", startOffsetMs: 0, durationMs: 60_000 },
         metric: { kind: "failureRate", stream: STREAM.burst },
-        bound: { kind: "greaterThan", value: 0.20 },
-        severity: "warn",
-      },
-      {
-        description:
-          "Cross-stream isolation — emergency short-hold failure rate stays bounded during the burst. Observed 10% in Slice 7 (emergency-priority shield is leaking; investigate before promoting). Plan §Slice 7 predicted < 0.02 for fully-working shield.",
-        window: { anchor: "tFire", startOffsetMs: 0, durationMs: 60_000 },
-        metric: { kind: "failureRate", stream: STREAM.short },
-        bound: { kind: "lessThan", value: 0.15 },
+        bound: { kind: "greaterThan", value: 0.50 },
         severity: "fail",
       },
       {
         description:
-          "Cross-stream isolation — limiter probe non-limiter-reject failures stay bounded during the burst",
+          "Cross-stream isolation — emergency short-hold NEW-call failure rate is effectively zero during the burst.",
+        window: { anchor: "tFire", startOffsetMs: 0, durationMs: 60_000 },
+        metric: { kind: "failureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.005 },
+        severity: "fail",
+      },
+      {
+        description:
+          "Mid-dialog protection — already-established emergency short-hold calls keep working through the burst (BYE/in-dialog 503s and 481s must not appear).",
+        window: { anchor: "tFire", startOffsetMs: 0, durationMs: 60_000 },
+        metric: { kind: "midDialogFailureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.005 },
+        severity: "fail",
+      },
+      {
+        description:
+          "Mid-dialog protection — long-hold emergency calls (20-min OPTIONS pings) keep working through the burst.",
+        window: { anchor: "tFire", startOffsetMs: 0, durationMs: 60_000 },
+        metric: { kind: "midDialogFailureRate", stream: STREAM.long },
+        bound: { kind: "lessThan", value: 0.005 },
+        severity: "fail",
+      },
+      {
+        description:
+          "Cross-stream isolation — limiter probe non-limiter-reject failures stay bounded during the burst.",
         window: { anchor: "tFire", startOffsetMs: 0, durationMs: 60_000 },
         metric: {
           kind: "failureRate",

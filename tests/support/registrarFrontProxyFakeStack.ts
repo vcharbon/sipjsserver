@@ -43,12 +43,14 @@ import {
   ForwardAllStrategyLive,
   ProxyBindConfig,
   ProxyCore,
+  ProxySelfGate,
   Registrar,
   RegisterStrategy,
   RegistrarProxyConfig,
   type SocketAddr,
   workerRegistryControlNoopLayer,
 } from "../../src/sip-front-proxy/index.js"
+import { simulatedLayer as loadSamplerSimulatedLayer } from "../../src/observability/LoadSampler.js"
 import { fromString as staticRegistryFromString } from "../../src/sip-front-proxy/registry/static.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
 
@@ -156,6 +158,15 @@ export function registrarFrontProxyFakeStackLayer(
     StrategyLayers,
     RegistryLayer,
     workerRegistryControlNoopLayer,
+    // Slice 6 — proxy-self gate. Permissive config — registrar baseline
+    // tests don't exercise the gate; tests that do build their own layer.
+    ProxySelfGate.layer({
+      eluCritical: 0.95,
+      cpsBucketSize: 1000000,
+      cpsBucketRate: 1000000,
+      eluSmoothingAlpha: 0.2,
+      samplerIntervalMs: 100,
+    }).pipe(Layer.provide(loadSamplerSimulatedLayer())),
   )
 
   return ProxyCore.Default.pipe(

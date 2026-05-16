@@ -32,12 +32,14 @@ import {
   ForwardAllStrategyLive,
   ProxyBindConfig,
   ProxyCore,
+  ProxySelfGate,
   Registrar,
   RegisterStrategy,
   RegistrarProxyConfig,
   type SocketAddr,
   workerRegistryControlNoopLayer,
 } from "../../sip-front-proxy/index.js"
+import { LoadSampler } from "../../observability/LoadSampler.js"
 import { fromString as staticRegistryFromString } from "../../sip-front-proxy/registry/static.js"
 
 export interface RegistrarFrontProxyHybridStackOpts {
@@ -112,6 +114,9 @@ export function registrarFrontProxyHybridStackLayer(
     StrategyLayers,
     RegistryLayer,
     workerRegistryControlNoopLayer,
+    // Slice 6 — proxy-self gate. Hybrid stack uses real LoadSampler since
+    // the proxy is a real process.
+    ProxySelfGate.layer().pipe(Layer.provide(LoadSampler.liveLayer)),
   )
 
   return ProxyCore.Default.pipe(Layer.provideMerge(Leaves))

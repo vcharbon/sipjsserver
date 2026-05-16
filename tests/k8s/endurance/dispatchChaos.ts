@@ -15,13 +15,11 @@ import {
   proxyCutoffEvent,
   PROXY_LABEL,
   verifyIptablesDropCounter,
-  verifyPodLogPattern,
   WORKER_LABEL,
   type ChaosEventType,
   type ChaosOutcome,
   type NetworkChaosOpts,
   type NetworkChaosPeerSet,
-  type VerifyOutcome,
 } from "./chaosOps.js"
 import { nonEmergencyBurstEvent } from "./sippJobs.js"
 
@@ -36,29 +34,6 @@ const HARD_CUT_VERIFY_MID_MS = 5_000
  * more wall time to climb past zero.
  */
 const LOSS_CUT_VERIFY_MID_MS = 10_000
-
-/**
- * Composite verify: iptables counter must show drops AND a specified
- * SUT-side log line must appear during the cut window. Returns the
- * stricter failure if either side fails. Used for cuts where we want
- * to catch both wrong-rule-target bugs AND silently-uninterested SUT
- * code paths (e.g. the worker never opens a connection during the cut).
- */
-const compositeVerify = (
-  iptables: Effect.Effect<VerifyOutcome>,
-  sutSide: Effect.Effect<VerifyOutcome>,
-): Effect.Effect<VerifyOutcome> =>
-  Effect.gen(function* () {
-    const [a, b] = yield* Effect.all([iptables, sutSide], {
-      concurrency: 2,
-    })
-    if (!a.ok) return a
-    if (!b.ok) return b
-    return {
-      ok: true,
-      observed: `${a.observed}; ${b.observed}`,
-    }
-  })
 
 export interface DispatchOpts {
   readonly namespace: string

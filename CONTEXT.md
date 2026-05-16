@@ -98,6 +98,47 @@ Cluster-shared counter (Redis-backed) that rate-limits concurrent calls per limi
 **Fail-open admission**:
 A call admitted *without* the limiter `INCR` landing on Redis. Happens when the limiter Redis is unreachable or times out (`RedisError` / `LimiterTimeout`). The call is allowed through to keep traffic flowing, but the `limiterEntries[i].incrementSucceeded` field is set to `false` so the matching `DECR` is skipped on termination — otherwise the cluster counter drifts negative. See [ADR-0004](docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md).
 
+**Overload signal**:
+The compact load-state payload a worker publishes on every OPTIONS reply (and any 503 reply it emits to an INVITE), carried as the SIP header `X-Overload: v=1; elu=…; gc=…; adm=…`:
+- `elu` — smoothed Event Loop Utilization (Node `perf_hooks.performance.eventLoopUtilization`, EWMA α≈0.2). Includes GC pauses (V8 counts major GC as "active").
+- `gc` — smoothed fraction of wall time spent in GC pauses over the reporting window (EWMA α≈0.2). Disambiguates GC-induced ELU inflation from real load.
+- `adm` — monotonic counter of non-emergency new-dialog INVITEs admitted by this worker since process start. Diffed by each LB to derive worker's total treated rate without inter-LB coordination.
+_Avoid_: "CPU", "load level" (overloaded prose).
+
+**Effective ELU**:
+The LB-derived `max(0, elu - gc)`. Used for the `soft_to_hard` / `hard_to_critical` band boundaries — the part of ELU that represents real JS work, not GC pressure. The `above_critical` filter still uses raw `elu` because an unresponsive worker is unresponsive regardless of cause.
+
+**ELU band**:
+The worker classification bucket the LB derives from `elu_ewma` on each OPTIONS tick:
+- `below_soft` (ELU ≤ `OVERLOAD_ELU_SOFT`) — AIMD increase enabled
+- `soft_to_hard` — hold (deadband)
+- `hard_to_critical` — AIMD multiplicative decrease
+- `above_critical` (ELU > `OVERLOAD_ELU_CRITICAL`) — worker filtered out of the new-dialog candidate set entirely (same exclusion path as `not-ready`)
+
+**Non-emergency rate cap**:
+The per-(LB, worker) AIMD-tuned admission rate (calls/sec) one LB will route to one worker for **out-of-dialog, non-emergency INVITEs only**. Each LB independently maintains its own cap. Bucket empty → immediate stateless 503 + `Retry-After`, no forwarding. In-dialog requests, emergency INVITEs, REGISTER, OPTIONS, and responses bypass the cap by SIP construction.
+_Avoid_: "shedding rate", "throttle".
+
+**Share-scaling**:
+The AIMD step adjustment factor `own_admitted_rate / worker_treated_total_rate`. Used for observability only (the `sip_proxy_worker_share` metric and alerts) — AIMD steps themselves are NOT share-scaled, since every LB sees the same OPTIONS payload and applies identical decisions in parallel.
+
+**Proxy-self gate**:
+The front-proxy's own overload gate, applied **only to external new-dialog non-emergency INVITEs**. Two-stage: `proxy_elu > PROXY_ELU_CRITICAL` → stateless 503 `reason=proxy_overload_elu`; else a CPS token bucket on the same traffic class — `proxy_overload_cps` on empty. In-dialog requests, emergency INVITEs, and worker-originated (internal) traffic all bypass. Unlike worker caps, no AIMD — the proxy's ELU is its own; no coordination needed.
+
+**Internal marking**:
+The `;wk=1` custom Via parameter a worker stamps on every outbound Via it generates as UAC (B-leg INVITEs, outbound OPTIONS, etc.). The proxy reads it at ingest to classify a request as internal-origin and skip the proxy-self gate. Internal classification additionally cross-checks `registry.lookupByAddress(srcAddr)`: a mismatch in either direction logs a warning but defaults to the safer side.
+
+### Gate order
+
+The five gates an external new-dialog non-emergency INVITE traverses in order, top to bottom:
+1. **UDP queue depth threshold** (Tier-1 brake on the UDP recv queue, byte-scan).
+2. **Proxy-self gate** (proxy ELU + proxy CPS bucket).
+3. **Candidate filter** — worker's `health === "alive"` and ELU band ≠ `above_critical`.
+4. **Per-(LB, worker) AIMD bucket** — non-emergency rate cap consume.
+5. **Worker-side panic backstop** — worker's own CPS hard cap + panic-ELU threshold.
+
+Emergency INVITEs skip gates 2, 3, 4, 5. In-dialog traffic skips gates 2, 3, 4. Internal (worker-originated) traffic skips gate 2.
+
 ### Event dispatch
 
 **Event dispatch**:

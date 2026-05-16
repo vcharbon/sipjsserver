@@ -33,6 +33,7 @@ import {
 } from "../../../src/sip-front-proxy/health/WorkerRegistryControl.js"
 import {
   WorkerId,
+  WorkerLoadObserver,
   WorkerRegistry,
   WorkerRegistrySimulatedControl,
   workerRegistrySimulatedLayer,
@@ -80,6 +81,7 @@ const buildLayer = () => {
   })
   const ControlOnRegistry = Control.pipe(Layer.provideMerge(Registry))
   return Probe.pipe(
+    Layer.provide(WorkerLoadObserver.layer()),
     Layer.provideMerge(ControlOnRegistry),
     Layer.provideMerge(Network)
   )

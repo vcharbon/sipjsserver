@@ -194,17 +194,13 @@ const finalize = (
   })
 
 const failureMessage = (cause: Cause.Cause<unknown>): string => {
-  const fail = cause.failures.length > 0 ? cause.failures[0] : undefined
-  if (fail !== undefined) {
-    if (fail instanceof Error) return fail.stack ?? fail.message
-    return String(fail)
+  // v4: Cause.pretty handles every cause shape (Fail / Die / Interrupt /
+  // Sequential / Parallel) and produces a readable trace.
+  try {
+    return Cause.pretty(cause)
+  } catch {
+    return "unknown failure"
   }
-  const def = cause.defects.length > 0 ? cause.defects[0] : undefined
-  if (def !== undefined) {
-    if (def instanceof Error) return def.stack ?? def.message
-    return String(def)
-  }
-  return "interrupted"
 }
 
 /**

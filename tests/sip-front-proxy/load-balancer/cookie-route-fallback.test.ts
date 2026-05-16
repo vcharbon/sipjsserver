@@ -114,10 +114,11 @@ describe("sip-front-proxy/load-balancer — cookie route fallback to w_bak", () 
             (h) => h.name.toLowerCase() === "record-route"
           )!
           expect(rr).toBeDefined()
-          // Sanity: the v2 cookie carries both ordinals.
+          // Sanity: the v3 cookie carries both ordinals + emergency flag.
           expect(rr.value).toMatch(/;w_pri=worker-a/)
           expect(rr.value).toMatch(/;w_bak=worker-b/)
-          expect(rr.value).toMatch(/v=2/)
+          expect(rr.value).toMatch(/;e=0/)
+          expect(rr.value).toMatch(/v=3/)
 
           // ── 2. 200 OK back through the proxy → Alice ─────────────────
           const ok = Buffer.from(

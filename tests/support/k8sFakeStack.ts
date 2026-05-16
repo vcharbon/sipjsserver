@@ -40,6 +40,7 @@ import {
   type SocketAddr,
   workerRegistryControlSimulatedAdapterLayer,
   WorkerId,
+  WorkerLoadObserver,
   WorkerRegistrySimulatedControl,
   type LoadBalancerConfigData,
 } from "../../src/sip-front-proxy/index.js"
@@ -212,7 +213,10 @@ export function k8sFakeStackLayer(opts: K8sFakeStackOpts) {
   const Probe = healthProbeOptionsKeepaliveLayer({
     bindHost: K8S_PROBE_BIND.ip,
     bindPort: K8S_PROBE_BIND.port,
-  }).pipe(Layer.provideMerge(ControlAdapter))
+  }).pipe(
+    Layer.provide(WorkerLoadObserver.layer()),
+    Layer.provideMerge(ControlAdapter),
+  )
 
   // Auto-start the probe at layer materialization. Mirrors
   // sipproxyHAFakeStackLayer's `ProbeAutoStart` pattern.

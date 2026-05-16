@@ -1,17 +1,20 @@
 <?xml version="1.0" encoding="ISO-8859-1" ?>
 <!DOCTYPE scenario SYSTEM "sipp.dtd">
 <!--
-  Non-emergency overload burst — INVITE / (200 or 4xx/5xx) / 1s / BYE.
+  Non-emergency overload burst — INVITE / (200 or 4xx/5xx) / BYE.
 
-  Sent at 200 CAPS for ~60 s during a `non-emergency-burst` chaos
+  Sent at high CAPS for ~60 s during a `non-emergency-burst` chaos
   event. No `Resource-Priority` header — the baseline streams DO have
   it, so the three overload tiers will shed THIS burst's calls first.
 
   The scenario tolerates either a 200 (successful) or any of the
   typical reject codes (503 overload, 480/486 admission-control)
-  terminating the call. The 1 s hold matches an "extremely short call"
-  so successful calls churn fast and the per-call rate doesn't drift
-  away from the offered CAPS.
+  terminating the call. Successful calls BYE immediately after ACK
+  (no hold) so that when the chaos sub-command stops the sipp Job at
+  the 60-s mark, no calls are left mid-hold with stranded dialog
+  state on the workers — a previous 1-s hold was leaking ~6 000
+  stranded dialogs per burst at high admission rates and degrading
+  subsequent runs (see 2026-05-16 perf-test post-mortem).
 -->
 <scenario name="K8s UAC non-emergency burst — INVITE / hold / BYE">
 

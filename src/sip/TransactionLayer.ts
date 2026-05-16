@@ -600,6 +600,11 @@ export class TransactionLayer extends ServiceMap.Service<
               )
               return
             }
+            // Counter published on X-Overload. Emergency admits are not
+            // counted — LBs cap non-emergency traffic only.
+            if (!isEmergency) {
+              overload.incrementNonEmergencyAdmitted()
+            }
           }
 
           // New server transaction

@@ -167,8 +167,11 @@ const computeMetric = (
   }
 }
 
+// startsWith, not includes: the run-id is embedded in baseline Call-IDs
+// (`endurance-short-overload-burst-v2-2026-05-16-N@det`). A `.includes("burst-")`
+// match cross-contaminates the burst stream's metric with baseline traffic.
 const matchesStream = (callId: string, stream: string): boolean =>
-  callId.includes(stream)
+  callId.startsWith(stream)
 
 const isSuccess = (o: CallOutcome): boolean =>
   o.outcome === "clean" || o.outcome === "retransmitted"

@@ -37,9 +37,11 @@ import {
   ProxyBindConfig,
   type ProxyBindConfigData,
   ProxyCore,
+  ProxySelfGate,
   RegisterStrategy,
   type SocketAddr,
 } from "../../src/sip-front-proxy/index.js"
+import { simulatedLayer as loadSamplerSimulatedLayer } from "../../src/observability/LoadSampler.js"
 import { fromString as staticRegistryFromString } from "../../src/sip-front-proxy/registry/static.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../src/sip/SignalingNetwork.js"
 
@@ -111,6 +113,15 @@ export function proxyOnlyFakeStackLayer(opts: ProxyOnlyFakeStackOpts) {
     StrategyLayer,
     RegistryLayer,
     workerRegistryControlNoopLayer,
+    // Slice 6: proxy-self gate. Permissive config so the ForwardAll
+    // distribution / smoke fixtures don't hit the gate.
+    ProxySelfGate.layer({
+      eluCritical: 0.95,
+      cpsBucketSize: 1000000,
+      cpsBucketRate: 1000000,
+      eluSmoothingAlpha: 0.2,
+      samplerIntervalMs: 100,
+    }).pipe(Layer.provide(loadSamplerSimulatedLayer())),
     // Slice 2 of REGISTER + double-stack: noop variants — this fixture
     // never exercises the registrar path. REGISTER would surface as 501
     // and the unused `core`-to-`ext` lookup is never reached.

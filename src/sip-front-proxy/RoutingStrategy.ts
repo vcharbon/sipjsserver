@@ -67,16 +67,25 @@ export type RouteParams = Record<string, string>
  * without unsafe casts.
  */
 export type DecodeResult =
-  | { readonly _tag: "forward"; readonly target: SocketAddr }
-  | { readonly _tag: "forwardBackup"; readonly target: SocketAddr }
+  | { readonly _tag: "forward"; readonly target: SocketAddr; readonly isEmergency?: boolean }
+  | { readonly _tag: "forwardBackup"; readonly target: SocketAddr; readonly isEmergency?: boolean }
   | { readonly _tag: "reject"; readonly status: number; readonly reason: string }
-  | { readonly _tag: "unknown" }
+  | { readonly _tag: "unknown"; readonly isEmergency?: boolean }
 
 export const DecodeResult = {
-  forward: (target: SocketAddr): DecodeResult => ({ _tag: "forward", target }),
-  forwardBackup: (target: SocketAddr): DecodeResult => ({ _tag: "forwardBackup", target }),
+  forward: (target: SocketAddr, isEmergency?: boolean): DecodeResult =>
+    isEmergency === undefined
+      ? { _tag: "forward", target }
+      : { _tag: "forward", target, isEmergency },
+  forwardBackup: (target: SocketAddr, isEmergency?: boolean): DecodeResult =>
+    isEmergency === undefined
+      ? { _tag: "forwardBackup", target }
+      : { _tag: "forwardBackup", target, isEmergency },
   reject: (status: number, reason: string): DecodeResult => ({ _tag: "reject", status, reason }),
-  unknown: (): DecodeResult => ({ _tag: "unknown" }),
+  unknown: (isEmergency?: boolean): DecodeResult =>
+    isEmergency === undefined
+      ? { _tag: "unknown" }
+      : { _tag: "unknown", isEmergency },
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +102,19 @@ export class NoTargetAvailable extends Data.TaggedError("NoTargetAvailable")<{
   readonly reason: string
 }> {}
 
+/**
+ * `selectForNewDialog` failure: the rendezvous winner exists but its
+ * per-(LB, worker) AIMD token bucket is empty. Distinct from
+ * `NoTargetAvailable` (which means "no alive workers at all"). Core
+ * synthesizes a 503 + `Retry-After` (seconds) back to the source.
+ * Emergency INVITEs never produce this — the strategy bypasses the
+ * bucket for emergency.
+ */
+export class RateCapExhausted extends Data.TaggedError("RateCapExhausted")<{
+  readonly workerId: string
+  readonly retryAfterSec: number
+}> {}
+
 // ---------------------------------------------------------------------------
 // Service surface
 // ---------------------------------------------------------------------------
@@ -105,8 +127,9 @@ export interface RoutingStrategyApi {
    * cookie (initial INVITE, or in-dialog request where decoding failed).
    */
   readonly selectForNewDialog: (
-    msg: SipMessage
-  ) => Effect.Effect<SocketAddr, NoTargetAvailable>
+    msg: SipMessage,
+    opts?: { readonly emergencyOverride?: boolean }
+  ) => Effect.Effect<SocketAddr, NoTargetAvailable | RateCapExhausted>
   /**
    * Recover the downstream target previously encoded into the topmost Route
    * URI's params (the proxy already verified the URI points at us and

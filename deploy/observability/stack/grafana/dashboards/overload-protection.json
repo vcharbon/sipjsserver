@@ -1,0 +1,354 @@
+{
+  "uid": "overload-protection",
+  "title": "Overload Protection — Chaos Cockpit",
+  "tags": ["sipjsserver", "overload", "chaos"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "worker",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(sip_proxy_worker_aimd_cap_cps, worker_id)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      },
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(b2bua_overload_admit_total, pod)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Rejection taxonomy (fleet-wide)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Rejections per second — by gate",
+      "description": "Stacked rate of INVITE rejections, broken out by which gate dropped them. proxy_overload_* are slice-6 proxy-self; all_workers_overloaded means the CRITICAL filter emptied the candidate set; rate_cap_exhausted is the per-(LB,worker) AIMD bucket; worker_panic_elu is the worker's own backstop. tier1_brake + tail_drop are pre-existing UDP-queue mechanisms.",
+      "gridPos": { "h": 9, "w": 18, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(sip_proxy_self_external_invites_rejected_total{reason=\"proxy_overload_elu\"}[1m]))", "refId": "A", "legendFormat": "proxy_overload_elu" },
+        { "expr": "sum(rate(sip_proxy_self_external_invites_rejected_total{reason=\"proxy_overload_cps\"}[1m]))", "refId": "B", "legendFormat": "proxy_overload_cps" },
+        { "expr": "sum(rate(sip_proxy_overload_rejections_total{reason=\"no_target_critical_filtered\"}[1m]))", "refId": "C", "legendFormat": "all_workers_overloaded" },
+        { "expr": "sum(rate(sip_proxy_overload_rejections_total{reason=\"bucket_empty\"}[1m]))", "refId": "D", "legendFormat": "rate_cap_exhausted" },
+        { "expr": "sum(rate(b2bua_overload_reject_total{reason=\"panic_elu\"}[1m]))", "refId": "E", "legendFormat": "worker_panic_elu" },
+        { "expr": "sum(rate(b2bua_overload_reject_total{reason=\"bucket_empty\"}[1m]))", "refId": "F", "legendFormat": "worker_cps_hard_cap" },
+        { "expr": "sum(rate(b2bua_udp_drops_total{reason=\"tier1_brake\"}[1m]))", "refId": "G", "legendFormat": "udp_tier1_brake" },
+        { "expr": "sum(rate(b2bua_udp_drops_total{reason=\"tail_drop\"}[1m]))", "refId": "H", "legendFormat": "udp_tail_drop" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "stacking": { "mode": "normal", "group": "A" }, "fillOpacity": 80 },
+          "unit": "reqps"
+        }
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Admissions per second",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(sip_proxy_self_external_invites_admitted_total[1m]))", "refId": "A", "legendFormat": "external admitted" },
+        { "expr": "sum(rate(sip_proxy_self_emergency_bypassed_total[1m]))", "refId": "B", "legendFormat": "emergency bypass" },
+        { "expr": "sum(rate(sip_proxy_self_internal_bypassed_total[1m]))", "refId": "C", "legendFormat": "internal bypass" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Emergency stream rejections (must be ~0)",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum(rate(sip_proxy_overload_rejections_total{reason=~\"bucket_empty|no_target_critical_filtered\"}[5m]))", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.001 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Proxy-self gate state",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 10 },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "sip_proxy_self_elu_ewma (proxy ELU)",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_proxy_self_elu_ewma", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.7 },
+              { "color": "red", "value": 0.95 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "sip_proxy_self_cps_bucket_level",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sip_proxy_self_cps_bucket_level", "refId": "A", "legendFormat": "level" },
+        { "expr": "sip_proxy_self_cps_bucket_max", "refId": "B", "legendFormat": "max" }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "sip_proxy_self_gc_fraction",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_proxy_self_gc_fraction", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Per-worker AIMD state",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "sip_proxy_worker_aimd_cap_cps",
+      "description": "Per-(LB,worker) AIMD-tuned admission cap. Drops on every multiplicative-decrease tick; recovers by +5 cps additive each non-cooldown OPTIONS tick.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_proxy_worker_aimd_cap_cps{worker_id=~\"$worker\"}", "refId": "A", "legendFormat": "{{worker_id}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "sip_proxy_worker_aimd_tokens",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_proxy_worker_aimd_tokens{worker_id=~\"$worker\"}", "refId": "A", "legendFormat": "{{worker_id}}" }]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "sip_proxy_worker_elu_band (heat by worker)",
+      "description": "0=below_soft, 1=soft_to_hard, 2=hard_to_critical, 3=above_critical (filtered out).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_proxy_worker_elu_band{worker_id=~\"$worker\"}", "refId": "A", "legendFormat": "{{worker_id}}" }],
+      "fieldConfig": { "defaults": { "min": 0, "max": 3 } }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "sip_proxy_worker_aimd_cooldown_ticks_remaining",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_proxy_worker_aimd_cooldown_ticks_remaining{worker_id=~\"$worker\"}", "refId": "A", "legendFormat": "{{worker_id}}" }]
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Per-worker observed signals",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "sip_proxy_worker_elu_observed",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 36 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_proxy_worker_elu_observed{worker_id=~\"$worker\"}", "refId": "A", "legendFormat": "{{worker_id}}" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.6 },
+              { "color": "orange", "value": 0.8 },
+              { "color": "red", "value": 0.95 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "sip_proxy_worker_treated_rate_cps vs own_admitted_rate_cps",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 36 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sip_proxy_worker_treated_rate_observed_cps{worker_id=~\"$worker\"}", "refId": "A", "legendFormat": "{{worker_id}} total" },
+        { "expr": "sip_proxy_worker_own_admitted_rate_cps{worker_id=~\"$worker\"}", "refId": "B", "legendFormat": "{{worker_id}} own" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "sip_proxy_worker_share",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 36 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_proxy_worker_share{worker_id=~\"$worker\"}", "refId": "A", "legendFormat": "{{worker_id}}" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "sip_proxy_worker_payload_age_ms (staleness)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "sip_proxy_worker_payload_age_ms{worker_id=~\"$worker\"}", "refId": "A", "legendFormat": "{{worker_id}}" }],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "sip_proxy_overload_payload_missing_total rate",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "rate(sip_proxy_overload_payload_missing_total{worker_id=~\"$worker\"}[1m])", "refId": "A", "legendFormat": "{{worker_id}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Per-worker queue & dispatch",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 50 },
+      "panels": []
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "b2bua_dispatch_worker_queue_count by partition",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 51 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_dispatch_worker_queue_count{pod=~\"$pod\", partition=\"primary\"}", "refId": "A", "legendFormat": "{{pod}} primary" },
+        { "expr": "b2bua_dispatch_worker_queue_count{pod=~\"$pod\", partition=\"backup\"}", "refId": "B", "legendFormat": "{{pod}} backup" }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "b2bua_dispatch_worker_in_flight",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 51 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_dispatch_worker_in_flight{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} {{partition}}" }]
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "b2bua_dispatch_worker_*_drops (rate)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "rate(b2bua_dispatch_worker_cap_drops_total[1m])", "refId": "A", "legendFormat": "cap_drops" },
+        { "expr": "rate(b2bua_dispatch_worker_queue_drops_total[1m])", "refId": "B", "legendFormat": "queue_drops" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "b2bua_dispatch_worker_saturation_total (rate)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 58 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "rate(b2bua_dispatch_worker_saturation_total[1m])", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Worker-side raw signals (cross-check)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 65 },
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "b2bua_overload_elu_ewma (published on X-Overload)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 66 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_overload_elu_ewma{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "b2bua_overload_non_emergency_admitted_total (rate)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 66 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "rate(b2bua_overload_non_emergency_admitted_total{pod=~\"$pod\"}[1m])", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "b2bua_overload_reject_total (worker-side panic + CPS hard cap)",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 73 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "rate(b2bua_overload_reject_total{reason=\"panic_elu\", pod=~\"$pod\"}[1m])", "refId": "A", "legendFormat": "{{pod}} panic_elu" },
+        { "expr": "rate(b2bua_overload_reject_total{reason=\"bucket_empty\", pod=~\"$pod\"}[1m])", "refId": "B", "legendFormat": "{{pod}} cps_bucket" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "b2bua_loop_lag_ms_p95 (legacy cross-check)",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 73 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_loop_lag_ms_p95{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "ms" } }
+    }
+  ]
+}

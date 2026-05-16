@@ -25,6 +25,7 @@ import { TracingService } from "../tracing/TracingService.js"
 import { TracerHealthSignal } from "../observability/tracer-health.js"
 import { UdpTransport } from "../sip/UdpTransport.js"
 import { SignalingNetwork } from "../sip/SignalingNetwork.js"
+import { LoadSampler } from "../observability/LoadSampler.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
 import { CallDecisionEngine } from "../decision/CallDecisionEngine.js"
 import { WorkerReadiness } from "../cache/WorkerReadiness.js"
@@ -81,6 +82,7 @@ export const defaultEmbeddedAppConfig: AppConfigData = {
   overloadLoopLagHardMs: 200,
   overloadRoutingNewCallSoftMs: 200,
   overloadRoutingNewCallHardMs: 1000,
+  overloadPanicEluThreshold: 0.75,
   retryAfterBaseSec: 5,
   retryAfterJitterSec: 5,
   emergencyListenerEnabled: false,
@@ -192,6 +194,7 @@ export const b2buaEmbeddedLayer = (opts: B2buaEmbeddedOptions): B2buaLayer => {
   const OverloadL = OverloadController.layer.pipe(
     Layer.provide(AppConfigL),
     Layer.provide(MetricsL),
+    Layer.provide(LoadSampler.liveLayer),
   )
 
   const UdpL = UdpTransport.layer.pipe(

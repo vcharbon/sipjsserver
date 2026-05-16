@@ -21,6 +21,7 @@ import { SignalingNetwork, type UdpEndpoint } from "../../src/sip/SignalingNetwo
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
 import { TransactionLayer } from "../../src/sip/TransactionLayer.js"
 import { OverloadController } from "../../src/b2bua/OverloadController.js"
+import { simulatedLayer as loadSamplerSimulatedLayer } from "../../src/observability/LoadSampler.js"
 import { SipParser } from "../../src/sip/Parser.js"
 import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 
@@ -44,8 +45,12 @@ function testConfig(): AppConfigData {
 const stackLayer = (() => {
   const Network = SignalingNetwork.simulated({ transitDelayMs: TRANSIT_MS })
   const AppCfg = Layer.succeed(AppConfig, testConfig())
-  const Leaves = Layer.mergeAll(Network, MetricsRegistry.layer, SipParser.layer)
-    .pipe(Layer.provideMerge(AppCfg))
+  const Leaves = Layer.mergeAll(
+    Network,
+    MetricsRegistry.layer,
+    SipParser.layer,
+    loadSamplerSimulatedLayer(),
+  ).pipe(Layer.provideMerge(AppCfg))
   const Mid = Layer.mergeAll(UdpTransport.layer, OverloadController.layer)
     .pipe(Layer.provideMerge(Leaves))
   const Top = TransactionLayer.layer.pipe(Layer.provideMerge(Mid))

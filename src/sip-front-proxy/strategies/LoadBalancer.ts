@@ -53,7 +53,16 @@
  * in constant time.
  */
 
-import { Clock, Effect, Layer, Option, ServiceMap } from "effect"
+import { Clock, Effect, Layer, Metric, Option, ServiceMap } from "effect"
+
+// Mirror the WorkerLoadObserver rejections counter so the strategy
+// can label its own "all-critical-filtered" rejection without needing
+// to expose a separate metric path through the observer.
+const lbRejectionsCounter = Metric.counter("sip_proxy_overload_rejections_total", {
+  description:
+    "selectForNewDialog rejections classified by reason (bucket_empty / no_target_critical_filtered).",
+  incremental: true,
+})
 import type { SipMessage } from "../../sip/types.js"
 import {
   type FreshPodAgeBucket,
@@ -64,7 +73,7 @@ import {
   RoutingStrategy,
   type SocketAddr,
 } from "../RoutingStrategy.js"
-import { DecodeResult, NoTargetAvailable } from "../RoutingStrategy.js"
+import { DecodeResult, NoTargetAvailable, RateCapExhausted } from "../RoutingStrategy.js"
 import { HmacKeyProvider } from "../security/HmacKeyProvider.js"
 import {
   type WorkerEntry,
@@ -72,6 +81,7 @@ import {
   WorkerId as makeWorkerId,
 } from "../registry/WorkerRegistry.js"
 import { rendezvousSelect } from "./RendezvousHash.js"
+import { WorkerLoadObserver } from "../WorkerLoadObserver.js"
 
 // ---------------------------------------------------------------------------
 // Config
@@ -109,6 +119,7 @@ export class LoadBalancerConfig extends ServiceMap.Service<
 
 const COOKIE_PRIMARY_NAME = "w_pri"
 const COOKIE_BACKUP_NAME = "w_bak"
+const COOKIE_EMERGENCY_NAME = "e"
 const DEFAULT_DRAIN_GRACE_MS = 5_000
 /**
  * 2 × default kubelet probePeriod (10 s) + default initialDelay (0). Tuned
@@ -116,7 +127,11 @@ const DEFAULT_DRAIN_GRACE_MS = 5_000
  * `httpGet /ready` round-trip without operator configuration.
  */
 const DEFAULT_FRESH_POD_GUARD_MS = 20_000
-const COOKIE_VERSION = "2"
+// v=3: added `e=<0|1>` for emergency in-dialog tracking. v=2 cookies
+// (no `e` param) are rejected on decode — operators must drain to
+// avoid mid-rotation traffic surprises, same handling as the v=1→v=2
+// bump.
+const COOKIE_VERSION = "3"
 /** First 16 bytes (128 bits) of HMAC-SHA256 — see header comment. */
 const TRUNCATED_MAC_BYTES = 16
 
@@ -128,19 +143,21 @@ const utf8 = (s: string): Uint8Array => new TextEncoder().encode(s)
 
 /**
  * Build the byte input fed to HMAC:
- * `v=2|w_pri=<id>|w_bak=<id>|c=<callId>`.
+ * `v=3|w_pri=<id>|w_bak=<id>|e=<0|1>|c=<callId>`.
  *
- * `backupId` is the empty string when only one worker is alive at encode
- * time. The HMAC binds the primary, backup, and call-id together, so a
- * UA that swaps `w_bak` to a different worker breaks the MAC.
+ * `backupId` is empty when only one worker is alive at encode time.
+ * `emergency` is "1" for emergency INVITEs and "0" otherwise. The
+ * HMAC binds primary, backup, emergency, and call-id together, so any
+ * tampering breaks verification.
  */
 const stickinessInput = (
   primaryId: string,
   backupId: string,
+  emergency: "0" | "1",
   callId: string
 ): Uint8Array =>
   utf8(
-    `v=${COOKIE_VERSION}|${COOKIE_PRIMARY_NAME}=${primaryId}|${COOKIE_BACKUP_NAME}=${backupId}|c=${callId}`
+    `v=${COOKIE_VERSION}|${COOKIE_PRIMARY_NAME}=${primaryId}|${COOKIE_BACKUP_NAME}=${backupId}|${COOKIE_EMERGENCY_NAME}=${emergency}|c=${callId}`
   )
 
 /** Truncate a digest to the first `n` bytes. */
@@ -197,6 +214,32 @@ const findByAddress = (
   target: SocketAddr
 ): WorkerEntry | undefined => snapshot.find((w) => sameAddr(w.address, target))
 
+// RFC 4412 / RPH — emergency call markers we honour. Same tokens the
+// worker stamps on Contact via `;emerg=1` after admission; here we
+// check the header directly on the inbound INVITE.
+const EMERGENCY_RP_RE = /(esnet\.0|wps\.0|q735\.0)/i
+
+const isEmergencyInvite = (msg: SipMessage): boolean => {
+  if (msg.type !== "request") return false
+  // Untyped `getHeader(name: string)` returns `ReadonlyArray<string>`.
+  const rp = msg.getHeader("resource-priority")
+  if (rp.length === 0) return false
+  return rp.some((v) => EMERGENCY_RP_RE.test(v))
+}
+
+/**
+ * An in-dialog request carries a non-empty `to.tag`. AIMD admission
+ * control is a *new-call* knob — applying it to BYE/CANCEL/ACK on
+ * established dialogs creates 503s on traffic that has already been
+ * admitted and is mid-conversation (root cause of the 140 BYE-503
+ * count observed during the 2026-05-16 burst sweep).
+ */
+const isInDialog = (msg: SipMessage): boolean => {
+  if (msg.type !== "request") return false
+  const to = msg.getHeader("to")
+  return to.tag !== undefined && to.tag !== ""
+}
+
 // ---------------------------------------------------------------------------
 // Layer
 // ---------------------------------------------------------------------------
@@ -204,13 +247,14 @@ const findByAddress = (
 export const LoadBalancerStrategyLive: Layer.Layer<
   RoutingStrategy,
   never,
-  WorkerRegistry | HmacKeyProvider | LoadBalancerConfig
+  WorkerRegistry | HmacKeyProvider | LoadBalancerConfig | WorkerLoadObserver
 > = Layer.effect(
   RoutingStrategy,
   Effect.gen(function* () {
     const registry = yield* WorkerRegistry
     const hmac = yield* HmacKeyProvider
     const cfg = yield* LoadBalancerConfig
+    const loadObserver = yield* WorkerLoadObserver
     // Metrics is provided inline (its Default has no deps) so the public
     // layer signature stays exactly what PR3b shipped.
     const metrics = yield* (Effect.gen(function* () {
@@ -221,32 +265,87 @@ export const LoadBalancerStrategyLive: Layer.Layer<
     const freshPodGuardMs = cfg.freshPodGuardMs ?? DEFAULT_FRESH_POD_GUARD_MS
 
     // ---- selectForNewDialog -----------------------------------------------
+    // Slice 5: AIMD cap + CRITICAL filter on non-emergency. Emergency
+    // bypasses both — emergency INVITEs always route, even to a CRITICAL
+    // worker (per overload-protection design: "emergency skips gates 2-5").
     const selectForNewDialog = (
-      msg: SipMessage
-    ): Effect.Effect<SocketAddr, NoTargetAvailable> =>
+      msg: SipMessage,
+      opts?: { readonly emergencyOverride?: boolean },
+    ): Effect.Effect<SocketAddr, NoTargetAvailable | RateCapExhausted> =>
       Effect.gen(function* () {
         const callId = callIdOf(msg) ?? ""
+        // `emergencyOverride` from the cookie-decode fallback path
+        // covers in-dialog requests (BYE / CANCEL / re-INVITE …) that
+        // don't carry Resource-Priority on the wire. ProxyCore sets it
+        // when the stickiness cookie carried `e=1`. Without the
+        // override, mid-dialog BYEs on emergency calls would land in
+        // the AIMD bucket and get 503'd during a burst (root cause of
+        // the 2026-05-16 perf-test 503-on-BYE finding).
+        const isEmergency = opts?.emergencyOverride === true || isEmergencyInvite(msg)
+        // In-dialog requests are exempt from AIMD entirely. AIMD is a
+        // new-call admission knob; once a dialog is established, BYE/
+        // CANCEL/ACK must complete regardless of admission pressure.
+        // Catches the case where an in-dialog request arrives with no
+        // Route (no cookie) and would otherwise hit `select_new` with
+        // emergencyOverride undefined.
+        const inDialog = isInDialog(msg)
         const snapshot = yield* registry.snapshot
-        // PR3b: filter on `alive` only. PR4 will exclude `draining` for new
-        // dialogs by re-reading `health` on each select; the snapshot is
-        // already authoritative.
-        const candidates = snapshot.filter((w) => w.health === "alive")
+
+        // Always start from the alive set. Non-emergency additionally
+        // excludes workers in the `above_critical` AIMD band — but
+        // in-dialog requests are also allowed onto critical workers
+        // because dropping them creates 481 storms on conversations
+        // that are already mid-flight.
+        const aliveSet = snapshot.filter((w) => w.health === "alive")
+        const candidates = isEmergency || inDialog
+          ? aliveSet
+          : aliveSet.filter(
+              (w) => loadObserver.bandFor(w.id) !== "above_critical",
+            )
         if (candidates.length === 0) {
+          if (!isEmergency && aliveSet.length > 0) {
+            // Candidate set was emptied by the CRITICAL filter, not by
+            // an empty alive set. Bump the dashboard's "all_workers_overloaded"
+            // bar so we can distinguish "fleet is dead" from
+            // "fleet is too hot for non-emergency".
+            yield* lbRejectionsCounter.pipe(
+              Metric.withAttributes({ reason: "no_target_critical_filtered" }),
+              Metric.update(1),
+            )
+          }
           return yield* new NoTargetAvailable({
             reason:
               snapshot.length === 0
                 ? "registry is empty"
-                : `no alive workers among ${snapshot.length} entries`,
+                : isEmergency
+                  ? `no alive workers among ${snapshot.length} entries`
+                  : `all alive workers in above_critical band (snapshot=${snapshot.length}, alive=${aliveSet.length})`,
           })
         }
         const winner = rendezvousSelect(callId, candidates)
         if (winner === undefined) {
-          // Defensive — `candidates.length > 0` guarantees a winner; the
-          // branch keeps the type total without an unsafe cast.
           return yield* new NoTargetAvailable({
             reason: "rendezvous returned no winner",
           })
         }
+
+        // Emergency and in-dialog requests bypass the AIMD bucket
+        // entirely. In-dialog: the call is already admitted; AIMD is
+        // for new-call rate control only.
+        if (isEmergency || inDialog) {
+          loadObserver.recordOwnAdmitted(winner.id)
+          return winner.address
+        }
+
+        const nowMs = yield* Clock.currentTimeMillis
+        const admitted = loadObserver.tryConsumeFor(winner.id, nowMs)
+        if (!admitted) {
+          return yield* new RateCapExhausted({
+            workerId: winner.id,
+            retryAfterSec: 1,
+          })
+        }
+        loadObserver.recordOwnAdmitted(winner.id)
         return winner.address
       })
 
@@ -282,13 +381,15 @@ export const LoadBalancerStrategyLive: Layer.Layer<
       )
       const backup = rendezvousSelect(callId, backupCandidates)
       const backupId = backup?.id ?? ""
-      const input = stickinessInput(primary.id, backupId, callId)
+      const emergencyFlag: "0" | "1" = isEmergencyInvite(msg) ? "1" : "0"
+      const input = stickinessInput(primary.id, backupId, emergencyFlag, callId)
       // @effect-diagnostics-next-line runEffectInsideEffect:off
       const signed = Effect.runSync(hmac.sign(input))
       const truncated = truncate(signed.mac, TRUNCATED_MAC_BYTES)
       return Option.some({
         [COOKIE_PRIMARY_NAME]: primary.id,
         [COOKIE_BACKUP_NAME]: backupId,
+        [COOKIE_EMERGENCY_NAME]: emergencyFlag,
         v: COOKIE_VERSION,
         kid: signed.kid,
         sig: base64urlEncode(truncated),
@@ -331,15 +432,16 @@ export const LoadBalancerStrategyLive: Layer.Layer<
      * core falls through to a fresh selection.
      */
     const tryBackup = (
-      backupId: string
+      backupId: string,
+      isEmergency: boolean,
     ): Effect.Effect<DecodeResult> =>
       Effect.gen(function* () {
-        if (backupId.length === 0) return DecodeResult.unknown()
+        if (backupId.length === 0) return DecodeResult.unknown(isEmergency)
         const opt = yield* registry.resolve(makeWorkerId(backupId))
-        if (Option.isNone(opt)) return DecodeResult.unknown()
+        if (Option.isNone(opt)) return DecodeResult.unknown(isEmergency)
         const bak = opt.value
-        if (bak.health !== "alive") return DecodeResult.unknown()
-        return DecodeResult.forwardBackup(bak.address)
+        if (bak.health !== "alive") return DecodeResult.unknown(isEmergency)
+        return DecodeResult.forwardBackup(bak.address, isEmergency)
       })
 
     const decodeStickiness = (
@@ -351,6 +453,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
         // core falls back to selectForNewDialog).
         const wPri = routeParam[COOKIE_PRIMARY_NAME]
         const wBakRaw = routeParam[COOKIE_BACKUP_NAME]
+        const eRaw = routeParam[COOKIE_EMERGENCY_NAME]
         const v = routeParam["v"]
         const kid = routeParam["kid"]
         const sig = routeParam["sig"]
@@ -359,6 +462,8 @@ export const LoadBalancerStrategyLive: Layer.Layer<
         if (
           typeof wPri !== "string" ||
           typeof wBakRaw !== "string" ||
+          typeof eRaw !== "string" ||
+          (eRaw !== "0" && eRaw !== "1") ||
           typeof v !== "string" ||
           typeof kid !== "string" ||
           typeof sig !== "string" ||
@@ -369,6 +474,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           yield* metrics.recordHmacFailure("missing")
           return DecodeResult.unknown()
         }
+        const emergencyFlag: "0" | "1" = eRaw
         if (v !== COOKIE_VERSION) {
           // Cookie minted by a different version is not forgeable into
           // the current grammar, so reject rather than fall back (which
@@ -394,7 +500,8 @@ export const LoadBalancerStrategyLive: Layer.Layer<
           )
         }
 
-        const input = stickinessInput(wPri, wBakRaw, callId)
+        const isEmergencyDialog = emergencyFlag === "1"
+        const input = stickinessInput(wPri, wBakRaw, emergencyFlag, callId)
         const ok = yield* hmac.verifyTruncated(input, kid, decoded)
         if (!ok) {
           // Distinguish unknown_kid from mismatch: when the kid isn't
@@ -411,7 +518,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
         const primaryOpt = yield* registry.resolve(makeWorkerId(wPri))
         if (Option.isNone(primaryOpt)) {
           // Primary scaled down / deleted: try the cookie's backup.
-          return yield* tryBackup(wBakRaw)
+          return yield* tryBackup(wBakRaw, isEmergencyDialog)
         }
         const primary = primaryOpt.value
 
@@ -431,7 +538,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
         // the backup. Falling through to `tryBackup(...)` below covers
         // this case correctly.
         if (primary.health === "alive" && isAckOrCancel(msg)) {
-          return DecodeResult.forward(primary.address)
+          return DecodeResult.forward(primary.address, isEmergencyDialog)
         }
         if (primary.health === "alive") {
           // Slice E3: even an "alive" primary may be a respawned pod
@@ -447,7 +554,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
             const nowMs = yield* Clock.currentTimeMillis
             const age = nowMs - firstSeenAtMs
             if (age < freshPodGuardMs) {
-              const promoted = yield* tryBackup(wBakRaw)
+              const promoted = yield* tryBackup(wBakRaw, isEmergencyDialog)
               if (promoted._tag === "forwardBackup") {
                 yield* metrics.recordDecodeForwardPromoted(
                   "unobserved-fresh-pod"
@@ -482,7 +589,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
               )
             }
           }
-          return DecodeResult.forward(primary.address)
+          return DecodeResult.forward(primary.address, isEmergencyDialog)
         }
         if (primary.health === "draining") {
           const since = primary.drainingSince
@@ -491,11 +598,11 @@ export const LoadBalancerStrategyLive: Layer.Layer<
             if (nowMs - since <= drainGraceMs) {
               // Pre-grace: forward to the original primary so in-flight
               // re-INVITE / UPDATE / INFO completes.
-              return DecodeResult.forward(primary.address)
+              return DecodeResult.forward(primary.address, isEmergencyDialog)
             }
           }
           // Post-grace: fall through to the backup.
-          return yield* tryBackup(wBakRaw)
+          return yield* tryBackup(wBakRaw, isEmergencyDialog)
         }
         // Slice E1: `not-ready` is the respawned-pod-mid-ReadyGate state.
         // The worker process is alive but its sidecar Redis is empty / still
@@ -504,7 +611,7 @@ export const LoadBalancerStrategyLive: Layer.Layer<
         // holds the call in `bak:{w_pri}:` and serves the request on the
         // primary's behalf (see docs/replication/call-cache-backup.md §0).
         // primary.health ∈ { "dead", "unknown", "not-ready" }: backup.
-        const promoted = yield* tryBackup(wBakRaw)
+        const promoted = yield* tryBackup(wBakRaw, isEmergencyDialog)
         if (
           primary.health === "not-ready" &&
           promoted._tag === "forwardBackup"

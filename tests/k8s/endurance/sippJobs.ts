@@ -438,22 +438,30 @@ export const nonEmergencyBurstEvent = (opts: {
   readonly artifactDir: string
 }): Effect.Effect<ChaosOutcome, SippDaemonError> =>
   Effect.gen(function* () {
+    // BURST_CAPS / BURST_DURATION_SEC env overrides — used by
+    // the chaos sub-command for dichotomy / breaking-point sweeps
+    // without rebuilding the cluster image.
+    const capsOverride = Number.parseInt(process.env["BURST_CAPS"] ?? "", 10)
+    const durOverride = Number.parseInt(process.env["BURST_DURATION_SEC"] ?? "", 10)
+    const caps = Number.isFinite(capsOverride) && capsOverride > 0 ? capsOverride : BURST_CAPS
+    const durSec =
+      Number.isFinite(durOverride) && durOverride > 0 ? durOverride : BURST_DURATION_SEC
     const tFire = new Date()
     const burstName = `burst-${tFire.getTime()}`
     yield* Effect.logInfo(
-      `chaos[non-emergency-burst] starting sipp burst (${BURST_CAPS} CAPS for ${BURST_DURATION_SEC}s, name=${burstName})`,
+      `chaos[non-emergency-burst] starting sipp burst (${caps} CAPS for ${durSec}s, name=${burstName})`,
     )
     const handle = yield* startSippDaemon({
       namespace: opts.namespace,
       name: burstName.slice(0, 50),
       scenario: "uac-burst-non-emergency.xml",
-      cps: BURST_CAPS,
+      cps: caps,
       artifactDir: opts.artifactDir,
     })
     // Best-effort: even if waitSippRunning fails, the burst still
     // runs (sipp can be Running before the watcher catches it).
     yield* waitSippRunning(opts.namespace, handle.name, 30).pipe(Effect.ignore)
-    yield* Effect.sleep(`${BURST_DURATION_SEC} seconds`).pipe(
+    yield* Effect.sleep(`${durSec} seconds`).pipe(
       Effect.ensuring(handle.stop.pipe(Effect.ignore)),
     )
     const tRecovered = new Date()

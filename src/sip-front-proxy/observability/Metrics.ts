@@ -16,9 +16,14 @@
  *
  * Metric inventory:
  *
- *   sip_messages_total{direction,method_or_status,result}
+ *   sip_messages_total{direction,method_or_status,cseq_method,result}
  *     counter — every inbound and outbound packet the proxy handles.
  *     direction ∈ {inbound, outbound}; result ∈ {forwarded, rejected, dropped}.
+ *     method_or_status carries the SIP method for requests and the
+ *     numeric status code for responses. cseq_method carries the CSeq
+ *     header method — for requests it equals method_or_status; for
+ *     responses it identifies which transaction the response answers
+ *     (e.g. `200`+`INVITE` vs `200`+`BYE` are functionally different).
  *
  *   sip_routing_duration_seconds{strategy,decision}
  *     histogram — wall time spent inside `handleRequestImpl` per inbound
@@ -41,12 +46,16 @@
  *     counter — `hit` / `miss` / `expired_sweep`. The first two come from
  *     `CancelBranchLru.lookup`, the last from the periodic sweep fiber.
  *
- *   sip_active_dialogs_estimate
- *     gauge — best-effort estimate. We back this off the LRU size: it's
- *     not a true dialog counter (the LRU expires entries after the CANCEL
- *     window, ~32 s), so it underestimates long-running dialogs and
- *     overestimates briefly-cancelled ones. Documented as such on the
- *     metric `description`.
+ *   sip_pending_invite_lru_size
+ *     gauge — size of the proxy-local pending-INVITE LRU. Each entry is
+ *     a `(Call-ID, CSeq number) → (target, branch)` mapping kept so a
+ *     matching CANCEL/ACK can be forwarded to the same downstream. TTL
+ *     is the CANCEL window (~32 s), so this gauge has nothing to do
+ *     with the cluster's dialog count — for that, see the B2BUA
+ *     worker's `b2bua_active_dialogs` gauge. Published from both the
+ *     INVITE-remember path (`ProxyCore.handleRequest`) and the sweep
+ *     fiber (`CancelBranchLru`); the latter is what keeps the gauge
+ *     decreasing after traffic stops.
  *
  * Hot-path discipline:
  *   - Every metric update is a single `Metric.update` call. No fiber
@@ -156,9 +165,9 @@ const baseCancelLookup = Metric.counter("sip_cancel_lookup_total", {
   incremental: true,
 })
 
-const activeDialogsEstimate = Metric.gauge("sip_active_dialogs_estimate", {
+const pendingInviteLruSize = Metric.gauge("sip_pending_invite_lru_size", {
   description:
-    "Best-effort active-dialog gauge. Approximated by the CancelBranchLru size — undercounts long-running dialogs (LRU TTL ~32 s) and overcounts briefly-cancelled ones.",
+    "Size of the proxy's pending-INVITE LRU — `(Call-ID, CSeq number) → (target, branch)` entries kept until the CANCEL window (~32 s) elapses. NOT a dialog count; see the worker's `b2bua_active_dialogs` for the dialog gauge.",
 })
 
 // ---------------------------------------------------------------------------
@@ -223,12 +232,15 @@ export interface ProxyMetricsApi {
   /**
    * Record one inbound or outbound message. `methodOrStatus` carries the
    * SIP method (uppercased) for requests and the numeric status code for
-   * responses. We coalesce them into one label dimension to keep the
-   * metric family flat.
+   * responses. `cseqMethod` is the CSeq header method — for requests it
+   * equals `methodOrStatus`; for responses it identifies the request
+   * method the response is answering (so `200`+`INVITE` and `200`+`BYE`
+   * resolve as distinct time series).
    */
   readonly recordMessage: (opts: {
     readonly direction: MessageDirection
     readonly methodOrStatus: string
+    readonly cseqMethod: string
     readonly result: MessageResult
   }) => Effect.Effect<void>
 
@@ -287,8 +299,8 @@ export interface ProxyMetricsApi {
     bucket: FreshPodAgeBucket,
   ) => Effect.Effect<void>
 
-  /** Update the active-dialogs estimate. */
-  readonly setActiveDialogsEstimate: (count: number) => Effect.Effect<void>
+  /** Publish the current size of the pending-INVITE LRU. */
+  readonly setPendingInviteLruSize: (count: number) => Effect.Effect<void>
 }
 
 export class ProxyMetrics extends ServiceMap.Service<ProxyMetrics, ProxyMetricsApi>()(
@@ -319,12 +331,14 @@ function buildApi(): ProxyMetricsApi {
   const recordMessage = (opts: {
     direction: MessageDirection
     methodOrStatus: string
+    cseqMethod: string
     result: MessageResult
   }): Effect.Effect<void> =>
     Metric.update(
       Metric.withAttributes(baseMessages, {
         direction: opts.direction,
         method_or_status: opts.methodOrStatus,
+        cseq_method: opts.cseqMethod,
         result: opts.result,
       }),
       1
@@ -401,8 +415,8 @@ function buildApi(): ProxyMetricsApi {
       1,
     )
 
-  const setActiveDialogsEstimate = (count: number): Effect.Effect<void> =>
-    Metric.update(activeDialogsEstimate, count)
+  const setPendingInviteLruSize = (count: number): Effect.Effect<void> =>
+    Metric.update(pendingInviteLruSize, count)
 
   return {
     recordMessage,
@@ -413,7 +427,7 @@ function buildApi(): ProxyMetricsApi {
     recordCancelLookup,
     recordDecodeForwardPromoted,
     recordFreshPodForward,
-    setActiveDialogsEstimate,
+    setPendingInviteLruSize,
   }
 }
 

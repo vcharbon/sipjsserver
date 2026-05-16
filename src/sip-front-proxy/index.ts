@@ -162,3 +162,21 @@ export {
   type MetricsServerOpts,
   renderPrometheus,
 } from "./observability/MetricsServer.js"
+export {
+  WorkerLoadObserver,
+  type WorkerLoadObserverApi,
+  type WorkerLoadObserverConfigData,
+  type OverloadPayload,
+  type EluBand,
+  type AimdAction,
+  type AimdSnapshot,
+  defaultWorkerLoadObserverConfig,
+} from "./WorkerLoadObserver.js"
+export {
+  ProxySelfGate,
+  type ProxySelfGateApi,
+  type ProxySelfGateConfigData,
+  type ProxySelfGateMetrics,
+  type ProxySelfRejection,
+  defaultProxySelfGateConfig,
+} from "./ProxySelfGate.js"

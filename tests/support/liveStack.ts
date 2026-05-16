@@ -30,6 +30,7 @@ import { EpochCounter } from "../../src/replication/EpochCounter.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
 import { BufferedTerminateWriter } from "../../src/cache/BufferedTerminateWriter.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
+import { LoadSampler } from "../../src/observability/LoadSampler.js"
 import { OverloadController } from "../../src/b2bua/OverloadController.js"
 import { RedisClient } from "../../src/redis/RedisClient.js"
 import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
@@ -87,7 +88,8 @@ export function liveStackLayer(opts: {
 
   const OverloadLayer = OverloadController.layer.pipe(
     Layer.provide(AppConfigLayer),
-    Layer.provide(MetricsLayer)
+    Layer.provide(MetricsLayer),
+    Layer.provide(LoadSampler.liveLayer)
   )
 
   const CallControlLayer = HttpReferenceAdapterLayer.pipe(

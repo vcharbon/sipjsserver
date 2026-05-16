@@ -4,7 +4,7 @@
  *
  * The proxy stamps a `Record-Route` URI of the form:
  *
- *   <sip:proxy:port;w_pri=<id>;w_bak=<id>;v=2;kid=<id>;sig=<base64url>;lr>
+ *   <sip:proxy:port;w_pri=<id>;w_bak=<id>;e=<0|1>;v=3;kid=<id>;sig=<base64url>;lr>
  *
  * (See `LoadBalancer.encodeStickiness` + `ProxyCore.buildRecordRouteValue`.)
  *
@@ -19,8 +19,13 @@
  *   - no Record-Route header present (single-worker / dev / test
  *     without a proxy in front),
  *   - the header is malformed,
- *   - `w_pri` is missing or empty (cookie not v2),
- *   - `v` is present but not "2" (forward-compat reject).
+ *   - `w_pri` is missing or empty,
+ *   - `v` is present but not in the accepted set.
+ *
+ * Accepted versions: "2" and "3". v=3 added `e=<0|1>` for emergency
+ * tracking (slice 7 of the overload rework); B2BUA doesn't read `e`
+ * but tolerates the bumped version so rolling deploys don't lose
+ * topology information across the proxy/worker version boundary.
  *
  * Empty `w_bak` is allowed (single-worker cluster) and surfaces as
  * `bak: ""`. Callers decide whether to skip the dual-write.
@@ -60,10 +65,10 @@ export function parseStickinessCookie(
   const pri = uri.params["w_pri"]
   if (pri === undefined || pri.length === 0) return null
 
-  // v=2 only — earlier versions are rejected (matches the proxy's
-  // decodeStickiness which also rejects mismatched versions).
+  // v=2 (legacy) and v=3 (with emergency flag — slice 7 of overload
+  // rework) accepted. Anything else rejected.
   const version = uri.params["v"]
-  if (version !== undefined && version !== "2") return null
+  if (version !== undefined && version !== "2" && version !== "3") return null
 
   const bak = uri.params["w_bak"] ?? ""
 

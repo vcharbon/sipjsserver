@@ -21,10 +21,11 @@
   },
   "panels": [
     {
-      "id": 1, "type": "stat", "title": "Active dialogs (proxy estimate)",
+      "id": 1, "type": "stat", "title": "Active dialogs (B2BUA)",
+      "description": "Authoritative dialog count — sum of `b2bua_active_dialogs` across worker pods (in-memory `callsMap` size). The proxy's `sip_pending_invite_lru_size` is a separate, ~32 s pending-INVITE cache and is NOT a dialog count.",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum(sip_active_dialogs_estimate)", "refId": "A" }],
+      "targets": [{ "expr": "sum(b2bua_active_dialogs)", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "none" } }
     },
     {
@@ -59,10 +60,11 @@
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
     {
-      "id": 6, "type": "timeseries", "title": "SIP messages / sec by direction × result (proxy)",
+      "id": 6, "type": "timeseries", "title": "SIP messages / sec by method × CSeq method (top 50)",
+      "description": "Top 50 series of (method_or_status, cseq_method). For responses the CSeq method identifies the request the response is answering — `200`+`INVITE` is functionally different from `200`+`BYE`.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sum by (direction, result) (rate(sip_messages_total[1m]))", "refId": "A", "legendFormat": "{{direction}} / {{result}}" }],
+      "targets": [{ "expr": "topk(50, sum by (method_or_status, cseq_method) (rate(sip_messages_total[1m])))", "refId": "A", "legendFormat": "{{method_or_status}} / {{cseq_method}}" }],
       "fieldConfig": { "defaults": { "unit": "cps" } }
     },
     {

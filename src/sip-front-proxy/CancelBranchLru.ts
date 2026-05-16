@@ -148,6 +148,7 @@ function makeCancelBranchLru(opts: {
             expiresAtMs: nowMs + ttlMs,
           })
         )
+        yield* metrics.setPendingInviteLruSize(MutableHashMap.size(table))
       })
 
     const lookup = (key: string) =>
@@ -185,6 +186,10 @@ function makeCancelBranchLru(opts: {
             for (let i = 0; i < expiredCount; i++) {
               yield* metrics.recordCancelLookup("expired_sweep")
             }
+            // Republish gauge so it drops back to zero after traffic
+            // stops — `remember` is the only other writer and won't fire
+            // until the next INVITE flows.
+            yield* metrics.setPendingInviteLruSize(MutableHashMap.size(table))
           }
         })
       )

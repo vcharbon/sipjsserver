@@ -57,6 +57,7 @@ import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { handlers, B2buaCoreLayer } from "./b2bua/B2buaCore.js"
 import { DrainingState } from "./b2bua/DrainingState.js"
 import { OverloadController } from "./b2bua/OverloadController.js"
+import { LoadSampler } from "./observability/LoadSampler.js"
 import { MetricsRegistry } from "./observability/MetricsRegistry.js"
 import { runRedisCallKeyCountScanner } from "./observability/RedisCallKeyCountScanner.js"
 
@@ -145,7 +146,8 @@ const CdrLayer = BufferedCdrLayer.pipe(
 
 const OverloadControllerLayer = OverloadController.layer.pipe(
   Layer.provide(AppConfigLayer),
-  Layer.provide(MetricsRegistryLayer)
+  Layer.provide(MetricsRegistryLayer),
+  Layer.provide(LoadSampler.liveLayer)
 )
 
 const CallControlLayer = HttpReferenceAdapterLayer.pipe(

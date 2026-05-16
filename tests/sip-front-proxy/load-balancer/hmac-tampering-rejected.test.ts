@@ -99,12 +99,14 @@ describe("sip-front-proxy/load-balancer — HMAC tampering rejected", () => {
         (h) => h.name.toLowerCase() === "record-route"
       )
       expect(rrHeader).toBeDefined()
-      // sanity: RR carries the v2 cookie
+      // sanity: RR carries the v3 cookie (slice 7 of overload rework
+      // added the `e=<0|1>` emergency flag and bumped to v=3).
       expect(rrHeader!.value).toMatch(/sig=/)
       expect(rrHeader!.value).toMatch(/kid=/)
       expect(rrHeader!.value).toMatch(/;w_pri=/)
       expect(rrHeader!.value).toMatch(/;w_bak=/)
-      expect(rrHeader!.value).toMatch(/v=2/)
+      expect(rrHeader!.value).toMatch(/;e=0/)
+      expect(rrHeader!.value).toMatch(/v=3/)
 
       // ── 2. 200 OK back through the proxy → Alice ─────────────────────
       const ok = Buffer.from(

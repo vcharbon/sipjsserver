@@ -120,6 +120,12 @@ export const AppConfigData = Schema.Struct({
   overloadRoutingNewCallSoftMs: Schema.Int,
   /** Tier 3 routing-API new-call latency hard threshold (ms). */
   overloadRoutingNewCallHardMs: Schema.Int,
+  /**
+   * Panic threshold (0..1) on the worker's own EWMA-smoothed ELU.
+   * Above this, non-emergency INVITEs are 503'd locally regardless of
+   * the LB's AIMD cap. Slice 7 of the overload rework.
+   */
+  overloadPanicEluThreshold: Schema.Number,
   /** Base value for Retry-After header on 503 responses (seconds). */
   retryAfterBaseSec: Schema.Int,
   /** Random jitter added to Retry-After (seconds). */
@@ -379,6 +385,7 @@ function readConfigFromEnv(): AppConfigData {
     overloadLoopLagHardMs: parseInt(envOrDefault("OVERLOAD_LOOP_LAG_HARD_MS", "200"), 10),
     overloadRoutingNewCallSoftMs: parseInt(envOrDefault("OVERLOAD_ROUTING_NEWCALL_SOFT_MS", "200"), 10),
     overloadRoutingNewCallHardMs: parseInt(envOrDefault("OVERLOAD_ROUTING_NEWCALL_HARD_MS", "1000"), 10),
+    overloadPanicEluThreshold: Number.parseFloat(envOrDefault("OVERLOAD_PANIC_ELU_THRESHOLD", "0.75")),
     retryAfterBaseSec: parseInt(envOrDefault("RETRY_AFTER_BASE_SEC", "5"), 10),
     retryAfterJitterSec: parseInt(envOrDefault("RETRY_AFTER_JITTER_SEC", "5"), 10),
     emergencyListenerEnabled: envOrDefault("EMERGENCY_LISTENER_ENABLED", "false") === "true",

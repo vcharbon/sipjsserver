@@ -204,6 +204,7 @@ function defaultHybridAppConfig(): AppConfigData {
     overloadLoopLagHardMs: 200,
     overloadRoutingNewCallSoftMs: 200,
     overloadRoutingNewCallHardMs: 1000,
+    overloadPanicEluThreshold: 0.75,
     retryAfterBaseSec: 5,
     retryAfterJitterSec: 5,
     emergencyListenerEnabled: false,

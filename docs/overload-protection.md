@@ -1,259 +1,309 @@
 # Overload Protection & Emergency Priority
 
-Reference for the three-tier overload-protection model implemented in this
-B2BUA. Companion to [b2bua-sip-headers.md](b2bua-sip-headers.md).
+Reference for the five-gate overload-protection model. Replaces the
+2026-04 three-tier model (which described a cluster-mode Dispatcher
+that no longer exists post-ADR-0005). Companion to
+[b2bua-sip-headers.md](b2bua-sip-headers.md) and [ADR-0006](adr/0006-overload-five-gate-and-aimd.md).
 
-## Goals
+## Goal
 
-Under traffic spikes, shed *new* call attempts as early and as cheaply as
-possible so already-admitted calls keep flowing without packet loss or
-retransmit-induced amplification. Emergency calls
-(`Resource-Priority: esnet.0|wps.0|q735.0`) are never dropped at any tier.
+Under traffic spikes, shed *new* call attempts as early and as cheaply
+as possible so already-admitted calls keep flowing without packet loss
+or retransmit-induced amplification. Emergency calls
+(`Resource-Priority: esnet.0|wps.0|q735.0`) are never dropped at any
+gate.
 
-## Three-tier model
-
-```
-UDP recv ─► Tier 1 (UdpTransport, pre-parse byte brake)
-         │   │
-         │   └─► stateless 503 (templated, no parse, no txn, no fiber)
-         │
-         ▼
-    bounded UDP queue ─► dispatcher (cluster mode only)
-                         │
-                         ▼
-                    Tier 2 (Dispatcher, per-worker class queues)
-                         │   ├─► emergency  (drained 1st, bound 500)
-                         │   ├─► inDialog   (drained 2nd, bound 400)
-                         │   └─► normalNewCall (drained last, bound 100)
-                         │
-                         ▼
-                    worker IPC ─► TransactionLayer
-                                       │
-                                       ▼
-                                  Tier 3 (OverloadController)
-                                  token bucket + max-of-fractions shedder
-                                       │
-                                       ▼
-                                  SipRouter ─► handlers ─► CallLimiter
-```
-
-### Tier 1 — pre-parse emergency brake
-
-Lives in [src/sip/UdpTransport.ts](../src/sip/UdpTransport.ts). Activates
-when the bounded recv queue depth crosses
-`UDP_QUEUE_TIER1_THRESHOLD_PCT` of `UDP_QUEUE_MAX`. The recv callback runs
-two cheap byte-level checks (`isInviteRequestBuffer`,
-`bufferHasEmergencyMarker`) and templates a stateless 503 directly from
-the inbound buffer for new, non-emergency INVITEs:
-
-- copies Via / From / To / Call-ID / CSeq verbatim from the inbound buffer
-- does **not** add a To-tag (orphan ACK is deliberately absorbed)
-- sets `Reason: SIP;cause=503;text="overload"` and a jittered `Retry-After`
-- `Content-Length: 0`
-
-No JsSIP parse, no transaction, no fiber. Emergency INVITEs, in-dialog
-traffic, ACKs, BYEs, and responses pass through. When the queue is fully
-saturated even after the brake, the recv callback tail-drops the packet
-and increments a counter.
-
-### Tier 2 — class-based per-worker queues (cluster mode)
-
-Lives in [src/cluster/Dispatcher.ts](../src/cluster/Dispatcher.ts). Each
-worker has three bounded queues drained in strict priority order:
-
-| Class           | Bound (default) | Drop policy on overflow |
-|-----------------|-----------------|-------------------------|
-| `emergency`     | 500             | drop oldest + page |
-| `inDialog`      | 400             | drop oldest + mark worker overloaded + start kill timer |
-| `normalNewCall` | 100             | drop newest + dispatcher sends stateless 503 directly |
-
-Classification is a pure byte-scan, no SIP parse:
-
-1. `bufferHasEmergencyMarker` (`;emerg=1` / `;em=1` / `Resource-Priority`) → `emergency`
-2. `isInviteRequestBuffer` && **no** To-tag → `normalNewCall`
-3. `isInviteRequestBuffer` && To-tag → `inDialog`
-4. else → `inDialog`
-
-When a worker's `inDialog` queue stays full continuously for
-`WORKER_INDIALOG_FULL_KILL_AFTER_MS` (default 60s), the dispatcher sends
-SIGTERM and the cluster respawns the worker. While in inDialog-full mode,
-the dispatcher pre-emptively 503s every new call attempt routed to that
-worker.
-
-### Tier 3 — token bucket + adaptive shedder
-
-Lives in [src/b2bua/OverloadController.ts](../src/b2bua/OverloadController.ts)
-and is invoked from
-[src/sip/TransactionLayer.ts](../src/sip/TransactionLayer.ts) before any
-INVITE server-transaction allocation. Algorithm:
+## The five gates
 
 ```
-admit(req):
-  if req.emergency:
-    bucket.consumeForced()      # bucket can go negative
-    return ADMIT
-  if !bucket.tryConsume():
-    return REJECT_503 reason=bucket_empty
-  p = max(
-    fraction(loop_lag_ewma_ms,        soft=50,  hard=200),
-    fraction(active_calls,            soft=80%, hard=100% of CALL_LIMIT),
-    fraction(inDialog_queue_depth,    soft=50%, hard=90% of bound),
-    fraction(routingApi_newCall_p95,  soft=200, hard=1000),
-  )
-  return random() < p ? REJECT_503 reason=shedder : ADMIT
+external new-dialog non-emergency INVITE
+        │
+        ▼
+  Gate 1: UDP queue threshold (Tier-1 brake, byte-scan)
+        │   ──► stateless 503 (template, no parse, no fiber)
+        │
+        ▼
+  Gate 2: Proxy-self ELU + CPS bucket  (slice 6 — ProxySelfGate)
+        │   ──► stateless 503 reason=proxy_overload_{elu|cps}
+        │
+        ▼
+  Gate 3: Candidate filter — drop workers in above_critical band
+        │   ──► NoTargetAvailable when set is empty
+        │
+        ▼
+  Gate 4: Per-(LB, worker) AIMD bucket (WorkerLoadObserver)
+        │   ──► RateCapExhausted ──► stateless 503 reason=rate_cap_exhausted
+        │
+        ▼
+  Gate 5: Worker-side panic backstop  (OverloadController)
+        │   ──► 503 reason=panic_elu  (or bucket_empty for CPS hard cap)
+        │
+        ▼
+   SipRouter → handlers → CallLimiter
 ```
 
-- Token bucket: `CPS_BUCKET_SIZE` capacity, `CPS_BUCKET_RATE` tokens/sec.
-- Loop-lag is sampled by a `setInterval`-driven EWMA (independent of
-  `TestClock` so the host runtime drives it directly).
-- Routing-API latency is fed by `CallControlClient.observeRoutingApiLatency`
-  with `new_call` and `in_dialog` stages tracked separately.
+| Traffic class | Gates that apply |
+|---|---|
+| External, new-dialog, non-emergency INVITE | 1 → 2 → 3 → 4 → 5 |
+| Emergency INVITE (Resource-Priority matches) | 1 only (defense-in-depth at UDP layer) |
+| In-dialog request (re-INVITE, BYE, ACK, …) | 1 only |
+| Worker-originated INVITE (B-leg via proxy) | 1 only — gates 2-5 bypassed |
+| REGISTER, OPTIONS, responses | 1 only |
 
-### Emergency classification & propagation
-
-[src/b2bua/InitialInviteHandler.ts](../src/b2bua/InitialInviteHandler.ts)
-detects `Resource-Priority: esnet.0|wps.0|q735.0` on the initial INVITE
-and sets `call.emergency = true` on the Call model.
-[src/sip/SipRouter.ts](../src/sip/SipRouter.ts) then stamps `;emerg=1` on
-the Contact URI and `;em=1` on the Via custom params of every outbound
-message for that call. Subsequent in-dialog packets carry these markers
-into Tier 1 / Tier 2 byte-scans, so dispatcher and UDP layer can recognise
-emergency dialogs without state.
-
-### Orphan ACK absorption
-
-[src/sip/TransactionLayer.ts](../src/sip/TransactionLayer.ts) drops ACKs
-that match neither a server INVITE transaction nor an existing dialog
-rather than emitting them upstream. Required so that the ACK responses to
-templated stateless 503s never reach SipRouter (which would reject them).
-
-### Order of gates for a new INVITE
+## The signal flow
 
 ```
-Tier 1 (UDP queue threshold + byte brake)
-  └─► Tier 2 (Dispatcher class queue)
-        └─► Tier 3 (OverloadController bucket + shedder)
-              └─► routing API (CallControlClient.newCall)
-                    └─► CallLimiter (per-customer windowed counter)
+                       ┌──────────────────────────────────────────────────────┐
+                       │ worker                                               │
+                       │                                                      │
+                       │  LoadSampler.elu/gcFraction (perf_hooks)             │
+                       │              │                                       │
+                       │              ▼                                       │
+                       │  OverloadController                                  │
+                       │    eluEwma, gcFractionEwma, nonEmergencyAdmittedTotal│
+                       │    xOverloadHeaderValue()                            │
+                       │              │                                       │
+                       └──────────────│───────────────────────────────────────┘
+                                      │
+                  X-Overload: v=1;    │
+                  elu=…; gc=…; adm=…  │   stamped on:
+                                      │     - every OPTIONS 200/503 reply
+                                      │     - every 503 reply to non-emergency INVITE
+                                      ▼
+                       ┌──────────────────────────────────────────────────────┐
+                       │ LB (front-proxy)                                     │
+                       │                                                      │
+                       │  HealthProbe                                         │
+                       │    parses X-Overload from OPTIONS replies            │
+                       │    → applyPayload(workerId, payload, nowMs)          │
+                       │              │                                       │
+                       │              ▼                                       │
+                       │  WorkerLoadObserver                                  │
+                       │    per-worker AIMD state machine                     │
+                       │    bandFor(workerId), tryConsumeFor(workerId)        │
+                       │              │                                       │
+                       │              ▼                                       │
+                       │  LoadBalancerStrategy.selectForNewDialog             │
+                       │    filter band==above_critical (non-emergency only)  │
+                       │    rendezvous-select among remaining                 │
+                       │    bucket consume (non-emergency only)               │
+                       │              │                                       │
+                       └──────────────│───────────────────────────────────────┘
+                                      ▼
+                              forwarded INVITE
 ```
 
-Emergency calls bypass Tier 1 reject, never see a Tier 3 reject, and the
-HTTP backend is expected to omit `call_limiter` for them. The SIP stack
-itself always applies whatever limiters the backend returns — emergency
-exemption from CallLimiter is a backend policy, not a SIP-stack one.
+## Worker side
 
-### Optional emergency dual UDP listener
+### `LoadSampler` ([src/observability/LoadSampler.ts](../src/observability/LoadSampler.ts))
 
-Controlled by `EMERGENCY_LISTENER_ENABLED` /
-`EMERGENCY_LISTENER_HOST` / `EMERGENCY_LISTENER_PORT`. When enabled, a
-second UDP socket binds on the configured loopback host:port. Admitted
-emergency calls publish their b-leg Contact / Via on this socket so that
-carrier-side in-dialog traffic for emergency dialogs lands in a physically
-isolated kernel buffer. Off by default. **Implementation deferred** —
-config flags are wired through but the second socket is not yet bound.
+Two readings, each `0..1`, computed since the previous read:
+
+- `elu()` — Node `perf_hooks.performance.eventLoopUtilization()` delta. Includes
+  major GC pauses ("loop is busy"). Production layer uses `perf_hooks`; the
+  simulated layer is ref-backed for fake-clock tests.
+- `gcFraction()` — fraction of wall time spent in GC pauses
+  (`PerformanceObserver type=gc`).
+
+The sampler is sync. EWMA smoothing is done by the consumer
+(`OverloadController`), not the sampler — keeps the test fixture
+simple ("inject 0.85 directly, no convergence wait").
+
+### `OverloadController` ([src/b2bua/OverloadController.ts](../src/b2bua/OverloadController.ts))
+
+Roles:
+1. **Publisher.** EWMA-smooths the LoadSampler's readings and the
+   `nonEmergencyAdmittedTotal` counter, exposes
+   `xOverloadHeaderValue()` for OPTIONS / 503 stamping.
+2. **Panic backstop.** Local 503 only when ELU EWMA crosses
+   `OVERLOAD_PANIC_ELU_THRESHOLD` (default `0.98`) — well above the LB's
+   `OVERLOAD_ELU_CRITICAL`, so it almost never fires in normal
+   operation. Catches "LB absent / misconfigured / itself overloaded".
+3. **CPS hard ceiling.** Pre-existing `CPS_BUCKET_SIZE` /
+   `CPS_BUCKET_RATE` token bucket — keeps the worker from ever
+   exceeding a configured CPS regardless of LB decisions.
+
+What was removed in slice 7 of the rework:
+- The probabilistic shedder (`Math.random() < p`). Gradual response is
+  the LB AIMD's job.
+- The `inDialogQueueDepth` signal — no longer meaningful post-ADR-0005
+  (per-call dispatch removed the global in-dialog queue).
+- The `fraction*` shedding signals, `shedProbability` metric.
+
+What was kept:
+- `setActiveCalls`, `setInDialogQueueDepth` as no-op setters (backwards
+  compat with callers that still pass a gauge).
+- `observeRoutingApiLatency` for the routing-API latency metric (used
+  by dashboards, not by admission).
+
+### `X-Overload` wire format
+
+```
+X-Overload: v=1; elu=0.852; gc=0.310; adm=12345
+```
+
+| Param | Semantics |
+|---|---|
+| `v` | Schema version. `1` is the only defined version. Future-extensible. LB silently ignores unknown versions (treats as legacy = `notePayloadMissing`). |
+| `elu` | EWMA-smoothed Event Loop Utilization (0..1), 3 decimal places. |
+| `gc` | EWMA-smoothed fraction of wall time spent in GC pauses (0..1), 3 decimal places. Day-1 LB records as a metric only; future bands can switch to `effective_elu = max(0, elu - gc)`. |
+| `adm` | Monotonic counter of non-emergency new-dialog INVITEs admitted since process start. Worker restart resets the counter; the LB detects the decrease and re-baselines (`workerTreatedRateCps := 0` for that tick). |
+
+Stamped on:
+- Every OPTIONS 200 reply ([src/sip/SipRouter.ts](../src/sip/SipRouter.ts)).
+- Every OPTIONS 503 reply ([src/sip/SipRouter.ts](../src/sip/SipRouter.ts)).
+- (Future slice) Every 503 reply to a non-emergency INVITE — collapses
+  the 1 s OPTIONS lag for the "I just got overloaded" signal.
+
+## LB side
+
+### `WorkerLoadObserver` ([src/sip-front-proxy/WorkerLoadObserver.ts](../src/sip-front-proxy/WorkerLoadObserver.ts))
+
+Per-(LB, worker) AIMD state machine. One bucket per worker, fed by
+`HealthProbe` from `X-Overload` payloads.
+
+**Band derivation (with hysteresis):**
+
+```
+elu > eluCritical                  → above_critical   (filter out)
+elu > eluHard                      → hard_to_critical (decrease)
+elu > eluSoft                      → soft_to_hard     (hold)
+elu ≤ eluSoft                      → below_soft       (increase if not in cooldown)
+```
+
+Boundaries are hysteresis-aware: once **in** the higher band, the
+worker must drop below `enter − bandHysteresis` before transitioning
+out. Prevents flap when `elu` oscillates around a boundary.
+
+**AIMD action per OPTIONS tick:**
+
+```
+above_critical:       cap ← floor; arm cooldown   (filter applies in selectForNewDialog)
+hard_to_critical:     cap ← max(floor, cap × decreaseFactor); arm cooldown
+soft_to_hard:         hold (deadband)
+below_soft:           if cooldown elapsed: cap ← min(ceiling, cap + increaseStep)
+```
+
+**Stale-payload sweep:** if a worker's last payload is older than
+`payloadStaleMs` (default 5 s), `sweepStale` decreases its cap
+conservatively. Acts as a backstop when OPTIONS replies fail to
+arrive (network partition / worker freeze).
+
+### Selection at the LB
+
+```
+selectForNewDialog(msg):
+  isEmergency = readResourcePriority(msg)
+  candidates = snapshot.alive
+  if !isEmergency: candidates = candidates.filter(bandFor(w) !== above_critical)
+  if candidates.empty: fail NoTargetAvailable
+  winner = rendezvousSelect(callId, candidates)
+  if isEmergency: recordOwnAdmitted(winner); return winner
+  if !tryConsumeFor(winner): fail RateCapExhausted(retryAfterSec)
+  recordOwnAdmitted(winner)
+  return winner
+```
+
+Emergency INVITEs bypass both the CRITICAL filter and the bucket. The
+proxy core converts `NoTargetAvailable` → `503 Reason=no_target_available`
+and `RateCapExhausted` → `503 Reason=rate_cap_exhausted` with the
+suggested Retry-After.
+
+### Stickiness cookie (`w_pri` / `w_bak`) is ELU-agnostic
+
+The backup ordinal stamped in the Record-Route cookie is the
+second-best HRW winner among the alive set — **no ELU filter applied
+at encode time**. Rationale (locked during the design grilling):
+
+- The backup will normally do 0 work for this call; current CPU at
+  encode time has no bearing on its load at fail-over time, which may
+  be hours later.
+- "Overload + half the fleet dies" is a chaos event already covered by
+  the CRITICAL filter on new-dialog selection: a backup that takes
+  on a wave of decoded-cookie traffic and crosses CRITICAL is
+  automatically stripped from the new-dialog candidate set,
+  redistributing further work to whoever has headroom.
+
+## Proxy-self gate ([src/sip-front-proxy/ProxySelfGate.ts](../src/sip-front-proxy/ProxySelfGate.ts))
+
+The front-proxy is a single Node process; under flood it saturates
+before any worker sees the traffic. The `ProxySelfGate` gates external
+new-dialog non-emergency INVITEs on two checks:
+
+```
+if proxy_elu_ewma > PROXY_ELU_CRITICAL: reject proxy_overload_elu
+elif !cpsBucket.tryConsume(): reject proxy_overload_cps
+```
+
+Both checks are binary (no AIMD) — the proxy's ELU is its own; there's
+no second party to converge with.
+
+Classification of "external" relies on
+`registry.lookupByAddress(srcAddr)`: a packet whose source IP:port
+matches a registered worker is **internal** and bypasses the gate.
+Rejecting internal traffic would just bounce the worker's B-leg
+attempt — added load, not shed load.
+
+Emergency INVITEs also bypass the gate (`isEmergencyRequest(req)`
+matches the same RPH tokens the worker uses).
 
 ## Configuration
 
-| Env | Default | Purpose |
+| Knob | Default | Effect |
 |---|---|---|
+| **Worker side** | | |
+| `OVERLOAD_PANIC_ELU_THRESHOLD` | `0.98` | Worker panic-503 trigger |
+| `CPS_BUCKET_SIZE` | 1000 | Worker CPS hard ceiling (capacity) |
+| `CPS_BUCKET_RATE` | 500 | Worker CPS hard ceiling (rate) |
 | `UDP_QUEUE_MAX` | 100 | Bounded UDP recv queue |
 | `UDP_QUEUE_TIER1_THRESHOLD_PCT` | 70 | Tier 1 brake activation |
-| `WORKER_QUEUE_EMERGENCY_MAX` | 500 | Per-worker emergency class queue |
-| `WORKER_QUEUE_INDIALOG_MAX` | 400 | Per-worker in-dialog class queue |
-| `WORKER_QUEUE_NEWCALL_MAX` | 100 | Per-worker normal new-call class queue |
-| `WORKER_INDIALOG_FULL_KILL_AFTER_MS` | 60000 | Worker-kill escalation timer |
-| `CPS_BUCKET_SIZE` | 1000 | Token bucket capacity |
-| `CPS_BUCKET_RATE` | 500 | Token refill rate (tokens/sec) |
-| `OVERLOAD_LOOP_LAG_SOFT_MS` / `_HARD_MS` | 50 / 200 | Tier 3 loop-lag thresholds |
-| `OVERLOAD_ROUTING_NEWCALL_SOFT_MS` / `_HARD_MS` | 200 / 1000 | Backend latency thresholds |
-| `RETRY_AFTER_BASE_SEC` / `_JITTER_SEC` | 5 / 5 | 503 `Retry-After` value |
-| `EMERGENCY_LISTENER_ENABLED` | false | b-leg dual UDP socket (deferred) |
-| `EMERGENCY_LISTENER_HOST` / `_PORT` | 127.0.0.1 / 5070 | Emergency listener bind |
+| **LB-AIMD side** (parameterised at layer-build via `WorkerLoadObserverConfigData`) | | |
+| `eluSoft` | `0.60` | AIMD increase enabled below |
+| `eluHard` | `0.80` | AIMD multiplicative decrease above |
+| `eluCritical` | `0.95` | Worker filtered out of new-dialog set |
+| `bandHysteresis` | `0.02` | Exit threshold = enter − h |
+| `aimdIncreaseStepCps` | `+5` | Additive increase per OPTIONS tick |
+| `aimdDecreaseFactor` | `0.75` | Multiplicative decrease (×0.75) |
+| `aimdCooldownTicks` | `3` | No increases for N ticks post-decrease |
+| `capInitialCps` | `100` | Fresh worker's starting cap |
+| `capFloorCps` | `1` | Cap never below |
+| `capCeilingCps` | `10000` | Cap never above |
+| `payloadStaleMs` | `5000` | Stale-payload sweep threshold |
+| `optionsIntervalMs` | `1000` | Cooldown clock unit |
+| **Proxy-self gate** | | |
+| `ProxySelfGate.eluCritical` | `0.95` | Proxy-self 503 trigger |
+| `ProxySelfGate.cpsBucketSize` | `1000` | Proxy external new-dialog CPS cap |
+| `ProxySelfGate.cpsBucketRate` | `500` | Proxy CPS refill rate |
+
+Every knob is live-tunable in principle (no constants are hardcoded
+in admission paths); production currently bakes defaults at layer
+build. Wire as AppConfig / env in the next operations push when
+operator data motivates it.
 
 ## Observability
 
-Two complementary export surfaces, both backed by
-[src/observability/MetricsRegistry.ts](../src/observability/MetricsRegistry.ts).
-Each subsystem (`UdpTransport`, `OverloadController`, `Dispatcher`)
-publishes its plain-object metric snapshot into the registry on layer
-init; the StatusServer reads from the registry on every request.
+`b2bua_overload_*` (worker), `sip_proxy_worker_*` (LB-AIMD),
+`sip_proxy_self_*` (proxy gate), and the existing
+`b2bua_dispatch_worker_*` queue metrics together feed the
+[overload-protection Grafana dashboard](../deploy/observability/stack/grafana/dashboards/overload-protection.json).
 
-### `GET /status`
-
-JSON. Adds an `overload` block alongside the existing `concurrent`/`total`/
-`uptimeMs` fields. Subfields are `null` when the corresponding subsystem is
-not running in this process (e.g. cluster main has no `tier3`; workers have
-no `udp` / `worker`). Sipp drivers poll at 1Hz and post-process to CSV.
-
-```json
-{
-  "ok": true,
-  "concurrent": 42,
-  "total": 1234,
-  "uptimeMs": 567890,
-  "overload": {
-    "udp": {
-      "queue_depth": 12,
-      "queue_max": 100,
-      "drops_total": { "tier1_brake": 0, "tail_drop": 0 },
-      "tier1_503_sent_total": 0
-    },
-    "worker": {
-      "queue_depth": { "emergency": 0, "inDialog": 5, "normalNewCall": 2 },
-      "queue_drops_total": { "emergency": 0, "inDialog": 0, "normalNewCall": 0 },
-      "dispatcher_503_sent_total": 0,
-      "kill_total": 0
-    },
-    "tier3": {
-      "admit_total": 12345,
-      "reject_total": { "bucket_empty": 0, "shedder": 0 },
-      "shed_probability": 0.0,
-      "token_bucket_level": 987,
-      "loop_lag_ms_p95": 8.4,
-      "routing_api_p95_ms": { "new_call": 142, "in_dialog": 23 }
-    }
-  }
-}
-```
-
-### `GET /metrics`
-
-Prometheus text-format. Same data as `/status.overload`, with stable metric
-names:
-
-```
-b2bua_udp_queue_depth
-b2bua_udp_queue_max
-b2bua_udp_drops_total{reason="tier1_brake"}
-b2bua_udp_drops_total{reason="tail_drop"}
-b2bua_tier1_503_sent_total
-b2bua_worker_queue_depth{class="emergency|inDialog|normalNewCall"}
-b2bua_worker_queue_drops_total{class="..."}
-b2bua_dispatcher_503_sent_total
-b2bua_worker_kill_total
-b2bua_tier3_admit_total
-b2bua_tier3_reject_total{reason="bucket_empty|shedder"}
-b2bua_tier3_shed_probability
-b2bua_tier3_token_bucket_level
-b2bua_loop_lag_ms_p95
-b2bua_routing_api_p95_ms{stage="new_call|in_dialog"}
-```
-
-All counters are monotonic; gauges reflect instantaneous values.
+The chaos cockpit's lead panel is the **rejection-by-gate stacked
+time series**, which shows where in the chain each shed INVITE was
+dropped — operator can read the gate that fired without grepping
+logs.
 
 ## Verification
 
-Verification is sipp-driven as a follow-up task. The existing `npm test`
-suite (unit + e2e) is the regression gate. The byte-scan classifier and
-stateless 503 builder are too combinatorial for meaningful unit tests, and
-the controller's behaviour under load is only meaningful end-to-end via
-sipp. Planned scenarios:
-
-| Scenario | Setup | Pass criteria |
+| Test | Coverage | Where |
 |---|---|---|
-| `tier1-brake.sipp` | 2000 cps INVITE flood, 30s | RSS bounded; `udp.drops_total.tier1_brake` increments; `tier1_503_sent_total` increments |
-| `protect-indialog.sipp` | 100 established calls + parallel 1500 cps new-INVITE flood | Zero retransmissions on established calls; new INVITEs receive 503s |
-| `emergency-priority.sipp` | Saturate `normalNewCall` + interleave Resource-Priority emergency INVITEs | 100% emergency admitted; normals 503'd by dispatcher |
-| `escalation-ladder.sipp` | Inject artificial slow handler so `inDialog` fills | Dispatcher transitions to "503 all new"; `worker.kill_total` increments after 60s |
-| `token-bucket-recovery.sipp` | Drain bucket > 500 cps; cut load; observe recovery | 503s carry `Retry-After`; `tier3.token_bucket_level` recovers; admission resumes |
-| `dual-listener.sipp` *(optional)* | Emergency b-leg traffic on second port; flood main port | Emergency in-dialog packets unaffected by main-port flood |
+| `WorkerLoadObserver.test.ts` | AIMD math (bands, hysteresis, cooldown, decrease/increase, floor/ceiling, stale sweep) | unit |
+| `OverloadController-xoverload.test.ts` | Worker-side X-Overload publication | unit |
+| `LoadSampler.test.ts` | Sampler service shape (production + simulated) | unit |
+| `selectForNewDialog-overload.test.ts` | LB integration (emergency bypass, CRITICAL filter, RateCapExhausted) | integration |
+| `non-emergency-burst` chaos event in K8s endurance | End-to-end acceptance under sipp load | live |
+
+The K8s endurance acceptance rule lives in
+[tests/k8s/endurance/expectedImpact.ts](../tests/k8s/endurance/expectedImpact.ts)
+under `non-emergency-burst`: emergency baseline streams MUST stay
+below 2% failure rate during the burst, burst stream MUST be ≥ 50%
+rejected (shed).

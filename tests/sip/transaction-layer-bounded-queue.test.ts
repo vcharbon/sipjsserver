@@ -27,6 +27,7 @@ import { Effect, Fiber, Layer, Queue, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
+import { simulatedLayer as loadSamplerSimulatedLayer } from "../../src/observability/LoadSampler.js"
 import { OverloadController } from "../../src/b2bua/OverloadController.js"
 import { SignalingNetwork, type UdpEndpoint } from "../../src/sip/SignalingNetwork.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
@@ -47,8 +48,12 @@ function makeConfig(): AppConfigData {
 const stackLayer = (() => {
   const Network = SignalingNetwork.simulated({ transitDelayMs: 1 })
   const AppCfg = Layer.succeed(AppConfig, makeConfig())
-  const Leaves = Layer.mergeAll(Network, MetricsRegistry.layer, SipParser.layer)
-    .pipe(Layer.provideMerge(AppCfg))
+  const Leaves = Layer.mergeAll(
+    Network,
+    MetricsRegistry.layer,
+    SipParser.layer,
+    loadSamplerSimulatedLayer(),
+  ).pipe(Layer.provideMerge(AppCfg))
   const Mid = Layer.mergeAll(UdpTransport.layer, OverloadController.layer)
     .pipe(Layer.provideMerge(Leaves))
   return TransactionLayer.layer.pipe(Layer.provideMerge(Mid))

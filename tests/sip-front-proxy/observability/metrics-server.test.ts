@@ -32,6 +32,7 @@ describe("sip-front-proxy/observability — MetricsServer", () => {
       yield* metrics.recordMessage({
         direction: "inbound",
         methodOrStatus: "INVITE",
+        cseqMethod: "INVITE",
         result: "forwarded",
       })
       yield* metrics.recordRoutingDecision({

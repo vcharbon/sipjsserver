@@ -25,13 +25,14 @@
 import { Effect, Layer, ServiceMap } from "effect"
 import { PerformanceObserver, constants as perfConstants } from "node:perf_hooks"
 import { AppConfig } from "../config/AppConfig.js"
+import { LoadSampler } from "../observability/LoadSampler.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-export type AdmitReason = "bucket_empty" | "shedder"
+export type AdmitReason = "bucket_empty" | "shedder" | "panic_elu"
 
 export interface AdmitDecision {
   readonly admit: boolean
@@ -61,7 +62,7 @@ export interface GcMetricsSnapshot {
 
 export interface OverloadControllerMetrics {
   admitTotal: number
-  rejectTotal: { bucket_empty: number; shedder: number }
+  rejectTotal: { bucket_empty: number; shedder: number; panic_elu: number }
   shedProbability: number
   tokenBucketLevel: number
   loopLagMsP95: number
@@ -75,22 +76,21 @@ export interface OverloadControllerMetrics {
   tokenBucketRatio: number
   /** GC pressure metrics. */
   gc: GcMetricsSnapshot
+  /** EWMA-smoothed Event Loop Utilization, the value published on X-Overload. */
+  eluEwma: number
+  /** EWMA-smoothed GC pause fraction, the value published on X-Overload. */
+  gcFractionEwma: number
+  /** Monotonic count of non-emergency new-dialog INVITEs admitted by this worker. */
+  nonEmergencyAdmittedTotal: number
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Linear ramp from 0 (at or below `soft`) to 1 (at or above `hard`).
- * Used to derive a per-signal shedding fraction.
- */
-function fraction(value: number, soft: number, hard: number): number {
-  if (hard <= soft) return value >= hard ? 1 : 0
-  if (value <= soft) return 0
-  if (value >= hard) return 1
-  return (value - soft) / (hard - soft)
-}
+// Slice 7 — the linear-ramp `fraction()` helper used by the probabilistic
+// shedder was removed when the shedder was retired. AIMD lives at the LB
+// side now (WorkerLoadObserver); the worker only does a binary panic-503.
 
 /**
  * Simple EWMA. Alpha = 0.2 gives a moderate-smoothing window of ~5 samples.
@@ -179,6 +179,23 @@ export interface OverloadControllerApi {
   /** Feed a routing-API latency observation (CallDecisionEngine adapters call this). */
   readonly observeRoutingApiLatency: (stage: "new_call" | "in_dialog", ms: number) => void
 
+  /**
+   * Increment the monotonic counter of non-emergency new-dialog INVITEs
+   * admitted by this worker. Caller must guarantee the request was both
+   * (a) a new dialog (no To-tag) and (b) non-emergency. The counter is
+   * published on every X-Overload header so LBs can derive the worker's
+   * total treated rate by diffing successive samples.
+   */
+  readonly incrementNonEmergencyAdmitted: () => void
+
+  /**
+   * Build the value of the X-Overload header for this worker's current
+   * state, e.g. `v=1; elu=0.732; gc=0.012; adm=12345`. EWMAs are read
+   * directly — no parameters. Cheap (string concat); safe to call on
+   * the OPTIONS-reply hot path.
+   */
+  readonly xOverloadHeaderValue: () => string
+
   /** Snapshot of metrics for /status and Prometheus. */
   readonly metrics: OverloadControllerMetrics
 }
@@ -186,21 +203,32 @@ export interface OverloadControllerApi {
 export class OverloadController extends ServiceMap.Service<OverloadController, OverloadControllerApi>()(
   "@sipjsserver/OverloadController"
 ) {
-  static readonly layer: Layer.Layer<OverloadController, never, AppConfig | MetricsRegistry> = Layer.effect(
+  static readonly layer: Layer.Layer<
+    OverloadController,
+    never,
+    AppConfig | MetricsRegistry | LoadSampler
+  > = Layer.effect(
     OverloadController,
     Effect.gen(function* () {
       const config = yield* AppConfig
       const registry = yield* MetricsRegistry
+      const sampler = yield* LoadSampler
 
       const bucket = new TokenBucket(config.cpsBucketSize, config.cpsBucketRate)
       const loopLagEwma = new Ewma(0.2)
       const routingNewCallEwma = new Ewma(0.2)
       const routingInDialogEwma = new Ewma(0.2)
+      // Worker-side overload signal — slice 2 of the overload rework.
+      // EWMA-smoothed alongside loopLag so a single sampler interval
+      // updates everything in lock-step.
+      const eluEwma = new Ewma(0.2)
+      const gcFractionEwma = new Ewma(0.2)
+      let nonEmergencyAdmittedTotal = 0
 
-      let activeCalls = 0
-      let activeCallLimit = 1 // updated via setActiveCalls; default avoids div-by-zero
-      let inDialogQueueDepth = 0
-      let inDialogQueueBound = config.workerQueueInDialogMax
+      // Slice 7: probabilistic shedder removed — `activeCallLimit`,
+      // `inDialogQueueDepth`, `inDialogQueueBound` are no longer used by
+      // admission. The corresponding setter methods stay as no-ops for
+      // backwards-compat with callers that still pass a gauge.
 
       // ── GC pressure observer ──────────────────────────────────────────
       // Uses perf_hooks PerformanceObserver to capture every GC pause with
@@ -248,7 +276,7 @@ export class OverloadController extends ServiceMap.Service<OverloadController, O
 
       const metrics: OverloadControllerMetrics = {
         admitTotal: 0,
-        rejectTotal: { bucket_empty: 0, shedder: 0 },
+        rejectTotal: { bucket_empty: 0, shedder: 0, panic_elu: 0 },
         shedProbability: 0,
         tokenBucketLevel: bucket.level(),
         loopLagMsP95: 0,
@@ -259,12 +287,19 @@ export class OverloadController extends ServiceMap.Service<OverloadController, O
         fractionRoutingLatency: 0,
         tokenBucketRatio: 1,
         gc: gcState,
+        eluEwma: 0,
+        gcFractionEwma: 0,
+        nonEmergencyAdmittedTotal: 0,
       }
       registry.overload = metrics
 
-      // ── Loop-lag sampler ─────────────────────────────────────────────
+      // ── Loop-lag + ELU + GC sampler ──────────────────────────────────
       // Uses raw setInterval (not Effect.sleep) so it is independent of
       // TestClock — sampler is a pure side effect of the host runtime.
+      // Samples three signals on each tick:
+      //   - loop-lag (legacy, used by the soon-to-be-retired shedder)
+      //   - ELU (new — published on X-Overload)
+      //   - GC fraction (new — published on X-Overload)
       let lastSampleAt = Date.now()
       const samplerInterval = setInterval(() => {
         const now = Date.now()
@@ -272,6 +307,10 @@ export class OverloadController extends ServiceMap.Service<OverloadController, O
         lastSampleAt = now
         loopLagEwma.observe(lag)
         metrics.loopLagMsP95 = loopLagEwma.get()
+        eluEwma.observe(sampler.elu())
+        gcFractionEwma.observe(sampler.gcFraction())
+        metrics.eluEwma = eluEwma.get()
+        metrics.gcFractionEwma = gcFractionEwma.get()
       }, 100)
       // Don't keep the Node event loop alive just for sampling.
       samplerInterval.unref()
@@ -300,42 +339,18 @@ export class OverloadController extends ServiceMap.Service<OverloadController, O
           }
         }
         metrics.tokenBucketLevel = bucket.level()
+        metrics.tokenBucketRatio =
+          config.cpsBucketSize > 0 ? bucket.level() / config.cpsBucketSize : 1
 
-        // Adaptive shedder
-        const inDialogDepthFraction =
-          inDialogQueueBound > 0
-            ? fraction(
-                inDialogQueueDepth / inDialogQueueBound,
-                0.5,
-                0.9
-              )
-            : 0
-        const activeCallFraction =
-          activeCallLimit > 0
-            ? fraction(activeCalls / activeCallLimit, 0.8, 1.0)
-            : 0
-        const loopLagFrac = fraction(loopLagEwma.get(), config.overloadLoopLagSoftMs, config.overloadLoopLagHardMs)
-        const routingFrac = fraction(
-          routingNewCallEwma.get(),
-          config.overloadRoutingNewCallSoftMs,
-          config.overloadRoutingNewCallHardMs
-        )
-        const p = Math.max(loopLagFrac, activeCallFraction, inDialogDepthFraction, routingFrac)
-        metrics.shedProbability = p
-        metrics.fractionLoopLag = loopLagFrac
-        metrics.fractionActiveCalls = activeCallFraction
-        metrics.fractionInDialogQueue = inDialogDepthFraction
-        metrics.fractionRoutingLatency = routingFrac
-        metrics.tokenBucketRatio = config.cpsBucketSize > 0 ? bucket.level() / config.cpsBucketSize : 1
-
-        if (Math.random() < p) {
-          metrics.rejectTotal.shedder++
-          // Refund the token — we already consumed it but are now rejecting.
-          // Bucket-level distortion is acceptable; alternative would be a
-          // two-phase commit which complicates the API.
+        // Slice 7: panic-ELU backstop. The LB-side AIMD is the primary
+        // control loop; this catches the cases where the LB is absent,
+        // misconfigured, or itself overloaded. Threshold is intentionally
+        // high (default 0.98) so it almost never fires in normal operation.
+        if (eluEwma.get() > config.overloadPanicEluThreshold) {
+          metrics.rejectTotal.panic_elu++
           return {
             admit: false,
-            reason: "shedder",
+            reason: "panic_elu",
             retryAfterSec: config.retryAfterBaseSec,
           }
         }
@@ -344,18 +359,16 @@ export class OverloadController extends ServiceMap.Service<OverloadController, O
         return { admit: true, reason: undefined, retryAfterSec: 0 }
       }
 
-      const setActiveCalls = (n: number): void => {
-        activeCalls = n
+      const setActiveCalls = (_n: number): void => {
+        // No-op since slice 7 — kept for caller compatibility.
       }
 
-      const setInDialogQueueDepth = (depth: number, bound: number): void => {
-        inDialogQueueDepth = depth
-        if (bound > 0) inDialogQueueBound = bound
+      // Slice 7: probabilistic shedder removed — kept as no-op for callers
+      // that still pass the gauge through. Signal is exported on metrics
+      // via the X-Overload payload now, not via this setter.
+      const setInDialogQueueDepth = (_depth: number, _bound: number): void => {
+        // intentionally empty — see header comment
       }
-
-      // Optional: callers may also configure the active-call cap via env in
-      // a follow-up; for now we use a sane default tied to bucket size.
-      activeCallLimit = config.cpsBucketSize * 4
 
       const observeRoutingApiLatency = (stage: "new_call" | "in_dialog", ms: number): void => {
         if (stage === "new_call") {
@@ -367,11 +380,26 @@ export class OverloadController extends ServiceMap.Service<OverloadController, O
         }
       }
 
+      const incrementNonEmergencyAdmitted = (): void => {
+        nonEmergencyAdmittedTotal++
+        metrics.nonEmergencyAdmittedTotal = nonEmergencyAdmittedTotal
+      }
+
+      // Format published on the wire: `v=1; elu=0.732; gc=0.012; adm=12345`.
+      // EWMAs are clamped to [0,1] by LoadSampler; counter is uint53-safe.
+      const xOverloadHeaderValue = (): string => {
+        const elu = eluEwma.get().toFixed(3)
+        const gc = gcFractionEwma.get().toFixed(3)
+        return `v=1; elu=${elu}; gc=${gc}; adm=${nonEmergencyAdmittedTotal}`
+      }
+
       return {
         shouldAdmit,
         setActiveCalls,
         setInDialogQueueDepth,
         observeRoutingApiLatency,
+        incrementNonEmergencyAdmitted,
+        xOverloadHeaderValue,
         metrics,
       }
     })

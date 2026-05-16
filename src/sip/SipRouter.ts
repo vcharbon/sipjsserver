@@ -34,6 +34,7 @@ import { CdrWriter } from "../cdr/CdrWriter.js"
 import { TracingService } from "../tracing/TracingService.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
 import { DrainingState } from "../b2bua/DrainingState.js"
+import { OverloadController } from "../b2bua/OverloadController.js"
 import { WorkerReadiness } from "../cache/WorkerReadiness.js"
 import { RedisError } from "../redis/RedisClient.js"
 import {
@@ -341,6 +342,7 @@ export class SipRouter extends ServiceMap.Service<
       const readiness = yield* WorkerReadiness
       const registry = yield* MetricsRegistry
       const dispatcher = yield* PerCallDispatcher
+      const overload = yield* OverloadController
       // selfOrdinal — mirrors `CallState.partitionOf` / `handleInitialInvite`
       // (this same logic appears in both places). Used by the router's
       // synchronous `routeKey` to derive the callRef for an initial
@@ -667,7 +669,12 @@ export class SipRouter extends ServiceMap.Service<
             const req = event.message
             const respDest = { host: event.rinfo.address, port: event.rinfo.port }
             if (mode === "serving" && ready) {
-              const ok = generateResponse(req, 200, "OK", { toTag: newTag() })
+              const ok = generateResponse(req, 200, "OK", {
+                toTag: newTag(),
+                extraHeaders: [
+                  { name: "X-Overload", value: overload.xOverloadHeaderValue() },
+                ],
+              })
               yield* Effect.logDebug(
                 `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 200 (serving, ready)`
               )
@@ -689,6 +696,7 @@ export class SipRouter extends ServiceMap.Service<
                 extraHeaders: [
                   { name: "Retry-After", value: "0" },
                   { name: "Reason", value: reasonHeader },
+                  { name: "X-Overload", value: overload.xOverloadHeaderValue() },
                 ],
               })
               yield* Effect.logDebug(

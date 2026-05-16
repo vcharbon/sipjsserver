@@ -28,6 +28,7 @@ import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { CallLimiter } from "../../src/call/CallLimiter.js"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
+import { LoadSampler, simulatedLayer as loadSamplerSimulatedLayer } from "../../src/observability/LoadSampler.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 import { OverloadController } from "../../src/b2bua/OverloadController.js"
 import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
@@ -49,9 +50,11 @@ import {
   ProxyBindConfig,
   type ProxyBindConfigData,
   ProxyCore,
+  ProxySelfGate,
   RegisterStrategy,
   type SocketAddr,
   type WorkerEntry,
+  WorkerLoadObserver,
   workerRegistrySimulatedLayer,
 } from "../../src/sip-front-proxy/index.js"
 
@@ -156,6 +159,11 @@ export function b2buaWorkerStackLayer(opts: {
     MockCallControlLayer,
     NoOpTracingLayer,
     CdrLayer,
+    // Slice 2 of the overload rework — OverloadController now reads ELU
+    // and GC fraction from LoadSampler to publish on X-Overload. Fake
+    // stack provides the simulated layer so tests can inject values via
+    // `LoadSamplerSimulatedControl`.
+    loadSamplerSimulatedLayer(),
   ).pipe(Layer.provideMerge(AppConfigLayer))
 
   // Phase 4: BufferedTerminateWriter — fake-clock tests get the
@@ -238,9 +246,48 @@ export function proxyStackLayer(opts: ProxyStackLayerOpts) {
       : {}),
   })
 
+  // Slice 5: LoadBalancer now requires WorkerLoadObserver for the AIMD
+  // bucket consume + CRITICAL filter. Fake stack defaults to a
+  // permissive observer config so baseline distribution / e2e tests
+  // don't get rate-limited by the aggressive operational defaults.
+  // Tests that exercise the rejection paths pull `WorkerLoadObserver`
+  // directly and call `applyPayload` to push workers into specific
+  // bands.
+  const FAKE_OBSERVER_CFG = {
+    eluSoft: 0.6,
+    eluHard: 0.8,
+    eluCritical: 0.95,
+    bandHysteresis: 0.02,
+    aimdIncreaseStepCps: 5,
+    aimdDecreaseFactor: 0.75,
+    aimdCooldownTicks: 3,
+    capInitialCps: 100000,
+    capFloorCps: 1,
+    capCeilingCps: 1000000,
+    payloadStaleMs: 60000,
+    optionsIntervalMs: 1000,
+  } as const
   const StrategyLayer = LoadBalancerStrategyLive.pipe(
-    Layer.provide(Layer.mergeAll(RegistryLayer, HmacLayer, LbCfgLayer)),
+    Layer.provide(
+      Layer.mergeAll(
+        RegistryLayer,
+        HmacLayer,
+        LbCfgLayer,
+        WorkerLoadObserver.layer(FAKE_OBSERVER_CFG),
+      ),
+    ),
   )
+
+  // Slice 6: ProxyCore now requires ProxySelfGate. Fake stack uses a
+  // permissive bucket so baseline tests don't hit the proxy-self gate;
+  // tests that exercise the gate directly drive their own LoadSampler.
+  const SelfGateLayer = ProxySelfGate.layer({
+    eluCritical: 0.95,
+    cpsBucketSize: 1000000,
+    cpsBucketRate: 1000000,
+    eluSmoothingAlpha: 0.2,
+    samplerIntervalMs: 100,
+  }).pipe(Layer.provide(loadSamplerSimulatedLayer()))
 
   const Leaves = Layer.mergeAll(
     BindCfgLayer,
@@ -249,6 +296,7 @@ export function proxyStackLayer(opts: ProxyStackLayerOpts) {
     RegistryLayer,
     HmacLayer,
     LbCfgLayer,
+    SelfGateLayer,
     // Slice 2 of REGISTER + double-stack: ProxyCore now requires the
     // registrar-mode strategies. Proxy fixtures that don't exercise the
     // registrar path wire the noop variants — REGISTER returns 501, the

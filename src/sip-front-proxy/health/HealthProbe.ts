@@ -70,6 +70,10 @@ import {
   type WorkerId,
 } from "../registry/WorkerRegistry.js"
 import { WorkerRegistryControl } from "./WorkerRegistryControl.js"
+import {
+  WorkerLoadObserver,
+  type OverloadPayload,
+} from "../WorkerLoadObserver.js"
 
 // ---------------------------------------------------------------------------
 // Service surface
@@ -152,7 +156,7 @@ export const optionsKeepaliveLayer = (
 ): Layer.Layer<
   HealthProbe,
   never,
-  SignalingNetwork | WorkerRegistry | WorkerRegistryControl
+  SignalingNetwork | WorkerRegistry | WorkerRegistryControl | WorkerLoadObserver
 > =>
   Layer.effect(
     HealthProbe,
@@ -165,6 +169,7 @@ export const optionsKeepaliveLayer = (
       const network = yield* SignalingNetwork
       const registry = yield* WorkerRegistry
       const controlRaw = yield* WorkerRegistryControl
+      const loadObserver = yield* WorkerLoadObserver
       const metrics = yield* (Effect.gen(function* () {
         return yield* ProxyMetrics
       }).pipe(Effect.provide(ProxyMetrics.Default)))
@@ -369,6 +374,19 @@ export const optionsKeepaliveLayer = (
                   )
                 )
               )
+
+            // Slice 4 — feed the AIMD observer with the worker's
+            // self-reported overload payload. Worker stamps X-Overload
+            // on both 200 (serving) and 503 (draining/not-ready) replies.
+            const payload = parseXOverloadHeader(
+              getHeader(msg.headers, "x-overload"),
+            )
+            const nowMs = yield* Clock.currentTimeMillis
+            if (payload !== undefined) {
+              loadObserver.applyPayload(id, payload, nowMs)
+            } else {
+              loadObserver.notePayloadMissing(id, nowMs)
+            }
           })
       )
 
@@ -474,6 +492,39 @@ export const manualLayer: Layer.Layer<
  * `draining` to preserve the legacy behaviour: any 503 demotes the worker
  * out of the new-dialog candidate set.
  */
+/**
+ * Parse a worker's `X-Overload: v=1; elu=…; gc=…; adm=…` header value.
+ *
+ * Returns `undefined` for missing/malformed/unknown-version headers —
+ * callers tick the `payload_missing` counter on a miss instead of
+ * trying to recover. Forward-compatible: `v=` other than `1` returns
+ * `undefined`; new params (e.g. `cap=`) are silently ignored.
+ */
+export const parseXOverloadHeader = (
+  value: string | undefined,
+): OverloadPayload | undefined => {
+  if (typeof value !== "string" || value.length === 0) return undefined
+  const params = new Map<string, string>()
+  for (const segment of value.split(";")) {
+    const trimmed = segment.trim()
+    if (trimmed.length === 0) continue
+    const eq = trimmed.indexOf("=")
+    if (eq < 0) continue
+    params.set(trimmed.slice(0, eq).trim(), trimmed.slice(eq + 1).trim())
+  }
+  if (params.get("v") !== "1") return undefined
+  const elu = Number(params.get("elu"))
+  const gc = Number(params.get("gc"))
+  const adm = Number(params.get("adm"))
+  if (!Number.isFinite(elu) || !Number.isFinite(gc) || !Number.isFinite(adm)) {
+    return undefined
+  }
+  // Clamp [0,1] defensively; counter MUST be >= 0.
+  const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n)
+  if (adm < 0) return undefined
+  return { elu: clamp01(elu), gc: clamp01(gc), adm }
+}
+
 const classify503 = (reasonHeader: string | undefined): WorkerHealth => {
   if (typeof reasonHeader !== "string") return "draining"
   return reasonHeader.toLowerCase().includes("not-ready")

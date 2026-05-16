@@ -41,6 +41,7 @@ import {
 } from "../../../src/sip-front-proxy/health/WorkerRegistryControl.js"
 import {
   WorkerId,
+  WorkerLoadObserver,
   WorkerRegistry,
   workerRegistrySimulatedLayer,
   type WorkerHealth,
@@ -83,7 +84,10 @@ const buildLayer = () => {
     intervalMs: INTERVAL_MS,
     timeoutMs: TIMEOUT_MS,
     threshold: THRESHOLD,
-  }).pipe(Layer.provideMerge(ProbeDeps))
+  }).pipe(
+    Layer.provide(WorkerLoadObserver.layer()),
+    Layer.provideMerge(ProbeDeps),
+  )
   return Probe
 }
 

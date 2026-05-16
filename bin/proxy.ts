@@ -54,7 +54,8 @@
 
 import { NodeRuntime } from "@effect/platform-node"
 import { KubeConfig, Watch } from "@kubernetes/client-node"
-import { Effect, Layer } from "effect"
+import { Clock, Effect, Layer } from "effect"
+import { LoadSampler } from "../src/observability/LoadSampler.js"
 import { SignalingNetwork } from "../src/sip/SignalingNetwork.js"
 import {
   CancelBranchLru,
@@ -67,11 +68,13 @@ import {
   LoadBalancerStrategyLive,
   ProxyBindConfig,
   ProxyCore,
+  ProxySelfGate,
   PROXY_VERSION,
   Registrar,
   RegisterStrategy,
   type SocketAddr,
   workerRegistryControlNoopLayer,
+  WorkerLoadObserver,
 } from "../src/sip-front-proxy/index.js"
 import {
   kubernetesStatefulSetLayer,
@@ -200,7 +203,10 @@ const buildStaticLayer = () => {
           staticRegistryFromString(""),
           // Provide a no-op WorkerRegistryControl so any future code that
           // reaches for it in this mode doesn't crash.
-          workerRegistryControlNoopLayer
+          workerRegistryControlNoopLayer,
+          // Slice 6 — proxy-self gate. Static (ForwardAll) mode rarely
+          // sees overload, but ProxyCore requires the service.
+          ProxySelfGate.layer().pipe(Layer.provide(LoadSampler.liveLayer)),
         )
       )
     ),
@@ -294,14 +300,46 @@ const buildKubernetesLayer = () => {
   // We build a single shared "infra" layer below ProxyCore + HealthProbe so
   // the registry and HMAC providers are instantiated exactly once and
   // shared across consumers.
-  const infraLayer = Layer.mergeAll(baseBindLayer, registryLayer, hmacLayer)
+  // Slice 4 — WorkerLoadObserver is shared between HealthProbe (which
+  // feeds it from OPTIONS replies) and LoadBalancerStrategy (which
+  // reads its bucket state — wired in slice 5).
+  const loadObserverLayer = WorkerLoadObserver.layer()
+  // Slice 6 — ProxySelfGate gates external new-dialog non-emergency
+  // INVITEs on proxy ELU + CPS bucket. Needs LoadSampler.liveLayer.
+  const selfGateLayer = ProxySelfGate.layer().pipe(
+    Layer.provide(LoadSampler.liveLayer),
+  )
+  const infraLayer = Layer.mergeAll(
+    baseBindLayer,
+    registryLayer,
+    hmacLayer,
+    loadObserverLayer,
+    selfGateLayer,
+  )
   const lbStrategyLayer = LoadBalancerStrategyLive.pipe(
     Layer.provide(LoadBalancerConfig.layer({}))
   )
+  // Auto-start a 1s sweep fiber for stale-payload handling. Runs for
+  // the layer's scope lifetime.
+  const loadObserverSweepLayer = Layer.effectDiscard(
+    Effect.gen(function* () {
+      const observer = yield* WorkerLoadObserver
+      yield* Effect.forkScoped(
+        Effect.forever(
+          Effect.gen(function* () {
+            yield* Effect.sleep("1 second")
+            const now = yield* Clock.currentTimeMillis
+            observer.sweepStale(now)
+          }),
+        ),
+      )
+    }),
+  ).pipe(Layer.provide(loadObserverLayer))
   const layer = Layer.mergeAll(
     ProxyCore.Default.pipe(Layer.provide(lbStrategyLayer)),
     probeLayer,
     metricsServerLayer,
+    loadObserverSweepLayer,
   ).pipe(Layer.provide(infraLayer))
   return { program, layer }
 }

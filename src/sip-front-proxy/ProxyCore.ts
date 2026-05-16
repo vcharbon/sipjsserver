@@ -39,6 +39,7 @@
 import { Clock, Effect, Layer, Option, type Scope, ServiceMap, Stream } from "effect"
 import {
   getHeader,
+  isEmergencyRequest,
   newBranch,
   newTag,
   parseSipUri,
@@ -69,6 +70,7 @@ import {
   type RoutingDecisionKind,
 } from "./observability/Metrics.js"
 import { ProxyTracing, type ProxyTracingApi } from "./observability/Tracing.js"
+import { ProxySelfGate, type ProxySelfGateApi } from "./ProxySelfGate.js"
 import { RegisterStrategy } from "./RegisterStrategy.js"
 import {
   RegistrarProxyConfig,
@@ -164,6 +166,7 @@ export class ProxyCore extends ServiceMap.Service<ProxyCore, ProxyCoreApi>()(
     | CancelBranchLru
     | ProxyBindConfig
     | WorkerRegistry
+    | ProxySelfGate
     | RegisterStrategy
     | CoreToExtRoutingStrategy
     // `Layer.suspend` defers `makeProxyCore` resolution past this class
@@ -208,6 +211,7 @@ interface ProxyCounters {
    *  ACK ourselves — same RFC clauses. */
   ackAbsorbed: number
   noTargetAvailable: number
+  rateCapExhausted: number
   routeStripped: number
   recordRouteInserted: number
   responseDroppedNoVia: number
@@ -235,6 +239,7 @@ const newCounters = (): ProxyCounters => ({
   ackSynthesized: 0,
   ackAbsorbed: 0,
   noTargetAvailable: 0,
+  rateCapExhausted: 0,
   routeStripped: 0,
   recordRouteInserted: 0,
   responseDroppedNoVia: 0,
@@ -259,6 +264,7 @@ const makeProxyCore: Effect.Effect<
   | ProxyTracing
   | ProxyLogger
   | WorkerRegistry
+  | ProxySelfGate
   | RegisterStrategy
   | CoreToExtRoutingStrategy
   | Scope.Scope
@@ -272,6 +278,7 @@ const makeProxyCore: Effect.Effect<
   const tracing = yield* ProxyTracing
   const logger = yield* ProxyLogger
   const registry = yield* WorkerRegistry
+  const selfGate = yield* ProxySelfGate
   const registerStrategy = yield* RegisterStrategy
   const coreToExtStrategy = yield* CoreToExtRoutingStrategy
   // Optional: registrar deployments provide this; the K8s-LB binary
@@ -455,6 +462,7 @@ const makeProxyCore: Effect.Effect<
         tracing,
         logger,
         registry,
+        selfGate,
       })
     })
 
@@ -583,6 +591,7 @@ interface HandleRequestArgs {
   readonly tracing: ProxyTracingApi
   readonly logger: ProxyLoggerApi
   readonly registry: WorkerRegistryApi
+  readonly selfGate: ProxySelfGateApi
 }
 
 const DIALOG_CREATING: ReadonlySet<string> = new Set(["INVITE", "SUBSCRIBE"])
@@ -602,6 +611,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       tracing,
       logger,
       registry,
+      selfGate,
     } = args
 
     const startMs = yield* Clock.currentTimeMillis
@@ -610,6 +620,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
     yield* metrics.recordMessage({
       direction: "inbound",
       methodOrStatus: method,
+      cseqMethod: method,
       result: "forwarded", // pre-decision; final result tag below
     })
 
@@ -664,6 +675,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         yield* metrics.recordMessage({
           direction: "outbound",
           methodOrStatus: "483",
+          cseqMethod: method,
           result: "rejected",
         })
         return
@@ -777,9 +789,50 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         }
       }
 
+      // ── Proxy-self gate (slice 6 of overload rework) ──────────────────────
+      // External, new-dialog, non-emergency INVITEs are subject to the
+      // proxy's own ELU + CPS gate. Worker-originated traffic (`isWorkerOutbound`)
+      // and emergency calls and in-dialog requests all bypass — rejecting
+      // them would cause re-routing churn or violate emergency priority.
+      const hasToTag = req.getHeader("to").tag !== undefined && req.getHeader("to").tag !== ""
+      const isNewDialogInvite = method === "INVITE" && !hasToTag
+      const isEmergency = isEmergencyRequest(req)
+      if (isNewDialogInvite && !isEmergency && !isWorkerOutbound) {
+        const decision = selfGate.tryAdmitExternal()
+        if (!decision.admit) {
+          const reasonText =
+            decision.reason === "proxy_overload_elu"
+              ? "proxy_overload_elu"
+              : "proxy_overload_cps"
+          const resp = generateResponse(req, 503, "Service Unavailable", {
+            toTag: newTag(),
+            extraHeaders: [
+              { name: "Retry-After", value: decision.retryAfterSec.toString() },
+              { name: "Reason", value: `SIP;cause=503;text="${reasonText}"` },
+            ],
+          })
+          yield* replyToSource(serialize(resp), src)
+          result = "dropped"
+          yield* metrics.recordMessage({
+            direction: "outbound",
+            methodOrStatus: "503",
+            cseqMethod: method,
+            result: "dropped",
+          })
+          return
+        }
+      } else if (isNewDialogInvite && isEmergency) {
+        selfGate.noteBypass("emergency")
+      } else if (isNewDialogInvite && isWorkerOutbound) {
+        selfGate.noteBypass("internal")
+      }
+
       // ── Pick the downstream target ────────────────────────────────────────
       let target: SocketAddr | undefined
       let synthesizedReply: { status: number; reason: string } | undefined
+      // When `selectForNewDialog` rejects, capture the outcome so the
+      // 503 we emit below carries the right Reason / Retry-After.
+      let selectRejection: SelectOutcome | undefined
       // RFC 3261 §9.1: a CANCEL must carry the same top-Via branch as the
       // INVITE it cancels so the downstream's transaction layer matches
       // them. When this proxy forwards an INVITE it stamps a fresh branch;
@@ -840,7 +893,11 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
           // Fall back to selectForNewDialog so a CANCEL we never saw the INVITE
           // for still gets forwarded somewhere reasonable. Stateless proxies
           // can't conjure a "we don't know" — we'd otherwise drop.
-          target = yield* tryStrategySelect(strategy, req, counters)
+          {
+            const outcome = yield* tryStrategySelect(strategy, req, counters)
+            if (outcome._tag === "ok") target = outcome.target
+            else selectRejection = outcome
+          }
         }
       } else if (looseRouteNextHop !== undefined) {
         // A downstream proxy added an RR below ours — follow it
@@ -865,6 +922,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
           yield* metrics.recordMessage({
             direction: "outbound",
             methodOrStatus: "400",
+            cseqMethod: method,
             result: "rejected",
           })
           return
@@ -890,13 +948,25 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
             synthesizedReply = { status: decoded.status, reason: decoded.reason }
             decisionKind = "decode_reject"
             break
-          case "unknown":
-            target = yield* tryStrategySelect(strategy, req, counters)
+          case "unknown": {
+            // Carry the emergency flag the cookie was signed with into
+            // the fallback path. Without this, in-dialog BYE/CANCEL on
+            // emergency calls land in the AIMD bucket and get 503'd
+            // during a burst (the message has no Resource-Priority on
+            // the wire; the cookie is the only emergency signal).
+            const outcome = yield* tryStrategySelect(strategy, req, counters, {
+              emergencyOverride: decoded.isEmergency === true,
+            })
+            if (outcome._tag === "ok") target = outcome.target
+            else selectRejection = outcome
             decisionKind = "decode_unknown"
             break
+          }
         }
       } else {
-        target = yield* tryStrategySelect(strategy, req, counters)
+        const outcome = yield* tryStrategySelect(strategy, req, counters)
+        if (outcome._tag === "ok") target = outcome.target
+        else selectRejection = outcome
         decisionKind = "select_new"
       }
 
@@ -909,22 +979,37 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
         yield* metrics.recordMessage({
           direction: "outbound",
           methodOrStatus: String(synthesizedReply.status),
+          cseqMethod: method,
           result: "rejected",
         })
         return
       }
 
       if (target === undefined) {
-        // selectForNewDialog raised NoTargetAvailable → emit 503 to source.
+        // Strategy rejected with NoTargetAvailable or RateCapExhausted.
+        // Both surface a 503 to the source; the distinct Reason header
+        // + Retry-After lets operators tell them apart in pcaps.
+        const retryAfter =
+          selectRejection?._tag === "rate_capped"
+            ? selectRejection.retryAfterSec.toString()
+            : "5"
+        const reasonHeader =
+          selectRejection?._tag === "rate_capped"
+            ? `SIP;cause=503;text="rate_cap_exhausted"`
+            : `SIP;cause=503;text="no_target_available"`
         const resp = generateResponse(req, 503, "Service Unavailable", {
           toTag: newTag(),
-          extraHeaders: [{ name: "Retry-After", value: "5" }],
+          extraHeaders: [
+            { name: "Retry-After", value: retryAfter },
+            { name: "Reason", value: reasonHeader },
+          ],
         })
         yield* replyToSource(serialize(resp), src)
         result = "dropped"
         yield* metrics.recordMessage({
           direction: "outbound",
           methodOrStatus: "503",
+          cseqMethod: method,
           result: "dropped",
         })
         return
@@ -981,9 +1066,6 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       if (method === "INVITE") {
         const key = callIdCseqKey(req.getHeader("call-id"), req.getHeader("cseq").seq)
         yield* cancelLru.remember(key, { target, branch: ourBranch })
-        // Update active-dialog estimate from LRU size (best-effort, see
-        // Metrics.ts header comment).
-        yield* metrics.setActiveDialogsEstimate(cancelLru.size())
       }
 
       // ── Serialize + send ──────────────────────────────────────────────────
@@ -1000,6 +1082,7 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       yield* metrics.recordMessage({
         direction: "outbound",
         methodOrStatus: method,
+        cseqMethod: method,
         result: "forwarded",
       })
     })
@@ -1021,23 +1104,47 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
       .pipe(Effect.ensuring(observeAndLog))
   })
 
+type SelectOutcome =
+  | { readonly _tag: "ok"; readonly target: SocketAddr }
+  | { readonly _tag: "no_target" }
+  | { readonly _tag: "rate_capped"; readonly retryAfterSec: number; readonly workerId: string }
+
 const tryStrategySelect = (
   strategy: RoutingStrategyApi,
   req: SipRequest,
-  counters: ProxyCounters
-): Effect.Effect<SocketAddr | undefined> =>
-  strategy.selectForNewDialog(req).pipe(
+  counters: ProxyCounters,
+  opts?: { readonly emergencyOverride?: boolean }
+): Effect.Effect<SelectOutcome> =>
+  strategy.selectForNewDialog(req, opts).pipe(
+    Effect.map(
+      (target): SelectOutcome => ({ _tag: "ok", target }),
+    ),
     Effect.catchTag("NoTargetAvailable", (err) =>
       Effect.sync(() => {
         counters.noTargetAvailable++
       }).pipe(
         Effect.tap(() =>
-          Effect.logWarning(`[ProxyCore] strategy ${strategy.name} no target: ${err.reason}`)
+          Effect.logWarning(`[ProxyCore] strategy ${strategy.name} no target: ${err.reason}`),
         ),
-        Effect.as(undefined as SocketAddr | undefined)
-      )
+        Effect.as({ _tag: "no_target" } as const),
+      ),
     ),
-    Effect.map((t) => t as SocketAddr | undefined)
+    Effect.catchTag("RateCapExhausted", (err) =>
+      Effect.sync(() => {
+        counters.rateCapExhausted++
+      }).pipe(
+        Effect.tap(() =>
+          Effect.logDebug(
+            `[ProxyCore] strategy ${strategy.name} rate cap exhausted: worker=${err.workerId}`,
+          ),
+        ),
+        Effect.as({
+          _tag: "rate_capped",
+          retryAfterSec: err.retryAfterSec,
+          workerId: err.workerId,
+        } as const),
+      ),
+    ),
   )
 
 // ---------------------------------------------------------------------------
@@ -1079,9 +1186,12 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
     } = args
     if (msg.type !== "response") return
 
+    const respCseqMethod = msg.getHeader("cseq").method.toUpperCase()
+
     yield* metrics.recordMessage({
       direction: "inbound",
       methodOrStatus: String(msg.status),
+      cseqMethod: respCseqMethod,
       result: "forwarded",
     })
 
@@ -1098,6 +1208,7 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
       yield* metrics.recordMessage({
         direction: "outbound",
         methodOrStatus: String(msg.status),
+        cseqMethod: respCseqMethod,
         result: "dropped",
       })
       return
@@ -1122,6 +1233,7 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
       yield* metrics.recordMessage({
         direction: "outbound",
         methodOrStatus: String(msg.status),
+        cseqMethod: respCseqMethod,
         result: "dropped",
       })
       return
@@ -1162,6 +1274,7 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
     yield* metrics.recordMessage({
       direction: "outbound",
       methodOrStatus: String(msg.status),
+      cseqMethod: respCseqMethod,
       result: "forwarded",
     })
 
@@ -1471,6 +1584,7 @@ const handleRequestRegistrarMode = (
     yield* metrics.recordMessage({
       direction: "outbound",
       methodOrStatus: method,
+      cseqMethod: method,
       result: "forwarded",
     })
   }).pipe(
