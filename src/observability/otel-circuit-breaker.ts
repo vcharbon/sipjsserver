@@ -9,64 +9,69 @@
  * forever. On the worker pods that's measurable CPU spent on a hot
  * loop that produces no useful telemetry.
  *
- * This wrapper imposes a single-shot retry policy in front of the
- * inner exporter:
+ * This wrapper imposes a self-healing two-state policy in front of
+ * the inner exporter:
  *
  *   CLOSED      — pass spans straight through.
  *                 success → stay CLOSED.
- *                 failure → OPEN, schedule one probe at now+cooldown.
+ *                 failure → OPEN, cooldown = baseCooldownMs.
  *
  *   OPEN        — drop spans (callback SUCCESS so BSP buffer drains)
  *                 until `cooldown` has elapsed; the next export call
- *                 then tries the inner exporter exactly once.
- *                 probe success → CLOSED.
- *                 probe failure → ABANDONED.
+ *                 then tries the inner exporter exactly once (a probe).
+ *                 probe success → CLOSED, cooldown reset to base.
+ *                 probe failure → stay OPEN, cooldown doubled up to
+ *                                 maxCooldownMs.
  *
- *   ABANDONED   — drop spans permanently (callback SUCCESS) and never
- *                 touch the inner exporter again. `shutdown()` and
- *                 `forceFlush()` still pass through so process exit
- *                 still gets a chance to flush whatever the inner
- *                 exporter cached.
- *
- * Net behaviour with a dead collector:
- *   - 1 real export attempt + 1 probe attempt (= 2 HTTP attempts).
- *   - Then silent until process exit. No diag-bridge log spam, no
- *     wasted Node event-loop ticks attempting export.
+ * Net behaviour with a permanently dead collector: probes are spaced
+ * 30s, 60s, 120s, 240s, 300s, 300s, … so roughly 8 HTTP attempts in
+ * the first hour and ~4/hour after — significantly cheaper than the
+ * BSP's natural 1 Hz attempt rate. A single probe success closes the
+ * circuit and resumes pass-through with no operator action, fixing
+ * the 2026-05-15 endurance failure where a transient collector blip
+ * left one worker tracing-dark for the rest of the run.
  *
  * Returning `SUCCESS` for dropped batches is intentional: the BSP
  * uses the result code to decide whether to re-enqueue / log a
- * "Dropping span" warning, and we want neither — once we've decided
- * to abandon we'd rather the BSP queue drain quickly. The
- * `MeasuredSpanExporter` wrapping us still records `exportedTotal`
- * for those batches (which is fine — they did leave the BSP), and
- * we publish our own `droppedBySwitch` counter for ground truth.
+ * "Dropping span" warning, and we want neither while open — we'd
+ * rather the BSP queue drain quickly. The `MeasuredSpanExporter`
+ * wrapping us still records `exportedTotal` for those batches (they
+ * did leave the BSP), and we publish our own `droppedBySwitch` and
+ * `probeFailures` counters for ground truth.
  */
 
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core"
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base"
 import { Effect } from "effect"
 
-export type CircuitState = "closed" | "open" | "abandoned"
+export type CircuitState = "closed" | "open"
 
 export interface CircuitBreakerOptions {
   /**
-   * How long to wait after the first failure before allowing the one
-   * probe attempt that decides whether we close or abandon.
-   *
-   * Default: 30 s — long enough to avoid retry chatter, short enough
-   * that a transient collector outage during deployment recovers
-   * without operator intervention.
+   * Base cooldown after the first failure, and the value the cooldown
+   * resets to after a probe success. Default: 30 s — long enough to
+   * avoid retry chatter, short enough to recover from a brief
+   * collector outage automatically.
    */
-  readonly cooldownMs?: number
+  readonly baseCooldownMs?: number
+  /**
+   * Upper bound on the exponentially-growing cooldown for a
+   * permanently-failing inner exporter. Default: 300 s (5 min).
+   */
+  readonly maxCooldownMs?: number
   /**
    * Optional logger. Default: route through the Effect logger so the
-   * three state transitions (open / abandoned / re-closed) appear in
-   * the same pod-log stream as the rest of the OTel diagnostics.
+   * two state transitions (open / re-closed) appear in the same pod-
+   * log stream as the rest of the OTel diagnostics.
    */
   readonly log?: (
     level: "info" | "warn",
     message: string,
   ) => void
+  /**
+   * Clock injection for tests. Defaults to `Date.now`.
+   */
+  readonly now?: () => number
 }
 
 const defaultLog = (level: "info" | "warn", message: string): void => {
@@ -77,18 +82,25 @@ const defaultLog = (level: "info" | "warn", message: string): void => {
 export class CircuitBreakerSpanExporter implements SpanExporter {
   private _state: CircuitState = "closed"
   private _openedAt = 0
+  private readonly _baseCooldownMs: number
+  private readonly _maxCooldownMs: number
   private _cooldownMs: number
   private _log: NonNullable<CircuitBreakerOptions["log"]>
+  private _now: NonNullable<CircuitBreakerOptions["now"]>
   private _droppedBySwitch = 0
   private _attempts = 0
+  private _probeFailures = 0
   private _consecutiveFailures = 0
 
   constructor(
     private readonly inner: SpanExporter,
     opts: CircuitBreakerOptions = {},
   ) {
-    this._cooldownMs = opts.cooldownMs ?? 30_000
+    this._baseCooldownMs = opts.baseCooldownMs ?? 30_000
+    this._maxCooldownMs = opts.maxCooldownMs ?? 300_000
+    this._cooldownMs = this._baseCooldownMs
     this._log = opts.log ?? defaultLog
+    this._now = opts.now ?? Date.now
   }
 
   state(): CircuitState {
@@ -100,24 +112,29 @@ export class CircuitBreakerSpanExporter implements SpanExporter {
     return this._droppedBySwitch
   }
 
-  /** Total inner-exporter calls (initial export + at most one probe). */
+  /** Total inner-exporter calls (initial export + every probe). */
   attempts(): number {
     return this._attempts
   }
 
+  /** Probe attempts that failed (while already OPEN). */
+  probeFailures(): number {
+    return this._probeFailures
+  }
+
+  /** Current cooldown window, in ms. Resets to base on recovery. */
+  currentCooldownMs(): number {
+    return this._cooldownMs
+  }
+
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
-    const now = Date.now()
-    if (this._state === "abandoned") {
-      this._droppedBySwitch += spans.length
-      resultCallback({ code: ExportResultCode.SUCCESS })
-      return
-    }
+    const now = this._now()
     if (this._state === "open" && now - this._openedAt < this._cooldownMs) {
       this._droppedBySwitch += spans.length
       resultCallback({ code: ExportResultCode.SUCCESS })
       return
     }
-    // CLOSED, or OPEN past cooldown (the one probe attempt).
+    // CLOSED, or OPEN past cooldown (probe attempt).
     const wasProbe = this._state === "open"
     this._attempts++
     this.inner.export(spans, (result) => {
@@ -125,22 +142,25 @@ export class CircuitBreakerSpanExporter implements SpanExporter {
         this._consecutiveFailures = 0
         if (this._state !== "closed") {
           this._state = "closed"
+          this._cooldownMs = this._baseCooldownMs
           this._log("info", "[otel] exporter circuit closed (collector reachable)")
         }
       } else {
         this._consecutiveFailures++
         if (wasProbe) {
-          this._state = "abandoned"
-          this._log(
-            "warn",
-            "[otel] exporter circuit ABANDONED — collector unreachable after probe; spans will be dropped silently for the rest of this process",
-          )
+          // Stay OPEN, back off further. Silent — log only on
+          // transitions, not on repeated probe failures, to keep
+          // the pod log clean during a multi-minute outage.
+          this._probeFailures++
+          this._cooldownMs = Math.min(this._cooldownMs * 2, this._maxCooldownMs)
+          this._openedAt = now
         } else if (this._state === "closed") {
           this._state = "open"
+          this._cooldownMs = this._baseCooldownMs
           this._openedAt = now
           this._log(
             "warn",
-            `[otel] exporter circuit opened — collector unreachable; cooling down ${Math.round(this._cooldownMs / 1000)}s before single probe attempt`,
+            `[otel] exporter circuit opened — collector unreachable; cooling down ${Math.round(this._cooldownMs / 1000)}s before probe (max ${Math.round(this._maxCooldownMs / 1000)}s)`,
           )
         }
       }
