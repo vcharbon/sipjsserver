@@ -14,12 +14,51 @@ import {
   nodeShutdownEvent,
   proxyCutoffEvent,
   PROXY_LABEL,
+  verifyIptablesDropCounter,
+  verifyPodLogPattern,
   WORKER_LABEL,
   type ChaosEventType,
   type ChaosOutcome,
+  type NetworkChaosOpts,
   type NetworkChaosPeerSet,
+  type VerifyOutcome,
 } from "./chaosOps.js"
 import { nonEmergencyBurstEvent } from "./sippJobs.js"
+
+/**
+ * Mid-cut counter read after this many ms. Hard cuts saturate the
+ * iptables FORWARD-chain rule within a few hundred ms at 30 CAPS, but
+ * keep some slack for slow scheduler quanta.
+ */
+const HARD_CUT_VERIFY_MID_MS = 5_000
+/**
+ * Loss cuts sample only ~30% of matched packets — give the counter
+ * more wall time to climb past zero.
+ */
+const LOSS_CUT_VERIFY_MID_MS = 10_000
+
+/**
+ * Composite verify: iptables counter must show drops AND a specified
+ * SUT-side log line must appear during the cut window. Returns the
+ * stricter failure if either side fails. Used for cuts where we want
+ * to catch both wrong-rule-target bugs AND silently-uninterested SUT
+ * code paths (e.g. the worker never opens a connection during the cut).
+ */
+const compositeVerify = (
+  iptables: Effect.Effect<VerifyOutcome>,
+  sutSide: Effect.Effect<VerifyOutcome>,
+): Effect.Effect<VerifyOutcome> =>
+  Effect.gen(function* () {
+    const [a, b] = yield* Effect.all([iptables, sutSide], {
+      concurrency: 2,
+    })
+    if (!a.ok) return a
+    if (!b.ok) return b
+    return {
+      ok: true,
+      observed: `${a.observed}; ${b.observed}`,
+    }
+  })
 
 export interface DispatchOpts {
   readonly namespace: string
@@ -64,76 +103,93 @@ export const dispatchChaos = (
         },
         rand,
       )
-    case "worker-cut-from-proxy-hard":
-      return networkChaosEvent(
-        {
-          namespace,
-          type,
-          targetLabel: WORKER_LABEL,
-          peerSets: ["proxy"],
-          intensity: { kind: "hard" },
-        },
-        rand,
-      )
-    case "worker-cut-from-peers-hard":
-      return networkChaosEvent(
-        {
-          namespace,
-          type,
-          targetLabel: WORKER_LABEL,
-          peerSets: ["peers"],
-          intensity: { kind: "hard" },
-        },
-        rand,
-      )
-    case "worker-cut-from-limiter-redis-hard":
-      return networkChaosEvent(
-        {
-          namespace,
-          type,
-          targetLabel: WORKER_LABEL,
-          peerSets: ["limiter-redis"],
-          intensity: { kind: "hard" },
-        },
-        rand,
-      )
-    case "worker-isolate-all-hard":
-      return networkChaosEvent(
-        {
-          namespace,
-          type,
-          targetLabel: WORKER_LABEL,
-          peerSets: [
-            "proxy",
-            "peers",
-            "limiter-redis",
-          ] as ReadonlyArray<NetworkChaosPeerSet>,
-          intensity: { kind: "hard" },
-        },
-        rand,
-      )
-    case "worker-cut-from-proxy-loss30":
-      return networkChaosEvent(
-        {
-          namespace,
-          type,
-          targetLabel: WORKER_LABEL,
-          peerSets: ["proxy"],
-          intensity: { kind: "loss", probability: 0.3 },
-        },
-        rand,
-      )
-    case "proxy-full-isolate":
-      return networkChaosEvent(
-        {
-          namespace,
-          type,
-          targetLabel: PROXY_LABEL,
-          peerSets: ["all"],
-          intensity: { kind: "hard" },
-        },
-        rand,
-      )
+    case "worker-cut-from-proxy-hard": {
+      const cutOpts: NetworkChaosOpts = {
+        namespace,
+        type,
+        targetLabel: WORKER_LABEL,
+        peerSets: ["proxy"],
+        intensity: { kind: "hard" },
+        buildVerify: ({ nodes }) =>
+          verifyIptablesDropCounter(nodes, HARD_CUT_VERIFY_MID_MS),
+      }
+      return networkChaosEvent(cutOpts, rand)
+    }
+    case "worker-cut-from-peers-hard": {
+      const cutOpts: NetworkChaosOpts = {
+        namespace,
+        type,
+        targetLabel: WORKER_LABEL,
+        peerSets: ["peers"],
+        intensity: { kind: "hard" },
+        // The replication puller (b2bua-worker-0 ↔ b2bua-worker-1)
+        // exchanges /replog SSE traffic continuously. Iptables counter
+        // is the direct OS-level proof. SUT-side puller-reconnect log
+        // is harder to scope without false negatives (the puller may
+        // be mid-reconnect when we sample), so we lead with iptables.
+        buildVerify: ({ nodes }) =>
+          verifyIptablesDropCounter(nodes, HARD_CUT_VERIFY_MID_MS),
+      }
+      return networkChaosEvent(cutOpts, rand)
+    }
+    case "worker-cut-from-limiter-redis-hard": {
+      const cutOpts: NetworkChaosOpts = {
+        namespace,
+        type,
+        targetLabel: WORKER_LABEL,
+        peerSets: ["limiter-redis"],
+        intensity: { kind: "hard" },
+        // iptables counter is the only reliable proof here. The worker
+        // does NOT emit `Redis (limiter): error` within 5s of a packet
+        // cut: ioredis fires `error` events on TCP close, but a packet
+        // drop just stalls the existing TCP socket — the worker observes
+        // hung consult calls (Event handler timed out after 10s) rather
+        // than a Redis error event.
+        buildVerify: ({ nodes }) =>
+          verifyIptablesDropCounter(nodes, HARD_CUT_VERIFY_MID_MS),
+      }
+      return networkChaosEvent(cutOpts, rand)
+    }
+    case "worker-isolate-all-hard": {
+      const cutOpts: NetworkChaosOpts = {
+        namespace,
+        type,
+        targetLabel: WORKER_LABEL,
+        peerSets: [
+          "proxy",
+          "peers",
+          "limiter-redis",
+        ] as ReadonlyArray<NetworkChaosPeerSet>,
+        intensity: { kind: "hard" },
+        buildVerify: ({ nodes }) =>
+          verifyIptablesDropCounter(nodes, HARD_CUT_VERIFY_MID_MS),
+      }
+      return networkChaosEvent(cutOpts, rand)
+    }
+    case "worker-cut-from-proxy-loss30": {
+      const cutOpts: NetworkChaosOpts = {
+        namespace,
+        type,
+        targetLabel: WORKER_LABEL,
+        peerSets: ["proxy"],
+        intensity: { kind: "loss", probability: 0.3 },
+        buildVerify: ({ nodes }) =>
+          verifyIptablesDropCounter(nodes, LOSS_CUT_VERIFY_MID_MS),
+      }
+      return networkChaosEvent(cutOpts, rand)
+    }
+    case "proxy-full-isolate": {
+      const cutOpts: NetworkChaosOpts = {
+        namespace,
+        type,
+        targetLabel: PROXY_LABEL,
+        peerSets: ["all"],
+        intensity: { kind: "hard" },
+        buildVerify: ({ nodes }) =>
+          verifyIptablesDropCounter(nodes, HARD_CUT_VERIFY_MID_MS),
+      }
+      return networkChaosEvent(cutOpts, rand)
+    }
     case "non-emergency-burst":
       return nonEmergencyBurstEvent({
         namespace,

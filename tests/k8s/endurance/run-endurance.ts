@@ -245,6 +245,12 @@ interface RunMeta {
   readonly chaosEventsScheduled: number
   readonly chaosEventsExecuted: number
   readonly chaosEventsSkipped: number
+  /**
+   * Events whose primitive ran but `verifyChaosTookEffect` returned
+   * `ok: false` — the cut was a silent no-op. Counted separately from
+   * `skipped` (which means the orchestrator declined to fire).
+   */
+  chaosEventsNoopDetected: number
   readonly initialPodRestartCounts: Record<string, number>
 }
 
@@ -274,6 +280,7 @@ const main = (argv: ReadonlyArray<string>) =>
       chaosEventsScheduled: 0,
       chaosEventsExecuted: 0,
       chaosEventsSkipped: 0,
+      chaosEventsNoopDetected: 0,
       initialPodRestartCounts: {},
     }
     const writeMeta = () =>
@@ -622,17 +629,23 @@ const runChaosLoop = (opts: ChaosLoopOpts) =>
         continue
       }
 
-      const fired = yield* fireChaosEvent(
+      const fireResult = yield* fireChaosEvent(
         opts.artifactDir,
         nextEvent,
         eventRng(nextEvent.index),
       )
       lastEventEndMs = Date.now()
       nextEventIdx += 1
-      if (fired) {
-        ;(opts.meta as { chaosEventsExecuted: number }).chaosEventsExecuted += 1
-      } else {
-        ;(opts.meta as { chaosEventsSkipped: number }).chaosEventsSkipped += 1
+      switch (fireResult) {
+        case "executed":
+          ;(opts.meta as { chaosEventsExecuted: number }).chaosEventsExecuted += 1
+          break
+        case "skipped":
+          ;(opts.meta as { chaosEventsSkipped: number }).chaosEventsSkipped += 1
+          break
+        case "noop":
+          ;(opts.meta as { chaosEventsNoopDetected: number }).chaosEventsNoopDetected += 1
+          break
       }
     }
   })
@@ -641,7 +654,7 @@ const fireChaosEvent = (
   artifactDir: string,
   event: ScheduledEvent,
   rand: () => number,
-): Effect.Effect<boolean, never> =>
+): Effect.Effect<"executed" | "skipped" | "noop", never> =>
   Effect.gen(function* () {
     yield* Effect.logInfo(
       `chaos[${event.index}] fire ${event.type} (relativeSec=${event.relativeSec})`,
@@ -673,22 +686,31 @@ const fireChaosEvent = (
           relativeSec: event.relativeSec,
         },
       ])
-      return false
+      return "skipped"
+    }
+    const verify = result.outcome.verify
+    const status: "executed" | "noop" =
+      verify !== undefined && !verify.ok ? "noop" : "executed"
+    if (status === "noop" && verify !== undefined && !verify.ok) {
+      yield* Effect.logWarning(
+        `chaos[${event.index}] NOOP_DETECTED: ${verify.reason}`,
+      )
     }
     yield* appendNdjsonRows(path.join(artifactDir, "chaos-timeline.ndjson"), [
       {
         index: event.index,
         type: event.type,
-        status: "executed",
+        status,
         target: result.outcome.target,
         tFire: result.outcome.tFire.toISOString(),
         tRecovered: result.outcome.tRecovered.toISOString(),
         relativeSec: event.relativeSec,
         readyBefore: result.outcome.readyBefore,
         readyAfter: result.outcome.readyAfter,
+        ...(verify !== undefined && { verify }),
       },
     ])
-    return true
+    return status
   })
 
 // Dispatcher lives in `./dispatchChaos.ts` so the iteration sub-command

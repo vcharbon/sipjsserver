@@ -87,7 +87,152 @@ export interface ChaosOutcome {
   readonly readyBefore: number
   /** Replicas ready after recovery completed. */
   readonly readyAfter: number
+  /**
+   * Proof-of-effect from `verifyChaosTookEffect`. Optional because the
+   * primitive may not have wired one yet (legacy path); analyser treats
+   * a missing `verify` as unverified, not noop.
+   */
+  readonly verify?: VerifyOutcome
 }
+
+/**
+ * Outcome of a `verifyChaosTookEffect` run. `ok: true` means the
+ * primitive demonstrably mutated cluster state (iptables counter went
+ * up, worker logged a Redis error, sipp success rate plummeted, …).
+ * `ok: false` means the orchestrator fired the primitive but no
+ * SUT-observable effect was detected — chaos[N] NOOP_DETECTED.
+ */
+export type VerifyOutcome =
+  | { readonly ok: true; readonly observed: string }
+  | { readonly ok: false; readonly reason: string }
+
+/**
+ * Wrap a verify Effect so every chaos primitive emits a uniform
+ * `chaos[verify]` log line — analysts grep this prefix to inspect
+ * every fired event's proof-of-effect across an entire run.
+ */
+export const verifyChaosTookEffect = (
+  eventType: ChaosEventType,
+  verifyRun: Effect.Effect<VerifyOutcome>,
+): Effect.Effect<VerifyOutcome> =>
+  Effect.gen(function* () {
+    const outcome = yield* verifyRun
+    if (outcome.ok) {
+      yield* Effect.logInfo(
+        `chaos[verify] PASSED  — ${eventType}: ${outcome.observed}`,
+      )
+    } else {
+      yield* Effect.logWarning(
+        `chaos[verify] FAILED  — ${eventType}: ${outcome.reason}`,
+      )
+    }
+    return outcome
+  })
+
+/**
+ * Trivial verify for primitives whose post-condition (pod gone +
+ * re-created, node back Ready, …) is already proven by the
+ * orchestrator's existing wait. Emits the uniform `chaos[verify]` line
+ * with `ok: true` and the supplied observation string.
+ */
+export const trivialVerifyOk = (observed: string): VerifyOutcome => ({
+  ok: true,
+  observed,
+})
+
+/**
+ * Sum FORWARD-chain packet counts across `nodes`, filtered by the
+ * `endurance-net-chaos` comment marker the network primitive stamps on
+ * its rules. Sleeps `midDelayMs` first so we read counters *during*
+ * the cut, then compares against the install-time baseline (always 0
+ * for fresh rules).
+ *
+ * Returns `ok: true` if any packets matched anywhere, `ok: false` if
+ * the rule installed but matched zero traffic (wrong chain / wrong
+ * direction / wrong pod-IP / kube-svc CIDR routing bypassed it).
+ */
+export const verifyIptablesDropCounter = (
+  nodes: ReadonlyArray<string>,
+  midDelayMs: number,
+): Effect.Effect<VerifyOutcome> =>
+  Effect.gen(function* () {
+    yield* Effect.sleep(`${midDelayMs} millis`)
+    let totalPkts = 0
+    const perNode: Array<string> = []
+    for (const node of nodes) {
+      const r = yield* exec(
+        "docker",
+        ["exec", node, "iptables", "-L", "FORWARD", "-nvx"],
+        { timeoutMs: 10_000 },
+      ).pipe(
+        Effect.matchEffect({
+          onSuccess: (out) => Effect.succeed(out.stdout),
+          onFailure: () => Effect.succeed(""),
+        }),
+      )
+      let nodePkts = 0
+      for (const rawLine of r.split("\n")) {
+        if (!rawLine.includes("endurance-net-chaos")) continue
+        const parts = rawLine.trim().split(/\s+/)
+        const pkts = parseInt(parts[0] ?? "0", 10)
+        if (Number.isFinite(pkts)) nodePkts += pkts
+      }
+      totalPkts += nodePkts
+      perNode.push(`${node}=${nodePkts}`)
+    }
+    const secs = (midDelayMs / 1000).toFixed(1)
+    if (totalPkts > 0) {
+      return {
+        ok: true,
+        observed: `pkts dropped=${totalPkts} after ${secs}s (${perNode.join(", ")})`,
+      }
+    }
+    return {
+      ok: false,
+      reason: `pkts dropped=0 across ${nodes.length} node(s) after ${secs}s — rule didn't match traffic (wrong chain / direction / pod-IP / kube-svc CIDR)`,
+    }
+  })
+
+/**
+ * Tail the target pod's container log starting `lookbackSec` before
+ * `now`, scan for `pattern`, return the first matching line. Used by
+ * SUT-side verifications: a hard cut is real only if the worker's
+ * Redis client / replication puller actually noticed.
+ */
+export const verifyPodLogPattern = (
+  namespace: string,
+  podName: string,
+  container: string,
+  pattern: RegExp,
+  midDelayMs: number,
+): Effect.Effect<VerifyOutcome> =>
+  Effect.gen(function* () {
+    yield* Effect.sleep(`${midDelayMs} millis`)
+    const sinceSec = Math.ceil(midDelayMs / 1000) + 2
+    const r = yield* exec(
+      "kubectl",
+      ["-n", namespace, "logs", podName, "-c", container, `--since=${sinceSec}s`],
+      { timeoutMs: 15_000 },
+    ).pipe(
+      Effect.matchEffect({
+        onSuccess: (out) => Effect.succeed(out.stdout),
+        onFailure: (e) => Effect.succeed(`<<logs read failed: ${e.message}>>`),
+      }),
+    )
+    for (const rawLine of r.split("\n")) {
+      if (pattern.test(rawLine)) {
+        const trimmed = rawLine.trim().slice(0, 240)
+        return {
+          ok: true,
+          observed: `${podName} emitted: ${trimmed}`,
+        }
+      }
+    }
+    return {
+      ok: false,
+      reason: `no /${pattern.source}/ in ${podName} (${container}) log within ${(midDelayMs / 1000).toFixed(1)}s of cut`,
+    }
+  })
 
 export const PROXY_LABEL = "app.kubernetes.io/name=sip-front-proxy"
 export const WORKER_LABEL = "app.kubernetes.io/name=b2bua-worker"
@@ -224,6 +369,17 @@ export const killPodEvent = (
           }),
       ),
     )
+    // The kill + replicas-ready wait already proved the primitive's
+    // effect (pod gone, then re-created). Emit the uniform log line so
+    // analysts see one chaos[verify] per event, including pod kills.
+    const verify = yield* verifyChaosTookEffect(
+      opts.type,
+      Effect.succeed<VerifyOutcome>(
+        trivialVerifyOk(
+          `pod ${target.name} killed (${kind}/${mode}), ${replicas} replica(s) Ready`,
+        ),
+      ),
+    )
     return {
       type: opts.type,
       target: target.name,
@@ -231,6 +387,7 @@ export const killPodEvent = (
       tRecovered,
       readyBefore: ready.length,
       readyAfter: replicas,
+      verify,
     }
   })
 
@@ -340,6 +497,14 @@ export const nodeShutdownEvent = (
           new ChaosOpsError({ op: type, target: chosen, reason: msg }),
       ),
     )
+    const verify = yield* verifyChaosTookEffect(
+      type,
+      Effect.succeed<VerifyOutcome>(
+        trivialVerifyOk(
+          `node ${chosen} stopped + started, ${witness.expected} ${opts.tier}-tier replicas re-Ready`,
+        ),
+      ),
+    )
     return {
       type,
       target: chosen,
@@ -347,6 +512,7 @@ export const nodeShutdownEvent = (
       tRecovered,
       readyBefore,
       readyAfter: witness.expected,
+      verify,
     }
   })
 
@@ -433,6 +599,14 @@ export const proxyCutoffEvent = (
     // Recovery is "rule removed"; we don't wait for application-level
     // re-convergence (the analyzer measures that from sipp results).
     const tRecovered = new Date()
+    const verify = yield* verifyChaosTookEffect(
+      type,
+      Effect.succeed<VerifyOutcome>(
+        trivialVerifyOk(
+          `iptables ${rule} installed+removed on ${node} for ${PROXY_CUTOFF_SEC}s (VRRP block)`,
+        ),
+      ),
+    )
     return {
       type,
       target: target.name,
@@ -440,6 +614,7 @@ export const proxyCutoffEvent = (
       tRecovered,
       readyBefore: ready.length,
       readyAfter: ready.length,
+      verify,
     }
   })
 
@@ -668,6 +843,19 @@ export interface NetworkChaosOpts {
   readonly peerSets: ReadonlyArray<NetworkChaosPeerSet>
   readonly intensity: NetworkChaosIntensity
   readonly durationSec?: number
+  /**
+   * Optional verify hook. Called after rules are installed but before
+   * the cut sleeps out. The verify Effect should sleep its own
+   * `midDelayMs`, read an OS- or SUT-level signal, and return a
+   * `VerifyOutcome` proving (or disproving) that the cut actually
+   * mutated state. See `verifyIptablesDropCounter`,
+   * `verifyPodLogPattern`.
+   */
+  readonly buildVerify?: (ctx: {
+    readonly target: PodInfo
+    readonly peerIps: ReadonlyArray<string>
+    readonly nodes: ReadonlyArray<string>
+  }) => Effect.Effect<VerifyOutcome>
 }
 
 /**
@@ -744,7 +932,7 @@ export const networkChaosEvent = (
     // traffic transits the docker bridge and is forwarded by the host;
     // installing everywhere covers both paths without resolving which
     // node each peer lives on.
-    yield* installRules(nodes, rules, "-A").pipe(
+    yield* installRules(nodes, rules, "-I").pipe(
       Effect.mapError(
         (msg) =>
           new ChaosOpsError({ op: opts.type, target: target.name, reason: msg }),
@@ -761,7 +949,25 @@ export const networkChaosEvent = (
       }),
     )
 
-    yield* Effect.sleep(`${durationSec} seconds`).pipe(Effect.ensuring(cleanup))
+    const verifyOutcome: VerifyOutcome | undefined = yield* Effect.gen(
+      function* () {
+        if (opts.buildVerify === undefined) {
+          yield* Effect.sleep(`${durationSec} seconds`)
+          return undefined
+        }
+        const tVerifyStart = Date.now()
+        const o = yield* verifyChaosTookEffect(
+          opts.type,
+          opts.buildVerify({ target, peerIps, nodes }),
+        )
+        const elapsedMs = Date.now() - tVerifyStart
+        const remainingMs = durationSec * 1000 - elapsedMs
+        if (remainingMs > 0) {
+          yield* Effect.sleep(`${remainingMs} millis`)
+        }
+        return o
+      },
+    ).pipe(Effect.ensuring(cleanup))
 
     const tRecovered = new Date()
     return {
@@ -771,6 +977,7 @@ export const networkChaosEvent = (
       tRecovered,
       readyBefore: readyTargets.length,
       readyAfter: readyTargets.length,
+      ...(verifyOutcome !== undefined && { verify: verifyOutcome }),
     }
   })
 
@@ -861,13 +1068,23 @@ const buildIptablesRules = (
 const installRules = (
   nodes: ReadonlyArray<string>,
   rules: ReadonlyArray<ReadonlyArray<string>>,
-  action: "-A" | "-D",
+  action: "-I" | "-D",
 ): Effect.Effect<void, string> =>
   Effect.gen(function* () {
     for (const node of nodes) {
       for (const rule of rules) {
-        const args = ["exec", node, "iptables", action, ...rule]
-        // -D may fail if a previous fire already cleaned up; tolerate.
+        // rule[0] is the chain name (e.g. "FORWARD"). Insert at
+        // position 1 so we run before kube-proxy's
+        // `KUBE-FORWARD ... ACCEPT ctstate RELATED,ESTABLISHED`
+        // short-circuit. Otherwise UDP/TCP flows already in conntrack
+        // (which is every flow after the first packet) bypass our DROP.
+        // For -D iptables matches the rule body regardless of position.
+        const chain = rule[0]!
+        const tail = rule.slice(1)
+        const args =
+          action === "-I"
+            ? ["exec", node, "iptables", "-I", chain, "1", ...tail]
+            : ["exec", node, "iptables", "-D", chain, ...tail]
         yield* exec("docker", args, { timeoutMs: 10_000 }).pipe(
           Effect.matchEffect({
             onSuccess: () => Effect.void,
@@ -877,7 +1094,7 @@ const installRules = (
                     `iptables -D on ${node} non-fatal: ${e.stderr.trim() || e.stdout.trim()}`,
                   )
                 : Effect.fail(
-                    `iptables -A on ${node} failed: ${e.stderr.trim() || e.stdout.trim()}`,
+                    `iptables ${action} on ${node} failed: ${e.stderr.trim() || e.stdout.trim()}`,
                   ),
           }),
         )

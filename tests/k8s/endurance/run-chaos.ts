@@ -373,22 +373,37 @@ const main = (argv: ReadonlyArray<string>) =>
     }
 
     const outcome = dispatchResult.outcome
+    const verify = outcome.verify
+    const status: "executed" | "noop" =
+      verify !== undefined && !verify.ok ? "noop" : "executed"
+    if (status === "noop" && verify !== undefined && !verify.ok) {
+      yield* Effect.logWarning(
+        `chaos[${eventIndex}] NOOP_DETECTED: ${verify.reason}`,
+      )
+    }
     yield* appendNdjsonRows(
       path.join(cli.artifactDir, "chaos-timeline.ndjson"),
       [
         {
           index: eventIndex,
           type: cli.event,
-          status: "executed",
+          status,
           target: outcome.target,
           tFire: outcome.tFire.toISOString(),
           tRecovered: outcome.tRecovered.toISOString(),
           relativeSec: 0,
           readyBefore: outcome.readyBefore,
           readyAfter: outcome.readyAfter,
+          ...(verify !== undefined && { verify }),
         },
       ],
     )
+    if (status === "noop") {
+      // Surface noop as a non-zero exit for the operator's iteration
+      // loop — they'll see `chaos[verify] FAILED` in stdout, but the
+      // exit code is what scripts/CI watch for.
+      process.exitCode = 2
+    }
 
     if (cli.noWait) {
       yield* Effect.logInfo("--no-wait: not blocking for verdict")
