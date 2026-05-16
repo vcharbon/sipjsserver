@@ -90,6 +90,14 @@ A per-`(channel, entryGen)` monotonic sequence number. Bumped on every write int
 >
 > **Author:** "B keeps the bodies A had in its `bak:` partition for B's calls — B is the **backup** for those. Incoming traffic for those calls lands on B because the stickiness cookie names B as backup; B serves them directly out of its backup partition. The primary ref never moves — B is *not* promoted to primary."
 
+### Admission
+
+**Call limiter**:
+Cluster-shared counter (Redis-backed) that rate-limits concurrent calls per limiter id, summed over the last N windows. Read on every initial INVITE; `INCR` on admission, `DECR` on termination. Cap-hit returns `Rejected` (a normal outcome, not an error).
+
+**Fail-open admission**:
+A call admitted *without* the limiter `INCR` landing on Redis. Happens when the limiter Redis is unreachable or times out (`RedisError` / `LimiterTimeout`). The call is allowed through to keep traffic flowing, but the `limiterEntries[i].incrementSucceeded` field is set to `false` so the matching `DECR` is skipped on termination — otherwise the cluster counter drifts negative. See [ADR-0004](docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md).
+
 ## Flagged ambiguities
 
 - **"mirror"** was overloaded: it was used both as a description of the act of dual-writing across two sidecars AND as the name for the `entryGen=0` sentinel bucket. Resolved: keep "mirror" for the wire-level `entryGen=0` sentinel only; use "replication channel" / "dual-write" for the higher-level concept.

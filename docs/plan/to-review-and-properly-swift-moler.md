@@ -74,9 +74,16 @@ The invariant is now structural: a successful INCR is *always* matched by exactl
 - ⬜ Test `orphan-sweep-refreshes-on-peer-activity`
 - ⬜ Test `config-validation-rejects-inconsistent`
 
-### Stage 5 — ADR-0004 + CONTEXT.md
+### Stage 5 — ADRs + CONTEXT.md
 
-- ⬜ `docs/adr/0004-per-call-fifo-via-router-and-workers.md`
+Split into two slices since Stage 3 is deferred:
+
+**5a — for Stages 1+2 (this session):**
+- ✅ `docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md` — bounded I/O, typed channels, the iff invariant, `incrementSucceeded` flag, eager DECR via `Effect.onExit`
+- ✅ CONTEXT.md gains **Call limiter** + **Fail-open admission** glossary entries
+
+**5b — for Stage 3 (deferred to future session):**
+- ⬜ `docs/adr/0005-per-call-fifo-via-router-and-workers.md` (was Q8 ADR-0004 in the original plan; renumbered to 0005 because the limiter ADR took 0004 first)
 - ⬜ CONTEXT.md gains "Per-call FIFO" + "Event dispatch" entries
 
 ### Live (k8s) tests
@@ -373,9 +380,24 @@ if (TERMINATING_TIMEOUT_MS <= keepaliveIntervalSec * 1000 + 60_000)
 
 Existing tests that exercise the safety timer at 64 s must be updated; the structural test (`callstate-arms-safety-on-terminating.test.ts`) uses the constant so a single source change covers it.
 
-### Q8 — ADR-0004 + CONTEXT.md _[resolved]_
+### Q8 — ADR + CONTEXT.md _[resolved, with renumbering]_
 
-**Decision.** Land **ADR-0004 — Per-call FIFO via router + per-call worker fibers** alongside the code.
+Two ADRs land, not one. Stage 3 is deferred to a future session, so the
+limiter ADR (originally an unlabelled "supporting" doc) takes the next
+sequential number **0004**, and the per-call FIFO ADR shifts to
+**0005** when Stage 3 lands.
+
+**ADR-0004 — Strong INCR/DECR invariant for the call limiter** (this session):
+- The bounded-I/O contract (ioredis + Effect timeout layers)
+- Typed channels: `LimiterDecision` / `LimiterBackendError`
+- The iff invariant + `incrementSucceeded` flag
+- Within-loop reject roll-up + outer `Effect.onExit` for post-INCR errors
+
+**ADR-0005 — Per-call FIFO via router + per-call worker fibers** (future):
+- The two FIFO invariants (UDP→eventQueue, eventQueue→perCallQueue) and the single-fiber set enforcing them (Q5 table).
+- Why Alt B (eager pre-population) over Alt A (lazy-only) — cleanup-validation rationale.
+- 200K hard cap rationale (≤ 400 MB worst-case + operator-visible `dispatch_worker_cap_drops`).
+- Relationship to ADR-0003 / ADR-0004.
 
 ADR scope:
 - The two FIFO invariants (UDP→eventQueue, eventQueue→perCallQueue) and the single-fiber set enforcing them (Q5 table).
