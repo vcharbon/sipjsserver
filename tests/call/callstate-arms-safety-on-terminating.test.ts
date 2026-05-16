@@ -83,13 +83,13 @@ describe("CallState.update — structural safety-net install on transition to te
   )
 
   it.effect(
-    "calling update again on an already-terminating call does NOT re-install the timer (idempotent)",
+    "Stage 4: updates while in `terminating` REFRESH the safety timer fireAt (replaces former idempotent contract)",
     () =>
       Effect.gen(function* () {
         const callState = yield* CallState
         const timers = yield* TimerService
 
-        const callRef = "self|call-idempotent"
+        const callRef = "self|call-refresh-on-update"
         yield* callState.create(makeActiveCall(callRef))
 
         yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }))
@@ -98,16 +98,18 @@ describe("CallState.update — structural safety-net install on transition to te
           (t) => t.id === firstSafetyId,
         )?.fireAt
 
-        // Advance virtual clock so any re-install would compute a later fireAt.
+        // Advance virtual clock so the refreshed fireAt is provably later.
         yield* TestClock.adjust("10 seconds")
         yield* Effect.yieldNow
 
-        // Another mutation while still terminating — must not re-arm.
+        // Another mutation while still terminating — refreshes fireAt.
         yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }))
 
         const after = yield* callState.peek(callRef)
-        const stillThere = after?.timers.find((t) => t.id === firstSafetyId)
-        expect(stillThere?.fireAt).toBe(firstFireAt)
+        const refreshed = after?.timers.find((t) => t.id === firstSafetyId)
+        expect(refreshed?.fireAt).toBeGreaterThan(firstFireAt ?? 0)
+        // Still exactly one timer fiber — replaceTimerById + schedule
+        // cancels the prior fiber and installs a new one under the same id.
         expect(yield* timers.activeCount()).toBe(1)
       }).pipe(Effect.provide(stack)),
   )
@@ -122,14 +124,61 @@ describe("CallState.update — structural safety-net install on transition to te
         yield* callState.create(makeActiveCall(callRef))
         yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }))
 
-        // Drive past the 64 s safety deadline in 1 s slices to give
-        // each sleeping fiber a yield boundary.
-        for (let i = 0; i < 70; i++) {
-          yield* TestClock.adjust("1 second")
+        // Drive past TERMINATING_TIMEOUT_MS (17 min). 30 s slices keep
+        // virtual-clock progress visible to each sleeping fiber.
+        for (let i = 0; i < 36; i++) {
+          yield* TestClock.adjust("30 seconds")
           yield* Effect.yieldNow
         }
 
         // Call has been removed by forcePurge.
+        const after = yield* callState.peek(callRef)
+        expect(after).toBeUndefined()
+      }).pipe(Effect.provide(stack)),
+  )
+
+  it.effect(
+    "Stage 4: orphan sweep refreshes on peer activity — late update inside `terminating` postpones the safety fire",
+    () =>
+      Effect.gen(function* () {
+        const callState = yield* CallState
+
+        const callRef = "self|call-refresh-postpones-safety"
+        yield* callState.create(makeActiveCall(callRef))
+        yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }))
+
+        // 8 minutes in — half-way through the 17-min window. The call
+        // simulates an in-flight peer response: stays terminating but
+        // gets a mutating update (e.g. byeDisposition flip on one leg).
+        for (let i = 0; i < 16; i++) {
+          yield* TestClock.adjust("30 seconds")
+          yield* Effect.yieldNow
+        }
+        yield* callState.update(callRef, (c) => ({
+          ...c,
+          state: "terminating",
+          // Touch some inert field so the update is non-trivial.
+          cdrEvents: [...c.cdrEvents],
+        }))
+
+        // Now advance another 16 min total (8 min from refresh point).
+        // Without refresh, safety would have fired at minute 17 — the
+        // call would be gone here. With refresh (re-armed at minute 8
+        // for +17), it survives until ~minute 25.
+        for (let i = 0; i < 16; i++) {
+          yield* TestClock.adjust("30 seconds")
+          yield* Effect.yieldNow
+        }
+
+        const stillPresent = yield* callState.peek(callRef)
+        expect(stillPresent).toBeDefined()
+        expect(stillPresent?.state).toBe("terminating")
+
+        // Drive past the refreshed deadline.
+        for (let i = 0; i < 36; i++) {
+          yield* TestClock.adjust("30 seconds")
+          yield* Effect.yieldNow
+        }
         const after = yield* callState.peek(callRef)
         expect(after).toBeUndefined()
       }).pipe(Effect.provide(stack)),

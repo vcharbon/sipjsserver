@@ -91,11 +91,78 @@
       "fieldConfig": { "defaults": { "unit": "ms" } }
     },
     {
-      "id": 10, "type": "timeseries", "title": "Active dialogs (estimate)",
+      "id": 10, "type": "timeseries", "title": "Active dialogs (per worker)",
+      "description": "Per-pod `b2bua_active_dialogs` — size of the worker's in-memory callsMap. Authoritative, not derived from the proxy LRU.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
       "datasource": { "type": "prometheus", "uid": "vm" },
-      "targets": [{ "expr": "sip_active_dialogs_estimate{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "targets": [{ "expr": "b2bua_active_dialogs{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
       "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Redis call keys — nominal (`pri:{self}`)",
+      "description": "Per-pod count of `pri:{self}:call:*` keys (this worker as primary). Refreshed by a periodic SCAN — `now - b2bua_redis_call_keys_scan_timestamp_seconds` is the staleness.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_redis_call_keys{partition=\"nominal\", pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Redis call keys — backup (`bak:{primary}`)",
+      "description": "Per-pod count of `bak:{primary}:call:*` keys, broken down by the primary the backup is held for. Sum over `primary` gives this pod's total backup load.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [{ "expr": "b2bua_redis_call_keys{partition=\"backup\", pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} ← {{primary}}" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Call limiter — outcomes per second (by result)",
+      "description": "rate() of b2bua_call_limiter_results_total. allowed=admitted; rejected=cap-hit (normal); redis_error / timeout = fail-open admissions (the cascade signal — non-zero means limiter Redis is sick).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod, result) (rate(b2bua_call_limiter_results_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{pod}} {{result}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Call limiter — fail-open rate (redis_error + timeout)",
+      "description": "Share of checkAndIncrement calls that fail-open admitted because the limiter Redis was unreachable or timed out. > 0 = limiter Redis degraded; the Stage 1/2 fail-open path is doing its job. Pre-Stage-4 baseline = cascade; post = bounded.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        {
+          "expr": "sum by (pod) (rate(b2bua_call_limiter_results_total{result=~\"redis_error|timeout\", pod=~\"$pod\"}[1m])) / clamp_min(sum by (pod) (rate(b2bua_call_limiter_results_total{pod=~\"$pod\"}[1m])), 0.001)",
+          "refId": "A",
+          "legendFormat": "{{pod}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.05 },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        }
+      }
     }
   ]
 }

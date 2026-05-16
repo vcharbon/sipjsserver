@@ -94,6 +94,21 @@ export interface SippDaemonResult {
 
 const MAX_CALLS = 2_000_000_000 // sipp `-m` upper bound; effectively unlimited.
 
+// Concurrent-call cap (`-l`). Default heuristic ramps to ~3000 under load,
+// at which point sipp self-throttles its CallRate to keep CurrentCall at
+// that ceiling — calls that get stuck waiting on a failed BYE eat slots
+// forever and starve new INVITEs, so the test stops exercising the
+// configured CAPS. Set high enough that we can't hit it even with
+// minutes of stuck calls accumulating.
+const CALL_LIMIT = 100_000
+
+// Per-call inactivity cap (`-recv_timeout`, in ms). If any `<recv>` step
+// waits this long for a message the call is aborted as failed. 16 min is
+// well above the long-options scenario's 350 s OPTIONS keepalive timeout
+// and the short scenario's ~32 s BYE-retransmit window, so it only fires
+// on genuinely stuck calls.
+const RECV_TIMEOUT_MS = 16 * 60 * 1000
+
 /**
  * Apply the Job manifest, fork a watcher fiber that polls the sipp
  * pod until it disappears, and return a handle the orchestrator stops
@@ -108,6 +123,8 @@ export const startSippDaemon = (
     const args: Array<string> = [target, "-s", service]
     args.push("-sf", `/scenarios/${opts.scenario}`)
     args.push("-m", String(MAX_CALLS))
+    args.push("-l", String(CALL_LIMIT))
+    args.push("-recv_timeout", String(RECV_TIMEOUT_MS))
     if (opts.callsPerPeriodMs) {
       args.push("-r", String(opts.callsPerPeriodMs.count))
       args.push("-rp", String(opts.callsPerPeriodMs.periodMs))

@@ -175,6 +175,12 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
     // but the CallState orphan sweep took a different code path (CDR +
     // delete only) and skipped the decrement. With ~10 orphans every
     // 15 min, the probe `inflight` ratcheted up to 2× cap.
+    //
+    // Stage 4 update: the orphan sweep now respects the safety timer's
+    // `fireAt`. A stuck `terminating` call without an armed timer falls
+    // back to `createdAt + TERMINATING_TIMEOUT_MS` (17 min) as its
+    // deadline — so the test advances past that threshold instead of
+    // the historical 60s.
     Effect.gen(function* () {
       const lim = yield* CallLimiter
       const state = yield* CallState
@@ -205,9 +211,12 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
       }
       yield* state.create(stuck)
 
-      // 4. Drive the orphan sweep daemon (60s interval). +1s margin so
-      //    the next loop tick fully completes its sweep body.
-      yield* TestClock.adjust("61 seconds")
+      // 4. Drive past TERMINATING_TIMEOUT_MS (17 min) so the orphan
+      //    sweep treats the call as past its safety deadline. The
+      //    sweep daemon ticks every 60 s — advancing well past both
+      //    the tick cadence and the deadline guarantees one sweep
+      //    pass observes the call as eligible.
+      yield* TestClock.adjust("18 minutes")
 
       // 5. Limiter slot must be released — a fresh admission proves it.
       const after = yield* lim.checkAndIncrement("orphan-sweep-leak", 1)

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Effect-TS/language-service/refs/heads/main/schema.json",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist-k8s-bringup",
+    "noEmit": true,
+    "incremental": false
+  },
+  "include": [
+    "tests/k8s/scripts/**/*.ts",
+    "tests/k8s/endurance/run-endurance.ts",
+    "tests/k8s/endurance/run-chaos.ts",
+    "tests/k8s/endurance/chaosOps.ts",
+    "tests/k8s/endurance/dispatchChaos.ts",
+    "tests/k8s/endurance/evaluateImpact.ts",
+    "tests/k8s/endurance/expectedImpact.ts",
+    "tests/k8s/endurance/recorder.ts",
+    "tests/k8s/endurance/scheduler.ts",
+    "tests/k8s/endurance/sippJobs.ts",
+    "tests/k8s/endurance/snapshot.ts",
+    "tests/k8s/fixtures/cluster.ts",
+    "tests/k8s/fixtures/helm.ts",
+    "tests/k8s/fixtures/exec.ts",
+    "tests/k8s/fixtures/kubectl.ts",
+    "tests/k8s/fixtures/sippOutcomes.ts"
+  ],
+  "exclude": []
+}

@@ -645,6 +645,8 @@ export const SimulatedK8sClusterLayer = (
           const ms = yield* Clock.currentTimeMillis
           const sec = Math.floor(ms / 1000)
           const currentWin = sec - (sec % windowSec)
+          // eslint-disable-next-line no-console
+          console.log(`[D ${Date.now() % 100000}] assert.expectLimiterCount ms=${ms} store=${Array.from(store).map(([k, v]) => `${k}=${v.count}`).join(",")}`)
           // Sweep first so a TTL'd window doesn't inflate the sum
           // (mirrors `buildMemoryLimiterImpl.sweep` semantics).
           const expired: string[] = []

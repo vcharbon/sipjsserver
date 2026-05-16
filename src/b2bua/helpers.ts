@@ -4,6 +4,7 @@
 
 import type { Call, Dialog, InviteTxnHandle, Leg, TimerEntry } from "../call/CallModel.js"
 import { addBLeg, addCdrEvent, makeEmptyDialog, randomInitialCSeq } from "../call/CallModel.js"
+import { TERMINATING_TIMEOUT_MS } from "../call/timer-helpers.js"
 import {
   emptyEffects,
   type HandlerEffects,
@@ -84,9 +85,6 @@ export function terminateCallEffects(call: Call): HandlerEffects {
  * @param nowMs - current wall-clock time for timer fireAt
  */
 export function beginTerminationEffects(callRef: string, nowMs: number): HandlerEffects {
-  // 64s = 2× RFC 3261 Timer B/F (32s). Gives plenty of margin for the
-  // far side to respond to our BYE before we force-clean.
-  const TERMINATING_TIMEOUT_MS = 64_000
   const safetyTimer: TimerEntry = {
     id: `terminating-timeout-${callRef}`,
     type: "terminating_timeout",

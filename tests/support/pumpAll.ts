@@ -103,6 +103,12 @@ export const pumpAll = (
 
     const clock = yield* PumpableClock
     const net = yield* SignalingNetwork
+    // ADR-0004: async-work registry — counts producer work (e.g.
+    // PerCallDispatcher's parked workers) that is invisible to the
+    // pendingSleeps + network in-flight quiescence checks. Exposed
+    // directly on PumpableClock since it's SUT-scoped (shared across
+    // all workers in multi-worker stacks).
+    const dispatchPendingWork = (): number => clock.asyncWorkPending()
 
     const startTime = clock.currentTimeMillisUnsafe()
     const startFired = clock.sleepsFiredCount()
@@ -125,12 +131,14 @@ export const pumpAll = (
           }
           const pending = clock.pendingSleeps()
           const inFlight = net.inFlight()
-          if (pending.length === 0 && inFlight === 0) {
+          const dispatchPending = dispatchPendingWork()
+          if (pending.length === 0 && inFlight === 0 && dispatchPending === 0) {
             return "clean" as const
           }
-          // If transit is in flight but no sleeps are pending, the transit
-          // fiber must be between sleep-fired and deliver-running. Another
-          // yield round will catch it; loop without advancing time.
+          // If transit is in flight (or dispatcher has work mid-flight)
+          // but no sleeps are pending, the responsible fiber is between
+          // tasks. Another yield round will catch it; loop without
+          // advancing time.
           if (pending.length === 0) continue
           const next = pending[0]!
           if (next > budgetDeadline) {
@@ -156,11 +164,17 @@ export const pumpAll = (
       if (realProbe === undefined) break
       const pendingBefore = clock.pendingSleeps().length
       const inFlightBefore = net.inFlight()
+      const dispatchPendingBefore = dispatchPendingWork()
       yield* clock.withLive(Effect.sleep(realProbe))
       yield* yieldRound
       const pendingAfter = clock.pendingSleeps().length
       const inFlightAfter = net.inFlight()
-      if (pendingAfter > pendingBefore || inFlightAfter > inFlightBefore) {
+      const dispatchPendingAfter = dispatchPendingWork()
+      if (
+        pendingAfter > pendingBefore ||
+        inFlightAfter > inFlightBefore ||
+        dispatchPendingAfter > dispatchPendingBefore
+      ) {
         realProbeWasUseful = true
         // Re-enter drain loop — new work appeared.
         continue

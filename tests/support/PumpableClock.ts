@@ -35,6 +35,7 @@ import {
 import * as Arr from "effect/Array"
 import * as Duration from "effect/Duration"
 import * as Fiber from "effect/Fiber"
+import { TestPace } from "../../src/observability/TestPace.js"
 
 interface SleepEntry {
   readonly sequence: number
@@ -73,6 +74,21 @@ export interface PumpableClockShape {
    * periodic-timer detection.
    */
   readonly firedHistogram: () => ReadonlyArray<{ readonly durationMillis: number; readonly count: number }>
+
+  /**
+   * Async-work registry. Any async producer whose work is invisible to
+   * the standard `pendingSleeps + network.inFlight` quiescence checks
+   * (notably `PerCallDispatcher` workers parked on `Queue.take`) bumps
+   * `beginAsyncWork` on submit and `endAsyncWork` on completion.
+   * `adjust` drains the counter to zero after each latch fire so the
+   * test fiber doesn't race ahead of pending async work.
+   *
+   * SUT-scoped: a single counter for every worker in a multi-worker
+   * stack, because PumpableClock is provided once at the SUT layer.
+   */
+  readonly beginAsyncWork: () => void
+  readonly endAsyncWork: () => void
+  readonly asyncWorkPending: () => number
 }
 
 export class PumpableClock extends ServiceMap.Service<PumpableClock, PumpableClockShape>()(
@@ -108,6 +124,15 @@ const buildImpl = Effect.gen(function* () {
   const histogram = MutableHashMap.empty<number, number>()
   let sleepsFired = 0
   let currentTimestamp = new Date(0).getTime()
+  let asyncWorkCounter = 0
+
+  const beginAsyncWork = (): void => {
+    asyncWorkCounter++
+  }
+  const endAsyncWork = (): void => {
+    asyncWorkCounter--
+  }
+  const asyncWorkPending = (): number => asyncWorkCounter
 
   const currentTimeMillisUnsafe = () => currentTimestamp
   const currentTimeNanosUnsafe = () => BigInt(currentTimestamp * 1_000_000)
@@ -132,8 +157,38 @@ const buildImpl = Effect.gen(function* () {
   // whose deadline is <= endTimestamp, in order, opening latches and yielding
   // between each so the resumed fiber gets a chance to enqueue follow-up
   // sleeps before we decide we're done.
+  //
+  // ADR-0004 — drain dispatcher pending work after each latch fire. The
+  // PerCallDispatcher's worker fibers parked on `Queue.take` are invisible
+  // to the latch queue, so without this an awakened fiber can be racing
+  // a worker fiber and beat it to a downstream assertion (concretely:
+  // 100ms pause expires, test fiber blasts through assertions before
+  // the worker body completes its DECR). `pendingWork()` counts events
+  // offered-but-not-yet-body-completed; we keep yielding until it
+  // drains. Resolved via `Effect.serviceOption` so test stacks that
+  // omit the dispatcher (cache-only fixtures) still build.
   const run = (step: (currentTimestamp: number) => number): Effect.Effect<void> =>
     Effect.gen(function* () {
+      // ADR-0004 — drain async-work registry after each latch fire. The
+      // PerCallDispatcher's worker fibers parked on `Queue.take` are
+      // invisible to the latch queue, so without this an awakened
+      // fiber can race a worker fiber and beat it to a downstream
+      // assertion (concrete failure mode: 100ms pause expires, test
+      // fiber blasts through to `expectLimiterCount` before the
+      // worker body's DECR has run). The counter is shared across all
+      // registered producers (multi-worker SUTs included) because
+      // PumpableClock is provided once at SUT scope.
+      const drainAsyncWork = Effect.gen(function* () {
+        // Bounded — a healthy body settles in a few scheduler hops. The
+        // cap stops a stuck handler from looping forever; the test
+        // assertion that follows will observe the stuck state and fail
+        // with a useful message.
+        for (let i = 0; i < 32; i++) {
+          if (asyncWorkCounter === 0) return
+          yield* Effect.yieldNow
+        }
+      })
+
       yield* Fiber.await(yield* Effect.forkScoped(Effect.yieldNow))
       const endTimestamp = step(currentTimestamp)
       while (Arr.isArrayNonEmpty(sleeps)) {
@@ -149,8 +204,12 @@ const buildImpl = Effect.gen(function* () {
         )
         entry.latch.openUnsafe()
         yield* Effect.yieldNow
+        yield* drainAsyncWork
       }
       currentTimestamp = endTimestamp
+      // Tail drain — after the last latch fires, any final async work
+      // (worker bodies, etc.) needs to complete before adjust returns.
+      yield* drainAsyncWork
     }).pipe(runSemaphore.withPermits(1))
 
   const adjust = (duration: Duration.DurationInput) => {
@@ -189,6 +248,9 @@ const buildImpl = Effect.gen(function* () {
     pendingSleeps,
     sleepsFiredCount,
     firedHistogram,
+    beginAsyncWork,
+    endAsyncWork,
+    asyncWorkPending,
   }
   return impl
 })
@@ -201,7 +263,7 @@ const buildImpl = Effect.gen(function* () {
  * Wire this in `tests/support/fakeStack.ts` so every fake-stack scenario
  * gets it. Real-clock tests must NOT pull this layer in.
  */
-export const PumpableClockLayer: Layer.Layer<PumpableClock | Clock.Clock> = Layer.effectServices(
+export const PumpableClockLayer: Layer.Layer<PumpableClock | Clock.Clock | TestPace> = Layer.effectServices(
   Effect.gen(function* () {
     const impl = yield* buildImpl
     // The Clock service we register also has to satisfy the upstream
@@ -218,9 +280,19 @@ export const PumpableClockLayer: Layer.Layer<PumpableClock | Clock.Clock> = Laye
       setTime: impl.setTime,
       withLive: impl.withLive,
     } as Clock.Clock
+    // TestPace service implementation — shares the same async-work
+    // counter as PumpableClock.adjust, so producers (PerCallDispatcher)
+    // can register their parked async work and the clock's drain loop
+    // sees it. Single shared SUT-scoped instance covers all workers.
+    const testPaceService = {
+      beginWork: impl.beginAsyncWork,
+      endWork: impl.endAsyncWork,
+      pendingWork: impl.asyncWorkPending,
+    }
     return ServiceMap.empty().pipe(
       ServiceMap.add(PumpableClock, impl),
       ServiceMap.add(Clock.Clock, clockService),
+      ServiceMap.add(TestPace, testPaceService),
     )
   }),
 )

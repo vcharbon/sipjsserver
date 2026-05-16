@@ -58,6 +58,7 @@ import { handlers, B2buaCoreLayer } from "./b2bua/B2buaCore.js"
 import { DrainingState } from "./b2bua/DrainingState.js"
 import { OverloadController } from "./b2bua/OverloadController.js"
 import { MetricsRegistry } from "./observability/MetricsRegistry.js"
+import { runRedisCallKeyCountScanner } from "./observability/RedisCallKeyCountScanner.js"
 
 // ---------------------------------------------------------------------------
 // Environment-specific layers
@@ -89,7 +90,8 @@ const LimiterRedisLayer = LimiterRedisClient.layer.pipe(
 
 const CallLimiterLayer = CallLimiter.redisLayer.pipe(
   Layer.provide(AppConfigLayer),
-  Layer.provide(LimiterRedisLayer)
+  Layer.provide(LimiterRedisLayer),
+  Layer.provide(MetricsRegistryLayer)
 )
 
 /**
@@ -534,6 +536,24 @@ const standaloneMain = Effect.gen(function* () {
 
   // Run HTTP server in a detached background fiber
   yield* Effect.forkDetach(Layer.launch(HttpLayer))
+
+  // Periodic SCAN of `pri:{self}:call:*` / `bak:*:call:*` so /metrics
+  // can surface nominal vs per-primary backup key counts without
+  // adding work to the SIP hot path.
+  yield* Effect.forkDetach(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const redis = yield* RedisClient
+        const metrics = yield* MetricsRegistry
+        yield* runRedisCallKeyCountScanner({
+          redis,
+          self: resolveOrdinal(config),
+          registry: metrics,
+        })
+        return yield* Effect.never
+      }),
+    ).pipe(Effect.provide(RedisLayer)),
+  )
 
   // Slice 5 — wire the BSP-decorator metrics into the registry and
   // start the kill-switch supervisor. Both are no-ops when OtelLayer

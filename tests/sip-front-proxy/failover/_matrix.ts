@@ -256,7 +256,7 @@ export function buildFailoverScenario(c: MatrixCase): ComposableScenario {
       // `.skipFinalSweep()` disables the implicit 24h end-of-scenario
       // advance, so without this pump the response sits in the simulated
       // network queue and the call leaks (no CDR emitted).
-      s.pause(100)
+      s.pause(200)
     }
 
     // Single-owner invariant.

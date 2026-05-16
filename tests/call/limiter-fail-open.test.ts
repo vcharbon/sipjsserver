@@ -27,6 +27,7 @@ import { Cause, Duration, Effect, Exit, Fiber, Layer, Option, Stream } from "eff
 import { AppConfig } from "../../src/config/AppConfig.js"
 import { CallLimiter, LimiterTimeout } from "../../src/call/CallLimiter.js"
 import { LimiterRedisClient } from "../../src/redis/LimiterRedisClient.js"
+import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 import { RedisError, type RedisOps } from "../../src/redis/RedisClient.js"
 import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 
@@ -69,6 +70,7 @@ describe("CallLimiter.redisLayer — fail-open contract", () => {
       const limiterLayer = CallLimiter.redisLayer.pipe(
         Layer.provide(stubLayer),
         Layer.provide(ConfigLayer),
+        Layer.provide(MetricsRegistry.layer),
       )
 
       return Effect.gen(function* () {
@@ -119,6 +121,7 @@ describe("CallLimiter.redisLayer — fail-open contract", () => {
       const limiterLayer = CallLimiter.redisLayer.pipe(
         Layer.provide(stubLayer),
         Layer.provide(ConfigLayer),
+        Layer.provide(MetricsRegistry.layer),
       )
 
       return Effect.gen(function* () {
@@ -148,6 +151,7 @@ describe("CallLimiter.redisLayer — fail-open contract", () => {
       const limiterLayer = CallLimiter.redisLayer.pipe(
         Layer.provide(stubLayer),
         Layer.provide(ConfigLayer),
+        Layer.provide(MetricsRegistry.layer),
       )
 
       return Effect.gen(function* () {
@@ -170,6 +174,7 @@ describe("CallLimiter.redisLayer — fail-open contract", () => {
       const limiterLayer = CallLimiter.redisLayer.pipe(
         Layer.provide(stubLayer),
         Layer.provide(ConfigLayer),
+        Layer.provide(MetricsRegistry.layer),
       )
 
       return Effect.gen(function* () {

@@ -98,6 +98,34 @@ Cluster-shared counter (Redis-backed) that rate-limits concurrent calls per limi
 **Fail-open admission**:
 A call admitted *without* the limiter `INCR` landing on Redis. Happens when the limiter Redis is unreachable or times out (`RedisError` / `LimiterTimeout`). The call is allowed through to keep traffic flowing, but the `limiterEntries[i].incrementSucceeded` field is set to `false` so the matching `DECR` is skipped on termination — otherwise the cluster counter drifts negative. See [ADR-0004](docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md).
 
+### Event dispatch
+
+**Event dispatch**:
+The pipeline from UDP packet ingest through to handler execution for one SIP call event. Three single-fiber tiers feed into a tier of per-call worker fibers: `TransactionLayer` ingest → `SipRouter` router fiber → `PerCallDispatcher` worker fiber (one per active callRef). The first two preserve UDP-arrival order; the third runs the handler. See [ADR-0005](docs/adr/0005-per-call-fifo-via-router-and-workers.md).
+
+**Per-call FIFO**:
+The invariant that all events for the same `callRef` are processed in strict UDP-arrival order and never overlap. Enforced structurally by the dispatch pipeline above — not by reviewer discipline at the call sites. The composition is: UDP-arrival → `eventQueue` (single-fiber producer) → `perCallQueue[R]` (single-fiber router) → worker fiber (one per `R`, serial loop). A slow handler on call X stalls only call X.
+
+**Per-call queue**:
+The `Queue.bounded` allocated per `callRef`, owned by the worker fiber. Bounded by `PER_CALL_QUEUE_DEPTH` (default 64). Total queue count bounded by `PER_CALL_QUEUE_CAP` (default 200 000). Cap-exceeded drops increment `b2bua_dispatch_worker_cap_drops_total`.
+
+**POISON**:
+The sentinel item enqueued by `CallState.remove` / `forcePurgeOne` to signal the worker fiber to drain residual events and exit. The worker removes its own `perCallQueues` entry on exit. POISON travels the same queue as events to preserve ordering — "every event offered before terminate runs before terminate".
+
+**Eager pre-population** (Alt B in the plan):
+Boot-time creation of one queue + worker per call returned by `loadOwnedCalls`. Trades ~100 MB at startup for (1) the cleanup path being exercised on every call (never a rare path) and (2) no fork surge during failover cutover when ~50 K backup-held calls suddenly receive traffic.
+
+### Termination safety
+
+**Terminating timeout**:
+The per-call safety net armed atomically when a call enters `state: "terminating"`. Defined as `TERMINATING_TIMEOUT_MS` in [src/call/timer-helpers.ts](src/call/timer-helpers.ts). When it fires, `forcePurge(callRef, "safety_timer")` runs. The constant must satisfy `TERMINATING_TIMEOUT_MS > keepaliveIntervalSec*1000 + 60_000` — enforced by `validateTerminatingTimeoutConsistency` at AppConfig load.
+
+**Terminating-timeout refresh**:
+The act of rewriting the safety timer's `fireAt` on every `CallState.update` while the call is in `terminating`. Treats peer messages and own activity as equivalent "this call is alive" signals. Net effect: the safety timer (and the orphan sweep that respects it) only fires when the call has truly been silent for `TERMINATING_TIMEOUT_MS` from any source — not when a routine peer-activity gap (e.g. an OPTIONS keepalive interval) elapses.
+
+**Orphan sweep**:
+The 60s-tick daemon in `CallState` that purges calls the rule-engine cleanup path missed. Post-Stage-4 of [the limiter cascade plan](docs/plan/to-review-and-properly-swift-moler.md), it respects the terminating-timeout `fireAt` — a `terminating` call is only swept when `now >= fireAt`. `terminated` corner cases are still swept immediately.
+
 ## Flagged ambiguities
 
 - **"mirror"** was overloaded: it was used both as a description of the act of dual-writing across two sidecars AND as the name for the `entryGen=0` sentinel bucket. Resolved: keep "mirror" for the wire-level `entryGen=0` sentinel only; use "replication channel" / "dual-write" for the higher-level concept.

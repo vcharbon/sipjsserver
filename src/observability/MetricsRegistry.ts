@@ -180,9 +180,14 @@ export interface TerminatingCallsByBucket {
  * here at layer init so the Prometheus renderer (and any future
  * /debug/memory caller) reads instantaneous bucket counts without
  * round-tripping through Effect.
+ *
+ * `concurrentCallsCount` is the source of truth for the
+ * `b2bua_active_dialogs` gauge: the size of the in-memory `callsMap`
+ * (every call this worker currently owns or is acting as backup for).
  */
 export interface CallStateMetrics {
   readonly terminatingByBucket: () => TerminatingCallsByBucket
+  readonly concurrentCallsCount: () => number
 }
 
 /**
@@ -279,6 +284,25 @@ export interface OtelPipelineMetrics {
   readonly tracerDisabledTotal: () => Record<string, number>
 }
 
+/**
+ * Periodic Redis SCAN-derived call-key counts. Refreshed on a
+ * background fiber so the SIP hot path never pays a SCAN.
+ *
+ *   - `nominalCount` is the number of `pri:{self}:call:*` keys the
+ *     worker currently owns as primary.
+ *   - `backupCountsByPrimary` is `{ [primary]: count }` for every
+ *     `bak:{primary}:call:*` partition this worker is holding on
+ *     behalf of another pod.
+ *   - `lastScanTimestampMs` is the wall-clock at which the snapshot
+ *     was last refreshed (0 if no scan has completed yet) — operators
+ *     can subtract it from `now` to see how stale the gauge is.
+ */
+export interface RedisCallKeyCountMetrics {
+  readonly nominalCount: () => number
+  readonly backupCountsByPrimary: () => Record<string, number>
+  readonly lastScanTimestampMs: () => number
+}
+
 /** BufferedCdrLayer counters (Phase 3 — non-blocking CDR write). */
 export interface CdrBufferMetrics {
   readonly submitDroppedTotal: () => number
@@ -293,6 +317,46 @@ export interface StorageBufferMetrics {
   readonly queueDepth: () => number
   readonly queueCapacity: number
   readonly drainerCount: number
+}
+
+/**
+ * CallLimiter result counters. Bumped on every `checkAndIncrement` outcome
+ * so operators can distinguish "limiter saturating naturally" (rejected) from
+ * "limiter Redis fell over" (redis_error / timeout). See plan
+ * docs/plan/to-review-and-properly-swift-moler.md — these counters are the
+ * primary in-cluster verification signal for the limiter-Redis cascade fix.
+ */
+export interface CallLimiterMetrics {
+  /** Successful INCR — call admitted under cap. */
+  readonly allowedTotal: () => number
+  /** Cap-hit — call rejected; not a backend error. */
+  readonly rejectedTotal: () => number
+  /** ioredis surfaced a RedisError within commandTimeout (fail-open admission). */
+  readonly redisErrorTotal: () => number
+  /** Outer Effect-level safety net fired (fail-open admission). */
+  readonly timeoutTotal: () => number
+}
+
+/** PerCallDispatcher gauges + counters (ADR-0004). */
+export interface DispatchMetrics {
+  /** Current number of per-call queues, by partition label ("primary" or "backup"). */
+  readonly queueCounts: () => { primary: number; backup: number }
+  /** Cumulative queues created since boot, by reason. */
+  readonly creationsTotal: () => { boot: number; lazy: number; failover: number }
+  /** Cumulative queues removed since boot, by reason. */
+  readonly removalsTotal: () => { terminate: number; reaper: number }
+  /** Lazy-creation attempts refused because the per-call queue cap was reached. */
+  readonly capDropsTotal: () => number
+  /** Events dropped at offer time because a per-call queue was full. */
+  readonly queueDropsTotal: () => number
+  /** Handlers currently in flight, by partition. */
+  readonly inFlight: () => { primary: number; backup: number }
+  /** Times the global concurrency cap blocked a worker from running. */
+  readonly saturationTotal: () => number
+  /** Configured global concurrency cap. */
+  readonly concurrencyCap: number
+  /** Configured per-call queue cap. */
+  readonly queueCap: number
 }
 
 export interface MetricsRegistryState {
@@ -317,6 +381,12 @@ export interface MetricsRegistryState {
   cdrBuffer: CdrBufferMetrics | undefined
   /** BufferedTerminateWriter queue depth + fallthrough counters (Phase 4). */
   storageBuffer: StorageBufferMetrics | undefined
+  /** PerCallDispatcher gauges + counters (ADR-0004). */
+  dispatch: DispatchMetrics | undefined
+  /** CallLimiter per-result counters (allowed / rejected / redis_error / timeout). */
+  callLimiter: CallLimiterMetrics | undefined
+  /** Periodic-SCAN-derived nominal/backup call-key counts. */
+  redisCallKeyCounts: RedisCallKeyCountMetrics | undefined
   /** Per-worker metrics snapshots, indexed by worker index. */
   workers: WorkerMetricsSnapshot[]
   /** Broadcast an IPC message to all workers (set by Dispatcher in cluster mode). */
@@ -341,6 +411,9 @@ export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, Metrics
     otelPipeline: undefined,
     cdrBuffer: undefined,
     storageBuffer: undefined,
+    dispatch: undefined,
+    callLimiter: undefined,
+    redisCallKeyCounts: undefined,
     workers: [],
     broadcastToWorkers: undefined,
     adapterErrors: {

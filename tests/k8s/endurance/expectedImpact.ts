@@ -134,7 +134,71 @@ export const EXPECTED_IMPACT: Record<ChaosEventType, ExpectedImpact> = {
   "limiter-redis-graceful": EMPTY,
   "limiter-redis-kill9": EMPTY,
   "node-shutdown-app": EMPTY,
-  "node-shutdown-edge": EMPTY,
+
+  /**
+   * Edge-tier node shutdown. With 2 proxy replicas + VRRP-managed VIP
+   * (advertIntSec=0.5s ⇒ master-down ~1.5s + GARP), traffic loss
+   * should be bounded to the VIP rehoming window. A larger trough
+   * indicates either:
+   *   - VIP failover is too slow (keepalived misconfig / ARP cache),
+   *   - or a non-proxy SPOF (e.g. single-replica `redis` with no
+   *     nodeSelector) is co-scheduled on the edge node — killing the
+   *     node then kills the limiter Redis, cascading into the worker's
+   *     CallState orphan sweep purging in-flight dialogs.
+   *
+   * 2026-05-15 incident: `node-shutdown-edge` picked
+   * `sip-e2e-worker`, which happened to host
+   * `redis-96b66f94c-724hr`. ~73s of `redisReady=false` plus a 60s
+   * traffic-zero trough in `endurance-short`. The HA pair MUST be
+   * resilient to a single edge-node loss; bounds below codify what
+   * "acceptable" looks like.
+   */
+  "node-shutdown-edge": {
+    description:
+      "Edge node shutdown — 2 proxy replicas + VRRP VIP must keep traffic flowing. Operator SLA: outside explicit deactivate scenarios, no single chaos event may impact more than the equivalent of 1–2 s of calls. At 35 CPS on `endurance-short` that's ≤ 70 lost calls (~2 %) across a 90 s window. A flatline at zero traffic or a wave of mid-dialog failures means the HA pair didn't carry the load, or a non-proxy SPOF (e.g. single-replica limiter Redis) was co-scheduled on the edge tier.",
+    rules: [
+      {
+        description:
+          "Short-hold stream failure rate during the chaos window ≤ ~2 % (equivalent of ≤ 2 s of calls lost at 35 CPS)",
+        window: { anchor: "tFire", startOffsetMs: 0, durationMs: 90_000 },
+        metric: { kind: "failureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.03 },
+        severity: "fail",
+      },
+      {
+        description:
+          "Short-hold concurrent calls must stay near nominal — the surviving proxy + VIP failover should not collapse the in-flight dialog count. Nominal is 35 CPS × 30 s hold ≈ 1050; bound at half-nominal allows for legitimate VIP-rehoming dip.",
+        window: { anchor: "tFire", startOffsetMs: 5_000, durationMs: 60_000 },
+        metric: {
+          kind: "concurrentCalls",
+          stream: STREAM.short,
+          assumedHoldMs: 30_000,
+        },
+        bound: { kind: "greaterThan", value: 500 },
+        severity: "fail",
+      },
+      {
+        description:
+          "Mid-dialog failures post-recovery ≤ ~2 % — orphan sweep must not purge dialogs whose cleanup was merely delayed",
+        window: { anchor: "tRecovered", startOffsetMs: 0, durationMs: 30_000 },
+        metric: { kind: "midDialogFailureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.02 },
+        severity: "fail",
+      },
+      {
+        description:
+          "Limiter probe non-admission-control failure rate ≤ ~3 % — exposes the limiter-Redis SPOF if Redis is co-scheduled on the killed edge node (limiter fail-open path must absorb the outage)",
+        window: { anchor: "tFire", startOffsetMs: 0, durationMs: 90_000 },
+        metric: {
+          kind: "failureRate",
+          stream: STREAM.limiter,
+          codesExclude: [503, 480, 486],
+        },
+        bound: { kind: "lessThan", value: 0.03 },
+        severity: "fail",
+      },
+    ],
+  },
 
   /* ---- new in 2026-05-15 amendment ------------------------------------------------- */
 

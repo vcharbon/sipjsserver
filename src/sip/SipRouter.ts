@@ -12,6 +12,7 @@
  */
 
 import { Clock, Duration, Effect, Layer, ServiceMap, Stream, Tracer } from "effect"
+import { PerCallDispatcher } from "./PerCallDispatcher.js"
 import type { RemoteInfo, SipRequest, SipResponse, B2BUAMessage } from "./types.js"
 import { TransactionLayer } from "./TransactionLayer.js"
 import { UdpTransport } from "./UdpTransport.js"
@@ -339,6 +340,18 @@ export class SipRouter extends ServiceMap.Service<
       const draining = yield* DrainingState
       const readiness = yield* WorkerReadiness
       const registry = yield* MetricsRegistry
+      const dispatcher = yield* PerCallDispatcher
+      // selfOrdinal — mirrors `CallState.partitionOf` / `handleInitialInvite`
+      // (this same logic appears in both places). Used by the router's
+      // synchronous `routeKey` to derive the callRef for an initial
+      // INVITE before any state exists, so the worker fork picks it up
+      // on the right queue. See `deriveCallRef` in CallModel.
+      const selfOrdinal =
+        config.workerOrdinalLabel !== undefined
+          ? config.workerOrdinalLabel
+          : config.workerIndex >= 0
+            ? String(config.workerIndex)
+            : "self"
 
       // Slice 1.4 + event-handler safety: counters surfaced via
       // MetricsRegistry. `eventHandlerTimeoutTotal` flips on first hit
@@ -1061,11 +1074,93 @@ export class SipRouter extends ServiceMap.Service<
             `rehydrate ${call.callRef} aLeg.localCSeq=${call.aLeg.dialogs[0]?.sip.localCSeq} bLeg=${call.bLegs[0]?.dialogs[0]?.sip.localCSeq} timers=${call.timers.map((t) => t.id + "@" + t.fireAt).join(",")}`,
           )
           yield* timers.restoreFromEntries(call.callRef, call.timers, handler)
+          // ADR-0004 Alt B (eager pre-population): every rehydrated
+          // call gets a worker fiber at boot. The cleanup-path is then
+          // exercised for every call, including those that never see
+          // an event before being terminated. Skipped silently if the
+          // dispatcher is at cap (capDropsTotal++).
+          yield* dispatcher.preCreate(call.callRef, { kind: "primary" }, "boot")
         }
         yield* Effect.logInfo(
           `SipRouter: rehydrated ${calls.length} owned call(s) and respawned their timer fibers`
         )
       })
+
+      /**
+       * Synchronous routing key derivation for the router fiber (ADR-0004).
+       *
+       * Returns the callRef that owns this event, or `undefined` for
+       * events that have no callRef and can be handled inline on the
+       * router (OPTIONS keepalive, unresolvable in-dialog requests
+       * that 481 quickly). Must never block — that is the entire
+       * point of the per-call dispatcher; a router-blocking resolve
+       * would re-create the single-fiber stall that motivated this work.
+       *
+       * Resolution rules:
+       *   - timer/timeout/internal-event:  callRef is carried on the event.
+       *   - cancelled:                     in-memory sipIndex lookup only;
+       *                                    miss → route inline (rare, 481).
+       *   - SIP initial INVITE (no to-tag): derive callRef sync via
+       *                                    `deriveCallRef(selfOrdinal, callId, fromTag)`
+       *                                    so the worker for this new
+       *                                    call picks it up on first
+       *                                    arrival.
+       *   - SIP request with URI params:   `cr=callref;lg=…` is sync.
+       *   - SIP response with Via params:  `cr=callref;lg=…` is sync.
+       *   - SIP fallback:                  in-memory sipIndex; miss →
+       *                                    route inline (slow Redis
+       *                                    fallback inside `withCall`
+       *                                    is acceptable — the cases
+       *                                    that hit it are rare).
+       */
+      const routeKey = (event: CallEvent): string | undefined => {
+        switch (event.type) {
+          case "timer":
+            return event.callRef
+          case "timeout":
+            return event.callRef
+          case "internal-event":
+            return event.callRef
+          case "cancelled":
+            return callState.resolveFromSipKeySync(event.callId, event.fromTag)
+          case "sip": {
+            const msg = event.message
+            if (msg.type === "request") {
+              // OPTIONS keepalive without to-tag is short-circuited by
+              // `withCall` before any call resolution; let it run inline
+              // so it never opens a perCallQueue slot for an
+              // infrastructure ping.
+              if (msg.method === "OPTIONS" && !msg.getHeader("to").tag) {
+                return undefined
+              }
+              if (msg.method === "INVITE" && !msg.getHeader("to").tag) {
+                // Initial INVITE — derive the same callRef
+                // `handleInitialInvite` will compute. Matches the
+                // formula in deriveCallRef() so the worker that picks
+                // this up will be the one CallState.create() then
+                // tags via sipIndex.
+                const callId = msg.getHeader("call-id")
+                const fromTag = msg.getHeader("from").tag
+                if (fromTag === undefined) return undefined
+                return deriveCallRef(selfOrdinal, callId, fromTag)
+              }
+              const uriParams = msg.requestUri.params
+              if (uriParams.callref) {
+                return decodeURIComponent(uriParams.callref)
+              }
+              const callId = msg.getHeader("call-id")
+              const fromTag = msg.getHeader("from").tag ?? ""
+              return callState.resolveFromSipKeySync(callId, fromTag)
+            }
+            const viaParams = msg.getHeader("via")[0].params
+            const cr = typeof viaParams.cr === "string" ? viaParams.cr : undefined
+            if (cr !== undefined) return decodeURIComponent(cr)
+            const callId = msg.getHeader("call-id")
+            const fromTag = msg.getHeader("from").tag ?? ""
+            return callState.resolveFromSipKeySync(callId, fromTag)
+          }
+        }
+      }
 
       const start = Effect.fnUntraced(function* (handlers: HandlerRegistry) {
         return yield* Stream.runForEach(txnLayer.events, (txnEvent) => {
@@ -1082,13 +1177,17 @@ export class SipRouter extends ServiceMap.Service<
               event = { type: "timeout", branch: txnEvent.branch, callRef: txnEvent.callRef, legId: txnEvent.legId, method: txnEvent.method }
               break
           }
-          return withCall(handlers, event).pipe(
-            // Per-event safety timeout. The first hit identifies the
-            // event class that hung — log all the discriminators we
-            // have so triage doesn't need a heap snapshot. The wrap
-            // intentionally sits *outside* the catchCause so the
-            // existing error-logging path stays in charge of plain
-            // failures; only Cause.TimeoutError is intercepted here.
+          // The body is what the per-call worker runs. Per-event safety
+          // timeout (`timeoutOrElse`) and catch-all logging are baked
+          // in here so the worker loop stays event-agnostic and
+          // identical for all routing paths.
+          //
+          // `timeoutOrElse` (non-aborting) is preserved from the
+          // pre-dispatcher single-fiber model: a slow handler logs +
+          // moves on; the underlying fiber keeps the dispatch slot but
+          // only for *that* callRef's queue. Other calls' workers are
+          // unaffected.
+          const body: Effect.Effect<void> = withCall(handlers, event).pipe(
             Effect.timeoutOrElse({
               duration: Duration.millis(config.eventHandlerTimeoutMs),
               orElse: () =>
@@ -1102,8 +1201,17 @@ export class SipRouter extends ServiceMap.Service<
             }),
             Effect.catchCause((cause) =>
               Effect.logError(`Unhandled error processing event [${describeEvent(event)}]`, cause)
-            )
+            ),
           )
+          const callRef = routeKey(event)
+          if (callRef === undefined) {
+            // No routing key — inline on router. Reserved for events
+            // that cannot or should not own a perCallQueue slot:
+            // OPTIONS keepalive (infrastructure ping; no call) and
+            // unresolvable in-dialog (will 481 quickly).
+            return body
+          }
+          return dispatcher.dispatch(callRef, body)
         }) as unknown as Effect.Effect<never>
       })
 

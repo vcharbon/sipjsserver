@@ -144,6 +144,71 @@ Existing instances:
 
 **Symptom of getting this wrong:** e2e tests hang at the 30s timeout because the sampler fiber is suspended on a virtual clock that nothing advances. If only `it.effect` cases hang while `it.live` cases pass, suspect a missed `setInterval`.
 
+### TestClock + scheduler-invisible async work
+
+A more subtle hazard: async producers whose work is **invisible to both** of the harness's quiescence signals (pending sleeps, simulated-network in-flight). The canonical example is `PerCallDispatcher` — its worker fiber is parked on `Queue.take` when idle, and a fiber parked on `Queue.take` is invisible to TestClock (no pending sleep) and invisible to `SignalingNetwork` (no packet in transit). The test fiber then resumes from its own pause via `Latch.openUnsafe → flushWaiters → fiber.evaluate`, which runs the test continuation **synchronously** — straight through to the next assertion, before the worker has had a single scheduler tick to dequeue.
+
+We hit this trying to wire the dispatcher into fake-clock matrix tests. The order of attempts and why each failed is the cautionary tale:
+
+| Attempt | Why it fails |
+|---|---|
+| `yield* Effect.yieldNow` after `Queue.offerUnsafe` | The test fiber's resume is synchronous via `flushWaiters` — it bypasses the scheduler queue entirely. yieldNow gives a setImmediate cycle, but the test fiber already ran its synchronous chain. |
+| `yieldNow ×5` | Same root cause — more yields don't help when the competing fiber doesn't yield through the scheduler at all. |
+| `yieldNowWith(priority)` | Priority orders tasks **within** one setImmediate batch. The test fiber's continuation isn't *in* the batch — it's a synchronous chain triggered earlier. |
+| `yieldNow + Effect.sleep("1 millis")` | The sleep registers AFTER yieldNow yields. By then the test fiber has already blasted through to the failing assertion. |
+| `Deferred` await on worker dequeue | Blocks the router fiber, but the test fiber doesn't care about the router being blocked. The test fiber and router are independent. |
+| `pumpAll` reads dispatcher pendingWork | Wrong code path — most fake-clock tests use `TestClock.adjust` directly (via the harness's `clockSleep`), not `pumpAll`. |
+
+The **correct** fix is to share a counter between the producer and the clock, and have the clock's `adjust` drain the counter to zero between latch fires. We expose this via the `TestPace` service ([src/observability/TestPace.ts](../src/observability/TestPace.ts)):
+
+```ts
+// Optional service — resolved with Effect.serviceOption so production
+// composition can omit it and the producer's begin/end calls become no-ops.
+interface TestPaceShape {
+  readonly beginWork: () => void  // producer submits async work
+  readonly endWork: () => void    // producer completes async work
+  readonly pendingWork: () => number
+}
+```
+
+- `PumpableClock` ([tests/support/PumpableClock.ts](../tests/support/PumpableClock.ts)) provides the real implementation. The same internal counter drives a `drainAsyncWork` Effect that loops `Effect.yieldNow` (bounded budget, default 32 yields) until `pendingWork() === 0`. `adjust` invokes `drainAsyncWork` after firing each latch and once more in a tail position. Sharing a single SUT-scoped counter means multi-worker test stacks all feed into the same drain.
+- `PerCallDispatcher` resolves `Effect.serviceOption(TestPace)` at layer-build time. `beginWork` runs after a successful `Queue.offerUnsafe`; `endWork` runs after the worker body completes. Production composition omits the layer; both calls become no-ops at runtime.
+
+**The rule for any new async producer that mirrors this shape:**
+
+If your service submits work to a fiber that parks on something invisible to `pendingSleeps` / `network.inFlight` (a Queue.take, a PubSub subscription, a custom Latch you opened from somewhere the harness doesn't know about), **register the work with `TestPace`**. Without it, the test fiber's continuation will race ahead of the producer's body execution under TestClock — and the failure mode is silent (an assertion sees stale state, no exception, no hang).
+
+```ts
+// Wrong — fake-clock tests will race the assertion ahead of the worker
+const enqueue = (item) =>
+  Effect.gen(function* () {
+    Queue.offerUnsafe(myQueue, item)
+    yield* Effect.yieldNow  // does not solve the problem, see table above
+  })
+
+// Right — fake-clock harness can drain the producer's work between latch fires
+const enqueue = (item) =>
+  Effect.gen(function* () {
+    const paceOpt = yield* Effect.serviceOption(TestPace)
+    Queue.offerUnsafe(myQueue, item)
+    if (paceOpt._tag === "Some") paceOpt.value.beginWork()
+    // ... worker calls paceOpt.value.endWork() after the item is fully processed ...
+  })
+```
+
+**Symptom of getting this wrong:** assertions in matrix-style multi-step scenarios pass under `it.live` but fail intermittently under `it.effect` with the assertion reading state from "before" the worker's body ran. The dispatcher's POISON / DECR / write-cdr effects look like they "didn't happen" — they did, just after the assertion. Add a debug `console.log` at the worker's body-start and the assertion's read site; if the body-start prints **after** the assertion, this is the bug.
+
+### Two clocks under one test, one mental model
+
+There are conceptually two clocks in a fake-clock test, but Effect lets the harness make them look like one:
+
+- **Virtual clock** (`Clock.Clock` / `TestClock`): advanced explicitly by the test harness via `TestClock.adjust` or `pumpAll`. `Effect.sleep` reads it. The clock the SUT thinks it's running under.
+- **Real clock** (Node event loop, setImmediate): drives fiber scheduling — what `yieldNow` and `Effect.callback` resumes ride on. The clock the JS engine actually runs under.
+
+Code that lives entirely under one of those clocks is fine. The hazard is **producer/consumer pairs split across the two**: a producer registering work that the consumer will pick up via the **real** scheduler (the Queue.take wake-up uses setImmediate via `scheduleReleaseTaker`), while the test fiber's pacing is on the **virtual** clock. The two clocks have independent notions of "ready" — and `pumpAll`'s quiescence model only knows about the virtual side.
+
+`TestPace` is the bridge. Any code that crosses the boundary — virtual-clock-driven offer → real-scheduler-driven dequeue → virtual-clock-driven completion (via outbound transit, internal sleep, …) — should funnel its "pending" state through this single service so the harness has a unified ready-signal.
+
 ## Layer combinator direction
 
 Layer composition is the single most common source of confusion when wiring services. The combinator names are subtle, the type errors land far from the cause, and bottom-up vs top-down reading flips depending on which combinator you're looking at. Internalise the direction-arrow contract below before writing new layer compositions.

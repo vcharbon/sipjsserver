@@ -35,6 +35,7 @@ import { TransactionLayer } from "../sip/TransactionLayer.js"
 import { CallState } from "../call/CallState.js"
 import { TimerService } from "../call/TimerService.js"
 import { SipParser } from "../sip/Parser.js"
+import { PerCallDispatcher } from "../sip/PerCallDispatcher.js"
 import { newTag } from "../sip/MessageHelpers.js"
 import { generateResponse } from "../sip/generators.js"
 import { buildCallContact } from "./stack-identity.js"
@@ -135,4 +136,5 @@ export const B2buaCoreLayer = SipRouter.layer.pipe(
   Layer.provideMerge(CallState.layer),
   Layer.provideMerge(TimerService.layer),
   Layer.provideMerge(SipParser.layer),
+  Layer.provideMerge(PerCallDispatcher.layer),
 )

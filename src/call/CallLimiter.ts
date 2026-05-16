@@ -10,6 +10,7 @@
 import { Clock, Duration, Effect, Layer, MutableHashMap, Option, Schema, ServiceMap } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { LimiterRedisClient } from "../redis/LimiterRedisClient.js"
+import { MetricsRegistry } from "../observability/MetricsRegistry.js"
 import type { RedisError } from "../redis/RedisClient.js"
 
 // ---------------------------------------------------------------------------
@@ -131,10 +132,28 @@ export class CallLimiter extends ServiceMap.Service<
     Effect.gen(function* () {
       const config = yield* AppConfig
       const redis = yield* LimiterRedisClient
+      const registry = yield* MetricsRegistry
 
       const windowSec = config.limiterWindowSeconds
       const activeWindows = config.limiterActiveWindows
       const ttl = config.limiterTtlSeconds
+
+      // Per-result counters. The chaos verification in
+      // docs/plan/to-review-and-properly-swift-moler.md needs to
+      // distinguish "limiter saturating naturally" (rejected) from
+      // "limiter Redis fell over" (redis_error / timeout). Pure ints,
+      // bumped from the success/failure branches below.
+      let allowedTotal = 0
+      let rejectedTotal = 0
+      let redisErrorTotal = 0
+      let timeoutTotal = 0
+
+      registry.callLimiter = {
+        allowedTotal: () => allowedTotal,
+        rejectedTotal: () => rejectedTotal,
+        redisErrorTotal: () => redisErrorTotal,
+        timeoutTotal: () => timeoutTotal,
+      }
 
       const computeWindow = (epochSec: number): number => {
         return epochSec - (epochSec % windowSec)
@@ -169,12 +188,26 @@ export class CallLimiter extends ServiceMap.Service<
       // Redis client's `commandTimeout: 100`. Only fires if ioredis fails
       // to surface its own timeout (unrecoverable command state). The
       // 50 ms gap guarantees the inner timeout wins under normal failure.
+      // Counters are bumped on every terminal branch so the four outcomes
+      // are mutually exclusive and exhaustive.
       const checkAndIncrement = (limiterId: string, limit: number): Effect.Effect<LimiterDecision, LimiterBackendError> =>
         checkAndIncrementInner(limiterId, limit).pipe(
           Effect.timeoutOrElse({
             duration: Duration.millis(LIMITER_BUDGET_MS),
             orElse: () => Effect.fail(new LimiterTimeout({ budgetMs: LIMITER_BUDGET_MS })),
           }),
+          Effect.tap((decision) =>
+            Effect.sync(() => {
+              if (decision._tag === "Allowed") allowedTotal++
+              else rejectedTotal++
+            }),
+          ),
+          Effect.tapError((err) =>
+            Effect.sync(() => {
+              if (err._tag === "LimiterTimeout") timeoutTotal++
+              else redisErrorTotal++
+            }),
+          ),
         )
 
       const decrement = Effect.fnUntraced(function* (

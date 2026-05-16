@@ -57,22 +57,33 @@ The invariant is now structural: a successful INCR is *always* matched by exactl
 
 ### Stage 3 — Per-call queue dispatch
 
-- ⬜ New `src/sip/PerCallDispatcher.ts` (perCallQueues, router-fiber, worker-fiber, POISON)
-- ⬜ Replace `Stream.runForEach` in `SipRouter.ts:1071`
-- ⬜ Move handler `timeoutOrElse` into worker loop
-- ⬜ Pre-populate at boot from CallStateCache
-- ⬜ `CallState.delete` enqueues POISON
-- ⬜ `AppConfig` adds `EVENT_DISPATCH_CONCURRENCY` (default 1024) + `PER_CALL_QUEUE_CAP` (default 200000)
-- ⬜ Metrics (`dispatch_queues{partition}`, `dispatch_in_flight`, `dispatch_saturation_total`, `dispatch_worker_cap_drops`, `dispatch_queue_creations_total`, `dispatch_queue_removals_total`, `dispatch_handler_duration_ms`)
-- ⬜ Tests T1, T2, T5, T6, T7, T8, T9
+- ✅ New [src/sip/PerCallDispatcher.ts](../../src/sip/PerCallDispatcher.ts) (perCallQueues + worker-fiber + POISON + lazy create + cap + global concurrency Semaphore)
+- ✅ `SipRouter.ts` start loop now routes via `dispatcher.dispatch(callRef, body)` with synchronous `routeKey` derivation (URI/Via params + in-memory `sipIndex` via new `CallState.resolveFromSipKeySync` + sync `deriveCallRef` for initial INVITE); unresolved (OPTIONS keepalive / unrouted) → inline on router
+- ✅ Per-event `timeoutOrElse` baked into the body before enqueue — worker loop applies it
+- ✅ Boot-time pre-population: `rehydrateOwnedCalls` calls `dispatcher.preCreate(callRef, primary, "boot")` for every rehydrated call (ADR-0004 Alt B)
+- ✅ `CallState.remove` + `forcePurgeOne` enqueue POISON (no-op when dispatcher absent — HTTP-only fixtures use `Effect.serviceOption` deferred resolve)
+- ✅ AppConfig: `EVENT_DISPATCH_CONCURRENCY` (default 1024), `PER_CALL_QUEUE_CAP` (default 200000), `PER_CALL_QUEUE_DEPTH` (default 64; `0` → passthrough for fake-clock tests)
+- ✅ Metrics on `/debug/dispatch` + Prometheus: `b2bua_dispatch_queues{partition}`, `b2bua_dispatch_in_flight{partition}`, `b2bua_dispatch_queue_creations_total{reason}`, `b2bua_dispatch_queue_removals_total{reason}`, `b2bua_dispatch_worker_cap_drops_total`, `b2bua_dispatch_queue_drops_total`, `b2bua_dispatch_saturation_total`, `b2bua_dispatch_concurrency_cap`, `b2bua_dispatch_queue_cap`
+- ✅ `TestPace` service + `PumpableClock` async-work drain — replaces the earlier passthrough sentinel. The dispatcher registers each offer with the optional `TestPace` service (no-op in production, present only under `PumpableClock`). `PumpableClock.adjust` drains the pending-work counter to zero between latch fires (bounded yield budget). Closes the "worker parked on `Queue.take` is invisible to `pumpAll`'s pending-sleep check" gap — fake-clock tests now exercise the real dispatcher code path end-to-end.
+- ✅ One pre-existing fragile pause widened from 100 ms → 200 ms in `_matrix.ts` (reinvite branch). The 100 ms was barely sufficient for the BYE round-trip under the pre-Stage-3 single-fiber dispatcher; the post-reinvite case (which queues 5–6 events on the per-call worker) pushed it over. Test was relying on synchronous dispatch timing.
+- ✅ Unit tests [tests/sip/PerCallDispatcher.test.ts](../../tests/sip/PerCallDispatcher.test.ts): T1 lazy-create-on-dispatch, T1 per-call FIFO, T5 parallel-across-callRefs (4×30 ms parallel ≈ 30 ms, not 120 ms), T7 POISON-drains-and-removes, T7 POISON-on-missing-is-noop, T8 cap-exceeded-drop, preCreate-then-dispatch-reuses
+- ⬜ T1 (invite+cancel FIFO under real SipRouter), T2 (cancel-orphan), T6 (boot-eager-populates), T9 (cancel-while-invite-in-flight) — deferred (the dispatcher contract is now covered structurally by the unit tests + every full-stack matrix test that runs through the real dispatcher)
+- ✅ `npm run typecheck` clean (only the 2 pre-existing `dispatchChaos.ts` warnings from the WIP chaos-primitives commit, unrelated to this work)
+- ✅ `npm run test:fake` clean — 1252 tests pass / 0 fail; no regressions from the pre-Stage-3 baseline
 
 ### Stage 4 — Safety-timer refresh + config validation
 
-- ⬜ Bump `TERMINATING_TIMEOUT_MS` from 64 000 → 420 000
-- ⬜ `CallState.update` refreshes `terminating_timeout` `fireAt` on every update while in `terminating`
-- ⬜ `AppConfig` validator: refuse to start if `terminatingTimeoutMs ≤ keepaliveIntervalSec*1000 + 60_000`
-- ⬜ Test `orphan-sweep-refreshes-on-peer-activity`
-- ⬜ Test `config-validation-rejects-inconsistent`
+- ✅ Bump `TERMINATING_TIMEOUT_MS` from 64 000 → **1 020 000** (17 min). Plan's first cut at 420 000 (7 min) didn't clear the test/fake-stack default `keepaliveIntervalSec = 900`, which the validator forces above `960 000`. 17 min satisfies both prod (300 s default) and test (900 s default) keepalive intervals.
+- ✅ `CallState.update` refreshes `terminating_timeout` `fireAt` on every update while in `terminating` ([src/call/CallState.ts:531-556](../../src/call/CallState.ts#L531-L556)). Uses the same `replaceTimerById` + `TimerService.schedule` machinery as the initial arm — `schedule` cancels the prior fiber under the same id and installs a new one.
+- ✅ `AppConfig` validator `validateTerminatingTimeoutConsistency` throws on `TERMINATING_TIMEOUT_MS <= keepaliveIntervalSec*1000 + 60_000` ([src/config/AppConfig.ts:440-461](../../src/config/AppConfig.ts#L440-L461)). The `Layer.sync` constructor calls it on every boot.
+- ✅ Orphan-sweep predicate also respects the safety timer's `fireAt` ([src/call/CallState.ts:1013-1042](../../src/call/CallState.ts#L1013-L1042)). Pre-fix the sweep blanket-purged every `terminating` call on the 60s tick — that was the actual mechanism behind cause (3) "purges in-flight dialogs". `terminated` corner-case still swept immediately.
+- ✅ `b2bua/helpers.ts` duplicate `const TERMINATING_TIMEOUT_MS = 64_000` removed in favor of importing the canonical constant from `timer-helpers.ts`.
+- ✅ Test `orphan-sweep-refreshes-on-peer-activity` ([tests/call/callstate-arms-safety-on-terminating.test.ts](../../tests/call/callstate-arms-safety-on-terminating.test.ts)) — call refreshed at +8 min survives past the original deadline, gets purged after the refreshed deadline.
+- ✅ Pre-existing idempotent test renamed/repurposed to assert the *new* contract: updates while in `terminating` REFRESH `fireAt` (was: "do NOT re-install").
+- ✅ Test `config-validation-rejects-inconsistent` ([tests/config/AppConfig-terminating-timeout-validation.test.ts](../../tests/config/AppConfig-terminating-timeout-validation.test.ts)) — three sub-cases: passes at floor, rejects above floor, rejects at exact boundary.
+- ✅ Pre-existing `tests/support/cache-and-limiter.test.ts:orphan-sweep-decrements` updated: advances `18 minutes` instead of `61 seconds` (the call now needs to pass the safety deadline before the sweep takes it).
+- ✅ `npm run typecheck` clean (only the 2 pre-existing `dispatchChaos.ts` warnings).
+- ✅ `npm run test:fake` clean: 1256 pass / 0 fail / 8 skipped.
 
 ### Stage 5 — ADRs + CONTEXT.md
 
@@ -82,9 +93,10 @@ Split into two slices since Stage 3 is deferred:
 - ✅ `docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md` — bounded I/O, typed channels, the iff invariant, `incrementSucceeded` flag, eager DECR via `Effect.onExit`
 - ✅ CONTEXT.md gains **Call limiter** + **Fail-open admission** glossary entries
 
-**5b — for Stage 3 (deferred to future session):**
-- ⬜ `docs/adr/0005-per-call-fifo-via-router-and-workers.md` (was Q8 ADR-0004 in the original plan; renumbered to 0005 because the limiter ADR took 0004 first)
-- ⬜ CONTEXT.md gains "Per-call FIFO" + "Event dispatch" entries
+**5b — for Stage 3:**
+- ✅ [docs/adr/0005-per-call-fifo-via-router-and-workers.md](../adr/0005-per-call-fifo-via-router-and-workers.md) (renumbered from the original plan's ADR-0004 because the limiter ADR took 0004 first)
+- ✅ CONTEXT.md gains **Event dispatch** + **Per-call FIFO** + **Per-call queue** + **POISON** + **Eager pre-population** glossary entries
+- ✅ [docs/typescript-effect.md](../typescript-effect.md) gains **TestClock + scheduler-invisible async work** + **Two clocks under one test** sections — pins the `TestPace` pattern for any future async producer crossing the virtual/real-scheduler boundary
 
 ### Live (k8s) tests
 

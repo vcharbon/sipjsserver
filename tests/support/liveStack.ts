@@ -75,7 +75,8 @@ export function liveStackLayer(opts: {
   ).pipe(Layer.provide(RedisLayer), Layer.provide(EpochCounterLayer))
   const CallLimiterLayer = CallLimiter.redisLayer.pipe(
     Layer.provide(AppConfigLayer),
-    Layer.provide(RedisLayer)
+    Layer.provide(RedisLayer),
+    Layer.provide(MetricsLayer)
   )
 
   const UdpLayer = UdpTransport.layer.pipe(

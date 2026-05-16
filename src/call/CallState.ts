@@ -39,6 +39,7 @@ import { replaceTimerById, TERMINATING_TIMEOUT_MS } from "./timer-helpers.js"
 import { MetricsRegistry, type TerminatingCallsByBucket } from "../observability/MetricsRegistry.js"
 import { TimerService } from "./TimerService.js"
 import { TransactionLayer } from "../sip/TransactionLayer.js"
+import { PerCallDispatcher } from "../sip/PerCallDispatcher.js"
 
 const JsonCallSchema = Schema.fromJsonString(CallSchema)
 
@@ -158,6 +159,15 @@ export class CallState extends ServiceMap.Service<
     readonly forcePurge: (callRef: string, reason: string) => Effect.Effect<void>
     /** Resolve a SIP key (callId|tag) to a callRef, checking memory then cache. */
     readonly resolveFromSipKey: (callId: string, tag: string) => Effect.Effect<string | undefined, RedisError>
+    /**
+     * Memory-only synchronous variant of `resolveFromSipKey`. Returns
+     * `undefined` if neither `callId|tag` nor `callId` is currently in
+     * the in-memory `sipIndex`. Used by `SipRouter`'s dispatch routing
+     * key resolver — it must never block on Redis. Missing in memory
+     * surfaces as "route inline" (fallback to the existing `withCall`
+     * flow which can do the async Redis lookup itself).
+     */
+    readonly resolveFromSipKeySync: (callId: string, tag: string) => string | undefined
     /** Get stats for the status endpoint. */
     readonly stats: () => Effect.Effect<{ concurrent: number; total: number }>
     /** Synchronous stats snapshot (for metrics interval — no Effect needed). */
@@ -183,6 +193,18 @@ export class CallState extends ServiceMap.Service<
       const limiter = yield* CallLimiter
       const registry = yield* MetricsRegistry
       const timers = yield* TimerService
+      // PerCallDispatcher is the per-callRef event-handler pool
+      // (ADR-0004). `remove()` enqueues POISON so the worker drains
+      // and removes its own map entry — symmetric cleanup. Resolved at
+      // call time (not layer-build) so test stacks that omit it
+      // (`cache-and-limiter` / HTTP-only call fixtures) still build;
+      // when absent, the POISON enqueue is a no-op. Same mechanism as
+      // the `TransactionLayer` deferred resolve below.
+      const dispatcherPoisonForCallRef = (callRef: string): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const opt = yield* Effect.serviceOption(PerCallDispatcher)
+          if (Option.isSome(opt)) yield* opt.value.enqueuePoison(callRef)
+        })
       // TransactionLayer is read at call time (not at layer-build time)
       // because the build-time Effect.gen of CallState.layer runs BEFORE
       // the parent layer composition has provided TransactionLayer into
@@ -499,8 +521,19 @@ export class CallState extends ServiceMap.Service<
 
             const enteringTerminating =
               prev.state !== "terminating" && next.state === "terminating"
+            // Stage 4: while the call is in `terminating`, every update
+            // (peer 200/487, BYE response, own retransmits, ...) refreshes
+            // the safety timer so the orphan sweep only fires when the
+            // call has been silent for `TERMINATING_TIMEOUT_MS` from any
+            // source. This is the predicate that closes the 2026-05-15
+            // limiter-Redis cascade: in-flight dialogs that get a peer
+            // response during the chaos window no longer get purged.
+            const refreshingTerminating =
+              !enteringTerminating &&
+              prev.state === "terminating" &&
+              next.state === "terminating"
 
-            if (!enteringTerminating) {
+            if (!enteringTerminating && !refreshingTerminating) {
               MutableHashMap.set(callsMap, callRef, next)
               return
             }
@@ -653,7 +686,18 @@ export class CallState extends ServiceMap.Service<
           peer: peerOpt,
           direction,
         })
+        // Per-call dispatcher cleanup (ADR-0004). POISON makes the
+        // per-call worker drain and exit; its own fiber removes the
+        // perCallQueues entry. No-op when dispatcher service is not in
+        // scope (HTTP-only test fixtures).
+        yield* dispatcherPoisonForCallRef(callRef)
       })
+
+      const resolveFromSipKeySync = (callId: string, tag: string): string | undefined => {
+        const byTag = Option.getOrUndefined(MutableHashMap.get(sipIndex, `${callId}|${tag}`))
+        if (byTag !== undefined) return byTag
+        return Option.getOrUndefined(MutableHashMap.get(sipIndex, callId))
+      }
 
       const resolveFromSipKey = Effect.fnUntraced(function* (
         callId: string,
@@ -736,7 +780,10 @@ export class CallState extends ServiceMap.Service<
         }
         return { lt10s, lt60s, lt300s, gte300s }
       }
-      registry.callState = { terminatingByBucket }
+      registry.callState = {
+        terminatingByBucket,
+        concurrentCallsCount: () => MutableHashMap.size(callsMap),
+      }
 
       const loadOwnedCalls = Effect.fnUntraced(function* (workerIndex: number) {
         // Slice 4: with the partitioned keyspace, "calls owned by self
@@ -934,6 +981,8 @@ export class CallState extends ServiceMap.Service<
           peer: peerOpt,
           direction,
         })
+        // Symmetric per-call dispatcher cleanup — see remove() above.
+        yield* dispatcherPoisonForCallRef(callRef)
       })
 
       const forcePurge = Effect.fnUntraced(function* (callRef: string, reason: string) {
@@ -962,10 +1011,33 @@ export class CallState extends ServiceMap.Service<
       const ORPHAN_SWEEP_INTERVAL_MS = 60_000
 
       const sweepOnce = Effect.gen(function* () {
+        // Stage 4 of docs/plan/to-review-and-properly-swift-moler.md:
+        // the orphan sweep no longer purges every `terminating` call on
+        // the 60s tick. Instead it respects the per-call safety timer's
+        // `fireAt`, which `CallState.update` refreshes on every event
+        // for the callRef. Net effect: an in-flight dialog that gets a
+        // peer response during a chaos window is NOT purged just because
+        // it has been in `terminating` for >60s.
+        //
+        // `terminated` calls (corner case where rule-path cleanup
+        // missed) are still swept immediately — they're cleaned up
+        // logically, just need their memory entry removed.
+        const now = yield* Clock.currentTimeMillis
         const orphans: Array<{ callRef: string; state: Call["state"]; createdAt: number }> = []
         for (const [callRef, call] of callsMap) {
-          if (call.state === "terminated" || call.state === "terminating") {
+          if (call.state === "terminated") {
             orphans.push({ callRef, state: call.state, createdAt: call.createdAt })
+            continue
+          }
+          if (call.state === "terminating") {
+            const safety = call.timers.find((t) => t.type === "terminating_timeout")
+            const deadline =
+              safety !== undefined
+                ? safety.fireAt
+                : call.createdAt + TERMINATING_TIMEOUT_MS
+            if (now >= deadline) {
+              orphans.push({ callRef, state: call.state, createdAt: call.createdAt })
+            }
           }
         }
         for (const { callRef, state, createdAt } of orphans) {
@@ -994,7 +1066,7 @@ export class CallState extends ServiceMap.Service<
         layerScope,
       )
 
-      return { create, withCall, update, peek, flushToRedis, remove, forcePurge, resolveFromSipKey, stats, statsSync, loadOwnedCalls, flushAllCalls }
+      return { create, withCall, update, peek, flushToRedis, remove, forcePurge, resolveFromSipKey, resolveFromSipKeySync, stats, statsSync, loadOwnedCalls, flushAllCalls }
     })
   )
 }

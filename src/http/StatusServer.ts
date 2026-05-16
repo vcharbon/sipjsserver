@@ -390,6 +390,133 @@ function renderPrometheus(
     m("b2bua_worker_terminating_calls", buckets.lt60s, { age_bucket: "lt60s" })
     m("b2bua_worker_terminating_calls", buckets.lt300s, { age_bucket: "lt300s" })
     m("b2bua_worker_terminating_calls", buckets.gte300s, { age_bucket: "gte300s" })
+
+    header(
+      "b2bua_active_dialogs",
+      "gauge",
+      "Active dialogs on this worker — size of the in-memory callsMap (every call this worker currently owns as primary or holds as backup). Authoritative dialog count; not derived from the proxy LRU.",
+    )
+    m("b2bua_active_dialogs", reg.callState.concurrentCallsCount())
+  }
+
+  // ── PerCallDispatcher gauges + counters (ADR-0004) ────────────────
+  if (reg.dispatch) {
+    const d = reg.dispatch
+    const counts = d.queueCounts()
+    const inFlight = d.inFlight()
+    const creations = d.creationsTotal()
+    const removals = d.removalsTotal()
+
+    header(
+      "b2bua_dispatch_queues",
+      "gauge",
+      "Current number of per-callRef event queues, by partition (primary = owned by this worker, backup = held for another peer).",
+    )
+    m("b2bua_dispatch_queues", counts.primary, { partition: "primary" })
+    m("b2bua_dispatch_queues", counts.backup, { partition: "backup" })
+
+    header(
+      "b2bua_dispatch_in_flight",
+      "gauge",
+      "Per-call event handlers currently running, by partition.",
+    )
+    m("b2bua_dispatch_in_flight", inFlight.primary, { partition: "primary" })
+    m("b2bua_dispatch_in_flight", inFlight.backup, { partition: "backup" })
+
+    header(
+      "b2bua_dispatch_queue_creations_total",
+      "counter",
+      "Per-call queues created since boot, labelled by reason (boot, lazy, failover).",
+    )
+    m("b2bua_dispatch_queue_creations_total", creations.boot, { reason: "boot" })
+    m("b2bua_dispatch_queue_creations_total", creations.lazy, { reason: "lazy" })
+    m("b2bua_dispatch_queue_creations_total", creations.failover, { reason: "failover" })
+
+    header(
+      "b2bua_dispatch_queue_removals_total",
+      "counter",
+      "Per-call queues removed since boot, labelled by reason (terminate, reaper).",
+    )
+    m("b2bua_dispatch_queue_removals_total", removals.terminate, { reason: "terminate" })
+    m("b2bua_dispatch_queue_removals_total", removals.reaper, { reason: "reaper" })
+
+    header(
+      "b2bua_dispatch_worker_cap_drops_total",
+      "counter",
+      "Events dropped because the perCallQueues map was at the configured cap.",
+    )
+    m("b2bua_dispatch_worker_cap_drops_total", d.capDropsTotal())
+
+    header(
+      "b2bua_dispatch_queue_drops_total",
+      "counter",
+      "Events dropped because a per-call queue was full at its configured depth.",
+    )
+    m("b2bua_dispatch_queue_drops_total", d.queueDropsTotal())
+
+    header(
+      "b2bua_dispatch_saturation_total",
+      "counter",
+      "Times a worker had to park on the global concurrency permit (in-flight cap hit).",
+    )
+    m("b2bua_dispatch_saturation_total", d.saturationTotal())
+
+    header(
+      "b2bua_dispatch_concurrency_cap",
+      "gauge",
+      "Configured global concurrency cap for in-flight per-call event handlers.",
+    )
+    m("b2bua_dispatch_concurrency_cap", d.concurrencyCap)
+
+    header(
+      "b2bua_dispatch_queue_cap",
+      "gauge",
+      "Configured hard cap on the number of per-call queues tracked.",
+    )
+    m("b2bua_dispatch_queue_cap", d.queueCap)
+  }
+
+  // ── Call limiter per-result counters ───────────────────────────────
+  // Primary in-cluster verification signal for the limiter-Redis cascade
+  // fix (docs/plan/to-review-and-properly-swift-moler.md). The four
+  // outcomes are mutually exclusive and exhaustive: every
+  // `checkAndIncrement` call lands on exactly one of them.
+  if (reg.callLimiter) {
+    const cl = reg.callLimiter
+    header(
+      "b2bua_call_limiter_results_total",
+      "counter",
+      "CallLimiter checkAndIncrement outcomes, by result label. " +
+        "allowed=admitted under cap; rejected=cap hit (normal); " +
+        "redis_error=ioredis RedisError (fail-open admission); " +
+        "timeout=Effect-level 150ms safety net fired (fail-open admission).",
+    )
+    m("b2bua_call_limiter_results_total", cl.allowedTotal(), { result: "allowed" })
+    m("b2bua_call_limiter_results_total", cl.rejectedTotal(), { result: "rejected" })
+    m("b2bua_call_limiter_results_total", cl.redisErrorTotal(), { result: "redis_error" })
+    m("b2bua_call_limiter_results_total", cl.timeoutTotal(), { result: "timeout" })
+  }
+
+  // ── Redis call-key counts (periodic SCAN snapshot) ─────────────────
+  if (reg.redisCallKeyCounts) {
+    const counts = reg.redisCallKeyCounts
+    header(
+      "b2bua_redis_call_keys",
+      "gauge",
+      "Periodic-SCAN snapshot of call keys in Redis. partition=nominal counts `pri:{self}:call:*` (this worker as primary); partition=backup is labelled by `primary` and counts `bak:{primary}:call:*` (calls this worker holds on behalf of another pod).",
+    )
+    m("b2bua_redis_call_keys", counts.nominalCount(), { partition: "nominal" })
+    const backups = counts.backupCountsByPrimary()
+    for (const [primary, count] of Object.entries(backups)) {
+      m("b2bua_redis_call_keys", count, { partition: "backup", primary })
+    }
+
+    header(
+      "b2bua_redis_call_keys_scan_timestamp_seconds",
+      "gauge",
+      "Unix timestamp at which the call-key SCAN snapshot above was last refreshed. now() - this value is the scrape staleness.",
+    )
+    m("b2bua_redis_call_keys_scan_timestamp_seconds", counts.lastScanTimestampMs() / 1000)
   }
 
   // ── Peer-scan-bootstrap (echo-removal slice) ───────────────────────
@@ -627,6 +754,36 @@ export const StatusServerLayer: Layer.Layer<
               timestamp: Date.now(),
             })
           })
+        )
+
+        // ADR-0004 — PerCallDispatcher gauges + counters. Surfaces the
+        // partition-tagged queue counts, in-flight handler counts, and
+        // saturation / cap-drop totals so operators can correlate a
+        // call-handling stall with which dispatcher dimension is
+        // exhausted (queue cap vs concurrency cap vs single-call
+        // queue depth).
+        yield* router.add(
+          "GET",
+          "/debug/dispatch",
+          Effect.gen(function* () {
+            const d = registry.dispatch
+            if (d === undefined) {
+              return yield* HttpServerResponse.json({ enabled: false })
+            }
+            return yield* HttpServerResponse.json({
+              enabled: true,
+              concurrencyCap: d.concurrencyCap,
+              queueCap: d.queueCap,
+              queueCounts: d.queueCounts(),
+              inFlight: d.inFlight(),
+              creationsTotal: d.creationsTotal(),
+              removalsTotal: d.removalsTotal(),
+              capDropsTotal: d.capDropsTotal(),
+              queueDropsTotal: d.queueDropsTotal(),
+              saturationTotal: d.saturationTotal(),
+              timestamp: Date.now(),
+            })
+          }),
         )
 
         yield* router.add(

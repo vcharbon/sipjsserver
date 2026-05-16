@@ -3,6 +3,7 @@
  */
 
 import { Layer, Schema, ServiceMap } from "effect"
+import { TERMINATING_TIMEOUT_MS } from "../call/timer-helpers.js"
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -214,6 +215,37 @@ export const AppConfigData = Schema.Struct({
    */
   limiterDecrementTimeoutMs: Schema.Int,
 
+  // ── Per-call event dispatch (ADR-0004) ────────────────────────────────
+  /**
+   * Maximum total in-flight per-call event handlers across all worker
+   * fibers. A bounded global semaphore caps how many distinct call
+   * handlers can be running at once; one slow handler can stall its own
+   * call but never blocks others.
+   *
+   * Justification (Q2 of the per-call FIFO plan): 100 CAPS × 10 s
+   * worst-case slow downstream → ~1000 concurrent handlers, default 1024
+   * leaves headroom for INVITE-storm spikes. Per-call FIFO is enforced
+   * structurally by the per-callRef queue — overlap between events for
+   * the same call is impossible.
+   */
+  eventDispatchConcurrency: Schema.Int,
+
+  /**
+   * Hard cap on the number of per-callRef queues the dispatcher will
+   * track. Router refuses to lazy-create new queues past this cap and
+   * increments `dispatch_worker_cap_drops` instead. Worst case heap at
+   * cap: ~400 MB (200 K × ~2 KB per fiber + queue overhead).
+   */
+  perCallQueueCap: Schema.Int,
+
+  /**
+   * Per-call queue depth. A single call's events queueing past this
+   * depth indicates either a stuck handler or a flooding peer; new
+   * events are dropped and counted via `dispatch_queue_drops_total`.
+   * A healthy call only ever has 0-1 events queued.
+   */
+  perCallQueueDepth: Schema.Int,
+
   // ── Tracing ───────────────────────────────────────────────────────────
   /** Header names whose values are redacted in sip.raw_message span attributes. */
   scrubHeaders: Schema.Array(Schema.String),
@@ -372,6 +404,9 @@ function readConfigFromEnv(): AppConfigData {
     storageBufferDrainers: parseInt(envOrDefault("STORAGE_BUFFER_DRAINERS", "4"), 10),
     storageDropFallbackMs: parseInt(envOrDefault("STORAGE_DROP_FALLBACK_MS", "1000"), 10),
     limiterDecrementTimeoutMs: parseInt(envOrDefault("LIMITER_DECREMENT_TIMEOUT_MS", "1000"), 10),
+    eventDispatchConcurrency: parseInt(envOrDefault("EVENT_DISPATCH_CONCURRENCY", "1024"), 10),
+    perCallQueueCap: parseInt(envOrDefault("PER_CALL_QUEUE_CAP", "200000"), 10),
+    perCallQueueDepth: parseInt(envOrDefault("PER_CALL_QUEUE_DEPTH", "64"), 10),
     scrubHeaders: envOrDefault("SCRUB_HEADERS", "Authorization,Proxy-Authorization")
       .split(",")
       .map((h) => h.trim())
@@ -392,6 +427,33 @@ function readConfigFromEnv(): AppConfigData {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-field validation
+// ---------------------------------------------------------------------------
+
+/**
+ * The `terminating_timeout` safety net must exceed the longest expected
+ * gap between peer activity by a comfortable margin. Otherwise a routine
+ * silent interval (an OPTIONS keepalive cycle, a session-timer refresh
+ * window) gets mistaken for "this call is dead" and the orphan sweep
+ * force-purges live dialogs. See ADR-0004 and plan
+ * docs/plan/to-review-and-properly-swift-moler.md Stage 4.
+ *
+ * Throws so the worker refuses to start on inconsistent configuration
+ * — the platform must never run with this gate misconfigured.
+ */
+export function validateTerminatingTimeoutConsistency(cfg: AppConfigData): void {
+  const requiredMs = cfg.keepaliveIntervalSec * 1000 + 60_000
+  if (TERMINATING_TIMEOUT_MS <= requiredMs) {
+    throw new Error(
+      `Inconsistent config: TERMINATING_TIMEOUT_MS (${TERMINATING_TIMEOUT_MS}) ` +
+        `must exceed keepaliveIntervalSec*1000 + 60000 (${requiredMs}). ` +
+        `Bump TERMINATING_TIMEOUT_MS in src/call/timer-helpers.ts or lower ` +
+        `KEEPALIVE_INTERVAL_SEC.`,
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -399,5 +461,9 @@ export class AppConfig extends ServiceMap.Service<
   AppConfig,
   AppConfigData
 >()("@sipjsserver/AppConfig") {
-  static readonly layer = Layer.sync(AppConfig, () => readConfigFromEnv())
+  static readonly layer = Layer.sync(AppConfig, () => {
+    const cfg = readConfigFromEnv()
+    validateTerminatingTimeoutConsistency(cfg)
+    return cfg
+  })
 }
