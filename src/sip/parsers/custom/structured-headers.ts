@@ -593,8 +593,13 @@ function parseHeaderParams(s: string, i: number): Record<string, string | true> 
     const pname = s.slice(i, nameEnd).toLowerCase()
     i = nameEnd
 
+    // RFC 3261 EQUAL production permits surrounding LWS: `SWS "=" SWS`.
+    // The 4475 wsinv fixture has a folded `branch= z9hG4bK30239` where the
+    // SP after `=` is just LWS, not the start of the value.
+    i = skipWS(s, i)
     if (i < len && s.charCodeAt(i) === 0x3d) { // =
       i++ // skip =
+      i = skipWS(s, i)
       // Read parameter value — may be quoted
       if (i < len && s.charCodeAt(i) === 0x22) { // "
         const { text, end } = readQuotedString(s, i)

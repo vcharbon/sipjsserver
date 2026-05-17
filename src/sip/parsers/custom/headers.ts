@@ -11,8 +11,9 @@
  */
 
 import type { SipHeader } from "../../types.js"
-import { Scanner, COLON, CR, LF, isWSP } from "./scanner.js"
+import { Scanner, COLON, CR, LF, HTAB, isWSP, isTokenChar } from "./scanner.js"
 import { expandCompactForm } from "./compact-forms.js"
+import type { SipParserLimits } from "../interface.js"
 
 export interface ParsedHeaders {
   readonly headers: SipHeader[]
@@ -23,7 +24,7 @@ export interface ParsedHeaders {
  * Parse all headers from current scanner position until double-CRLF.
  * Advances the scanner past the blank line (end-of-headers marker).
  */
-export function parseHeaders(s: Scanner): ParsedHeaders {
+export function parseHeaders(s: Scanner, limits: SipParserLimits): ParsedHeaders {
   const headers: SipHeader[] = []
   let contentLength = 0
 
@@ -58,6 +59,14 @@ export function parseHeaders(s: Scanner): ParsedHeaders {
     const trimmedValue = value.trim()
     const lowerName = name.toLowerCase()
 
+    // Bound per-header memory cost: name + ": " + value, post-unfold/trim.
+    const headerLen = name.length + 2 + trimmedValue.length
+    if (headerLen > limits.maxHeaderLength) {
+      throw new Error(
+        `Header "${name}" length ${headerLen} exceeds limit ${limits.maxHeaderLength}`
+      )
+    }
+
     // Validate and track Content-Length
     if (lowerName === "content-length") {
       const parsed = parseInt(trimmedValue, 10)
@@ -83,6 +92,22 @@ export function parseHeaders(s: Scanner): ParsedHeaders {
       }
     }
 
+    // For headers whose grammar uses quoted-string (display names, auth
+    // params, contact params, etc.), reject unterminated quotes — see
+    // CVE-2023-27599 (OpenSIPS parse_to_param crash on `a="T\` at EOL).
+    // Generic readHeaderValue is context-free and cannot enforce this
+    // because Call-ID's `word` grammar (RFC 3261) allows bare `"`.
+    if (QUOTED_STRING_HEADERS.has(lowerName) && hasUnbalancedQuotes(trimmedValue)) {
+      throw new Error(`Unterminated quoted-string in ${name} header`)
+    }
+
+    // Digest credentials (RFC 3261 §22.4) must be comma-separated
+    // name=value pairs. The OpenSIPS PoC `Digest a a="",real` is a bare
+    // token + orphan token shape that crashed parse_param_name (CVE-2023-28098).
+    if (AUTHORIZATION_HEADERS.has(lowerName) && !isValidDigestCredentials(trimmedValue)) {
+      throw new Error(`Malformed Digest credentials in ${name} header`)
+    }
+
     headers.push({ name, value: trimmedValue })
   }
 
@@ -90,22 +115,161 @@ export function parseHeaders(s: Scanner): ParsedHeaders {
 }
 
 /**
+ * Headers whose RFC 3261 grammar can carry a quoted-string. A `"` inside
+ * one of these values must be properly paired (with `\<any>` escape support).
+ */
+const QUOTED_STRING_HEADERS = new Set([
+  "to",
+  "from",
+  "contact",
+  "reply-to",
+  "refer-to",
+  "subject",
+  "authorization",
+  "proxy-authorization",
+  "www-authenticate",
+  "proxy-authenticate",
+  "authentication-info",
+  "warning",
+  "alert-info",
+  "call-info",
+  "error-info",
+])
+
+/**
+ * True iff `value` contains an unterminated quoted-string.
+ * Inside a quoted-string, `\<any>` is an escape pair — neither byte
+ * influences quote state. Bytes outside a quoted-string are ignored.
+ */
+function hasUnbalancedQuotes(value: string): boolean {
+  let inQuote = false
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i)
+    if (inQuote) {
+      if (c === 0x5c) {
+        // Escape pair — skip next char, do not toggle.
+        i++
+        continue
+      }
+      if (c === 0x22) {
+        inQuote = false
+      }
+      continue
+    }
+    if (c === 0x22) {
+      inQuote = true
+    }
+  }
+  return inQuote
+}
+
+/**
  * Read header name bytes until colon.
- * Header names are tokens per RFC 3261, but we're lenient here —
- * we accept any non-colon, non-CR, non-LF byte.
- * Trailing whitespace before the colon is trimmed.
+ *
+ * RFC 3261 §25.1 says header-name is a `token`, but real-world SIP traffic
+ * (and RFC 4475 §3.1.1.2 itself) carries extension headers with chars that
+ * fall outside the strict token grammar. We therefore reject only the
+ * unambiguously-illegal bytes: CTL (0x00–0x1F except HTAB) and DEL (0x7F).
+ * That catches CVE-2023-27598 (OpenSIPS parse_via crash on a `\x16ia:`-style
+ * header line) while preserving the wide-range torture test.
+ *
+ * Trailing whitespace before the colon (e.g. `TO :`) is permitted by
+ * RFC 4475 §3.1.1.1 — we read the name, then skip WSP up to the colon.
  */
 function readHeaderName(s: Scanner): string {
   const start = s.pos
   while (s.pos < s.buf.length) {
     const b = s.buf[s.pos]!
     if (b === COLON || b === CR || b === LF) break
+    if (isWSP(b)) break
+    if (isIllegalHeaderNameByte(b)) {
+      throw new Error(`Illegal byte 0x${b.toString(16)} in header name at position ${s.pos}`)
+    }
     s.pos++
   }
-  // Trim trailing whitespace from name
-  let end = s.pos
-  while (end > start && isWSP(s.buf[end - 1]!)) {
-    end--
+  const name = s.buf.toString("utf-8", start, s.pos)
+  // Skip optional WSP between name and colon (RFC 4475 §3.1.1.1).
+  s.skipWSP()
+  return name
+}
+
+/** CTL bytes (0x00-0x1F except HTAB) and DEL (0x7F) never belong in a header name. */
+function isIllegalHeaderNameByte(b: number): boolean {
+  if (b === HTAB) return false
+  if (b < 0x20) return true
+  if (b === 0x7f) return true
+  return false
+}
+
+const AUTHORIZATION_HEADERS = new Set(["authorization", "proxy-authorization"])
+
+/**
+ * Validate a credentials header value (Authorization / Proxy-Authorization).
+ * Only the `Digest` scheme is grammar-checked; other schemes pass through.
+ *
+ * For Digest: after the scheme, the value must be one or more comma-separated
+ * `name=value` pairs (RFC 3261 §22.4). The name must be a non-empty token;
+ * the value may be a token or a quoted-string. Bare tokens (no `=`) and
+ * empty parts reject.
+ */
+function isValidDigestCredentials(value: string): boolean {
+  const SCHEME = "digest"
+  const lower = value.toLowerCase()
+  if (!lower.startsWith(SCHEME)) return true // not Digest; skip
+  const afterScheme = value.length > SCHEME.length ? value.charCodeAt(SCHEME.length) : -1
+  if (afterScheme !== -1 && !isWSP(afterScheme)) return true // e.g. "Digestion" — not the Digest scheme
+  const params = value.slice(SCHEME.length).trimStart()
+  if (params.length === 0) return false
+
+  const parts = splitTopLevelCommas(params)
+  for (const part of parts) {
+    const trimmed = part.trim()
+    if (trimmed.length === 0) return false
+    const eqIdx = findUnquotedEquals(trimmed)
+    if (eqIdx < 0) return false
+    const name = trimmed.slice(0, eqIdx).trimEnd()
+    if (name.length === 0) return false
+    for (let i = 0; i < name.length; i++) {
+      if (!isTokenChar(name.charCodeAt(i))) return false
+    }
   }
-  return s.buf.toString("utf-8", start, end)
+  return true
+}
+
+/** Split a string on `,` that is not inside a quoted-string. */
+function splitTopLevelCommas(s: string): string[] {
+  const parts: string[] = []
+  let inQuote = false
+  let start = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (inQuote) {
+      if (c === 0x5c) { i++; continue } // escape pair
+      if (c === 0x22) inQuote = false
+      continue
+    }
+    if (c === 0x22) { inQuote = true; continue }
+    if (c === 0x2c) {
+      parts.push(s.slice(start, i))
+      start = i + 1
+    }
+  }
+  parts.push(s.slice(start))
+  return parts
+}
+
+/** Index of the first `=` outside a quoted-string, or -1. */
+function findUnquotedEquals(s: string): number {
+  let inQuote = false
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (inQuote) {
+      if (c === 0x5c) { i++; continue }
+      if (c === 0x22) inQuote = false
+      continue
+    }
+    if (c === 0x22) { inQuote = true; continue }
+    if (c === 0x3d) return i
+  }
+  return -1
 }

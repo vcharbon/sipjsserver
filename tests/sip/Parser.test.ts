@@ -161,6 +161,7 @@ describe("RFC 4475 Section 3.1.2 — syntactically invalid messages", () => {
     ["3.1.2.2 — Content-Length larger than message", invalid.contentLengthTooLarge],
     ["3.1.2.3 — negative Content-Length", invalid.negativeContentLength],
     ["3.1.2.4 — overlarge request scalar fields", invalid.overlargRequestScalars],
+    ["3.1.2.6 — unterminated quoted string in display name", invalid.unterminatedQuotedString],
     ["3.1.2.7 — angle brackets enclosing Request-URI", invalid.angleBracketRequestUri],
     ["3.1.2.8 — embedded LWS in Request-URI", invalid.embeddedLwsInUri],
     ["3.1.2.9 — multiple SP in request-line", invalid.multipleSPInRequestLine],
@@ -190,7 +191,6 @@ describe("RFC 4475 Section 3.1.2 — syntactically invalid messages", () => {
 
   const acceptedAsRequest: Array<[string, Buffer]> = [
     ["3.1.2.1 — extraneous header field separators", invalid.extraneousSeparators],
-    ["3.1.2.6 — unterminated quoted string in display name", invalid.unterminatedQuotedString],
     ["3.1.2.10 — trailing spaces in request-line", invalid.trailingSpacesInRequestLine],
     ["3.1.2.11 — escaped headers in Request-URI", invalid.escapedHeadersInUri],
     ["3.1.2.12 — invalid timezone in Date header", invalid.invalidTimezone],
