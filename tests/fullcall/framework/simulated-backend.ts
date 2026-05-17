@@ -197,7 +197,9 @@ export function createSimulatedTransport(opts?: {
   // that runs replication via a per-worker puller fiber). Drained at
   // scenario end and rendered alongside the SIP trace in the report.
   const replicationTraceRecorder: ReplicationTraceRecorder | undefined =
-    sut === "sipproxyHA" ? makeReplicationTraceRecorder() : undefined
+    sut === "sipproxyHA" || sut === "k8sFailover"
+      ? makeReplicationTraceRecorder()
+      : undefined
 
   const StackLayer =
     sut === "sipproxyHA"
@@ -210,7 +212,14 @@ export function createSimulatedTransport(opts?: {
             : {}),
         })
       : sut === "k8sFailover"
-        ? k8sFakeStackLayer({ config, handlers: buildTestHandlers(), simulateMissingOutboundProxy })
+        ? k8sFakeStackLayer({
+            config,
+            handlers: buildTestHandlers(),
+            simulateMissingOutboundProxy,
+            ...(replicationTraceRecorder !== undefined
+              ? { replicationTraceRecorder }
+              : {}),
+          })
         : sut === "proxy+b2b"
           ? proxyB2bFakeStackLayer({ config, simulateMissingOutboundProxy })
           : sut === "registrarFrontProxy"

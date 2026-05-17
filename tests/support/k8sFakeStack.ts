@@ -25,7 +25,7 @@
  * external agents (alice / bob) on `10.30.0.x` / `10.40.0.x`.
  */
 
-import { Effect, Layer, MutableRef, Scope, ServiceMap, Stream } from "effect"
+import { Clock, Effect, Layer, MutableRef, Scope, ServiceMap, Stream } from "effect"
 import { AppConfig, type AppConfigData } from "../../src/config/AppConfig.js"
 import { CallLimiter, type LimiterMemoryStore, makeLimiterMemoryStore } from "../../src/call/CallLimiter.js"
 import { PeerFabric, type PeerFabricApi } from "../../src/cache/PeerFabric.js"
@@ -46,6 +46,8 @@ import {
 } from "../../src/sip-front-proxy/index.js"
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
 import { makeReplicationApply } from "../../src/replication/EchoApply.js"
+import { decodeFrame } from "../../src/replication/ReplicationProtocol.js"
+import type { ReplicationTraceRecorder } from "./ReplicationTraceRecorder.js"
 import {
   initialPeerView,
   PullerTransportError,
@@ -137,6 +139,16 @@ export interface K8sFakeStackOpts {
    * and tore down every long-hold call via `keepaliveTimeoutRule`.
    */
   readonly simulateMissingOutboundProxy?: boolean
+  /**
+   * Optional replication-frame trace recorder. When provided, every
+   * Data NDJSON frame the simulated `/replog` HTTP transport emits
+   * between workers is decoded and pushed onto the recorder so the
+   * harness can render the replication panel alongside the SIP trace
+   * in the HTML report. Mirrors the `proxyB2bFakeStack` opt; opt-in
+   * because the recording layer adds a `Stream.mapEffect` to every
+   * puller and we don't want it in steady-state perf tests.
+   */
+  readonly replicationTraceRecorder?: ReplicationTraceRecorder
 }
 
 /**
@@ -262,6 +274,7 @@ export function k8sFakeStackLayer(opts: K8sFakeStackOpts) {
       windowSec: opts.config.limiterWindowSeconds,
       activeWindows: opts.config.limiterActiveWindows,
     },
+    opts.replicationTraceRecorder,
   )
 
   return Layer.mergeAll(
@@ -313,6 +326,7 @@ function buildClusterWithWorkersLayer(
     readonly windowSec: number
     readonly activeWindows: number
   },
+  replicationTraceRecorder?: ReplicationTraceRecorder,
 ): Layer.Layer<
   SimulatedK8sCluster,
   never,
@@ -480,13 +494,43 @@ function buildClusterWithWorkersLayer(
               { self: peerOrdStr, peer: selfOrdStr, gen: peerGen },
               peerKv
             )
-            return buildPullStream({
+            const base = buildPullStream({
               channel: peerOutgoingToSelf,
               serverGen: peerGen,
               initialSince: { gen: args.sinceGen, counter: args.sinceCounter },
               chunkSize: args.chunkSize,
               noopIntervalMs: REPL_PULL_RECONNECT_GAP_MS,
             })
+            if (replicationTraceRecorder === undefined) return base
+            // Tee each NDJSON chunk through the recorder. Mirrors the
+            // proxyB2bFakeStack wiring: decode line-by-line, drop
+            // anything that isn't a Data frame (Noop heartbeats fire
+            // every reconnect-gap and would flood the report with no
+            // diagnostic value), and append everything else.
+            return Stream.mapEffect(base, (bytes) =>
+              Effect.gen(function* () {
+                const now = yield* Clock.currentTimeMillis
+                const text = new TextDecoder().decode(bytes)
+                for (const line of text.split("\n")) {
+                  if (line.length === 0) continue
+                  let frame: ReturnType<typeof decodeFrame> = null
+                  try {
+                    frame = decodeFrame(line)
+                  } catch {
+                    continue
+                  }
+                  if (frame === null) continue
+                  if (frame._tag !== "Data") continue
+                  replicationTraceRecorder.record({
+                    timestamp: now,
+                    from: peerOrdStr,
+                    to: selfOrdStr,
+                    frame,
+                  })
+                }
+                return bytes
+              }),
+            )
           }
 
           // Replication apply is local-only — no mirror echo.
