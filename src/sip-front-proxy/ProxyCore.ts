@@ -39,6 +39,7 @@
 import { Clock, Effect, Layer, Option, type Scope, ServiceMap, Stream } from "effect"
 import {
   getHeader,
+  getHeaders,
   isEmergencyRequest,
   newBranch,
   newTag,
@@ -215,6 +216,22 @@ interface ProxyCounters {
   routeStripped: number
   recordRouteInserted: number
   responseDroppedNoVia: number
+  /**
+   * Response routed to the cookie's `w_bak` because the destination
+   * worker named by the next-Via was no longer alive. Mirror of
+   * `decode_forward_backup` on the request path — the proxy promotes
+   * the reverse-path destination away from a dead/draining/not-ready
+   * worker. See `handleResponseImpl`.
+   */
+  responseReroutedToBackup: number
+  /**
+   * Response dropped because the destination worker was dead AND no
+   * usable backup was decodable from the response's Record-Route
+   * (missing cookie, no `w_bak`, backup also dead). Bumps for every
+   * response we couldn't honour — non-zero indicates calls dying on
+   * the reverse path with no failover landing pad.
+   */
+  responseDroppedDeadWorker: number
   sendErrors: number
   /** Worker-outbound (`;outbound`) request rejected because the R-URI is
    *  unparseable; the worker is the bug source — we 400 it back. */
@@ -243,6 +260,8 @@ const newCounters = (): ProxyCounters => ({
   routeStripped: 0,
   recordRouteInserted: 0,
   responseDroppedNoVia: 0,
+  responseReroutedToBackup: 0,
+  responseDroppedDeadWorker: 0,
   sendErrors: 0,
   malformedRouteParam: 0,
   workerOutboundClassificationMiss: 0,
@@ -478,6 +497,8 @@ const makeProxyCore: Effect.Effect<
       defaultEgressNet: net,
       cancelLru,
       metrics,
+      registry,
+      strategy,
     })
 
   // -------------------------------------------------------------------------
@@ -1168,6 +1189,47 @@ interface HandleResponseArgs {
    *  hop-by-hop ACK for 3xx-6xx finals. */
   readonly cancelLru: CancelBranchLruApi
   readonly metrics: ProxyMetricsApi
+  /** Reverse-path failover: consulted to detect a dead destination
+   *  worker and decode the cookie's `w_bak` for rerouting. */
+  readonly registry: WorkerRegistryApi
+  readonly strategy: RoutingStrategyApi
+}
+
+/**
+ * Find the proxy's own Record-Route entry in a response and return its
+ * URI params (carrying the stickiness cookie). Walks the Record-Route
+ * list and returns the params of the first entry whose URI host:port
+ * matches our advertised address on either fabric. The downstream UAS
+ * echoes Record-Route verbatim in the response (RFC 3261 §16.6 step 4),
+ * so the cookie we stamped on the request is available here for
+ * reverse-path failover decisions.
+ *
+ * Returns `undefined` if no entry matches us (e.g. response from a UAS
+ * we did not Record-Route, or Record-Route stripped by a misbehaving
+ * downstream).
+ */
+const findOwnRecordRouteParams = (
+  msg: SipMessage,
+  advertisedAddress: { readonly ip: string; readonly port: number },
+  coreAdvertisedAddress: { readonly ip: string; readonly port: number } | undefined,
+): RouteParams | undefined => {
+  const rrEntries = getHeaders(msg.headers, "record-route")
+  for (const entry of rrEntries) {
+    // Record-Route may be a comma-separated list within a single header.
+    // splitTopLevelCommas respects angle-bracket quoting.
+    for (const slice of splitTopLevelCommas(entry)) {
+      const parsed = parseSipUri(slice)
+      if (parsed === undefined) continue
+      const matchesExt =
+        parsed.host === advertisedAddress.ip && parsed.port === advertisedAddress.port
+      const matchesCore =
+        coreAdvertisedAddress !== undefined &&
+        parsed.host === coreAdvertisedAddress.ip &&
+        parsed.port === coreAdvertisedAddress.port
+      if (matchesExt || matchesCore) return parsed.params
+    }
+  }
+  return undefined
 }
 
 const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
@@ -1183,6 +1245,8 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
       defaultEgressNet,
       cancelLru,
       metrics,
+      registry,
+      strategy,
     } = args
     if (msg.type !== "response") return
 
@@ -1243,11 +1307,70 @@ const handleResponseImpl = (args: HandleResponseArgs): Effect.Effect<void> =>
     // received / rport take precedence over sent-by per §18.2.2 / §16.7.3.
     const receivedRaw = next.params["received"]
     const rportRaw = next.params["rport"]
-    const host = typeof receivedRaw === "string" && receivedRaw.length > 0 ? receivedRaw : next.host
-    const port =
+    let host = typeof receivedRaw === "string" && receivedRaw.length > 0 ? receivedRaw : next.host
+    let port =
       typeof rportRaw === "string" && rportRaw.length > 0
         ? Number.parseInt(rportRaw, 10)
         : (next.port ?? 5060)
+
+    // Reverse-path failover. If the destination of this response is a
+    // known worker that is no longer alive (dead / draining-post-grace
+    // / not-ready), attempt to reroute via the cookie's `w_bak` — the
+    // mirror of `decode_forward_backup` on the request path. The cookie
+    // sits on the proxy's own Record-Route entry, echoed by the
+    // downstream UAS in the response (RFC 3261 §16.6 step 4). Without
+    // this, an in-flight UAS response (e.g. bob's 200 OK to an INVITE
+    // whose primary just died) is forwarded into the void and the
+    // upstream UAC waits for Timer B to fire — see
+    // docs/plan/crash-of-b2b-during-drifting-lemur.md.
+    const destWorker = yield* registry.lookupByAddress({ host, port })
+    if (Option.isSome(destWorker) && destWorker.value.health !== "alive") {
+      const cookieParams = findOwnRecordRouteParams(msg, advertisedAddress, coreAdvertisedAddress)
+      if (cookieParams !== undefined) {
+        const decoded = yield* strategy.decodeStickiness(cookieParams, msg)
+        if (decoded._tag === "forwardBackup") {
+          counters.responseReroutedToBackup++
+          yield* Effect.logInfo(
+            `[ProxyCore] response rerouted to backup — destination ` +
+              `${destWorker.value.id} (${host}:${port}) health=${destWorker.value.health}; ` +
+              `via cookie w_bak ${decoded.target.host}:${decoded.target.port} ` +
+              `(status=${msg.status} cseq=${respCseqMethod})`,
+          )
+          host = decoded.target.host
+          port = decoded.target.port
+        } else {
+          counters.responseDroppedDeadWorker++
+          yield* Effect.logWarning(
+            `[ProxyCore] response dropped — destination ${destWorker.value.id} ` +
+              `(${host}:${port}) health=${destWorker.value.health}; cookie ` +
+              `decode=${decoded._tag} yielded no usable backup ` +
+              `(status=${msg.status} cseq=${respCseqMethod})`,
+          )
+          yield* metrics.recordMessage({
+            direction: "outbound",
+            methodOrStatus: String(msg.status),
+            cseqMethod: respCseqMethod,
+            result: "dropped",
+          })
+          return
+        }
+      } else {
+        counters.responseDroppedDeadWorker++
+        yield* Effect.logWarning(
+          `[ProxyCore] response dropped — destination ${destWorker.value.id} ` +
+            `(${host}:${port}) health=${destWorker.value.health}; no Record-Route ` +
+            `cookie to decode for backup rerouting ` +
+            `(status=${msg.status} cseq=${respCseqMethod})`,
+        )
+        yield* metrics.recordMessage({
+          direction: "outbound",
+          methodOrStatus: String(msg.status),
+          cseqMethod: respCseqMethod,
+          result: "dropped",
+        })
+        return
+      }
+    }
 
     // Egress endpoint — read the `;net=` tag we stamped on the way out.
     // Single-endpoint deployments never set the param; egress defaults

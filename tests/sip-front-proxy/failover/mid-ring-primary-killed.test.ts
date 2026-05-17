@@ -117,7 +117,7 @@ const midRingKilledScenario = scenario("mid-ring-primary-killed", (s) => {
   // any transient binding-unavailable window into noise.
   .skipFinalSweep()
 
-describe.skip("sip-front-proxy/failover — mid-ring-primary-killed (known failing)", () => {
+describe("sip-front-proxy/failover — mid-ring-primary-killed", () => {
   const run = createSimulatedRunner({
     outputDir: OUTPUT_DIR,
     sut: "k8sFailover",
