@@ -27,6 +27,9 @@
       Content-Length: 0
     ]]>
   </send>
+  <!-- 5s simulated ring time between 180 Ringing and 200 OK so the
+       B2BUA observes realistic alert-to-answer latency on every call. -->
+  <pause milliseconds="5000"/>
   <send retrans="500">
     <![CDATA[
       SIP/2.0 200 OK
