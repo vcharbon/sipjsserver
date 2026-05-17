@@ -17,6 +17,29 @@ import { scenario } from "../../src/test-harness/framework/dsl.js"
 import type { DialogRef, ScenarioContext } from "../../src/test-harness/framework/recorder.js"
 import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipHeader } from "../../src/sip/types.js"
+import type { K8sKillTiming } from "../../src/test-harness/framework/types.js"
+
+/**
+ * Mid-establishment kill spec: inject a ring pause between 180 and 200
+ * and tear down a worker partway through it. Used by failover scenarios
+ * that exercise the establishment window the current chaos suite does
+ * not reach (no pause between 180 and 200 means no realistic chaos
+ * window mid-ring). The shape supports a single timing tier today
+ * ("mid-ring"); see `withRingAndKill` for the composable matrix form
+ * that extends to PRACK / 100rel tiers without touching call-sites.
+ */
+export interface RingKillSpec {
+  /** Offset from the start of the ring at which `s.cluster.kill` fires. Must be < `ringMs`. */
+  readonly atRingOffsetMs: number
+  /** Worker ordinal to kill (e.g. `"b2b-1"`). The caller resolves primary/backup from the Call-ID. */
+  readonly worker: string
+  /** Optional per-phase timing knobs passed through to `s.cluster.kill`. */
+  readonly timing?: K8sKillTiming
+  /** Optional hook fired immediately before the kill (e.g. replication-state assertions). */
+  readonly beforeKill?: (s: ScenarioContext) => void
+  /** Optional hook fired immediately after the kill (e.g. settle pause, registry assertions). */
+  readonly afterKill?: (s: ScenarioContext) => void
+}
 
 function getHeaderValue(headers: ReadonlyArray<SipHeader>, name: string): string | undefined {
   return headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value
@@ -59,9 +82,22 @@ export interface BasicCallOpts {
    * decode path on the way back to alice.
    */
   readonly byeFrom?: "alice" | "bob"
+  /**
+   * Ring duration: pause between 180 Ringing and 200 OK. Default `0`
+   * preserves the original back-to-back shape and leaves every existing
+   * call-site unchanged. Pass a positive value (e.g. `10_000`) to
+   * simulate a realistic ring window the chaos suite can crash into.
+   */
+  readonly ringMs?: number
+  /**
+   * When set, inject a `s.cluster.kill(...)` call partway through the
+   * ring pause. Ignored unless `ringMs > killSpec.atRingOffsetMs`. See
+   * `RingKillSpec` for the contract.
+   */
+  readonly killSpec?: RingKillSpec
 }
 
-const DEFAULTS: Required<Omit<BasicCallOpts, "callId">> = {
+const DEFAULTS: Required<Omit<BasicCallOpts, "callId" | "killSpec">> = {
   aliceName: "alice",
   bobName: "bob",
   aliceHost: "127.0.0.1",
@@ -70,6 +106,7 @@ const DEFAULTS: Required<Omit<BasicCallOpts, "callId">> = {
   proxyHost: "127.0.0.1",
   proxyPort: 15060,
   byeFrom: "alice",
+  ringMs: 0,
 }
 
 /**
@@ -142,6 +179,26 @@ export function basicCallBody(s: ScenarioContext, opts: BasicCallOpts = {}): voi
   // Bob → 180 Ringing
   bobInviteTxn.reply(180)
   aliceInviteTxn.expect(180)
+
+  // Optional ring window + mid-ring kill. `ringMs === 0` (default)
+  // preserves today's back-to-back 180→200 shape exactly. When set,
+  // bob holds the call in early-dialog state for `ringMs` of virtual
+  // time. If `killSpec` is set, fire `s.cluster.kill(...)` at the
+  // requested offset; the pre/post hooks let the caller assert on
+  // replication state or routing decisions inline.
+  const ringMs = opts.ringMs ?? DEFAULTS.ringMs
+  if (ringMs > 0) {
+    const killSpec = opts.killSpec
+    if (killSpec !== undefined && killSpec.atRingOffsetMs < ringMs) {
+      s.pause(killSpec.atRingOffsetMs)
+      killSpec.beforeKill?.(s)
+      s.cluster.kill(killSpec.worker, killSpec.timing)
+      killSpec.afterKill?.(s)
+      s.pause(ringMs - killSpec.atRingOffsetMs)
+    } else {
+      s.pause(ringMs)
+    }
+  }
 
   // Bob → 200 OK with SDP answer
   bobInviteTxn.reply(200, { body: sdpAnswer() })

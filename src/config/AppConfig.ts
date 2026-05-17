@@ -460,6 +460,33 @@ export function validateTerminatingTimeoutConsistency(cfg: AppConfigData): void 
   }
 }
 
+/**
+ * Cluster-mode workers MUST route b-leg outbound traffic through the LB
+ * proxy. The proxy is the single point that owns failover-aware routing
+ * (cookie-decode, dead-worker promotion to backup); a worker that sends
+ * b-leg INVITEs direct to bob bypasses this guarantee and the bob-side
+ * responses + in-dialog requests have no path back to a healthy worker
+ * when the original primary dies. The "direct to bob" path is reserved
+ * for the basic standalone single-b2b deployment.
+ *
+ * Detection signal: `clusterWorkers > 0` (set via `CLUSTER_WORKERS`).
+ * Single-node deployments leave it at 0 and bypass this gate.
+ *
+ * Throws so a misconfigured cluster worker refuses to boot.
+ */
+export function validateClusterModeOutboundProxy(cfg: AppConfigData): void {
+  if (cfg.clusterWorkers > 0 && cfg.b2bOutboundProxy === undefined) {
+    throw new Error(
+      `Inconsistent config: CLUSTER_WORKERS=${cfg.clusterWorkers} (cluster mode) but ` +
+        `B2B_OUTBOUND_PROXY is unset. Cluster-mode workers MUST route b-leg ` +
+        `outbound traffic through the LB proxy so bob-side responses and ` +
+        `in-dialog requests have a single failover-aware routing point ` +
+        `(see docs/lb-proxy-ha.md). Set B2B_OUTBOUND_PROXY=<host>:<port> ` +
+        `or unset CLUSTER_WORKERS to run as a standalone single-b2b worker.`,
+    )
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -471,6 +498,7 @@ export class AppConfig extends ServiceMap.Service<
   static readonly layer = Layer.sync(AppConfig, () => {
     const cfg = readConfigFromEnv()
     validateTerminatingTimeoutConsistency(cfg)
+    validateClusterModeOutboundProxy(cfg)
     return cfg
   })
 }
