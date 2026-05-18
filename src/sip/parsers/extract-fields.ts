@@ -25,7 +25,14 @@ import {
   parseCSeq,
   parseSipUriString,
   splitTopLevelCommas,
+  validateStrictHost,
+  validateStrictSipUri,
 } from "./custom/structured-headers.js"
+import { DEFAULT_SIP_PARSER_LIMITS, type SipParserLimits } from "./interface.js"
+import { strictNonNegativeDecimal, isTokenChar } from "./custom/scanner.js"
+
+/** RFC 3261 §8.1.1.7 — top-Via branch MUST start with this magic cookie. */
+const VIA_BRANCH_MAGIC_COOKIE = "z9hG4bK"
 
 /** Eager slots plus a parsed Request-URI for requests. */
 interface RequestEager extends EagerHeaderSlots {
@@ -220,8 +227,64 @@ function countTagParams(value: string): number {
   return count
 }
 
+/**
+ * Inspect a Via header's raw value to confirm the sent-protocol grammar:
+ *   sent-protocol = protocol-name SLASH protocol-version SLASH transport
+ *   SLASH         = SWS "/" SWS   ; LWS permitted around the `/`
+ * RFC §25.1 — all three tokens must be non-empty `1*tchar` sequences. The
+ * lenient `parseVia` swallows empty tokens silently; the strict check
+ * re-scans the value byte-by-byte and surfaces the missing piece. The
+ * RFC 4475 §3.1.1.1 "short tortuous INVITE" fixture exercises the LWS-
+ * around-`/` form (e.g. `SIP  / 2.0  / TCP …`) and must still pass.
+ */
+function checkSentProtocol(via: string): string | undefined {
+  const skipWS = (i: number) => {
+    while (i < via.length && (via.charCodeAt(i) === 0x20 || via.charCodeAt(i) === 0x09)) i++
+    return i
+  }
+  const readTokenRun = (i: number) => {
+    while (i < via.length && isTokenChar(via.charCodeAt(i))) i++
+    return i
+  }
+  let i = skipWS(0)
+  const nameStart = i
+  i = readTokenRun(i)
+  if (i === nameStart) return "empty Via protocol-name"
+  i = skipWS(i)
+  if (i >= via.length || via.charCodeAt(i) !== 0x2f) return "missing `/` after Via protocol-name"
+  i = skipWS(i + 1)
+  const verStart = i
+  i = readTokenRun(i)
+  if (i === verStart) return "empty Via protocol-version"
+  i = skipWS(i)
+  if (i >= via.length || via.charCodeAt(i) !== 0x2f) return "missing `/` after Via protocol-version"
+  i = skipWS(i + 1)
+  const transStart = i
+  i = readTokenRun(i)
+  if (i === transStart) return "empty Via transport"
+  return undefined
+}
+
+/**
+ * Strictness mode for header extraction.
+ *
+ * - `"wire"` — every check enforced including ADR-0007 strict-grammar gates
+ *   (Via magic cookie, transport allowlist, Via sent-protocol structure,
+ *   strict host grammar, strict SIP-URI ABNF, CSeq paranoid digit + method
+ *   presence, multi-colon sent-by detection). Used by the parser adapters
+ *   on wire-received bytes.
+ * - `"hydrate"` — the strict-grammar gates are skipped; only the
+ *   pre-existing baseline checks fire (mandatory header presence, tag
+ *   uniqueness, port range, CTL bytes). Used by `hydrateRequest` /
+ *   `hydrateResponse` where the message is reconstructed from already
+ *   trusted internal fields (test scaffolding, B2BUA re-INVITE building).
+ */
+type ExtractMode = "wire" | "hydrate"
+
 export function extractCommonFields(
   headers: ReadonlyArray<SipHeader>,
+  limits: SipParserLimits = DEFAULT_SIP_PARSER_LIMITS,
+  mode: ExtractMode = "wire",
 ): Result.Result<EagerHeaderSlots, SipParseError> {
   // Mandatory headers — presence is enforced; internal field parsing is
   // best-effort. Empty `uri` / `host` slots are surfaced as-is so the
@@ -238,6 +301,13 @@ export function extractCommonFields(
   if (countTagParams(fromVal) > 1) {
     return Result.fail(new SipParseError({ reason: "Duplicate From tag parameter" }))
   }
+  // Strict URI grammar on the From URI (catches sip:@host, sip:::host, etc.).
+  if (mode === "wire") {
+    const fromUriReason = validateStrictSipUri(fromParsed.uri)
+    if (fromUriReason !== undefined) {
+      return Result.fail(new SipParseError({ reason: `Strict From URI: ${fromUriReason} ("${fromParsed.uri}")` }))
+    }
+  }
 
   const toVal = getHeaderValue(headers, "To")
   if (toVal === undefined) {
@@ -250,6 +320,12 @@ export function extractCommonFields(
   if (countTagParams(toVal) > 1) {
     return Result.fail(new SipParseError({ reason: "Duplicate To tag parameter" }))
   }
+  if (mode === "wire") {
+    const toUriReason = validateStrictSipUri(toParsed.uri)
+    if (toUriReason !== undefined) {
+      return Result.fail(new SipParseError({ reason: `Strict To URI: ${toUriReason} ("${toParsed.uri}")` }))
+    }
+  }
 
   const callId = getHeaderValue(headers, "Call-ID")
   if (callId === undefined || callId.length === 0) {
@@ -261,6 +337,31 @@ export function extractCommonFields(
     return Result.fail(new SipParseError({ reason: "Missing mandatory CSeq header" }))
   }
   const cseqParsed = parseCSeq(cseqVal)
+  // CSeq strict grammar: `1*DIGIT LWS Method` — both pieces mandatory and
+  // paranoid-digit-only. Catches `CSeq: 1` (no method), `CSeq: 1.5 INVITE`
+  // (float in seq), `CSeq: -1 INVITE` (sign), and `CSeq: 1 ` (whitespace
+  // only after digits).
+  if (mode === "wire") {
+    const cseqRaw = cseqVal.trim()
+    const cseqSpaceIdx = (() => {
+      for (let i = 0; i < cseqRaw.length; i++) {
+        const c = cseqRaw.charCodeAt(i)
+        if (c === 0x20 || c === 0x09) return i
+      }
+      return -1
+    })()
+    if (cseqSpaceIdx === -1) {
+      return Result.fail(new SipParseError({ reason: `CSeq missing method token: "${cseqVal}"` }))
+    }
+    const cseqDigits = cseqRaw.slice(0, cseqSpaceIdx)
+    if (strictNonNegativeDecimal(cseqDigits, 2 ** 31 - 1) === undefined) {
+      return Result.fail(new SipParseError({ reason: `CSeq seq malformed (paranoid digit check): "${cseqDigits}"` }))
+    }
+    const cseqMethodToken = cseqRaw.slice(cseqSpaceIdx + 1).trim()
+    if (cseqMethodToken.length === 0) {
+      return Result.fail(new SipParseError({ reason: `CSeq missing method token: "${cseqVal}"` }))
+    }
+  }
 
   const viaValues = getHeaderValues(headers, "Via")
   if (viaValues.length === 0) {
@@ -281,17 +382,76 @@ export function extractCommonFields(
           new SipParseError({ reason: `Trailing non-digit after Via port: "${segment}"` }),
         )
       }
+      if (mode === "wire") {
+        const protoReason = checkSentProtocol(segment)
+        if (protoReason !== undefined) {
+          return Result.fail(
+            new SipParseError({ reason: `${protoReason}: "${segment}"` }),
+          )
+        }
+      }
     }
   }
-  const viasParsed = viaValues.flatMap((v) =>
-    splitTopLevelCommas(v).map(parseVia),
-  )
-  for (const v of viasParsed) {
+  const viaSegments = viaValues.flatMap((v) => splitTopLevelCommas(v))
+  const viasParsed = viaSegments.map(parseVia)
+  for (let idx = 0; idx < viasParsed.length; idx++) {
+    const v = viasParsed[idx]!
+    const raw = viaSegments[idx]!
     if (v.port !== undefined && !isValidPort(v.port)) {
       return Result.fail(new SipParseError({ reason: `Via port out of range: ${v.port}` }))
     }
     if (v.branch !== undefined && v.branch.length === 0) {
       return Result.fail(new SipParseError({ reason: "Empty Via branch parameter" }))
+    }
+    if (mode !== "wire") continue
+    // Top-Via magic cookie — RFC 3261 §8.1.1.7. Only enforced on the
+    // topmost Via; deeper Vias trace upstream proxies that may pre-date
+    // RFC 3261.
+    if (idx === 0) {
+      const branch = v.branch
+      if (branch === undefined || !branch.startsWith(VIA_BRANCH_MAGIC_COOKIE)) {
+        return Result.fail(
+          new SipParseError({
+            reason: `Top Via branch missing magic cookie "${VIA_BRANCH_MAGIC_COOKIE}": ${branch === undefined ? "<no branch>" : `"${branch}"`}`,
+          }),
+        )
+      }
+    }
+    // Strict host grammar applies to every Via (IPv4 octet ≤255 + no
+    // leading zeros / hostname label alphanum-start / IPv6 bracket-content
+    // tolerated as-is).
+    const hostReason = validateStrictHost(v.host)
+    if (hostReason !== undefined) {
+      return Result.fail(
+        new SipParseError({ reason: `Strict Via sent-by host: ${hostReason} ("${v.host}")` }),
+      )
+    }
+    // Multiple-colon sent-by — count colons in the raw Via value outside
+    // `[...]` IPv6 brackets and before the first `;` params delimiter.
+    // sent-protocol contributes 0 colons; well-formed sent-by contributes
+    // 0 (host) or 1 (host:port). > 1 is malformed `host:::port` shape.
+    {
+      let inBracket = false
+      let colonCount = 0
+      for (let k = 0; k < raw.length; k++) {
+        const c = raw.charCodeAt(k)
+        if (c === 0x5b) { inBracket = true; continue }
+        if (c === 0x5d) { inBracket = false; continue }
+        if (c === 0x3b && !inBracket) break
+        if (!inBracket && c === 0x3a) colonCount++
+      }
+      if (colonCount > 1) {
+        return Result.fail(
+          new SipParseError({ reason: `Via sent-by has ${colonCount} colons (must be ≤ 1): "${raw}"` }),
+        )
+      }
+    }
+    // Transport allowlist — RFC §7.1 permits `other-transport`; this
+    // rejects per the SipParserLimits.allowedTransports policy.
+    if (!limits.allowedTransports.has(v.transport.toUpperCase())) {
+      return Result.fail(
+        new SipParseError({ reason: `Via transport "${v.transport}" not in allowed set` }),
+      )
     }
   }
   const vias = viasParsed.map((v) => ({
@@ -304,6 +464,19 @@ export function extractCommonFields(
 
   const contactVal = getHeaderValue(headers, "Contact")
   const contactParsed = contactVal ? parseContact(contactVal) : undefined
+  if (mode === "wire" && contactParsed !== undefined) {
+    // `Contact: *` is the RFC 3261 §10.2.2 REGISTER wildcard — legitimate
+    // and bypasses URI strict-check. Any other value runs the strict pass.
+    const trimmedContact = contactVal!.trim()
+    if (trimmedContact !== "*") {
+      const contactReason = validateStrictSipUri(contactParsed.uri)
+      if (contactReason !== undefined) {
+        return Result.fail(
+          new SipParseError({ reason: `Strict Contact URI: ${contactReason} ("${contactParsed.uri}")` }),
+        )
+      }
+    }
+  }
 
   return Result.succeed({
     from: {
@@ -327,13 +500,53 @@ export function extractCommonFields(
 
 /**
  * Extract request-specific parsed fields (common + Request-URI).
+ *
+ * RFC 3261 §17.1.3 / §17.2.3 — the CSeq method in a request MUST match
+ * the request method (with the standard CANCEL/ACK matching their parent
+ * INVITE on the wire as separate transactions). When `method` is supplied
+ * we cross-check; the check used to live in custom/index.ts but moving it
+ * here means jssip / sip-parser adapters get the same enforcement.
  */
 export function extractRequestFields(
   headers: ReadonlyArray<SipHeader>,
   requestUri: string,
+  limits: SipParserLimits = DEFAULT_SIP_PARSER_LIMITS,
+  method?: string,
+  mode: ExtractMode = "wire",
 ): Result.Result<RequestEager, SipParseError> {
-  const common = extractCommonFields(headers)
+  const common = extractCommonFields(headers, limits, mode)
   if (Result.isFailure(common)) return Result.fail(common.failure)
+  if (method !== undefined) {
+    const cseqVal = getHeaderValue(headers, "CSeq")
+    if (cseqVal !== undefined) {
+      const cseqMethod = (() => {
+        const trimmed = cseqVal.trim()
+        for (let i = 0; i < trimmed.length; i++) {
+          const c = trimmed.charCodeAt(i)
+          if (c === 0x20 || c === 0x09) return trimmed.slice(i + 1).trim()
+        }
+        return ""
+      })()
+      if (cseqMethod.length > 0 && cseqMethod.toUpperCase() !== method.toUpperCase()) {
+        return Result.fail(
+          new SipParseError({
+            reason: `CSeq method "${cseqMethod}" does not match request method "${method}"`,
+          }),
+        )
+      }
+    }
+  }
+  // Strict SIP-URI grammar on the Request-URI. Catches sip:@host,
+  // sip:::host, sip:a@@host, sip: (empty hostport), host-label invalid
+  // start char.
+  if (mode === "wire") {
+    const requestUriReason = validateStrictSipUri(requestUri)
+    if (requestUriReason !== undefined) {
+      return Result.fail(
+        new SipParseError({ reason: `Strict Request-URI: ${requestUriReason} ("${requestUri}")` }),
+      )
+    }
+  }
   if (hasUnescapedCtlBytes(requestUri)) {
     return Result.fail(
       new SipParseError({ reason: `Control byte in Request-URI: "${requestUri}"` }),
@@ -398,8 +611,10 @@ export function extractRequestFields(
 export function extractResponseFields(
   headers: ReadonlyArray<SipHeader>,
   status: number,
+  limits: SipParserLimits = DEFAULT_SIP_PARSER_LIMITS,
+  mode: ExtractMode = "wire",
 ): Result.Result<EagerHeaderSlots, SipParseError> {
-  const common = extractCommonFields(headers)
+  const common = extractCommonFields(headers, limits, mode)
   if (Result.isFailure(common)) return common
   if (status > 100 && common.success.to.tag === undefined) {
     return Result.fail(
@@ -509,7 +724,10 @@ export function hydrateRequest(args: {
   readonly body: Uint8Array
   readonly raw: Buffer
 }): SipRequest {
-  const fields = extractRequestFields(args.headers, args.uri)
+  // mode "hydrate" — skip ADR-0007 wire-strict gates. Hydrate is for
+  // already-trusted internal fields (test scaffolding, B2BUA re-INVITE
+  // construction). Wire grammar enforcement runs on parser ingest only.
+  const fields = extractRequestFields(args.headers, args.uri, undefined, undefined, "hydrate")
   if (Result.isFailure(fields)) {
     throw new Error(`hydrateRequest: malformed headers — ${fields.failure.reason}`)
   }
@@ -533,7 +751,7 @@ export function hydrateResponse(args: {
   readonly body: Uint8Array
   readonly raw: Buffer
 }): SipResponse {
-  const fields = extractCommonFields(args.headers)
+  const fields = extractCommonFields(args.headers, undefined, "hydrate")
   if (Result.isFailure(fields)) {
     throw new Error(`hydrateResponse: malformed headers — ${fields.failure.reason}`)
   }

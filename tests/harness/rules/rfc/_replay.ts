@@ -22,10 +22,13 @@ import type { CallRecording, RecordedMessage } from "../../recording.js"
 // ---------------------------------------------------------------------------
 
 export function parseMessage(raw: string): SipMessage | null {
+  // Lenient layer — rule self-tests intentionally mutate the wire bytes to
+  // trip a rule (e.g. drop the magic-cookie prefix) and need the parser to
+  // still produce a SipMessage so the rule can observe and report.
   const eff = Effect.gen(function* () {
     const parser = yield* SipParser
     return yield* parser.parse(Buffer.from(raw, "utf8"))
-  }).pipe(Effect.provide(SipParser.layer), Effect.result)
+  }).pipe(Effect.provide(SipParser.lenientLayer), Effect.result)
   const result = Effect.runSync(eff)
   if (result._tag === "Failure") return null
   return result.success

@@ -620,3 +620,256 @@ function parseHeaderParams(s: string, i: number): Record<string, string | true> 
 
   return params
 }
+
+// =========================================================================
+// Strict host validation
+//
+// RFC 3261 §25.1 host = hostname / IPv4address / IPv6reference. We classify
+// by shape, then enforce the per-shape grammar:
+//
+//   IPv6 reference  — bracket-delimited at the caller's parseHostPort step;
+//                     the brackets ARE the structural validation, so the
+//                     content passes here (modern stacks tolerate the wide
+//                     range of legal IPv6 forms including zone IDs).
+//   IPv4address     — four dot-separated all-digit labels, each octet
+//                     0..255, no leading zeros (except single "0").
+//                     Leading zeros banned because inet_aton-family parsers
+//                     historically interpret "010" as octal — an SSRF /
+//                     dns-rebind bypass vector.
+//   hostname        — every label non-empty, alphanum-start, trailing dot
+//                     tolerated as RFC §25.1 permits.
+// =========================================================================
+
+/**
+ * Validate a host string already extracted by `parseHostPort`. Returns
+ * `undefined` when the host is well-formed, or a short reason string when
+ * it violates the grammar. The caller wraps the reason into the relevant
+ * `SipParseError`.
+ *
+ * Empty host string passes — callers separately enforce non-empty hosts
+ * where the field grammar requires it (Request-URI, Via sent-by, etc.).
+ */
+export function validateStrictHost(host: string): string | undefined {
+  if (host.length === 0) return undefined
+  // IPv6 reference content: the surrounding `parseHostPort` has already
+  // stripped the brackets, so we cannot redetect the IPv6 shape here. The
+  // bracket-delimitation upstream IS the structural validation; pass.
+  // Heuristic: any `:` byte means it was an IPv6 host (IPv4 / hostname have
+  // none — they're already :-split into host[:port]).
+  for (let i = 0; i < host.length; i++) {
+    if (host.charCodeAt(i) === 0x3a) return undefined
+  }
+
+  // IPv4 shape: exactly four `.`-separated all-digit labels.
+  const labels = host.split(".")
+  let ipv4Shape = labels.length === 4
+  if (ipv4Shape) {
+    for (const label of labels) {
+      if (label.length === 0) { ipv4Shape = false; break }
+      for (let i = 0; i < label.length; i++) {
+        const c = label.charCodeAt(i)
+        if (c < 0x30 || c > 0x39) { ipv4Shape = false; break }
+      }
+      if (!ipv4Shape) break
+    }
+  }
+  if (ipv4Shape) {
+    for (const label of labels) {
+      if (label.length > 1 && label.charCodeAt(0) === 0x30) {
+        return `IPv4 octet "${label}" has leading zero (octal-confusion vector)`
+      }
+      // Reject 1*3DIGIT bound: any 4+ digit label is overlength regardless of value.
+      if (label.length > 3) {
+        return `IPv4 octet "${label}" exceeds 1*3DIGIT`
+      }
+      let n = 0
+      for (let i = 0; i < label.length; i++) {
+        n = n * 10 + (label.charCodeAt(i) - 0x30)
+      }
+      if (n > 255) {
+        return `IPv4 octet ${n} out of range`
+      }
+    }
+    return undefined
+  }
+
+  // Hostname shape: every label non-empty + alphanum-start, EXCEPT a
+  // single trailing empty label (the "host." absolute form is RFC-legal).
+  for (let i = 0; i < labels.length; i++) {
+    const label = labels[i]!
+    if (label.length === 0) {
+      if (i === labels.length - 1 && labels.length > 1) continue // trailing dot
+      return "empty host label"
+    }
+    const c0 = label.charCodeAt(0)
+    const isAlpha = (c0 >= 0x41 && c0 <= 0x5a) || (c0 >= 0x61 && c0 <= 0x7a)
+    const isNum = c0 >= 0x30 && c0 <= 0x39
+    if (!isAlpha && !isNum) {
+      return `host label "${label}" must start with alphanum`
+    }
+  }
+  return undefined
+}
+
+/**
+ * Detect a sent-by string that carries more colons than the
+ * `host [":" port]` grammar admits. Operates on the raw sent-by token (no
+ * brackets, no params). IPv6 references — bracket-delimited — bypass this
+ * check at the caller before invoking.
+ *
+ * Returns the colon count if it exceeds 1 (i.e. the call should reject),
+ * or `undefined` when the sent-by is well-formed.
+ */
+export function detectSentByMultipleColons(sentBy: string): number | undefined {
+  let count = 0
+  for (let i = 0; i < sentBy.length; i++) {
+    if (sentBy.charCodeAt(i) === 0x3a) count++
+  }
+  return count > 1 ? count : undefined
+}
+
+// =========================================================================
+// Strict SIP-URI grammar
+//
+// RFC 3261 §25.1:
+//   SIP-URI  = "sip:" [ userinfo ] hostport ...
+//   userinfo = ( user / telephone-subscriber ) [ ":" password ] "@"
+//   user     = 1*( unreserved / escaped / user-unreserved )   ; ≥ 1 char
+//   hostport = host [ ":" port ]
+//
+// The lenient `parseSipUriString` returns `undefined` on the most
+// pathological shapes (no scheme colon) but silently accepts `sip:@host`,
+// `sip:::host`, `sip:a@b@host`, `sip:` (empty hostport), and hosts whose
+// first label fails the alphanum-start rule. This validator catches them
+// all by shape inspection — it does not need to re-parse params/headers.
+// =========================================================================
+
+/**
+ * Validate a SIP/SIPS URI string. Returns `undefined` on success or a
+ * short reason string on failure. Non-SIP schemes (`http:`, `tel:`, `cid:`,
+ * etc.) pass with only structural checks — host/user RFC 3261 rules apply
+ * only when the scheme is `sip` or `sips`.
+ */
+export function validateStrictSipUri(uri: string): string | undefined {
+  if (uri.length === 0) return "empty URI"
+  // Locate scheme colon.
+  let i = 0
+  while (i < uri.length) {
+    const c = uri.charCodeAt(i)
+    if (c === 0x3a) break
+    // scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+    if (i === 0) {
+      if (!((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a))) {
+        return "scheme must start with ALPHA"
+      }
+    } else {
+      const isAlpha = (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a)
+      const isDigit = c >= 0x30 && c <= 0x39
+      const isSpecial = c === 0x2b || c === 0x2d || c === 0x2e
+      if (!isAlpha && !isDigit && !isSpecial) return "invalid scheme character"
+    }
+    i++
+  }
+  if (i >= uri.length) return "missing scheme colon"
+  const scheme = uri.slice(0, i).toLowerCase()
+  i++ // past ':'
+
+  // Non-SIP schemes: structural OK, leave field-specific checks to caller.
+  if (scheme !== "sip" && scheme !== "sips") return undefined
+
+  // userinfo = user [ ":" password ] "@"   — optional.
+  // Locate the `@` that terminates userinfo, if any. The `@` is anywhere
+  // before the first hostport delimiter (`;`, `?`, `>`). Anything earlier
+  // is userinfo. A second `@` in userinfo is illegal.
+  let atIdx = -1
+  let secondAt = false
+  for (let j = i; j < uri.length; j++) {
+    const c = uri.charCodeAt(j)
+    if (c === 0x40) { // @
+      if (atIdx === -1) atIdx = j
+      else { secondAt = true; break }
+    } else if (c === 0x3b || c === 0x3f || c === 0x3e) {
+      break
+    }
+  }
+  if (secondAt) return "multiple `@` in userinfo"
+
+  let hostStart: number
+  if (atIdx !== -1) {
+    if (atIdx === i) return "empty user before `@`"
+    // user must be 1*(unreserved / escaped / user-unreserved). We only
+    // bail on the unambiguous shape errors here (empty) — char-class
+    // checks would over-reject percent-encoded sequences.
+    hostStart = atIdx + 1
+  } else {
+    hostStart = i
+  }
+
+  if (hostStart >= uri.length) return "empty hostport"
+  const firstHostChar = uri.charCodeAt(hostStart)
+  if (firstHostChar === 0x3a) return "hostport starts with `:`"
+  if (firstHostChar === 0x3b || firstHostChar === 0x3f || firstHostChar === 0x3e) {
+    return "empty hostport"
+  }
+
+  // Find end of hostport: first `;`, `?`, or `>`.
+  let hostEnd = uri.length
+  for (let j = hostStart; j < uri.length; j++) {
+    const c = uri.charCodeAt(j)
+    if (c === 0x3b || c === 0x3f || c === 0x3e) { hostEnd = j; break }
+  }
+
+  // Split host from port at the first `:` (only IPv4/hostname here — IPv6
+  // refs are bracket-delimited so the first `:` inside `[...]` is part of
+  // the address, not the port separator).
+  if (uri.charCodeAt(hostStart) === 0x5b) {
+    // IPv6 reference: must close with `]`.
+    let closed = false
+    let k = hostStart + 1
+    for (; k < hostEnd; k++) {
+      if (uri.charCodeAt(k) === 0x5d) { closed = true; break }
+    }
+    if (!closed) return "unclosed IPv6 reference"
+    if (k === hostStart + 1) return "empty IPv6 reference"
+    // After `]`, only optional `:port` then end-of-hostport.
+    let after = k + 1
+    if (after < hostEnd) {
+      if (uri.charCodeAt(after) !== 0x3a) return "junk after `]` in hostport"
+      after++
+      const portReason = validatePortDigits(uri, after, hostEnd)
+      if (portReason !== undefined) return portReason
+    }
+    return undefined
+  }
+
+  // Plain host[:port]. Multiple unbracketed `:` = malformed.
+  let colonIdx = -1
+  for (let j = hostStart; j < hostEnd; j++) {
+    if (uri.charCodeAt(j) === 0x3a) {
+      if (colonIdx === -1) colonIdx = j
+      else return "multiple `:` in hostport"
+    }
+  }
+  const host = colonIdx === -1 ? uri.slice(hostStart, hostEnd) : uri.slice(hostStart, colonIdx)
+  if (host.length === 0) return "empty host"
+  const hostReason = validateStrictHost(host)
+  if (hostReason !== undefined) return hostReason
+  if (colonIdx !== -1) {
+    const portReason = validatePortDigits(uri, colonIdx + 1, hostEnd)
+    if (portReason !== undefined) return portReason
+  }
+  return undefined
+}
+
+function validatePortDigits(uri: string, from: number, to: number): string | undefined {
+  if (from >= to) return "empty port"
+  let n = 0
+  for (let i = from; i < to; i++) {
+    const c = uri.charCodeAt(i)
+    if (c < 0x30 || c > 0x39) return "non-digit in port"
+    n = n * 10 + (c - 0x30)
+    if (n > 65535) return "port out of range"
+  }
+  if (n < 1) return "port out of range"
+  return undefined
+}

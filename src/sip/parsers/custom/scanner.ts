@@ -240,3 +240,28 @@ export class Scanner {
 }
 
 export { isTokenChar, isDigit, isWSP, SP, HTAB, CR, LF, COLON }
+
+/**
+ * Paranoid `1*DIGIT` decoder for SIP numeric header values. Accepts ONLY
+ * the byte range 0x30..0x39 with at least one byte present. Rejects every
+ * `parseInt`-tolerated shape that has historically been a SIP injection
+ * vector: leading/trailing whitespace, `+` / `-` sign, decimal point,
+ * scientific notation (`1e10`), hex (`0x10`), octal (`0o10`), `Infinity`,
+ * `NaN`, empty string. Overflow against `max` is detected mid-loop so
+ * adversarially long inputs cannot wrap.
+ *
+ * Return value: parsed integer on success, `undefined` on any rejection.
+ * Use this everywhere a SIP numeric header is consumed — never
+ * `parseInt(value, 10)` directly.
+ */
+export function strictNonNegativeDecimal(s: string, max: number): number | undefined {
+  if (s.length === 0) return undefined
+  let n = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x30 || c > 0x39) return undefined
+    n = n * 10 + (c - 0x30)
+    if (n > max) return undefined
+  }
+  return n
+}

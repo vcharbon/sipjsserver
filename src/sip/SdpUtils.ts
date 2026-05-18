@@ -7,12 +7,110 @@
  *   - Build a synthetic "held" SDP (a=inactive, port 0) carrying that codec
  *     profile so C accepts the initial INVITE without media flowing until
  *     the c-realigning re-INVITE arrives.
+ *   - Strict RFC 4566 §5 minimum-grammar validation (`validateSdpBody`)
+ *     callable on-demand by any pipeline that needs to refuse a malformed
+ *     SDP body. The B2BUA's transfer path keeps using the tolerant
+ *     `extractCodecProfile` because graceful degradation is preferable
+ *     mid-call; secusiptest invokes `validateSdpBody` directly to retire
+ *     its hand-rolled SDP-grammar check.
  *
  * Kept deliberately string-based — no external SDP library. Not a full
  * parser: only the fields we need.
  */
 
+import { Result, Schema } from "effect"
 import { sdpOriginAddress, sdpSessionId } from "./SdpAnswerFromOffer.js"
+
+// =========================================================================
+// Strict SDP body validation — RFC 4566 §5 minimum grammar
+//
+// The session description MUST start with `v=` then `o=` then `s=`, with
+// `t=` present somewhere before any `m=` section. We enforce:
+//   - `v=0` (RFC 4566 §5.1 fixes the version at 0)
+//   - `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <addr>`
+//      (six SP-separated tokens)
+//   - `s=<value>` present (RFC 4566 requires the line; value MAY be empty
+//     but the SDP fixture corpus uses `s=-`)
+//   - `t=<start-time> <stop-time>` present
+//   - every `m=<media> <port> <proto> <fmt>...` line has ≥ 4 tokens
+//
+// Failure returns a short reason string in the SdpValidationError. CRLF
+// and LF line endings are both tolerated; trailing empty lines are
+// ignored to match the wire reality.
+// =========================================================================
+
+export class SdpValidationError extends Schema.TaggedErrorClass<SdpValidationError>()(
+  "SdpValidationError",
+  { reason: Schema.String }
+) {}
+
+/**
+ * Validate the minimum RFC 4566 §5 grammar of an SDP body. Returns
+ * `Result.succeed(undefined)` on success or `Result.fail(SdpValidationError)`
+ * with the first violation found. Callable from any pipeline that wants to
+ * refuse a malformed body — the B2BUA core path keeps using the tolerant
+ * `extractCodecProfile` for graceful degradation, but operators / tests
+ * can layer this in where strict acceptance is required.
+ *
+ * Empty body fails (`v=` absent). Content-Type is the caller's
+ * responsibility — invoke this only when `Content-Type: application/sdp`.
+ */
+export function validateSdpBody(
+  body: Uint8Array | string,
+): Result.Result<void, SdpValidationError> {
+  const text = typeof body === "string" ? body : new TextDecoder("utf-8").decode(body)
+  const lines = text.split(/\r\n|\n/).filter((l) => l.length > 0)
+
+  if (lines.length === 0) {
+    return Result.fail(new SdpValidationError({ reason: "empty SDP body" }))
+  }
+
+  const required: Array<{ prefix: string; reason: string }> = [
+    { prefix: "v=", reason: "missing v= line" },
+    { prefix: "o=", reason: "missing o= line" },
+    { prefix: "s=", reason: "missing s= line" },
+    { prefix: "t=", reason: "missing t= line" },
+  ]
+  for (const { prefix, reason } of required) {
+    if (!lines.some((l) => l.startsWith(prefix))) {
+      return Result.fail(new SdpValidationError({ reason }))
+    }
+  }
+
+  // v=0 — RFC 4566 §5.1 fixes the version.
+  const vLine = lines.find((l) => l.startsWith("v="))!
+  if (vLine !== "v=0") {
+    return Result.fail(
+      new SdpValidationError({ reason: `non-zero protocol-version: "${vLine}"` }),
+    )
+  }
+
+  // o= must have exactly six SP-tokens.
+  const oLine = lines.find((l) => l.startsWith("o="))!
+  const oFields = oLine.slice(2).trim().split(/\s+/).filter((t) => t.length > 0)
+  if (oFields.length !== 6) {
+    return Result.fail(
+      new SdpValidationError({
+        reason: `o= line has ${oFields.length} tokens (want 6): "${oLine}"`,
+      }),
+    )
+  }
+
+  // Every m= line has ≥ 4 tokens (<media> <port> <proto> <fmt>+).
+  for (const line of lines) {
+    if (!line.startsWith("m=")) continue
+    const tokens = line.slice(2).trim().split(/\s+/).filter((t) => t.length > 0)
+    if (tokens.length < 4) {
+      return Result.fail(
+        new SdpValidationError({
+          reason: `m= line has ${tokens.length} tokens (want ≥ 4): "${line}"`,
+        }),
+      )
+    }
+  }
+
+  return Result.succeed(undefined)
+}
 
 /** Codec profile extracted from the first audio m-line of an SDP body. */
 export interface CodecProfile {

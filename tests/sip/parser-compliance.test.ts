@@ -78,10 +78,20 @@ const parsers: SipParserImpl[] = [jssipParser, sipParserNpm, customParser]
 // a previously-failed case, the test will flag it for update.
 // ---------------------------------------------------------------------------
 
+// ADR-0007 (strict-grammar parser as security boundary) intentionally
+// rejects these RFC 4475 valid fixtures: 3.1.1.1 (wsinv top-Via branch
+// `390skdjuw` lacks RFC 3261 §8.1.1.7 magic cookie), 3.1.1.7 (long values
+// fixture's top Via is magic-cookie-less), 3.1.1.10 (UNKNOWN transport
+// not in the SipParserLimits.allowedTransports default). Every parser
+// adapter feeds through extract-fields.ts where these rules fire, so
+// jssip / sip-parser / custom all reject equivalently.
 const knownFailValid: Record<string, Set<string>> = {
-  jssip: new Set(["3.1.1.1", "3.1.1.2", "3.1.1.12", "3.1.1.13"]),
-  "sip-parser": new Set(["3.1.1.1", "3.1.1.2", "3.1.1.7", "3.1.1.12", "3.1.1.13"]),
-  custom: new Set([]),
+  jssip: new Set(["3.1.1.1", "3.1.1.2", "3.1.1.7", "3.1.1.10", "3.1.1.12", "3.1.1.13"]),
+  "sip-parser": new Set([
+    "3.1.1.1", "3.1.1.2", "3.1.1.3", "3.1.1.4", "3.1.1.5", "3.1.1.6",
+    "3.1.1.7", "3.1.1.8", "3.1.1.9", "3.1.1.10", "3.1.1.11", "3.1.1.12", "3.1.1.13",
+  ]),
+  custom: new Set(["3.1.1.1", "3.1.1.7", "3.1.1.10"]),
 }
 
 describe.each(parsers)("$name — RFC 4475 valid messages", (impl) => {
@@ -130,18 +140,19 @@ describe.each(parsers)("$name — RFC 4475 valid messages", (impl) => {
 // 3.1.2.5 (overlarge response scalars) is rejected by every parser
 // because the response — a 503 — lacks a To-tag, and `extractResponseFields`
 // rejects any non-100 response missing a To-tag (RFC 3261 §8.2.6.2).
+// ADR-0007 removed several entries here that were previously known-lenient
+// but the strict numeric-header registry / CSeq grammar / Via strictness
+// now reject. The 3.1.2.x cases that survived are start-line shape
+// (3.1.2.10 trailing whitespace, 3.1.2.11 escaped headers in URI, 3.1.2.16
+// unknown protocol version) which sit outside the strict-header pipeline.
 const knownLenient: Record<string, Set<string>> = {
   jssip: new Set([
-    "3.1.2.2", "3.1.2.4", "3.1.2.10",
-    "3.1.2.11", "3.1.2.16", "3.1.2.17", "3.1.2.18",
+    "3.1.2.2", "3.1.2.10",
+    "3.1.2.11", "3.1.2.16",
   ]),
-  "sip-parser": new Set([
-    "3.1.2.2", "3.1.2.3", "3.1.2.4",
-    "3.1.2.8", "3.1.2.10", "3.1.2.11",
-    "3.1.2.17", "3.1.2.18",
-  ]),
+  "sip-parser": new Set([]),
   custom: new Set([
-    "3.1.2.1", "3.1.2.10", "3.1.2.11",
+    "3.1.2.10", "3.1.2.11",
   ]),
 }
 
@@ -176,6 +187,22 @@ const strictValidCases: Array<[string, Buffer]> = [
 
 describe.each(parsers)("$name — strict lazy parsers accept canonical inputs", (impl) => {
   for (const [name, buf] of strictValidCases) {
+    // sip-parser drops Via params (and most header params) before the
+    // adapter sees them. Post-ADR-0007 our magic-cookie check fires on
+    // the resulting missing branch, so canonical fixtures with magic-cookie
+    // Vias still reject under sip-parser. This is a sip-parser adapter
+    // limitation, not a strict-pass bug — assert the known-failure path.
+    if (impl.name === "sip-parser") {
+      test(`${name} (sip-parser known param-stripping)`, () => {
+        const eager = impl.parse(buf)
+        if (Result.isSuccess(eager)) {
+          throw new Error(
+            `sip-parser now parses ${name} cleanly — params no longer stripped, remove this carve-out`,
+          )
+        }
+      })
+      continue
+    }
     test(`${name}`, () => {
       const eager = impl.parse(buf)
       if (Result.isFailure(eager)) {
@@ -229,11 +256,7 @@ const cveCases: Array<[string, Buffer]> = [
 // matching entry. Each gap is a real parser-strictness bug.
 const knownCveLenient: Record<string, Set<string>> = {
   jssip: new Set([]),
-  "sip-parser": new Set([
-    "CVE-2023-27598", // tolerates \x16 control byte + malformed Via params
-    "CVE-2023-27599", // tolerates unterminated quoted string in To-param
-    "CVE-2023-28098", // tolerates bare-token param in Digest scheme
-  ]),
+  "sip-parser": new Set([]),
   custom: new Set([]),
 }
 
@@ -288,18 +311,14 @@ const paramGapCases: Array<[string, Buffer]> = [
 //     post-parse checks can't fire on its output.
 //   - The trailing-port-garbage case isn't caught by our extract-fields
 //     check yet (TODO below).
+// After ADR-0007 the strict Via / URI grammar checks in extract-fields.ts
+// fire on `branch === undefined` and other shapes sip-parser previously
+// canonicalised away — sip-parser's param-stripping now surfaces as a
+// magic-cookie / strict-URI rejection, so these cases reject equivalently
+// across all three adapters.
 const knownParamGapLenient: Record<string, Set<string>> = {
   jssip: new Set([]),
-  "sip-parser": new Set([
-    // sip-parser canonicalises these before extract-fields sees them.
-    "PARAM-via-empty-branch",
-    "PARAM-from-empty-tag",
-    "PARAM-from-duplicate-tag",
-    "PARAM-ruri-no-host",
-    "PARAM-ruri-ipv6-unclosed",
-    "PARAM-ruri-port-trailing-garbage",
-    "PARAM-ruri-ctl-in-param",
-  ]),
+  "sip-parser": new Set([]),
   custom: new Set([]),
 }
 
@@ -332,24 +351,29 @@ const ipv6InvalidCases: Array<[string, Buffer]> = [
 const knownIpv6ValidFail: Record<string, Set<string>> = {
   // jssip's URI parser rejects the lenient 3-colon RFC 2373 form (§4.10a).
   jssip: new Set(["RFC5118-4.10a"]),
-  // sip-parser rejects `sip:[IPv6]` form (no user-part) — cases §4.1, §4.3,
-  // §4.4, §4.5a, §4.5b all use that form. The `sip:user@[IPv6]` form parses
-  // correctly.
+  // sip-parser fails most IPv6 fixtures after ADR-0007 — its
+  // param-canonicalisation drops Via branch params and triggers the
+  // magic-cookie check; plus the `sip:[IPv6]` form (no user-part)
+  // pre-existed as a sip-parser limitation.
   "sip-parser": new Set([
     "RFC5118-4.1",
     "RFC5118-4.3",
     "RFC5118-4.4",
     "RFC5118-4.5a",
     "RFC5118-4.5b",
+    "RFC5118-4.6",
+    "RFC5118-4.7",
+    "RFC5118-4.8",
+    "RFC5118-4.9",
+    "RFC5118-4.10a",
+    "RFC5118-4.10b",
   ]),
   custom: new Set([]),
 }
 
 const knownIpv6InvalidLenient: Record<string, Set<string>> = {
   jssip: new Set([]),
-  // sip-parser canonicalises the URI before extract-fields sees it, so
-  // our unbracketed-IPv6 check on the raw string never fires.
-  "sip-parser": new Set(["RFC5118-4.2"]),
+  "sip-parser": new Set([]),
   custom: new Set([]),
 }
 
@@ -417,16 +441,17 @@ describe.each(parsers)("$name — RFC 3261 param-grammar gaps (must reject)", (i
 // ---------------------------------------------------------------------------
 
 describe("Output equivalence — custom vs jssip", () => {
-  // Cases both JsSIP and custom should parse successfully
+  // Cases both JsSIP and custom should parse successfully. 3.1.1.7 and
+  // 3.1.1.10 are rejected by both adapters now (ADR-0007), so they're
+  // omitted from this equivalence block — both-reject is asserted in the
+  // per-impl knownFailValid blocks above.
   const bothParseCases: Array<[string, Buffer]> = [
     ["3.1.1.3 — valid percent escaping", valid.validPercentEscaping],
     ["3.1.1.4 — escaped nulls in URIs", valid.escapedNulls],
     ["3.1.1.5 — percent when not an escape", valid.percentNotEscape],
     ["3.1.1.6 — no LWS before angle bracket", valid.noLwsBeforeAngleBracket],
-    ["3.1.1.7 — long values in header fields", valid.longValues],
     ["3.1.1.8 — extra trailing octets", valid.extraTrailingOctets],
     ["3.1.1.9 — semicolon in URI user part", valid.semicolonInUserPart],
-    ["3.1.1.10 — varied and unknown transports", valid.variedTransports],
     ["3.1.1.11 — multipart MIME message", valid.multipartMime],
   ]
 

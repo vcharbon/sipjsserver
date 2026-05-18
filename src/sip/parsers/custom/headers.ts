@@ -11,9 +11,73 @@
  */
 
 import type { SipHeader } from "../../types.js"
-import { Scanner, COLON, CR, LF, HTAB, isWSP, isTokenChar } from "./scanner.js"
+import { Scanner, COLON, CR, LF, HTAB, isWSP, isTokenChar, strictNonNegativeDecimal } from "./scanner.js"
 import { expandCompactForm } from "./compact-forms.js"
 import type { SipParserLimits } from "../interface.js"
+
+/**
+ * Numeric-header registry — every header whose value must be a non-negative
+ * decimal integer within a defined range. The strict validator runs in the
+ * headers loop so any non-conformant value rejects the whole message at the
+ * parser boundary.
+ *
+ * Using `strictNonNegativeDecimal` (byte-level `[0-9]+` check) rules out
+ * float-injection (`1.5e10` ≠ integer), hex (`0x10`), octal (`0o10`),
+ * scientific notation, signed forms (`+10` / `-10`), and surrounding
+ * whitespace inside the value — every shape `parseInt(_, 10)` historically
+ * silently accepted. See ADR-0007.
+ *
+ * Headers covered here:
+ *  - Content-Length (§20.14, 0..2^31-1) — bounds body slicing.
+ *  - CSeq seq      (§20.16, 0..2^31-1) — full CSeq grammar enforced in
+ *                                       extract-fields.ts (digits + method).
+ *  - Max-Forwards  (§20.22, 0..255)    — loop guard.
+ *  - Expires       (§20.19, 0..2^32-1) — registration duration.
+ *  - Min-Expires   (§20.23, 0..2^32-1) — registrar minimum.
+ *  - Session-Expires (RFC 4028 §4)     — integer prefix only; refresher param
+ *                                       (`;refresher=uac`) is split off and
+ *                                       only the digit prefix is checked.
+ *  - Min-SE        (RFC 4028 §5)       — integer prefix only.
+ */
+const UINT_32_MAX = 2 ** 32 - 1
+const INT_32_MAX = 2 ** 31 - 1
+
+interface NumericHeaderRule {
+  readonly max: number
+  /** True if value may carry `;param=...` tail (RFC 4028 session timers). */
+  readonly allowParamTail?: boolean
+}
+
+const NUMERIC_HEADERS: Readonly<Record<string, NumericHeaderRule>> = {
+  "content-length": { max: INT_32_MAX },
+  "cseq": { max: INT_32_MAX },
+  "max-forwards": { max: 255 },
+  "expires": { max: UINT_32_MAX },
+  "min-expires": { max: UINT_32_MAX },
+  "session-expires": { max: UINT_32_MAX, allowParamTail: true },
+  "min-se": { max: UINT_32_MAX, allowParamTail: true },
+}
+
+/**
+ * Strict numeric extraction with optional param tail. For CSeq, the digit
+ * prefix is followed by LWS + method — the LWS is taken as the terminator
+ * and `parseHeaderValue` already trimmed nothing inside the value so any
+ * non-digit byte (including space) ends the digit run.
+ */
+function extractStrictNumericPrefix(value: string, rule: NumericHeaderRule): number | undefined {
+  let end = value.length
+  if (rule.allowParamTail) {
+    const semi = value.indexOf(";")
+    if (semi >= 0) end = semi
+  }
+  // CSeq value is "1*DIGIT LWS Method" — terminate digit scan at first WSP.
+  let i = 0
+  for (; i < end; i++) {
+    const c = value.charCodeAt(i)
+    if (c === 0x20 || c === 0x09) break
+  }
+  return strictNonNegativeDecimal(value.slice(0, i).trim(), rule.max)
+}
 
 export interface ParsedHeaders {
   readonly headers: SipHeader[]
@@ -67,28 +131,17 @@ export function parseHeaders(s: Scanner, limits: SipParserLimits): ParsedHeaders
       )
     }
 
-    // Validate and track Content-Length
-    if (lowerName === "content-length") {
-      const parsed = parseInt(trimmedValue, 10)
-      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 2147483647) {
-        throw new Error(`Invalid Content-Length: "${trimmedValue}"`)
+    // Numeric-header strict validation. Registry-driven paranoid digit-only
+    // pass — rejects floats, hex, octal, scientific notation, signed values,
+    // inline whitespace, and anything `parseInt` would silently coerce.
+    const numericRule = NUMERIC_HEADERS[lowerName]
+    if (numericRule !== undefined) {
+      const parsed = extractStrictNumericPrefix(trimmedValue, numericRule)
+      if (parsed === undefined) {
+        throw new Error(`Invalid ${name} numeric value: "${trimmedValue}"`)
       }
-      contentLength = parsed
-    }
-
-    // Validate CSeq range (3.1.2.4 — overlarge scalars)
-    if (lowerName === "cseq") {
-      const seqNum = parseInt(trimmedValue, 10)
-      if (Number.isFinite(seqNum) && seqNum > 2147483647) {
-        throw new Error(`CSeq number exceeds 2^31 - 1: ${seqNum}`)
-      }
-    }
-
-    // Validate Max-Forwards range
-    if (lowerName === "max-forwards") {
-      const mf = parseInt(trimmedValue, 10)
-      if (Number.isFinite(mf) && (mf < 0 || mf > 255)) {
-        throw new Error(`Max-Forwards out of range: ${mf}`)
+      if (lowerName === "content-length") {
+        contentLength = parsed
       }
     }
 

@@ -99,6 +99,15 @@ export {
   extractResponseFields,
 } from "./parsers/extract-fields.js"
 
+// SDP helpers (extractCodecProfile + strict validateSdpBody)
+export {
+  extractCodecProfile,
+  buildHeldSdpFromProfile,
+  validateSdpBody,
+  SdpValidationError,
+} from "./SdpUtils.js"
+export type { CodecProfile, BuildHeldSdpOptions } from "./SdpUtils.js"
+
 // Signaling network (UDP fabric service used by both b2bua and test-harness)
 export { SignalingNetwork } from "./SignalingNetwork.js"
 export type {

@@ -85,6 +85,17 @@ interface SippStream {
   readonly callsPerSec: ReadonlyArray<number | null>
   readonly failsPerSec: ReadonlyArray<number | null>
   readonly currentCall: ReadonlyArray<number | null>
+  /**
+   * Cumulative failure counts straight from sipp's stat.csv `(C)`
+   * columns — monotonically increasing. `failsTotal` is `FailedCall(C)`;
+   * the breakdown buckets sum to ≤ total (sipp also has long-tail
+   * categories like regexp / cmd-not-sent which we lump into "other"
+   * implicitly = total − the named buckets).
+   */
+  readonly failsCumTotal: ReadonlyArray<number | null>
+  readonly failsCumTimeout: ReadonlyArray<number | null>
+  readonly failsCumUnexpected: ReadonlyArray<number | null>
+  readonly failsCumRejected: ReadonlyArray<number | null>
 }
 
 /**
@@ -183,6 +194,12 @@ interface ReportData {
     readonly target: string
     readonly tFire: number
     readonly tRecovered: number
+    /**
+     * True for events the harness did not schedule — currently only
+     * sipp-staleness-derived `kernel-stall` rows. Rendered with an
+     * "unsolicited" badge so they don't get mistaken for a planned cut.
+     */
+    readonly unsolicited?: boolean
   }>
   readonly limiter: {
     readonly t: ReadonlyArray<number>
@@ -238,11 +255,20 @@ const parseSippStatCsv = async (
   const idxFailedP = header.indexOf("FailedCall(P)")
   const idxCallRateP = header.indexOf("CallRate(P)")
   const idxCurrentCall = header.indexOf("CurrentCall")
+  const idxFailedC = header.indexOf("FailedCall(C)")
+  const idxTORecvC = header.indexOf("FailedTimeoutOnRecv(C)")
+  const idxTOSendC = header.indexOf("FailedTimeoutOnSend(C)")
+  const idxUnexpC = header.indexOf("FailedUnexpectedMessage(C)")
+  const idxRejC = header.indexOf("FailedCallRejected(C)")
   if (idxCurrentTime < 0 || idxFailedP < 0) return undefined
   const t: Array<number> = []
   const callsPerSec: Array<number> = []
   const failsPerSec: Array<number> = []
   const currentCall: Array<number> = []
+  const failsCumTotal: Array<number> = []
+  const failsCumTimeout: Array<number> = []
+  const failsCumUnexpected: Array<number> = []
+  const failsCumRejected: Array<number> = []
   for (let i = 1; i < lines.length; i++) {
     const cols = (lines[i] ?? "").split(";")
     // CurrentTime is "YYYY-MM-DD\tHH:MM:SS.ffffff\t<unixSecondsWithFraction>"
@@ -279,8 +305,27 @@ const parseSippStatCsv = async (
     failsPerSec.push(Number.isFinite(failedP) ? failedP / 10 : 0)
     const cc = idxCurrentCall >= 0 ? parseFloat(cols[idxCurrentCall] ?? "0") : 0
     currentCall.push(Number.isFinite(cc) ? cc : 0)
+    const fnum = (idx: number): number => {
+      if (idx < 0) return 0
+      const v = parseFloat(cols[idx] ?? "0")
+      return Number.isFinite(v) ? v : 0
+    }
+    failsCumTotal.push(fnum(idxFailedC))
+    failsCumTimeout.push(fnum(idxTORecvC) + fnum(idxTOSendC))
+    failsCumUnexpected.push(fnum(idxUnexpC))
+    failsCumRejected.push(fnum(idxRejC))
   }
-  return { name, t, callsPerSec, failsPerSec, currentCall }
+  return {
+    name,
+    t,
+    callsPerSec,
+    failsPerSec,
+    currentCall,
+    failsCumTotal,
+    failsCumTimeout,
+    failsCumUnexpected,
+    failsCumRejected,
+  }
 }
 
 /**
@@ -308,8 +353,22 @@ const resampleSippStream = (
   const cc: Array<number | null> = new Array(buckets).fill(null)
   const cps: Array<number | null> = new Array(buckets).fill(null)
   const fps: Array<number | null> = new Array(buckets).fill(null)
+  const fcTotal: Array<number | null> = new Array(buckets).fill(null)
+  const fcTO: Array<number | null> = new Array(buckets).fill(null)
+  const fcUnexp: Array<number | null> = new Array(buckets).fill(null)
+  const fcRej: Array<number | null> = new Array(buckets).fill(null)
   if (s.t.length === 0) {
-    return { name: s.name, t, currentCall: cc, callsPerSec: cps, failsPerSec: fps }
+    return {
+      name: s.name,
+      t,
+      currentCall: cc,
+      callsPerSec: cps,
+      failsPerSec: fps,
+      failsCumTotal: fcTotal,
+      failsCumTimeout: fcTO,
+      failsCumUnexpected: fcUnexp,
+      failsCumRejected: fcRej,
+    }
   }
   const tFirst = s.t[0]!
   const tLast = s.t[s.t.length - 1]!
@@ -321,8 +380,22 @@ const resampleSippStream = (
     cc[i] = s.currentCall[j] ?? null
     cps[i] = s.callsPerSec[j] ?? null
     fps[i] = s.failsPerSec[j] ?? null
+    fcTotal[i] = s.failsCumTotal[j] ?? null
+    fcTO[i] = s.failsCumTimeout[j] ?? null
+    fcUnexp[i] = s.failsCumUnexpected[j] ?? null
+    fcRej[i] = s.failsCumRejected[j] ?? null
   }
-  return { name: s.name, t, currentCall: cc, callsPerSec: cps, failsPerSec: fps }
+  return {
+    name: s.name,
+    t,
+    currentCall: cc,
+    callsPerSec: cps,
+    failsPerSec: fps,
+    failsCumTotal: fcTotal,
+    failsCumTimeout: fcTO,
+    failsCumUnexpected: fcUnexp,
+    failsCumRejected: fcRej,
+  }
 }
 
 /* -------------------------------------------------------------------- */
@@ -767,7 +840,7 @@ const buildReportData = async (artifactDir: string): Promise<ReportData> => {
   const chaosRows = await readNdjson<ChaosRow>(
     path.join(artifactDir, "chaos-timeline.ndjson"),
   )
-  const chaos = chaosRows
+  const scheduledChaos = chaosRows
     .filter((r) => r.status === "executed" && r.tRecovered !== undefined)
     .map((r) => ({
       type: r.type,
@@ -775,6 +848,25 @@ const buildReportData = async (artifactDir: string): Promise<ReportData> => {
       tFire: epoch(r.tFire),
       tRecovered: epoch(r.tRecovered as string),
     }))
+  // Fold actual platform anomalies (sipp staleness = wheel_base/clock_tick
+  // race triggered by host stalls) into the chaos timeline as unsolicited
+  // entries. Point-in-time events: tFire == tRecovered.
+  const stalenessRows = await readNdjson<SippStalenessRow>(
+    path.join(artifactDir, "sipp-staleness.ndjson"),
+  ).catch(() => [] as Array<SippStalenessRow>)
+  const unsolicitedChaos = stalenessRows.map((r) => {
+    const t = epoch(r.tDetected)
+    return {
+      type: "kernel-stall",
+      target: `${r.name} (sipp ElapsedTime(C) frozen at ${r.lastElapsed})`,
+      tFire: t,
+      tRecovered: t,
+      unsolicited: true as const,
+    }
+  })
+  const chaos = [...scheduledChaos, ...unsolicitedChaos].sort(
+    (a, b) => a.tFire - b.tFire,
+  )
 
   const limiterRows = await readNdjson<LimiterRow>(
     path.join(artifactDir, "limiter-probe.ndjson"),
@@ -949,10 +1041,16 @@ const renderPlatformBanner = (p: PlatformHealth): string => {
   if (!p.isWsl2 && p.stalenessEvents.length === 0) return ""
   const lines: Array<string> = []
   lines.push(`<div class="platform">`)
-  lines.push(`<h2>⚠ Platform-side event detected (NOT a B2BUA regression)</h2>`)
+  // The "detected" wording is reserved for runs where the staleness
+  // watchdog actually fired; an isWsl2-only banner is a heads-up about
+  // the host platform, not a claim that anything stalled in this run.
+  const heading = p.stalenessEvents.length > 0
+    ? `⚠ Platform-side event detected (NOT a B2BUA regression)`
+    : `Platform context (host may affect timing — no anomaly detected in this run)`
+  lines.push(`<h2>${heading}</h2>`)
   if (p.isWsl2) {
     lines.push(
-      `<div>Host kernel <code>${escapeHtml(p.kernel ?? "")}</code> — this run executed on <strong>WSL2</strong>. WSL2 is known to exhibit TSC drift (kernel re-anchors monotonic time when the Windows host steals CPU) and recurring <code>vmbus_alloc_ring</code> order:7 page-allocation failures under memory pressure. Both produce sub-second to multi-second pauses inside the guest that look like B2BUA stalls but originate outside it.</div>`,
+      `<div>Host kernel <code>${escapeHtml(p.kernel ?? "")}</code> — this run executed on <strong>WSL2</strong>. WSL2 is known to exhibit TSC drift (kernel re-anchors monotonic time when the Windows host steals CPU) and recurring <code>vmbus_alloc_ring</code> order:7 page-allocation failures under memory pressure. Both produce sub-second to multi-second pauses inside the guest that look like B2BUA stalls but originate outside it. When a stall is <em>actually observed</em> (the sipp-staleness watchdog catches it), it lands in the events table above as an unsolicited <code>kernel-stall</code> row.</div>`,
     )
   }
   if (p.stalenessEvents.length > 0) {
@@ -985,7 +1083,11 @@ const emitHtml = (data: ReportData): string => {
       const dur = (ev.tRecovered - ev.tFire).toFixed(2)
       const fire = new Date(ev.tFire * 1000).toISOString().replace(/\.\d+Z$/, "Z")
       const rec = new Date(ev.tRecovered * 1000).toISOString().replace(/\.\d+Z$/, "Z")
-      return `<tr><td class="ix">${i}</td><td>${escapeHtml(ev.type)}</td><td>${escapeHtml(
+      const rowClass = ev.unsolicited === true ? ' class="unsolicited"' : ""
+      const typeCell = ev.unsolicited === true
+        ? `${escapeHtml(ev.type)} <span class="badge">unsolicited</span>`
+        : escapeHtml(ev.type)
+      return `<tr${rowClass}><td class="ix">${i}</td><td>${typeCell}</td><td>${escapeHtml(
         ev.target,
       )}</td><td>${fire}</td><td>${rec}</td><td>${dur}s</td></tr>`
     })
@@ -1007,6 +1109,8 @@ const emitHtml = (data: ReportData): string => {
     .events table { border-collapse: collapse; font-size: 12px; }
     .events td, .events th { padding: 2px 8px; border-bottom: 1px solid #eee; text-align: left; }
     .events td.ix { font-family: monospace; color: #666; text-align: right; }
+    .events tr.unsolicited td { background: #fff7ed; color: #7c2d12; }
+    .events .badge { display: inline-block; padding: 0 6px; margin-left: 6px; border: 1px solid #d97706; border-radius: 3px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: #7c2d12; background: #fed7aa; }
     .platform { border-left: 4px solid #d97706; background: #fff7ed; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #7c2d12; }
     .platform h2 { font-size: 14px; margin: 0 0 6px; color: #7c2d12; }
     .platform table { border-collapse: collapse; font-size: 12px; margin-top: 6px; }
@@ -1052,6 +1156,7 @@ const emitHtml = (data: ReportData): string => {
       'worker-pod-kill9':    'rgba(255, 90, 60, 0.45)',
       'node-shutdown-app':   'rgba(180, 60, 220, 0.40)',
       'node-shutdown-edge':  'rgba(220, 30, 30, 0.50)',
+      'kernel-stall':        'rgba(217, 119, 6, 0.55)',
     };
     const SERIES_COLORS = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf'];
     const FULL_RANGE = { min: DATA.tStart, max: DATA.tEnd };
@@ -1278,17 +1383,41 @@ const emitHtml = (data: ReportData): string => {
         makeChart('Sipp calls/sec per stream (CallRate(P))', charts, xs, seriesData, 'cps');
       }
 
-      // 6. Sipp failure rate per stream
+      // 6. Sipp cumulative failures per stream (total + per cause)
+      //    Replaces the periodic /sec view: cumulative is easier to read
+      //    for impact attribution because steps in the line align with
+      //    the exact moment failures started accruing, and the slope
+      //    encodes the rate. Per-cause breakdown (timeout / unexpected /
+      //    rejected) lets you tell apart "B2BUA didn't answer" from
+      //    "B2BUA returned 481" from "B2BUA's UAS rejected the leg" at
+      //    a glance — same x-axis across all four charts.
       {
         const xs = DATA.streams[0] ? DATA.streams[0].t : [];
-        const seriesData = DATA.streams.map(function (s, i) {
-          return {
-            label: s.name,
-            values: s.failsPerSec,
-            color: SERIES_COLORS[i % SERIES_COLORS.length],
-          };
-        });
-        makeChart('Sipp failures/sec per stream (FailedCall(P)/10s)', charts, xs, seriesData, '/sec');
+        const buildSeries = function (pick) {
+          return DATA.streams.map(function (s, i) {
+            return {
+              label: s.name,
+              values: pick(s),
+              color: SERIES_COLORS[i % SERIES_COLORS.length],
+            };
+          });
+        };
+        makeChart('Sipp cumulative failures per stream (FailedCall(C))',
+          charts, xs,
+          buildSeries(function (s) { return s.failsCumTotal; }),
+          'calls');
+        makeChart('Sipp cumulative failures — timeout (FailedTimeoutOnRecv+Send (C))',
+          charts, xs,
+          buildSeries(function (s) { return s.failsCumTimeout; }),
+          'calls');
+        makeChart('Sipp cumulative failures — unexpected message, incl. mid-flow 481 (FailedUnexpectedMessage(C))',
+          charts, xs,
+          buildSeries(function (s) { return s.failsCumUnexpected; }),
+          'calls');
+        makeChart('Sipp cumulative failures — explicit call-reject responses (FailedCallRejected(C))',
+          charts, xs,
+          buildSeries(function (s) { return s.failsCumRejected; }),
+          'calls');
       }
 
       // 7. Proxy "no alive workers" warning rate

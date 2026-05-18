@@ -22,16 +22,6 @@ import { Scanner } from "./scanner.js"
 import { parseStartLine } from "./start-line.js"
 import { parseHeaders } from "./headers.js"
 
-/** Extract the method from a CSeq header value like "1 INVITE". No regex. */
-function extractCSeqMethod(value: string): string | undefined {
-  let i = 0
-  while (i < value.length && (value.charCodeAt(i) === 0x20 || value.charCodeAt(i) === 0x09)) i++
-  while (i < value.length && value.charCodeAt(i) >= 0x30 && value.charCodeAt(i) <= 0x39) i++
-  while (i < value.length && (value.charCodeAt(i) === 0x20 || value.charCodeAt(i) === 0x09)) i++
-  const method = value.slice(i).trim()
-  return method.length > 0 ? method : undefined
-}
-
 /**
  * Build a custom parser with caller-supplied length caps. Unspecified caps
  * fall back to {@link DEFAULT_SIP_PARSER_LIMITS} (2048 bytes for both header
@@ -68,20 +58,9 @@ export function createCustomParser(
           body = new Uint8Array(0)
         }
 
-        // Cross-validate CSeq method matches start-line method (RFC 4475 §3.1.2.17 / §3.1.2.18)
-        if (startLine.type === "request") {
-          const cseqHeader = headers.find((h) => h.name.toLowerCase() === "cseq")
-          if (cseqHeader) {
-            const cseqMethod = extractCSeqMethod(cseqHeader.value)
-            if (cseqMethod && cseqMethod.toUpperCase() !== startLine.method) {
-              return Result.fail(
-                new SipParseError({
-                  reason: `CSeq method "${cseqMethod}" does not match request method "${startLine.method}"`,
-                })
-              )
-            }
-          }
-        }
+        // CSeq method cross-validation lives in extractRequestFields now —
+        // moved there so every adapter (jssip / sip-parser / custom) gets
+        // the check uniformly. See ADR-0007.
       } catch (err) {
         return Result.fail(
           new SipParseError({
@@ -90,8 +69,9 @@ export function createCustomParser(
         )
       }
 
+      const mode = effective.wireGrammar ? "wire" : "hydrate"
       if (startLine.type === "request") {
-        const fields = extractRequestFields(headers, startLine.uri)
+        const fields = extractRequestFields(headers, startLine.uri, effective, startLine.method, mode)
         if (Result.isFailure(fields)) return Result.fail(fields.failure)
         return Result.succeed(finalizeRequest({
           method: startLine.method,
@@ -104,7 +84,7 @@ export function createCustomParser(
         }))
       }
 
-      const fields = extractResponseFields(headers, startLine.status)
+      const fields = extractResponseFields(headers, startLine.status, effective, mode)
       if (Result.isFailure(fields)) return Result.fail(fields.failure)
       return Result.succeed(finalizeResponse({
         version: startLine.version,

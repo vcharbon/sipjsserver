@@ -79,13 +79,10 @@ describe("RFC 4475 Section 3.1.1 — valid messages", () => {
     })
   )
 
-  it.effect("3.1.1.7 — long values in header fields", () =>
+  it.effect("3.1.1.7 — long values (ADR-0007 rejects: top-Via magic-cookie-less)", () =>
     Effect.gen(function* () {
-      const msg = yield* parse(valid.longValues)
-      expect(msg.type).toBe("request")
-      expect((msg as SipRequest).method).toBe("INVITE")
-      // 34 Via headers with various capitalizations (Via, v, V, via, etc.)
-      expect(countHeaders(msg, "via", "v")).toBeGreaterThanOrEqual(10)
+      const result = yield* parseResult(valid.longValues)
+      expect(result._tag).toBe("Failure")
     })
   )
 
@@ -106,12 +103,10 @@ describe("RFC 4475 Section 3.1.1 — valid messages", () => {
     })
   )
 
-  it.effect("3.1.1.10 — varied and unknown transport types", () =>
+  it.effect("3.1.1.10 — varied transports (ADR-0007 rejects: UNKNOWN not in allowlist)", () =>
     Effect.gen(function* () {
-      const msg = yield* parse(valid.variedTransports)
-      expect(msg.type).toBe("request")
-      expect((msg as SipRequest).method).toBe("OPTIONS")
-      expect(countHeaders(msg, "via")).toBeGreaterThanOrEqual(5)
+      const result = yield* parseResult(valid.variedTransports)
+      expect(result._tag).toBe("Failure")
     })
   )
 
@@ -189,13 +184,13 @@ describe("RFC 4475 Section 3.1.2 — syntactically invalid messages", () => {
 
   // --- Parser ACCEPTS these (known leniency — header-value validation not yet implemented) ---
 
+  // Post-ADR-0007: 3.1.2.1 (empty Via sent-protocol) and 3.1.2.14 (spaces
+  // around addr-spec → strict-URI rejection) move to the rejected set.
   const acceptedAsRequest: Array<[string, Buffer]> = [
-    ["3.1.2.1 — extraneous header field separators", invalid.extraneousSeparators],
     ["3.1.2.10 — trailing spaces in request-line", invalid.trailingSpacesInRequestLine],
     ["3.1.2.11 — escaped headers in Request-URI", invalid.escapedHeadersInUri],
     ["3.1.2.12 — invalid timezone in Date header", invalid.invalidTimezone],
     ["3.1.2.13 — failure to enclose name-addr URI in <>", invalid.unencloseNameAddr],
-    ["3.1.2.14 — spaces within addr-spec", invalid.spacesInAddrSpec],
     ["3.1.2.15 — non-token characters in display name", invalid.nonTokenDisplayName],
   ]
 
@@ -207,4 +202,18 @@ describe("RFC 4475 Section 3.1.2 — syntactically invalid messages", () => {
       })
     )
   }
+
+  it.effect("3.1.2.1 — extraneous header field separators (rejected by ADR-0007)", () =>
+    Effect.gen(function* () {
+      const result = yield* parseResult(invalid.extraneousSeparators)
+      expect(result._tag).toBe("Failure")
+    })
+  )
+
+  it.effect("3.1.2.14 — spaces within addr-spec (rejected by ADR-0007 strict URI)", () =>
+    Effect.gen(function* () {
+      const result = yield* parseResult(invalid.spacesInAddrSpec)
+      expect(result._tag).toBe("Failure")
+    })
+  )
 })

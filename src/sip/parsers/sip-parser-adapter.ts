@@ -52,10 +52,11 @@ function adaptMessage(
   }
 
   const requestUri = stringifyUri(msg.requestUri)
-  const fields = extractRequestFields(headers, requestUri)
+  const method = msg.method.toUpperCase()
+  const fields = extractRequestFields(headers, requestUri, undefined, method)
   if (Result.isFailure(fields)) return Result.fail(fields.failure)
   return Result.succeed(finalizeRequest({
-    method: msg.method.toUpperCase(),
+    method,
     uri: requestUri,
     version: msg.version,
     headers,

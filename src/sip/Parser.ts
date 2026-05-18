@@ -23,6 +23,15 @@ export class SipParser extends ServiceMap.Service<
   /** Default layer using the custom parser (zero-regex, RFC 3261 compliant). */
   static readonly layer = SipParser.fromImpl(customParser)
 
+  /**
+   * Lenient layer that bypasses the ADR-0007 wire-grammar gates. Used by
+   * the test harness's rule-self-tests to feed deliberately-mutated raw
+   * recordings into the rule engine — the parser must accept the mutated
+   * message so the rule under test can observe and report the violation,
+   * instead of the parser pre-rejecting it.
+   */
+  static readonly lenientLayer = SipParser.withLimits({ wireGrammar: false })
+
   /** Build a layer from any pure parser implementation. */
   static fromImpl(impl: SipParserImpl) {
     return Layer.sync(SipParser, () => ({

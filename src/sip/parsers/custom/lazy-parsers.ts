@@ -17,6 +17,7 @@ import {
   parseRack,
   parseReferTo,
   splitTopLevelCommas,
+  validateStrictSipUri,
   type ParsedContact,
   type ParsedNameAddr,
   type ParsedRack,
@@ -57,6 +58,18 @@ function parseNameAddrListHeader(
         return Result.fail(
           new SipParseError({
             reason: `Malformed ${headerName} entry: "${entry}"`,
+          }),
+        )
+      }
+      // Strict SIP-URI grammar — same gate the eager path enforces on
+      // From/To/Contact/Request-URI. Lazy consumption (e.g. rule engine
+      // reading P-Asserted-Identity) trips this when the URI is shaped
+      // like `sip:@host`, `sip:::host`, `sip:` etc.
+      const reason = validateStrictSipUri(parsed.uri)
+      if (reason !== undefined) {
+        return Result.fail(
+          new SipParseError({
+            reason: `Strict ${headerName} URI: ${reason} ("${parsed.uri}")`,
           }),
         )
       }
@@ -151,8 +164,21 @@ export const parseRackHeader = (
 
 export const parseReferToHeader = (
   headers: ReadonlyArray<SipHeader>,
-): Result.Result<ParsedReferTo | undefined, SipParseError> =>
-  parseSingleValueHeader(headers, "Refer-To", parseReferTo)
+): Result.Result<ParsedReferTo | undefined, SipParseError> => {
+  const base = parseSingleValueHeader(headers, "Refer-To", parseReferTo)
+  if (Result.isFailure(base) || base.success === undefined) return base
+  // Strict SIP-URI on the target URI (head — without embedded headers).
+  const uri = base.success.uri
+  const qIdx = uri.indexOf("?")
+  const uriHead = qIdx === -1 ? uri : uri.slice(0, qIdx)
+  const reason = validateStrictSipUri(uriHead)
+  if (reason !== undefined) {
+    return Result.fail(
+      new SipParseError({ reason: `Strict Refer-To URI: ${reason} ("${uriHead}")` }),
+    )
+  }
+  return base
+}
 
 // =========================================================================
 // Strict re-parsers — used by parser-compliance tests (and any opt-in

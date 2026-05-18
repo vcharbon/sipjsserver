@@ -77,10 +77,11 @@ function adaptMessage(
   }
 
   const requestUri = msg.ruri?.toString() ?? ""
-  const fields = extractRequestFields(headers, requestUri)
+  const method = (msg.method ?? "").toUpperCase()
+  const fields = extractRequestFields(headers, requestUri, undefined, method)
   if (Result.isFailure(fields)) return Result.fail(fields.failure)
   return Result.succeed(finalizeRequest({
-    method: (msg.method ?? "").toUpperCase(),
+    method,
     uri: requestUri,
     version: "SIP/2.0",
     headers,

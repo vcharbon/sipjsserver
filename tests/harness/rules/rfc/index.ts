@@ -47,10 +47,11 @@ interface AgentView {
 }
 
 function parseMessage(raw: string): SipMessage | null {
+  // Lenient layer — see explanation in _replay.ts.
   const eff = Effect.gen(function* () {
     const parser = yield* SipParser
     return yield* parser.parse(Buffer.from(raw, "utf8"))
-  }).pipe(Effect.provide(SipParser.layer), Effect.result)
+  }).pipe(Effect.provide(SipParser.lenientLayer), Effect.result)
   const result = Effect.runSync(eff)
   if (result._tag === "Failure") return null
   return result.success
