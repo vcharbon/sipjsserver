@@ -93,7 +93,16 @@ A per-`(channel, entryGen)` monotonic sequence number. Bumped on every write int
 ### Admission
 
 **Call limiter**:
-Cluster-shared counter (Redis-backed) that rate-limits concurrent calls per limiter id, summed over the last N windows. Read on every initial INVITE; `INCR` on admission, `DECR` on termination. Cap-hit returns `Rejected` (a normal outcome, not an error).
+Cluster-shared sliding-window counter (Redis-backed) that rate-limits concurrent calls per limiter id, summed over the last `LIMITER_ACTIVE_WINDOWS` windows of `LIMITER_WINDOW_SECONDS` each (default 3 × 300 s = 15 min lookback). Read on every initial INVITE; `INCR` on admission, `DECR` on termination. Cap-hit returns `Rejected` (a normal outcome, not an error).
+
+The limiter is **not a hard cap**. It is an eventually-cap-honoring counter. See **Cap-honoring target** vs **Limiter inflight (diagnostic)** below.
+
+**Cap-honoring target**:
+The actual operational contract: the externally observable concurrent-call count on a limited limiter id — measured as sipp's `CurrentCall` (`concurrentCalls(endurance-limiter)` in analyzer terms) — converges to ≤ cap after any chaos episode ends. **Typical** reconcile is `~2 × (KEEPALIVE_INTERVAL_SEC + KEEPALIVE_TIMEOUT_SEC)` ≈ 10 min (peer keepalive detects the dead worker and DECRs its phantoms). **Worst case** is `LIMITER_ACTIVE_WINDOWS × LIMITER_WINDOW_SECONDS` ≈ 15 min (phantoms age out of the sliding window with no actor required). Once chaos is over and all in-flight calls drain, the count returns to 0. See [ADR-0004](docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md).
+_Avoid_: "inflight ≤ cap at all times", "hard cap" — both wrong descriptions of the contract.
+
+**Limiter inflight (diagnostic)**:
+The Redis-counted view of "INCRs landed minus DECRs landed" across the active windows, as exposed by `LIMITER_INFLIGHT_PROBE` and the analyzer's `limiterProbe` block. A *lagged proxy* for the true count, not the target. May transiently exceed cap during/just after chaos (phantom INCRs from dead workers age out only as their window rotates). `verdict.limiterProbe.exceededCap=true` is a diagnostic signal, **not** a verdict-level pass/fail. The structural INCR↔DECR symmetry of [ADR-0004](docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md) guarantees this view eventually settles at the cap (or zero, once calls drain).
 
 **Fail-open admission**:
 A call admitted *without* the limiter `INCR` landing on Redis. Happens when the limiter Redis is unreachable or times out (`RedisError` / `LimiterTimeout`). The call is allowed through to keep traffic flowing, but the `limiterEntries[i].incrementSucceeded` field is set to `false` so the matching `DECR` is skipped on termination — otherwise the cluster counter drifts negative. See [ADR-0004](docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md).
@@ -138,6 +147,27 @@ The five gates an external new-dialog non-emergency INVITE traverses in order, t
 5. **Worker-side panic backstop** — worker's own CPS hard cap + panic-ELU threshold.
 
 Emergency INVITEs skip gates 2, 3, 4, 5. In-dialog traffic skips gates 2, 3, 4. Internal (worker-originated) traffic skips gate 2.
+
+### Abuse classes
+
+Four disjoint axes of bad input the B2BUA must survive. Each is defended by a different mechanism; tests live in different homes.
+
+**Malformed packet**:
+Bytes that fail SIP grammar — truncated, wrong CRLF, oversized header, missing mandatory header, header-injection garbage. Rejected at the parser; the rest of the application never sees them. Defended by `parser.parse()` in [src/sip-front-proxy/ProxyCore.ts](src/sip-front-proxy/ProxyCore.ts), tracked by `b2bua_parse_dropped_total`. Test home: [tests/sip/parser-compliance.test.ts](tests/sip/parser-compliance.test.ts).
+
+**Abusive-volume call**:
+A call where the wire is well-formed and the dialog state machine is respected, but the in-dialog message rate or count is far above normal — re-INVITE flood, 18x flood. Defended by the proposed per-call message cap (`MAX_MESSAGES_PER_CALL`, not yet implemented). Test home: **abuse stream** (see below).
+_Avoid_: "burst" (already taken by rate-level abuse at gate 4).
+
+**Out-of-sequence call**:
+A call where the wire is well-formed but messages violate dialog ordering — ACK before 200, PRACK without 180, CSeq jumping backward, in-dialog request with missing/wrong To-tag, duplicate dialog-establishing method. Defended by rule-engine state-machine drops and recovered by [[terminating-timeout]] + [[orphan-sweep]] + limiter `DECR`-on-terminate. Test home: **abuse stream**.
+
+**Nefarious / injection**:
+A call where the wire is well-formed and semantics are valid, but a payload field weaponizes the B2BUA against itself or its environment — DNS amplification via externally-supplied hostnames, internal-name probing via Route/Path, storage bloat via large stored headers, log injection. Defended by per-field allowlists + no resolution of externally-supplied hostnames. Test home: separate risk-discovery plan + per-surface ADRs.
+_Avoid_: "attack" (these can be unintentional — see the past self-DDoS via DNS lookups of bad entries).
+
+**Abuse stream**:
+The continuous parallel traffic class injected during endurance soaks alongside [[short-hold-stream]] / [[long-options-stream]] / [[limiter-probe-stream]], composed of **abusive-volume** + **out-of-sequence** archetypes. Real-call KPIs must match the no-abuse baseline; abuse-call outcomes are excluded from KPI accounting via Call-ID prefix segregation. See [docs/plan/design-in-detail-a-reflective-spark.md](docs/plan/design-in-detail-a-reflective-spark.md).
 
 ### Event dispatch
 

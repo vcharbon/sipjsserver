@@ -149,7 +149,19 @@ export const installProxyHostMode = (namespace: string) =>
     waitTimeoutSec: 120,
   })
 
-export const installSipp = (namespace: string) =>
+export interface InstallSippOpts {
+  /**
+   * When true, install the parallel abuse-UAS deployment + service and
+   * set call-control's abuse target. Endurance runs with --abuse-caps>0
+   * pass this so protocol-abuse traffic routes to a distinct UAS pool.
+   */
+  readonly abuseUasEnabled?: boolean
+}
+
+export const installSipp = (
+  namespace: string,
+  opts: InstallSippOpts = {},
+) =>
   Effect.gen(function* () {
     // The b2bua worker's TargetAdmission rejects b-leg destinations
     // whose host is neither an IP literal nor matches the suffix
@@ -174,11 +186,34 @@ export const installSipp = (namespace: string) =>
         ),
       )
     }
+    const setValues: Array<[string, string]> = [["callControl.target.host", target]]
+    if (opts.abuseUasEnabled === true) {
+      const abuseTarget = `sipp-abuse-uas.${namespace}.svc.cluster.local`
+      const abuseVerdict = classifyAdmission(
+        abuseTarget,
+        DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES,
+      )
+      if (abuseVerdict === "reject") {
+        const suffixesDebug = formatSuffixesForDebug(
+          DEFAULT_WORKER_ALLOWED_TARGET_SUFFIXES,
+        )
+        return yield* Effect.die(
+          new Error(
+            `installSipp: abuse target host '${abuseTarget}' would be rejected by the worker's TargetAdmission ` +
+              `(suffixes=${suffixesDebug}).`,
+          ),
+        )
+      }
+      setValues.push(
+        ["abuseUas.enabled", "true"],
+        ["callControl.abuseTarget.host", abuseTarget],
+      )
+    }
     yield* helmInstall({
       release: "sipp",
       chart: SIPP_CHART,
       namespace,
-      setValues: [["callControl.target.host", target]],
+      setValues,
       waitTimeoutSec: 60,
     })
   })

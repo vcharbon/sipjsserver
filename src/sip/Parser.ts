@@ -9,8 +9,8 @@
 import { Effect, Layer, ServiceMap } from "effect"
 import type { SipMessage } from "./types.js"
 import { SipParseError } from "./parsers/errors.js"
-import type { SipParserImpl } from "./parsers/interface.js"
-import { customParser } from "./parsers/custom/index.js"
+import type { SipParserImpl, SipParserLimits } from "./parsers/interface.js"
+import { customParser, createCustomParser } from "./parsers/custom/index.js"
 
 export { SipParseError } from "./parsers/errors.js"
 
@@ -28,5 +28,10 @@ export class SipParser extends ServiceMap.Service<
     return Layer.sync(SipParser, () => ({
       parse: (raw: Buffer) => Effect.fromResult(impl.parse(raw)),
     }))
+  }
+
+  /** Build a layer using the custom parser with caller-supplied length caps. */
+  static withLimits(limits: Partial<SipParserLimits>) {
+    return SipParser.fromImpl(createCustomParser(limits))
   }
 }

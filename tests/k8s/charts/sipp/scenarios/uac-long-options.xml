@@ -4,13 +4,20 @@
   Long-call UAC for endurance: INVITE → 200 → ACK → OPTIONS-driven hold → BYE.
 
   After ACK the scenario loops on in-dialog OPTIONS from the B2BUA's
-  keepaliveRule (TimerRules), replying 200 OK to each. The loop has no
-  fixed iteration count — the call holds for as long as keepalives are
-  flowing, regardless of how many that ends up being. When OPTIONS
-  stops arriving for `recv timeout` (the keepalive interval plus a
-  generous margin), the UAC assumes the dialog has been torn down (by
-  the B2BUA, a chaos event, or a network failure) and sends BYE to
-  complete the scenario.
+  keepaliveRule (TimerRules), replying 200 OK to each. The loop is
+  capped at HOLD_KEEPALIVES iterations (default 4 ≈ 20 min at the
+  300 s keepalive interval) so every call eventually terminates from
+  the UAC side, matching the hard-cap guarantee in
+  `uac-endurance-short.xml` (`<pause milliseconds="30000"/>`). Without
+  this cap, sipp's CurrentCall grows linearly for the lifetime of the
+  run because the B2BUA happily keeps sending keepalives forever and
+  the UAC has no other reason to send BYE — endurance-5h runs were
+  reaching ~2700 concurrent long-calls instead of the intended ~480.
+
+  Two exit paths still apply:
+    - keepalive timeout (B2BUA torn down, chaos, network failure) →
+      `recv timeout="350000" ontimeout="end_hold"` jumps to BYE.
+    - hold cap reached → counter loop falls through to BYE.
 
   Earlier revisions used a flat `<pause milliseconds="1200000"/>` and
   relied on sipp's "default `pingreply` behavior" to auto-200 in-dialog
@@ -88,7 +95,13 @@
        `ontimeout` set, mandatory recv jumps to the labeled step
        instead of aborting on timeout — so when keepalives stop
        arriving for `timeout` ms (B2BUA terminated the call, chaos
-       event, network failure) we exit to the BYE phase. -->
+       event, network failure) we exit to the BYE phase.
+
+       The loop is capped at 4 iterations so calls eventually
+       terminate even when keepalives keep flowing — see the header
+       comment. `hold_count` is incremented after each reply; `test`
+       sets `hold_done` truthy once we've replied to 4 OPTIONS, and
+       the `nop test=...` branches to `end_hold` instead of looping. -->
   <label id="hold_loop"/>
   <recv request="OPTIONS" crlf="true" timeout="350000" ontimeout="end_hold"/>
   <send>
@@ -103,7 +116,12 @@
       Contact: sip:sipp@[local_ip]:[local_port]
       Content-Length: 0
     ]]>
+    <action>
+      <add assign_to="hold_count" value="1"/>
+      <test assign_to="hold_done" variable="hold_count" compare="greater_than_equal" value="4"/>
+    </action>
   </send>
+  <nop test="hold_done" next="end_hold"/>
   <nop next="hold_loop"/>
 
   <label id="end_hold"/>

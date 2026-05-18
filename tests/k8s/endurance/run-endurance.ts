@@ -13,6 +13,7 @@
 
 import { Data, Effect, References } from "effect"
 import * as fs from "node:fs/promises"
+import * as os from "node:os"
 import * as path from "node:path"
 import { clusterDown } from "../fixtures/cluster.js"
 import { WORKER_VALUES_ENDURANCE } from "../fixtures/helm.js"
@@ -34,6 +35,7 @@ import {
 } from "./scheduler.js"
 import {
   readSippStatCsv,
+  startAbuseStreams,
   startSippDaemon,
   waitSippRunning,
   type SippDaemonHandle,
@@ -60,6 +62,14 @@ class EnduranceAbort extends Data.TaggedError("EnduranceAbort")<{
 }> {
   override get message(): string {
     return `endurance ${this.phase}: ${this.reason}`
+  }
+}
+
+class RenderError extends Data.TaggedError("RenderError")<{
+  readonly reason: string
+}> {
+  override get message(): string {
+    return `render: ${this.reason}`
   }
 }
 
@@ -107,6 +117,22 @@ interface CliArgs {
    * every breach and emits the run-end verdict.
    */
   readonly stopAtFirstFailure: boolean
+  /**
+   * Total CAPS of the continuous abuse stream (sum across archetypes).
+   * 0 disables abuse jobs entirely — the chart's abuse-uas deployment
+   * is not installed, no abuse pods scheduled, no warning logs from
+   * the worker about ghost / out-of-sequence calls.
+   *
+   * **Mandatory**: every invocation must pass this flag explicitly.
+   * Forgetting to think about abuse must not silently fill logs.
+   */
+  readonly abuseCaps: number
+  /**
+   * Restrict abuse traffic to a single archetype slug (e.g. `reinvite-flood`).
+   * Used for per-archetype attribution when STEADY regresses. When
+   * undefined, all archetypes run.
+   */
+  readonly abuseOnly?: string
 }
 
 const DEFAULTS = {
@@ -139,12 +165,18 @@ const parseArgs = (argv: ReadonlyArray<string>): CliArgs => {
     const a = argv[i]
     if (a === undefined) continue
     if (!a.startsWith("--")) continue
-    const k = a.slice(2)
+    const body = a.slice(2)
+    // Accept both `--key=value` and `--key value` forms.
+    const eq = body.indexOf("=")
+    if (eq >= 0) {
+      args.set(body.slice(0, eq), body.slice(eq + 1))
+      continue
+    }
     const next = argv[i + 1]
     if (next === undefined || next.startsWith("--")) {
-      flags.add(k)
+      flags.add(body)
     } else {
-      args.set(k, next)
+      args.set(body, next)
       i++
     }
   }
@@ -163,6 +195,19 @@ const parseArgs = (argv: ReadonlyArray<string>): CliArgs => {
   const drainSec = parseDuration(
     get("drain", smoke ? `${SMOKE_OVERRIDES.drainSec}s` : `${DEFAULTS.drainSec}s`),
   )
+  // --abuse-caps is mandatory. No default. Pass 0 to disable.
+  const abuseCapsRaw = args.get("abuse-caps")
+  if (abuseCapsRaw === undefined) {
+    throw new Error(
+      "missing required flag --abuse-caps=N (pass 0 to disable abuse traffic)",
+    )
+  }
+  const abuseCaps = parseInt(abuseCapsRaw, 10)
+  if (!Number.isFinite(abuseCaps) || abuseCaps < 0) {
+    throw new Error(
+      `bad --abuse-caps: '${abuseCapsRaw}' (must be a non-negative integer)`,
+    )
+  }
   return {
     durationSec,
     caps: parseInt(get("caps", String(smoke ? SMOKE_OVERRIDES.caps : DEFAULTS.caps)), 10),
@@ -186,10 +231,12 @@ const parseArgs = (argv: ReadonlyArray<string>): CliArgs => {
     proxyChaosDisabled: flags.has("proxy-chaos-disabled"),
     noChaos: flags.has("no-chaos"),
     stopAtFirstFailure: flags.has("stop-at-first-failure"),
+    abuseCaps,
     ...(args.has("chaos-weights")
       ? { chaosWeights: parseChaosWeights(args.get("chaos-weights")!) }
       : {}),
     ...(args.has("proxy-target") ? { proxyTarget: args.get("proxy-target")! } : {}),
+    ...(args.has("abuse-only") ? { abuseOnly: args.get("abuse-only")! } : {}),
   }
 }
 
@@ -234,6 +281,8 @@ interface RunMeta {
   readonly runId: string
   readonly tStart: string
   readonly args: CliArgs
+  /** `uname -r` — used by the HTML report to detect platform (e.g. WSL2). */
+  readonly kernel: string
   readonly phase: {
     tWarmupStart: string
     tSoakStart: string
@@ -258,7 +307,7 @@ const main = (argv: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const args = parseArgs(argv)
     yield* Effect.logInfo(
-      `endurance run: smoke=${args.smoke} duration=${args.durationSec}s caps=${args.caps} limiterCap=${args.limiterCap} seed=${args.seed} runId=${args.runId}`,
+      `endurance run: smoke=${args.smoke} duration=${args.durationSec}s caps=${args.caps} limiterCap=${args.limiterCap} abuseCaps=${args.abuseCaps}${args.abuseOnly !== undefined ? ` abuseOnly=${args.abuseOnly}` : ""} seed=${args.seed} runId=${args.runId}`,
     )
 
     const artifactDir = path.resolve("test-results", "k8s-endurance", args.runId)
@@ -270,6 +319,7 @@ const main = (argv: ReadonlyArray<string>) =>
       runId: args.runId,
       tStart: tStart.toISOString(),
       args,
+      kernel: os.release(),
       phase: {
         tWarmupStart: "",
         tSoakStart: "",
@@ -317,7 +367,10 @@ const main = (argv: ReadonlyArray<string>) =>
     // exists to prevent.
     yield* Effect.logInfo("phase=BRINGUP (down → upFull)")
     yield* clusterDown.pipe(Effect.ignore)
-    yield* upFull({ extraWorkerValues: [WORKER_VALUES_ENDURANCE] })
+    yield* upFull({
+      extraWorkerValues: [WORKER_VALUES_ENDURANCE],
+      abuseUasEnabled: args.abuseCaps > 0,
+    })
 
     /* ----- start recorders ---------------------------------------- */
     // 1Gi mirrors `tests/k8s/values/b2bua-worker.endurance.yaml`'s
@@ -371,7 +424,9 @@ const main = (argv: ReadonlyArray<string>) =>
         name: k8sJobName(`endurance-long-${args.runId}`),
         scenario: "uac-long-options.xml",
         callsPerPeriodMs: { count: 1, periodMs: longPeriodMs },
-        // Hold is hardcoded to 1200000ms (20 min) in the scenario.
+        // Hold is capped at 4 OPTIONS-keepalive iterations in the
+        // scenario (~20 min at the default 300 s keepalive interval),
+        // matching the short stream's 30 s hard cap.
         artifactDir,
         ...(args.proxyTarget !== undefined && { target: args.proxyTarget }),
       })
@@ -393,6 +448,33 @@ const main = (argv: ReadonlyArray<string>) =>
         ...(args.proxyTarget !== undefined && { target: args.proxyTarget }),
       })
       streams.push(limiterHandle)
+
+      // Abuse stream — continuous parallel traffic class. Skipped
+      // entirely when --abuse-caps=0. Call-ID prefix `abuse-` routes
+      // through call-control's mock to the abuse-UAS service, so the
+      // standard sipp-UAS pod never sees abuse-prefixed traffic.
+      if (args.abuseCaps > 0) {
+        yield* Effect.logInfo(
+          `phase=ABUSE-STREAM-START (abuseCaps=${args.abuseCaps}${args.abuseOnly !== undefined ? ` onlySlug=${args.abuseOnly}` : ""})`,
+        )
+        const abuseHandles = yield* startAbuseStreams({
+          namespace: NAMESPACE,
+          runId: args.runId,
+          artifactDir,
+          totalCaps: args.abuseCaps,
+          ...(args.abuseOnly !== undefined && { onlySlug: args.abuseOnly }),
+          ...(args.proxyTarget !== undefined && { proxyTarget: args.proxyTarget }),
+        }).pipe(
+          Effect.mapError(
+            (e) =>
+              new EnduranceAbort({
+                phase: "ABUSE-STREAM-START",
+                reason: e.message,
+              }),
+          ),
+        )
+        for (const h of abuseHandles) streams.push(h)
+      }
 
       yield* Effect.logInfo("phase=WARMUP (sipp streams ramping)")
       // Wait for all sipp Jobs to actually be Running before counting.
@@ -516,6 +598,26 @@ const main = (argv: ReadonlyArray<string>) =>
         ).pipe(Effect.orDie)
         yield* Effect.tryPromise(() => runAnalyze(artifactDir)).pipe(Effect.orDie)
       }
+      /* ----- RENDER HTML ----------------------------------------- */
+      // The timeline view is the first thing an operator looks at;
+      // render unconditionally (independent of --no-analyze) so the
+      // report exists even when the verdict pipeline was skipped.
+      // Best-effort: matchEffect swallows render failure into a log
+      // warning so an otherwise complete run still finishes cleanly.
+      yield* Effect.logInfo("phase=RENDER")
+      yield* Effect.tryPromise({
+        try: async () => {
+          const { runRender } = await import("./render-report.js")
+          const out = await runRender(artifactDir)
+          console.log(`html report: ${out}`)
+        },
+        catch: (e) => new RenderError({ reason: String(e) }),
+      }).pipe(
+        Effect.matchEffect({
+          onSuccess: () => Effect.void,
+          onFailure: (e) => Effect.logWarning(`render failed: ${e.message}`),
+        }),
+      )
       yield* Effect.logInfo(`endurance run complete: artifacts at ${artifactDir}`)
     } finally {
       yield* cleanupStreams()

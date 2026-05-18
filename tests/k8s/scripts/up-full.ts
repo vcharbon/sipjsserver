@@ -112,11 +112,14 @@ const applyObservability = (label: string) =>
     )
   })
 
-const installStack = (extraWorkerValues: ReadonlyArray<string>) =>
+const installStack = (
+  extraWorkerValues: ReadonlyArray<string>,
+  abuseUasEnabled: boolean,
+) =>
   Effect.gen(function* () {
     yield* Effect.logInfo(`charts: installing into namespace=${NAMESPACE}`)
     yield* installRedis(NAMESPACE)
-    yield* installSipp(NAMESPACE)
+    yield* installSipp(NAMESPACE, { abuseUasEnabled })
     yield* installWorker(NAMESPACE, { extraValues: extraWorkerValues })
     yield* installProxy(NAMESPACE)
   })
@@ -128,6 +131,11 @@ export interface UpFullOptions {
    * path passes nothing.
    */
   readonly extraWorkerValues?: ReadonlyArray<string>
+  /**
+   * Install the parallel abuse-UAS deployment + service in the sipp
+   * chart. Endurance passes `true` when `--abuse-caps > 0`.
+   */
+  readonly abuseUasEnabled?: boolean
 }
 
 export const upFull = (opts: UpFullOptions = {}) =>
@@ -156,7 +164,7 @@ export const upFull = (opts: UpFullOptions = {}) =>
     yield* buildAndLoad
 
     // Helm charts.
-    yield* installStack(opts.extraWorkerValues ?? [])
+    yield* installStack(opts.extraWorkerValues ?? [], opts.abuseUasEnabled === true)
 
     // Sanity gate — fails the bring-up loudly if traffic can't flow or
     // metrics aren't being served.

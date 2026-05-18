@@ -17,7 +17,25 @@ data:
     // alice's INVITE.
     const TARGET_HOST = process.env.TARGET_HOST || "sipp-uas"
     const TARGET_PORT = parseInt(process.env.TARGET_PORT || "5060", 10)
+    // Abuse-traffic destination overrides. When the inbound call-id
+    // starts with ABUSE_CID_PREFIX, the b-leg routes to the abuse
+    // pool instead of the standard UAS — keeps protocol-abuse
+    // traffic from polluting the standard sipp-uas's success-rate.
+    const ABUSE_TARGET_HOST = process.env.ABUSE_TARGET_HOST || TARGET_HOST
+    const ABUSE_TARGET_PORT = parseInt(
+      process.env.ABUSE_TARGET_PORT || String(TARGET_PORT),
+      10,
+    )
+    const ABUSE_CID_PREFIX = process.env.ABUSE_CID_PREFIX || "abuse-"
     const PORT = parseInt(process.env.PORT || "8080", 10)
+
+    function pickTargetFor(body) {
+      const cid = (body && body.call_id) || ""
+      if (typeof cid === "string" && cid.startsWith(ABUSE_CID_PREFIX)) {
+        return { host: ABUSE_TARGET_HOST, port: ABUSE_TARGET_PORT }
+      }
+      return { host: TARGET_HOST, port: TARGET_PORT }
+    }
 
     function readBody(req) {
       return new Promise((resolve, reject) => {
@@ -45,8 +63,9 @@ data:
         }
       }
       const dest = instr.destination || {}
-      const host = dest.host || TARGET_HOST
-      const port = dest.port || TARGET_PORT
+      const fallback = pickTargetFor(body)
+      const host = dest.host || fallback.host
+      const port = dest.port || fallback.port
       const resp = {
         action: "route",
         destination: { host, port, transport: "udp" },
@@ -73,10 +92,11 @@ data:
         return buildRouteFromInstruction(body, instr)
       }
       // Legacy fallback for tests that don't send X-Api-Call.
+      const t = pickTargetFor(body)
       return {
         action: "route",
-        destination: { host: TARGET_HOST, port: TARGET_PORT, transport: "udp" },
-        new_ruri: `sip:test@${TARGET_HOST}:${TARGET_PORT}`,
+        destination: { host: t.host, port: t.port, transport: "udp" },
+        new_ruri: `sip:test@${t.host}:${t.port}`,
       }
     }
 
@@ -126,7 +146,7 @@ data:
       }
     })
     server.listen(PORT, "0.0.0.0", () => {
-      console.log(`mock call-control listening on :${PORT}, default-target=${TARGET_HOST}:${TARGET_PORT}`)
+      console.log(`mock call-control listening on :${PORT}, default-target=${TARGET_HOST}:${TARGET_PORT}, abuse-target=${ABUSE_TARGET_HOST}:${ABUSE_TARGET_PORT} (cid prefix='${ABUSE_CID_PREFIX}')`)
     })
 ---
 apiVersion: apps/v1
@@ -161,6 +181,12 @@ spec:
               value: {{ .Values.callControl.target.host | quote }}
             - name: TARGET_PORT
               value: {{ .Values.callControl.target.port | quote }}
+            - name: ABUSE_TARGET_HOST
+              value: {{ .Values.callControl.abuseTarget.host | quote }}
+            - name: ABUSE_TARGET_PORT
+              value: {{ .Values.callControl.abuseTarget.port | quote }}
+            - name: ABUSE_CID_PREFIX
+              value: {{ .Values.callControl.abuseCidPrefix | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.callControl.port }}

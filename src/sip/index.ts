@@ -12,6 +12,9 @@
 
 // Parser
 export { SipParser, SipParseError } from "./Parser.js"
+export { createCustomParser, customParser } from "./parsers/custom/index.js"
+export type { SipParserImpl, SipParserLimits } from "./parsers/interface.js"
+export { DEFAULT_SIP_PARSER_LIMITS } from "./parsers/interface.js"
 
 // Serializer
 export { serialize, sipSummary, messageSummary } from "./Serializer.js"

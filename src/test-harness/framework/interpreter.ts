@@ -53,7 +53,7 @@ function makePlaceholderRequest(method: string): SipRequest {
     method,
     uri: "sip:placeholder@invalid",
     headers: [
-      { name: "Via", value: "SIP/2.0/UDP placeholder.invalid:0;branch=z9hG4bK-placeholder" },
+      { name: "Via", value: "SIP/2.0/UDP placeholder.invalid:5060;branch=z9hG4bK-placeholder" },
       { name: "From", value: "<sip:placeholder@invalid>;tag=placeholder" },
       { name: "To", value: "<sip:placeholder@invalid>" },
       { name: "Call-ID", value: "placeholder" },

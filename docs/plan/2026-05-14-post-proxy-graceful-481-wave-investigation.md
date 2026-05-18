@@ -698,6 +698,103 @@ References:
 - https://github.com/SIPp/sipp/pull/619
 - https://github.com/SIPp/sipp/blob/master/CHANGES.md
 
+### 6.4.5b The bump is NOT sufficient — host-platform freeze, not a real sipp bug — 2026-05-17 update
+
+The 2026-05-15 commit `292e8f56` bumped the sipp image from Debian's
+3.6.x to a from-source build of `v3.7.7`. The 5-hour endurance run on
+2026-05-16 fired the same assertion **twice** — once on the
+`endurance-short` pod at +1h17m, once on `endurance-long` at +3h55m —
+with the same 1-tick `clock_tick = wheel_base - 1` fingerprint:
+
+```
+2026-05-16 21:59:44.523685: wheel_base is 4622110, clock_tick is 4622109
+2026-05-17 00:35:52.356937: wheel_base is 13570094, clock_tick is 13570093
+```
+
+The behaviour also changed in a way that makes the symptom *harder*
+to detect: in 3.6.x sipp `ERROR`'d and exited, which a pod-level watch
+could catch. In 3.7.7 ([src/task.cpp](https://github.com/SIPp/sipp/blob/v3.7.7/src/task.cpp))
+the assert site emits an `ERROR()` log and then `assert(wheel_base <=
+clock_tick)` — but our cmake build evidently has `NDEBUG` defined (or
+the assert path otherwise no-ops), so sipp does **not** exit. It keeps
+running with `ElapsedTime(C)` frozen, `OutgoingCall` plateaued, and
+`CurrentCall` pinned. The pod stays Running. The Job stays Running.
+The orchestrator's `waitSippRunning` is satisfied. We silently lose
+sipp traffic for the rest of the run.
+
+[CHANGES.md](https://github.com/SIPp/sipp/blob/v3.7.7/CHANGES.md)
+confirms PR #619 is the **only** clock-related fix between v3.7.0 and
+v3.7.7 (latest stable). No follow-up tag fixes a residual race; no
+3.7.x rollback or roll-forward avoids it.
+
+#### Root cause: host VM time-keeping anomaly, not a sipp bug
+
+Cross-pod evidence rules out a sipp-internal race as the trigger:
+
+- The `endurance-short` and `endurance-limiter` pods independently
+  saw the **same proportional 2-second message-rate dip at the same
+  wall-clock second** (21:59:22–23 UTC: short 245 → 119 → 63 msg/s;
+  limiter 16 → 8 → 4 msg/s). Same recovery overshoot at 21:59:24–25.
+  A sipp-internal race cannot produce that synchronous bilateral
+  signature.
+- 21 s after the bilateral dip, sipp-short's wheel_base assert fires
+  (21:59:44.523) and the pod wedges. The limiter pod, with a much
+  lower offered rate (~16 msg/s vs ~245 msg/s), absorbs the same
+  perturbation without tripping its timewheel.
+- WSL2 host-kernel logs from the same machine confirm the
+  time-keeping anomaly: `Adjusting tsc more than 11% (3390955 vs
+  4240478)` at 23:28:43 UTC (during the run) and recurring
+  `vmbus_alloc_ring order:7` page-allocation failures throughout the
+  run window. WSL2 is well known to expose host CPU-steal as guest
+  TSC drift, with kernel re-anchoring producing brief monotonic-time
+  jumps. CLOCK_MONOTONIC is the source for sipp's `clock_tick`.
+
+So sipp v3.7.0+ (PR #619) closed the *sipp-internal* `getmicroseconds`
+thread race; it did not — and cannot — defend against *external* time
+perturbations injected by the host VM. The wheel_base assert in v3.7.7
+should be read as a **platform-health propagation symptom**, not as a
+sipp bug.
+
+#### Why this happens on WSL2 specifically
+
+| Pathology | Mechanism | Evidence in this run |
+|---|---|---|
+| TSC drift | Windows host reclaims CPU; VM's TSC falls behind wall-clock; kernel re-anchors when drift exceeds threshold. CLOCK_MONOTONIC briefly jumps. | `Adjusting tsc more than 11%` at 23:28:43 UTC |
+| vmbus memory pressure | Hyper-V channel rings need order:7 (512 KB) contiguous pages; under memory pressure (15 GiB total, ~800 MiB free, 2.7 GiB swap used in this case) the allocation slow-paths through compaction. | Repeat `vmbus_alloc_ring order:7 page allocation failure` events at 21:11, 22:02-06, 22:14, 22:18-20 UTC etc. |
+| Chaos-triggered host pressure | Creating/deleting pods triggers kind network reconfig → vmbus channels created → allocation under pressure. | 244-line dmesg burst at 21:11 UTC coincident with chaos event 1 (`worker-pod-kill9`) |
+
+#### Mitigations (in priority order)
+
+1. **Run endurance on a stable-clock host** — dedicated Linux VM with
+   reserved CPU, or bare metal. This is the only real fix. The
+   verdict pipeline cannot be trusted as a regression gate while the
+   host injects multi-second pauses.
+2. **Orchestrator-side staleness watchdog** — implemented in
+   [tests/k8s/endurance/sippJobs.ts](../../tests/k8s/endurance/sippJobs.ts)
+   (`runStalenessWatchdog`). Polls each sipp pod's `stat.csv` every
+   30 s; emits one row to `sipp-staleness.ndjson` per stream when
+   `ElapsedTime(C)` hasn't advanced for ≥ 60 s. Surfaces the platform
+   freeze as a structured artifact so the analyst doesn't have to
+   re-discover it from sipp's err.log on every run. Auto-restart
+   deliberately **not** wired in — mid-soak Job recreation skews the
+   analysis.
+3. **HTML-report platform banner** —
+   [tests/k8s/endurance/render-report.ts](../../tests/k8s/endurance/render-report.ts)
+   renders an orange "Platform-side event detected (NOT a B2BUA
+   regression)" banner at the top of `timeline.html` whenever
+   `metadata.json:kernel` matches `*microsoft*` OR
+   `sipp-staleness.ndjson` is non-empty. The renderer is now invoked
+   automatically at end-of-run from
+   [run-endurance.ts](../../tests/k8s/endurance/run-endurance.ts)
+   (RENDER phase). An operator opening `timeline.html` sees the
+   platform-health signal before they see any system metric.
+4. **`.wslconfig` tuning if WSL2 is unavoidable** — `memory=20GB` and
+   pinned `processors=N` reduce but don't eliminate the issue.
+
+The previous "we do not need a watchdog" claim is superseded by this
+section. The deeper "we do not need a different host" claim is also
+now superseded: items 2–4 are mitigations, not fixes.
+
 ---
 
 ## 7. Artifacts to attach when starting work

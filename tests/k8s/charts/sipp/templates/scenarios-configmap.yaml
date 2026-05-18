@@ -25,3 +25,15 @@ data:
 {{ .Files.Get "scenarios/uac-endurance-limiter.xml" | indent 4 }}
   uac-burst-non-emergency.xml: |-
 {{ .Files.Get "scenarios/uac-burst-non-emergency.xml" | indent 4 }}
+  uas-abuse-tolerant.xml: |-
+{{ .Files.Get "scenarios/uas-abuse-tolerant.xml" | indent 4 }}
+  uac-abuse-reinvite-flood.xml: |-
+{{ .Files.Get "scenarios/uac-abuse-reinvite-flood.xml" | indent 4 }}
+  uac-abuse-reinvite-flood.csv: |-
+{{ .Files.Get "scenarios/uac-abuse-reinvite-flood.csv" | indent 4 }}
+  uac-abuse-options-flood.xml: |-
+{{ .Files.Get "scenarios/uac-abuse-options-flood.xml" | indent 4 }}
+  uac-abuse-options-flood.csv: |-
+{{ .Files.Get "scenarios/uac-abuse-options-flood.csv" | indent 4 }}
+  uac-abuse-ghost-after-ack.xml: |-
+{{ .Files.Get "scenarios/uac-abuse-ghost-after-ack.xml" | indent 4 }}

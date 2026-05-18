@@ -1,0 +1,60 @@
+{{- if .Values.abuseUas.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sipp-abuse-uas
+  labels:
+    app.kubernetes.io/name: sipp-abuse-uas
+    sipp-pool: abuse
+spec:
+  replicas: {{ .Values.abuseUas.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sipp-abuse-uas
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sipp-abuse-uas
+        sipp-pool: abuse
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: uas
+          image: {{ .Values.sipp.image | quote }}
+          imagePullPolicy: {{ .Values.sipp.imagePullPolicy }}
+          command: ["sipp"]
+          # Tolerant UAS scenario: handles re-INVITE / in-dialog OPTIONS
+          # storms gracefully and waits indefinitely for BYE. The pool
+          # is deliberately separated from the standard sipp-uas so an
+          # abuse archetype that wedges the UAS can't pollute real-call
+          # success-rate KPIs.
+          args:
+            - "-sf"
+            - "/scenarios/uas-abuse-tolerant.xml"
+            - "-p"
+            - "5060"
+            - "-i"
+            - "$(POD_IP)"
+            - "-trace_err"
+            - "-error_file"
+            - "/tmp/uas-err.log"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - name: sip-udp
+              containerPort: 5060
+              protocol: UDP
+          volumeMounts:
+            - name: scenarios
+              mountPath: /scenarios
+      volumes:
+        - name: scenarios
+          configMap:
+            name: sipp-scenarios
+{{- end }}

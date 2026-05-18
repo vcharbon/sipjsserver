@@ -14,6 +14,8 @@
  *   ESTABLISHING_DURING_CHAOS  — INVITE/200/ACK overlaps an impact window
  *   POST_RECOVERY              — first 5s after recovery ends
  *   LIMITER_PROBE              — origin = limiter-probe stream (Call-ID prefix)
+ *   ABUSE_STREAM               — origin = abuse stream (Call-ID prefix `abuse-`);
+ *                                report-only, never counted as real-call failure
  *   PRE_WARMUP / POST_DRAIN    — outside SOAK; informational only
  */
 
@@ -25,8 +27,11 @@ export type CallCategory =
   | "ESTABLISHING_DURING_CHAOS"
   | "POST_RECOVERY"
   | "LIMITER_PROBE"
+  | "ABUSE_STREAM"
   | "PRE_WARMUP"
   | "POST_DRAIN"
+
+export const ABUSE_CID_PREFIX = "abuse-"
 
 export interface ChaosImpactWindow {
   readonly tFire: Date
@@ -110,6 +115,12 @@ const categorizeOne = (
   const success =
     outcome.outcome === "clean" || outcome.outcome === "retransmitted"
 
+  // Abuse stream takes precedence over every other classification —
+  // it must never leak into STEADY or per-event windows. Tested by
+  // unit case in categorize.test.ts.
+  if (callId.startsWith(ABUSE_CID_PREFIX)) {
+    return { callId, category: "ABUSE_STREAM", outcome, success }
+  }
   if (callId.startsWith(opts.limiterProbeCidPrefix)) {
     return { callId, category: "LIMITER_PROBE", outcome, success }
   }
@@ -220,6 +231,7 @@ export const buildPerEventBreakdown = (
       ESTABLISHING_DURING_CHAOS: { ok: 0, failed: 0 },
       POST_RECOVERY: { ok: 0, failed: 0 },
       LIMITER_PROBE: { ok: 0, failed: 0 },
+      ABUSE_STREAM: { ok: 0, failed: 0 },
       PRE_WARMUP: { ok: 0, failed: 0 },
       POST_DRAIN: { ok: 0, failed: 0 },
     }

@@ -8,6 +8,7 @@
  */
 
 import { Scanner, SP, CR, LF } from "./scanner.js"
+import type { SipParserLimits } from "../interface.js"
 
 export interface RequestLine {
   readonly type: "request"
@@ -29,7 +30,7 @@ export type StartLine = RequestLine | StatusLine
  * Parse the start line from the scanner.
  * Advances the scanner past the CRLF terminator.
  */
-export function parseStartLine(s: Scanner): StartLine {
+export function parseStartLine(s: Scanner, limits: SipParserLimits): StartLine {
   // Read first token until SP
   const firstToken = readUntilSP(s)
   if (firstToken.length === 0) {
@@ -53,10 +54,10 @@ export function parseStartLine(s: Scanner): StartLine {
   }
 
   // Otherwise → Request-Line
-  return parseRequestLine(s, firstToken)
+  return parseRequestLine(s, firstToken, limits)
 }
 
-function parseRequestLine(s: Scanner, method: string): RequestLine {
+function parseRequestLine(s: Scanner, method: string, limits: SipParserLimits): RequestLine {
   // Request-URI: everything until next SP
   // Must not start with < (3.1.2.7)
   if (s.peek() === 0x3c) { // <
@@ -66,6 +67,9 @@ function parseRequestLine(s: Scanner, method: string): RequestLine {
   const uri = readUntilSP(s)
   if (uri.length === 0) {
     throw new Error("Empty Request-URI")
+  }
+  if (uri.length > limits.maxUriLength) {
+    throw new Error(`Request-URI length ${uri.length} exceeds limit ${limits.maxUriLength}`)
   }
 
   // Exactly one SP before version

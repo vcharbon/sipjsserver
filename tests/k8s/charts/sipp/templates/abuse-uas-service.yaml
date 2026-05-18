@@ -1,0 +1,21 @@
+{{- if .Values.abuseUas.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: sipp-abuse-uas
+  labels:
+    app.kubernetes.io/name: sipp-abuse-uas
+    sipp-pool: abuse
+spec:
+  # Same headless model as sipp-uas — see comment on sipp-uas Service
+  # for why ClusterIP would break the source-IP-discipline on the
+  # response path back to the front-proxy VIP.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: sipp-abuse-uas
+  ports:
+    - name: sip-udp
+      port: 5060
+      targetPort: sip-udp
+      protocol: UDP
+{{- end }}

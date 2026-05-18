@@ -17,7 +17,7 @@
  * `-set` parameter values.
  */
 
-import { Data, Effect } from "effect"
+import { Data, Effect, Fiber } from "effect"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -25,6 +25,7 @@ import { BURST_CAPS, BURST_DURATION_SEC, type ChaosOutcome } from "./chaosOps.js
 import { exec } from "../fixtures/exec.js"
 import { FRONT_PROXY_VIP_TARGET } from "../fixtures/frontProxyTarget.js"
 import { execInPod, kubectlCp } from "../fixtures/kubectl.js"
+import { appendNdjsonRows } from "./recorder.js"
 import { parseSippStats, type SippStats } from "../fixtures/sippJob.js"
 import { parseSippStat } from "../fixtures/sippOutcomes.js"
 
@@ -72,6 +73,20 @@ export interface SippDaemonOpts {
    * built-in macros. Reference in scenario CDATA as `[keyword]`.
    */
   readonly keyVars?: ReadonlyArray<readonly [string, string]>
+  /**
+   * Path (inside the sipp container) of a CSV passed as `-inf`. One row
+   * is consumed per launched call; columns are exposed inside the
+   * scenario as `[field0]`, `[field1]`, etc. Used by abuse archetypes
+   * to deliver hundreds of distinct call shapes from one scenario.
+   */
+  readonly inject?: string
+  /**
+   * Extra raw argv tokens appended to the sipp command line. Abuse
+   * archetypes use this to set `-default_behaviors none`, which stops
+   * sipp from auto-replying / auto-BYE-ing / aborting on the unexpected
+   * 481s and in-dialog requests their floods provoke from the B2BUA.
+   */
+  readonly extraArgs?: ReadonlyArray<string>
   /** Artifact dir; sipp traces land in `<artifactDir>/sipp/<name>/` on stop. */
   readonly artifactDir: string
 }
@@ -93,6 +108,43 @@ export interface SippDaemonResult {
 }
 
 const MAX_CALLS = 2_000_000_000 // sipp `-m` upper bound; effectively unlimited.
+
+// HOST-PLATFORM FREEZE (NOT a B2BUA regression, NOT a real sipp bug).
+//
+// Symptom: "wheel_base is X, clock_tick is X-1" lines in sipp's err.log
+// followed by sipp wedging — stat.csv `ElapsedTime(C)` stops advancing,
+// `OutgoingCall` plateaus, `CurrentCall` pins at the in-flight count
+// at the moment of freeze, and the proxy's per-worker INVITE-rate
+// panel drops to ~0.
+//
+// Root cause: the host VM (notably WSL2 on Hyper-V, but any VM with
+// CPU-stolen TSC behaviour) pauses the guest for ~1-2 s, during which
+// sipp's traffic thread can't run while wheel_base keeps advancing
+// from the post-pause recovery overshoot. clock_tick ends up trailing
+// wheel_base by one tick, which trips the timewheel assert in
+// `timewheel::task2list()`. sipp 3.7.0+ (PR #619) closed the main
+// thread-race vector inside sipp itself; the residual sensitivity is
+// to *external* clock perturbations, which v3.7.7 cannot defend
+// against. Direct evidence in our 2026-05-16 run: WSL2 kernel logged
+// 11% TSC re-anchor + recurring vmbus_alloc_ring order:7 failures
+// during the run window. Two sipp pods independently saw the SAME
+// 2-second message-rate dip at the SAME wall-time, proving the stall
+// was host-side not sipp-internal.
+//
+// What this means for the analyst: when per-event "during ok/fail"
+// counts collapse to 0 from a specific timestamp onward AND there is
+// a `wheel_base` line in err.log, classify as a platform freeze and
+// look at host kernel logs (`dmesg -T | grep -i tsc`, vmbus_alloc),
+// NOT at the B2BUA. The renderer surfaces this in `timeline.html`
+// via the "Platform-side event detected" banner.
+//
+// Mitigation in this harness: `runStalenessWatchdog` below emits
+// staleness rows to `sipp-staleness.ndjson` so the freeze is at
+// least *visible* — auto-restart deliberately not wired (mid-soak
+// Job recreation skews analysis). The real fix is to run endurance
+// on a host with stable monotonic time (dedicated Linux VM or bare
+// metal); see docs/plan/2026-05-14-post-proxy-graceful-481-wave-investigation.md
+// §6.4.5b.
 
 // Concurrent-call cap (`-l`). Default heuristic ramps to ~3000 under load,
 // at which point sipp self-throttles its CallRate to keep CurrentCall at
@@ -158,6 +210,12 @@ export const startSippDaemon = (
     for (const [k, v] of opts.keyVars ?? []) {
       args.push("-key", k, v)
     }
+    if (opts.inject !== undefined) {
+      args.push("-inf", opts.inject)
+    }
+    for (const a of opts.extraArgs ?? []) {
+      args.push(a)
+    }
     // sipp's stats refresh frequency. 10s gives the SOAK-START sanity
     // gate a chance to read at least one stat row at WARMUP=60s
     // (smoke). The analyzer doesn't depend on stat resolution for
@@ -188,7 +246,22 @@ export const startSippDaemon = (
       ),
     )
 
+    // Staleness watchdog (see wheel_base comment near MAX_CALLS).
+    // v3.7.7 doesn't crash on the timewheel race; sipp keeps running
+    // but stops scheduling new calls and freezes ElapsedTime(C). A pod
+    // watch can't detect this. We poll stat.csv and emit a one-shot
+    // staleness event when ElapsedTime(C) hasn't advanced.
+    const watchdogFiber = yield* Effect.forkChild(
+      runStalenessWatchdog({
+        namespace: opts.namespace,
+        name: opts.name,
+        scenario: opts.scenario,
+        artifactDir: opts.artifactDir,
+      }),
+    )
+
     const stop = Effect.gen(function* () {
+      yield* Fiber.interrupt(watchdogFiber).pipe(Effect.ignore)
       // 1. Find the pod (it may have died already).
       const pod = yield* findJobPod(opts.namespace, opts.name).pipe(
         Effect.orElseSucceed(() => ""),
@@ -513,6 +586,119 @@ export const waitSippRunning = (
   })
 
 /**
+ * Abuse stream archetype catalogue.
+ *
+ * Each archetype maps to a sipp scenario file + a CSV of per-call
+ * mutation parameters. Call-ID prefix is forced to `abuse-` (via the
+ * Job name) so the analyzer routes outcomes to the ABUSE_STREAM
+ * category — never to STEADY.
+ *
+ * Architectural invariant: ALL abuse traffic, regardless of which
+ * side (UAC or UAS) carries the bad behaviour, routes its B-leg
+ * through the abuse-UAS service. The standard sipp-UAS must keep a
+ * 100 % OK rate; structural isolation is the only way to guarantee
+ * that. Call-control mock detects the `abuse-` prefix in `call_id`
+ * and returns abuse-UAS as the destination.
+ */
+export interface AbuseArchetype {
+  /** Slug used in Job name + Call-ID prefix (`abuse-<slug>-...`). */
+  readonly slug: string
+  /** Scenario filename in the sipp-scenarios ConfigMap. */
+  readonly scenario: string
+  /** Optional CSV filename (mounted at /scenarios/<csv>). */
+  readonly injectCsv?: string
+}
+
+/**
+ * Starter set of three UAC-side archetypes. The full ≥20-archetype
+ * catalogue lands incrementally; see the plan for the queue.
+ */
+export const ABUSE_ARCHETYPES: ReadonlyArray<AbuseArchetype> = [
+  { slug: "reinvite-flood", scenario: "uac-abuse-reinvite-flood.xml", injectCsv: "uac-abuse-reinvite-flood.csv" },
+  { slug: "options-flood", scenario: "uac-abuse-options-flood.xml", injectCsv: "uac-abuse-options-flood.csv" },
+  { slug: "ghost-after-ack", scenario: "uac-abuse-ghost-after-ack.xml" },
+]
+
+export interface AbuseStreamOpts {
+  readonly namespace: string
+  readonly runId: string
+  readonly artifactDir: string
+  /** Total CAPS summed across all archetypes. 0 = no abuse Jobs at all. */
+  readonly totalCaps: number
+  /** If set, run only this slug; everything else stays idle. */
+  readonly onlySlug?: string
+  /** Forwarded to `startSippDaemon.target`. */
+  readonly proxyTarget?: string
+}
+
+/**
+ * Launch one sipp Job per (selected) archetype. Returns the handles
+ * so the orchestrator can stop them on DRAIN. Returns an empty array
+ * when totalCaps === 0.
+ *
+ * Each archetype gets `totalCaps / N` CAPS, with a fractional-rate
+ * fallback (one call every `1000 / cps` ms) when cps < 1.
+ */
+export const startAbuseStreams = (
+  opts: AbuseStreamOpts,
+): Effect.Effect<ReadonlyArray<SippDaemonHandle>, SippDaemonError> =>
+  Effect.gen(function* () {
+    if (opts.totalCaps <= 0) return []
+    const archetypes = opts.onlySlug !== undefined
+      ? ABUSE_ARCHETYPES.filter((a) => a.slug === opts.onlySlug)
+      : ABUSE_ARCHETYPES
+    if (archetypes.length === 0) {
+      return yield* new SippDaemonError({
+        job: opts.onlySlug ?? "<all>",
+        reason: `no abuse archetype matched --abuse-only='${opts.onlySlug}'`,
+      })
+    }
+    const perArchetypeCps = opts.totalCaps / archetypes.length
+    const handles: Array<SippDaemonHandle> = []
+    for (const a of archetypes) {
+      // Job name must start with `abuse-` so the Call-ID prefix
+      // (set by sippJobs.ts as `<jobName>-%u@det`) matches
+      // ABUSE_CID_PREFIX in categorize.ts.
+      const name = k8sJobName(`abuse-${a.slug}-${opts.runId}`)
+      const handle = yield* startSippDaemon({
+        namespace: opts.namespace,
+        name,
+        scenario: a.scenario,
+        ...(perArchetypeCps >= 1
+          ? { cps: Math.floor(perArchetypeCps) }
+          : {
+              callsPerPeriodMs: {
+                count: 1,
+                periodMs: Math.max(1000, Math.floor(1000 / Math.max(0.05, perArchetypeCps))),
+              },
+            }),
+        ...(a.injectCsv !== undefined && {
+          inject: `/scenarios/${a.injectCsv}`,
+        }),
+        // Abuse flows trigger unsolicited 481s, in-dialog OPTIONS, and
+        // BYEs from the B2BUA. sipp's default behaviors would auto-reply
+        // / auto-BYE / abort the call; disabling them lets the scenario
+        // keep dispatching new calls instead of dying on the first
+        // unexpected message.
+        extraArgs: ["-default_behaviors", "none"],
+        artifactDir: opts.artifactDir,
+        ...(opts.proxyTarget !== undefined && { target: opts.proxyTarget }),
+      })
+      handles.push(handle)
+    }
+    return handles
+  })
+
+// Duplicate of run-endurance.ts's helper; not exported there to avoid
+// circular dep, so re-derived here for the abuse-stream Job names.
+const k8sJobName = (s: string): string =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9.-]/g, "-")
+    .slice(0, 50)
+    .replace(/^[-.]+|[-.]+$/g, "")
+
+/**
  * Read sipp's stat.csv directly out of the running pod. Sipp updates
  * stat.csv every `-fd` seconds with a cumulative-counters row, unlike
  * screen.log which is only flushed on sipp exit. Used by the
@@ -543,5 +729,59 @@ export const readSippStatCsv = (
         onFailure: () => Effect.succeed(""),
       }),
     )
+  })
+
+const parseElapsedTimeC = (csv: string): string | undefined => {
+  const lines = csv.split("\n").filter((l) => l.trim().length > 0)
+  if (lines.length < 2) return undefined
+  const header = (lines[0] ?? "").split(";")
+  const lastRow = (lines[lines.length - 1] ?? "").split(";")
+  const idx = header.indexOf("ElapsedTime(C)")
+  if (idx < 0) return undefined
+  const v = (lastRow[idx] ?? "").trim()
+  return v === "" ? undefined : v
+}
+
+// Polls stat.csv every 30s; flags the stream once when ElapsedTime(C)
+// hasn't advanced for ≥60s. Continues polling after flagging (cheap,
+// and useful if sipp ever recovers). The flagged event lands in
+// sipp-staleness.ndjson so the analyzer / operator can correlate.
+const runStalenessWatchdog = (opts: {
+  readonly namespace: string
+  readonly name: string
+  readonly scenario: string
+  readonly artifactDir: string
+}): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    let prev: string | undefined
+    let staleCount = 0
+    let flagged = false
+    while (true) {
+      yield* Effect.sleep("30 seconds")
+      const csv = yield* readSippStatCsv(opts.namespace, opts.name)
+      const elapsed = parseElapsedTimeC(csv)
+      if (elapsed === undefined) continue
+      if (prev !== undefined && elapsed === prev) staleCount += 1
+      else staleCount = 0
+      prev = elapsed
+      if (staleCount >= 2 && !flagged) {
+        flagged = true
+        const tDetected = new Date().toISOString()
+        yield* Effect.logWarning(
+          `sipp staleness detected on ${opts.name} (scenario=${opts.scenario}): ElapsedTime(C) stuck at ${elapsed} for ≥60s. Suspect wheel_base/clock_tick race (see MAX_CALLS comment).`,
+        )
+        yield* appendNdjsonRows(
+          path.join(opts.artifactDir, "sipp-staleness.ndjson"),
+          [
+            {
+              tDetected,
+              name: opts.name,
+              scenario: opts.scenario,
+              lastElapsed: elapsed,
+            },
+          ],
+        )
+      }
+    }
   })
 

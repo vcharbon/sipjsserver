@@ -48,6 +48,21 @@ interface MetadataFile {
     readonly tCooldownEnd: string
     readonly tDrainEnd: string
   }
+  /** uname -r captured at run start (undefined for older runs). */
+  readonly kernel?: string
+}
+
+interface SippStalenessRow {
+  readonly tDetected: string
+  readonly name: string
+  readonly scenario: string
+  readonly lastElapsed: string
+}
+
+interface PlatformHealth {
+  readonly kernel: string | undefined
+  readonly isWsl2: boolean
+  readonly stalenessEvents: ReadonlyArray<SippStalenessRow>
 }
 
 interface ChaosRow {
@@ -67,9 +82,9 @@ interface LimiterRow {
 interface SippStream {
   readonly name: string
   readonly t: ReadonlyArray<number>
-  readonly callsPerSec: ReadonlyArray<number>
-  readonly failsPerSec: ReadonlyArray<number>
-  readonly currentCall: ReadonlyArray<number>
+  readonly callsPerSec: ReadonlyArray<number | null>
+  readonly failsPerSec: ReadonlyArray<number | null>
+  readonly currentCall: ReadonlyArray<number | null>
 }
 
 /**
@@ -179,6 +194,7 @@ interface ReportData {
   readonly proxyWarnings: WarningSeries
   readonly queueDepth: QueueDepthSeries
   readonly workerMetrics: WorkerMetricCharts
+  readonly platform: PlatformHealth
 }
 
 /* -------------------------------------------------------------------- */
@@ -265,6 +281,48 @@ const parseSippStatCsv = async (
     currentCall.push(Number.isFinite(cc) ? cc : 0)
   }
   return { name, t, callsPerSec, failsPerSec, currentCall }
+}
+
+/**
+ * Resample a sipp stream onto the global tStart..tEnd grid so every
+ * stream shares the same X axis. Sipp emits one CSV row per ~10s
+ * period and bursts run for only a minute or two, so each raw stream
+ * has a different length and time domain. Plotting them against
+ * `streams[0].t` previously aligned everything to whichever stream
+ * the filesystem returned first.
+ *
+ * Within the stream's observation window [tFirst, tLast+periodSec],
+ * carry the latest sipp sample forward into every bucket. Outside it,
+ * emit null so uPlot draws gaps instead of zero lines for streams
+ * that aren't running.
+ */
+const resampleSippStream = (
+  s: SippStream,
+  tStart: number,
+  tEnd: number,
+  periodSec: number,
+): SippStream => {
+  const buckets = Math.max(1, Math.ceil((tEnd - tStart) / periodSec))
+  const t: Array<number> = new Array(buckets)
+  for (let i = 0; i < buckets; i++) t[i] = tStart + i * periodSec
+  const cc: Array<number | null> = new Array(buckets).fill(null)
+  const cps: Array<number | null> = new Array(buckets).fill(null)
+  const fps: Array<number | null> = new Array(buckets).fill(null)
+  if (s.t.length === 0) {
+    return { name: s.name, t, currentCall: cc, callsPerSec: cps, failsPerSec: fps }
+  }
+  const tFirst = s.t[0]!
+  const tLast = s.t[s.t.length - 1]!
+  let j = 0
+  for (let i = 0; i < buckets; i++) {
+    const bs = t[i]!
+    if (bs < tFirst || bs > tLast + periodSec) continue
+    while (j + 1 < s.t.length && s.t[j + 1]! <= bs + periodSec) j++
+    cc[i] = s.currentCall[j] ?? null
+    cps[i] = s.callsPerSec[j] ?? null
+    fps[i] = s.failsPerSec[j] ?? null
+  }
+  return { name: s.name, t, currentCall: cc, callsPerSec: cps, failsPerSec: fps }
 }
 
 /* -------------------------------------------------------------------- */
@@ -737,7 +795,9 @@ const buildReportData = async (artifactDir: string): Promise<ReportData> => {
       .replace(/-endurance-.*/, "")
     const csv = path.join(sippDir, sd, "stat.csv")
     const parsed = await parseSippStatCsv(csv, name)
-    if (parsed) streams.push(parsed)
+    if (parsed) {
+      streams.push(resampleSippStream(parsed, tStart, tEnd, SAMPLE_PERIOD_SEC))
+    }
   }
 
   const podLogsDir = path.join(artifactDir, "pod-logs")
@@ -847,6 +907,21 @@ const buildReportData = async (artifactDir: string): Promise<ReportData> => {
     proxyWarnings: { t: warnRate.t, ratePerSec: warnRate.rate },
     queueDepth,
     workerMetrics,
+    platform: await loadPlatformHealth(artifactDir, meta),
+  }
+}
+
+const loadPlatformHealth = async (
+  artifactDir: string,
+  meta: MetadataFile,
+): Promise<PlatformHealth> => {
+  const stalenessEvents = await readNdjson<SippStalenessRow>(
+    path.join(artifactDir, "sipp-staleness.ndjson"),
+  ).catch(() => [] as Array<SippStalenessRow>)
+  return {
+    kernel: meta.kernel,
+    isWsl2: meta.kernel?.toLowerCase().includes("microsoft") ?? false,
+    stalenessEvents,
   }
 }
 
@@ -869,6 +944,37 @@ const escapeHtml = (s: string): string =>
         return "&#39;"
     }
   })
+
+const renderPlatformBanner = (p: PlatformHealth): string => {
+  if (!p.isWsl2 && p.stalenessEvents.length === 0) return ""
+  const lines: Array<string> = []
+  lines.push(`<div class="platform">`)
+  lines.push(`<h2>⚠ Platform-side event detected (NOT a B2BUA regression)</h2>`)
+  if (p.isWsl2) {
+    lines.push(
+      `<div>Host kernel <code>${escapeHtml(p.kernel ?? "")}</code> — this run executed on <strong>WSL2</strong>. WSL2 is known to exhibit TSC drift (kernel re-anchors monotonic time when the Windows host steals CPU) and recurring <code>vmbus_alloc_ring</code> order:7 page-allocation failures under memory pressure. Both produce sub-second to multi-second pauses inside the guest that look like B2BUA stalls but originate outside it.</div>`,
+    )
+  }
+  if (p.stalenessEvents.length > 0) {
+    lines.push(
+      `<div style="margin-top:6px;"><strong>${p.stalenessEvents.length}</strong> sipp staleness event(s) recorded — sipp's <code>ElapsedTime(C)</code> stalled, meaning the sipp process froze (typically the wheel_base/clock_tick race, triggered by host stalls). The freeze is sipp wedging in response to a host-side time-keeping anomaly — read it as a platform-health signal, not as a SIP system regression. Affected streams continue to appear in per-event "during/after" counts but stop generating new traffic.</div>`,
+    )
+    lines.push(
+      `<table><thead><tr><th>tDetected (UTC)</th><th>stream</th><th>scenario</th><th>last ElapsedTime(C)</th></tr></thead><tbody>`,
+    )
+    for (const ev of p.stalenessEvents) {
+      lines.push(
+        `<tr><td>${escapeHtml(ev.tDetected)}</td><td>${escapeHtml(ev.name)}</td><td>${escapeHtml(ev.scenario)}</td><td>${escapeHtml(ev.lastElapsed)}</td></tr>`,
+      )
+    }
+    lines.push(`</tbody></table>`)
+  }
+  lines.push(
+    `<div style="margin-top:6px;font-size:11px;color:#92400e;">See <code>tests/k8s/endurance/sippJobs.ts</code> (MAX_CALLS comment) and <code>docs/plan/2026-05-14-post-proxy-graceful-481-wave-investigation.md</code> §6.4.5b for the diagnostic history.</div>`,
+  )
+  lines.push(`</div>`)
+  return lines.join("\n")
+}
 
 const emitHtml = (data: ReportData): string => {
   const json = JSON.stringify(data)
@@ -901,6 +1007,10 @@ const emitHtml = (data: ReportData): string => {
     .events table { border-collapse: collapse; font-size: 12px; }
     .events td, .events th { padding: 2px 8px; border-bottom: 1px solid #eee; text-align: left; }
     .events td.ix { font-family: monospace; color: #666; text-align: right; }
+    .platform { border-left: 4px solid #d97706; background: #fff7ed; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #7c2d12; }
+    .platform h2 { font-size: 14px; margin: 0 0 6px; color: #7c2d12; }
+    .platform table { border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+    .platform td, .platform th { padding: 2px 8px; border-bottom: 1px solid #fcd5b5; text-align: left; }
     .chart { background: #fff; border: 1px solid #ddd; padding: 8px 12px; margin-bottom: 16px; }
     .chart h2 { font-size: 14px; margin: 0 0 6px; color: #333; }
     .chart .uplot { width: 100%; }
@@ -917,6 +1027,7 @@ const emitHtml = (data: ReportData): string => {
     <button id="zoom-soak" type="button">Zoom to soak</button>
     <span class="hint">drag = zoom · shift+drag = pan · wheel = zoom · double-click = reset</span>
   </div>
+  ${renderPlatformBanner(data.platform)}
   <div class="events">
     <h2 style="font-size:14px;margin:0 0 6px;">Chaos events</h2>
     <table>
@@ -1266,28 +1377,42 @@ const emitHtml = (data: ReportData): string => {
 /* CLI                                                                   */
 /* -------------------------------------------------------------------- */
 
-const main = async (): Promise<void> => {
-  const artifactDir = process.argv[2]
-  if (artifactDir === undefined) {
-    console.error("usage: render-report.ts <run-dir>")
-    process.exit(2)
-  }
+export const runRender = async (artifactDir: string): Promise<string> => {
   const data = await buildReportData(artifactDir)
   const html = emitHtml(data)
   const outHtml = path.join(artifactDir, "timeline.html")
   await fsp.writeFile(outHtml, html, "utf8")
-  // Copy uPlot assets next to the HTML so the report stays
-  // self-contained.
   for (const asset of ["uPlot.iife.min.js", "uPlot.min.css"]) {
     await fsp.copyFile(
       path.join(ASSET_DIR, asset),
       path.join(artifactDir, asset),
     )
   }
-  console.log(outHtml)
+  return outHtml
 }
 
-main().catch((e) => {
-  console.error(e)
-  process.exit(1)
-})
+// CLI entry — only fires when this file is invoked directly, so
+// importing the module (e.g. from run-endurance.ts) doesn't execute
+// main(). The `tsx`/Node ESM convention compares import.meta.url to
+// argv[1] resolved as a file URL.
+const isDirectInvocation = (() => {
+  const argv1 = process.argv[1]
+  if (argv1 === undefined) return false
+  const argvUrl = new URL("file://" + path.resolve(argv1)).href
+  return import.meta.url === argvUrl
+})()
+
+if (isDirectInvocation) {
+  const artifactDir = process.argv[2]
+  if (artifactDir === undefined) {
+    console.error("usage: render-report.ts <run-dir>")
+    process.exit(2)
+  }
+  runRender(artifactDir).then(
+    (out) => console.log(out),
+    (e) => {
+      console.error(e)
+      process.exit(1)
+    },
+  )
+}

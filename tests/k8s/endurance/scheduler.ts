@@ -61,18 +61,20 @@ const DEFAULT_WEIGHTS: Record<ChaosEventType, number> = {
   "node-shutdown-edge": 10,
   // Network-chaos catalog. Weights set after per-event validation —
   // see docs/plan/2026-05-15-validate-new-chaos-events-sliced.md.
-  // Two events remain at 0 pending investigation:
-  //   - `proxy-full-isolate`: VIP fail-over doesn't trigger
+  //   - `proxy-full-isolate` still at 0: VIP fail-over doesn't trigger
   //     (keepalived `nopreempt`); total outage for cut duration.
-  //   - `non-emergency-burst`: emergency-priority shield leaks ~10%
-  //     on baseline; analyzer can't read the burst Job's traces.
+  //   - `non-emergency-burst` at 5: overload-protection rework
+  //     (2026-05-16) demonstrated 0% cross-stream collateral at the
+  //     default 200 CAPS burst; analyzer's NO-DATA on the burst stream
+  //     itself is cosmetic — wire-level proxy counters confirm
+  //     ~99% rejection. See docs/adr/0006-overload-five-gate-and-aimd.md.
   "worker-cut-from-proxy-hard": 5,
   "worker-cut-from-peers-hard": 3,
   "worker-cut-from-limiter-redis-hard": 5,
   "worker-isolate-all-hard": 2,
   "worker-cut-from-proxy-loss30": 3,
   "proxy-full-isolate": 0,
-  "non-emergency-burst": 0,
+  "non-emergency-burst": 5,
 }
 
 /**

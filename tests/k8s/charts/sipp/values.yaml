@@ -2,6 +2,16 @@ sipp:
   image: sipp:dev
   imagePullPolicy: IfNotPresent
 
+# Parallel "abuse" UAS pool. Receives ONLY abuse-prefixed B-leg traffic
+# (call-control mock routes by Call-ID prefix `abuse-`). Disabled by
+# default — endurance runs with --abuse-caps=0 don't allocate it.
+abuseUas:
+  enabled: false
+  replicas: 1
+  # Resolved by call-control as the abuse-traffic B-leg target.
+  host: sipp-abuse-uas
+  port: 5060
+
 # Mock call-control backend that always routes to sipp-uas:5060.
 # Reuses the sipjsserver:dev image (Node 22) and runs an inline JS
 # mounted from a ConfigMap.
@@ -14,6 +24,14 @@ callControl:
   target:
     host: sipp-uas
     port: 5060
+  # Where the worker should route calls whose Call-ID prefix matches
+  # `abuseCidPrefix`. Used by the endurance abuse-stream — keeps
+  # protocol-abusive traffic structurally separated from the standard
+  # sipp-uas so real-call KPIs aren't contaminated.
+  abuseTarget:
+    host: sipp-abuse-uas
+    port: 5060
+  abuseCidPrefix: "abuse-"
 
 # Pin SIPp UAS and mock call-control to the load tier so they don't
 # share nodes with the proxy/worker pods.

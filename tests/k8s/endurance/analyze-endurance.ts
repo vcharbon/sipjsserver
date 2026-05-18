@@ -192,6 +192,7 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
     ESTABLISHING_DURING_CHAOS: { ok: 0, failed: 0 },
     POST_RECOVERY: { ok: 0, failed: 0 },
     LIMITER_PROBE: { ok: 0, failed: 0 },
+    ABUSE_STREAM: { ok: 0, failed: 0 },
     PRE_WARMUP: { ok: 0, failed: 0 },
     POST_DRAIN: { ok: 0, failed: 0 },
   }
@@ -201,7 +202,13 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
     else slot.failed += 1
   }
 
-  const limiterStability = analyzeLimiterStability(limiter, meta?.args.limiterCap ?? 10)
+  const limiterCap = meta?.args.limiterCap ?? 10
+  const limiterStability = analyzeLimiterStability(limiter, limiterCap)
+  const limiterConvergence = analyzeLimiterConvergence(
+    limiter,
+    impactWindows,
+    limiterCap,
+  )
 
   const isIncomplete =
     meta === undefined ||
@@ -209,14 +216,25 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
     meta.phase.tDrainEnd === ""
 
   const steadyFail = counters.STEADY.failed > 0
-  const limiterLeak = limiterStability.exceededCap
+  // Limiter verdict gate: ADR-0004's eventual-cap-honoring contract.
+  // The limiter probe scenario uses 10-s hold calls, so phantoms drain
+  // through the keepalive-driven cleanup path (typical ~10 min), not
+  // the worst-case window-rotation path (~15 min). The verdict fails
+  // only when the Redis-counted inflight failed to drop back to ≤ cap
+  // within 10 min of a chaos `tRecovered`. A transient overshoot
+  // inside that window is by-design behaviour, not a regression.
+  const limiterConvergenceBreach = limiterConvergence.breached
   // ExpectedImpact may downgrade the run to WARN (warn-severity
   // breaches or stubbed events) or up to FAIL (fail-severity breaches
   // on top of any STEADY/limiter regression).
   let verdictOutcome: "PASS" | "WARN" | "FAIL" | "INCOMPLETE"
   if (isIncomplete) {
     verdictOutcome = "INCOMPLETE"
-  } else if (steadyFail || limiterLeak || impactAggregate.outcome === "FAIL") {
+  } else if (
+    steadyFail ||
+    limiterConvergenceBreach ||
+    impactAggregate.outcome === "FAIL"
+  ) {
     verdictOutcome = "FAIL"
   } else if (impactAggregate.outcome === "WARN") {
     verdictOutcome = "WARN"
@@ -229,6 +247,7 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
     runId: meta?.runId ?? path.basename(artifactDir),
     counters,
     limiterProbe: limiterStability,
+    limiterConvergence,
     chaos: {
       scheduled: meta?.chaosEventsScheduled ?? chaos.length,
       executed: meta?.chaosEventsExecuted ?? impactWindows.length,
@@ -254,7 +273,8 @@ export const runAnalyze = async (artifactDir: string): Promise<void> => {
 
   console.log(
     `analyze: ${verdictOutcome} | STEADY ok=${counters.STEADY.ok} fail=${counters.STEADY.failed}` +
-      ` | limiter cap=${limiterStability.cap} max=${limiterStability.maxInflight} exceeded=${limiterStability.exceededCap}` +
+      ` | limiter cap=${limiterStability.cap} max=${limiterStability.maxInflight} (diag exceeded=${limiterStability.exceededCap})` +
+      ` | converge ${limiterConvergence.breached ? "BREACHED" : "ok"} ${limiterConvergence.breaches.length}/${limiterConvergence.evaluated} at +${limiterConvergence.deadlineSec}s` +
       ` | events executed=${verdict.chaos.executed} skipped=${verdict.chaos.skipped}` +
       ` | impact ${impactAggregate.outcome} pass=${impactAggregate.counts.pass} warn=${impactAggregate.counts.warn} fail=${impactAggregate.counts.fail} stub-events=${impactAggregate.counts.eventsWithoutSpec}`,
   )
@@ -269,6 +289,14 @@ interface LimiterStability {
   readonly stabilizedAtCap: boolean
 }
 
+// DIAGNOSTIC, NOT a verdict input. The cap-honoring contract (ADR-0004)
+// is on `concurrentCalls(endurance-limiter)`, not on this Redis-counted
+// view. `exceededCap=true` is expected during the reconcile window
+// after chaos (typical ~10 min via keepalive, worst-case ~15 min via
+// window rotation); the ExpectedImpact rules evaluate the
+// sipp-observable target separately. See CONTEXT.md§Cap-honoring target.
+// The verdict gate is `analyzeLimiterConvergence` below — this struct
+// is reported alongside it but does not feed the FAIL decision.
 const analyzeLimiterStability = (
   rows: ReadonlyArray<LimiterRow>,
   cap: number,
@@ -303,6 +331,98 @@ const analyzeLimiterStability = (
   }
 }
 
+// Per-event reconcile deadline applied to the Redis-counted inflight
+// view. The limiter probe scenario uses 10-s hold calls, so phantom
+// INCRs from dead workers are reclaimed through the keepalive-driven
+// path (typical ~2×KEEPALIVE ≈ 10 min from ADR-0004), not the
+// worst-case window-rotation path (~15 min). 10 min is the right
+// budget for this specific probe; runs using longer-hold scenarios
+// would need the 15-min worst-case bound instead.
+const LIMITER_CONVERGENCE_DEADLINE_SEC = 10 * 60
+
+interface LimiterConvergenceBreach {
+  readonly chaosType: string
+  readonly chaosTarget: string
+  readonly tRecovered: string
+  readonly deadline: string
+  readonly inflightAtDeadline: number
+}
+
+interface LimiterConvergence {
+  readonly cap: number
+  readonly deadlineSec: number
+  readonly evaluated: number
+  readonly skippedNoNextWindow: number
+  readonly breached: boolean
+  readonly breaches: ReadonlyArray<LimiterConvergenceBreach>
+}
+
+// VERDICT GATE for the limiter. For each executed chaos event, the
+// Redis-counted inflight must drop back to ≤ cap by `tRecovered +
+// LIMITER_CONVERGENCE_DEADLINE_SEC`, or — if the next chaos event
+// fires before the deadline — by the earliest sample taken after
+// `tRecovered` that lies inside the inter-chaos window. Events whose
+// inter-chaos gap is too short to evaluate are reported as skipped
+// and do not affect the verdict.
+const analyzeLimiterConvergence = (
+  rows: ReadonlyArray<LimiterRow>,
+  impactWindows: ReadonlyArray<ChaosImpactWindow>,
+  cap: number,
+): LimiterConvergence => {
+  const breaches: Array<LimiterConvergenceBreach> = []
+  let evaluated = 0
+  let skipped = 0
+  const sorted = [...rows].sort(
+    (a, b) => new Date(a.tScrape).getTime() - new Date(b.tScrape).getTime(),
+  )
+  for (let i = 0; i < impactWindows.length; i++) {
+    const w = impactWindows[i]
+    if (w === undefined) continue
+    const recoveredMs = w.tRecovered.getTime()
+    const nextFireMs =
+      impactWindows[i + 1]?.tFire.getTime() ?? Number.POSITIVE_INFINITY
+    const deadlineMs = Math.min(
+      recoveredMs + LIMITER_CONVERGENCE_DEADLINE_SEC * 1000,
+      nextFireMs,
+    )
+    if (deadlineMs <= recoveredMs) {
+      skipped += 1
+      continue
+    }
+    // Closest sample at or before deadline (the value the system
+    // stabilised at by the deadline).
+    let snapshot: LimiterRow | undefined
+    for (const r of sorted) {
+      const t = new Date(r.tScrape).getTime()
+      if (t <= recoveredMs) continue
+      if (t > deadlineMs) break
+      snapshot = r
+    }
+    if (snapshot === undefined) {
+      skipped += 1
+      continue
+    }
+    evaluated += 1
+    if (snapshot.inflight > cap) {
+      breaches.push({
+        chaosType: w.type,
+        chaosTarget: w.target,
+        tRecovered: w.tRecovered.toISOString(),
+        deadline: new Date(deadlineMs).toISOString(),
+        inflightAtDeadline: snapshot.inflight,
+      })
+    }
+  }
+  return {
+    cap,
+    deadlineSec: LIMITER_CONVERGENCE_DEADLINE_SEC,
+    evaluated,
+    skippedNoNextWindow: skipped,
+    breached: breaches.length > 0,
+    breaches,
+  }
+}
+
 const writeReport = async (
   artifactDir: string,
   verdict: ReturnType<typeof JSON.parse>,
@@ -329,13 +449,34 @@ const writeReport = async (
   }
   lines.push("")
 
-  lines.push(`## Limiter probe\n`)
+  lines.push(`## Limiter probe (diagnostic — see ADR-0004)\n`)
   lines.push(`- cap=${verdict.limiterProbe.cap}`)
   lines.push(`- maxInflight=${verdict.limiterProbe.maxInflight}`)
   lines.push(`- mean=${verdict.limiterProbe.mean.toFixed(2)}`)
   lines.push(`- samples=${verdict.limiterProbe.samples}`)
   lines.push(`- exceededCap=${verdict.limiterProbe.exceededCap}`)
   lines.push(`- stabilizedAtCap=${verdict.limiterProbe.stabilizedAtCap}\n`)
+
+  if (verdict.limiterConvergence !== undefined) {
+    const lc = verdict.limiterConvergence
+    lines.push(`## Limiter convergence (verdict gate)\n`)
+    lines.push(`- cap=${lc.cap}`)
+    lines.push(`- reconcile deadline=${lc.deadlineSec}s after each tRecovered`)
+    lines.push(`- evaluated=${lc.evaluated}`)
+    lines.push(`- skipped (inter-chaos gap too short)=${lc.skippedNoNextWindow}`)
+    lines.push(`- breached=${lc.breached}\n`)
+    if (lc.breaches.length > 0) {
+      lines.push(`### Convergence breaches\n`)
+      lines.push(`| chaos type | target | tRecovered | deadline | inflight |`)
+      lines.push(`| --- | --- | --- | --- | --: |`)
+      for (const b of lc.breaches) {
+        lines.push(
+          `| ${b.chaosType} | ${b.chaosTarget} | ${b.tRecovered} | ${b.deadline} | ${b.inflightAtDeadline} |`,
+        )
+      }
+      lines.push("")
+    }
+  }
 
   lines.push(`## Chaos events\n`)
   lines.push(`- scheduled=${verdict.chaos.scheduled}`)

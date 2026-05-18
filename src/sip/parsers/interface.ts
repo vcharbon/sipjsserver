@@ -18,4 +18,23 @@ export interface SipParserImpl {
   readonly parse: SipParseFn
 }
 
+/**
+ * Length caps the parser enforces to keep adversarial inputs bounded.
+ * Lengths are measured against decoded (unfolded, trimmed) values.
+ *
+ * - `maxHeaderLength`: max bytes of a single header, counted as
+ *   `name + ": " + value` after unfolding. Bounds memory cost per header.
+ * - `maxUriLength`: max bytes of the Request-URI in the start line.
+ */
+export interface SipParserLimits {
+  readonly maxHeaderLength: number
+  readonly maxUriLength: number
+}
+
+/** Defaults applied when no overrides are provided. */
+export const DEFAULT_SIP_PARSER_LIMITS: SipParserLimits = {
+  maxHeaderLength: 2048,
+  maxUriLength: 2048,
+}
+
 export { SipParseError } from "./errors.js"
