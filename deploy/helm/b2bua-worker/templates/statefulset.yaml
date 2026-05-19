@@ -180,6 +180,17 @@ spec:
           volumeMounts:
             - name: redis-data
               mountPath: /data
+          # Stay alive through the worker's two-tier drain (ADR-0008).
+          # K8s sends SIGTERM to all containers in the pod at the same
+          # moment; without this sleep, Redis would exit in ~60ms and
+          # the worker's drain orchestrator (DRAIN_TIER1_MS=3s +
+          # DRAIN_TIER2_MS=5s) would lose its local pri:/bak: partition
+          # mid-flight, causing 481-on-BYE for in-dialog traffic the
+          # draining worker is still authoritatively serving.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep {{ .Values.redis.preStopSleepSec | default 10 }}"]
           readinessProbe:
             tcpSocket:
               port: redis

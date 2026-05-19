@@ -1152,7 +1152,8 @@ const emitHtml = (data: ReportData): string => {
     const CHAOS_COLORS = {
       'proxy-pod-graceful':  'rgba(60, 130, 255, 0.30)',
       'proxy-pod-kill9':     'rgba(60, 130, 255, 0.45)',
-      'worker-pod-graceful': 'rgba(255, 160, 60, 0.30)',
+      'worker-pod-graceful': 'rgba(80, 200, 120, 0.40)',
+      'worker-pod-api-delete-force': 'rgba(255, 160, 60, 0.35)',
       'worker-pod-kill9':    'rgba(255, 90, 60, 0.45)',
       'node-shutdown-app':   'rgba(180, 60, 220, 0.40)',
       'node-shutdown-edge':  'rgba(220, 30, 30, 0.50)',

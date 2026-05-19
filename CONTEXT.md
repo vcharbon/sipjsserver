@@ -197,6 +197,22 @@ The act of rewriting the safety timer's `fireAt` on every `CallState.update` whi
 **Orphan sweep**:
 The 60s-tick daemon in `CallState` that purges calls the rule-engine cleanup path missed. Post-Stage-4 of [the limiter cascade plan](docs/plan/to-review-and-properly-swift-moler.md), it respects the terminating-timeout `fireAt` — a `terminating` call is only swept when `now >= fireAt`. `terminated` corner cases are still swept immediately.
 
+### Drain
+
+**Two-tier drain**:
+The worker-side SIGTERM-driven sequence walking `serving → draining-new → draining-quiet → exit`. Designed to give the proxy two distinct synchronization points (one for new-INVITE exclusion, one for in-dialog cutover) before the worker exits, so that the LB has fully moved on by the time the process terminates. See [ADR-0008](docs/adr/0008-two-tier-graceful-drain.md).
+
+**draining-new**:
+First phase of the two-tier drain. OPTIONS replies remain `200 OK` but carry `X-Overload: elu=1.0; reason=draining; ...`, which puts the worker in the proxy's `above_critical` ELU band and excludes it from `selectForNewDialog`. In-dialog routing is **unchanged** so the worker keeps serving live calls and keeps replog flowing to the peer's `bak:` partition.
+_Avoid_: "soft drain", "tier-1 drain" (use the explicit name).
+
+**draining-quiet**:
+Second phase. The worker stops replying to OPTIONS entirely. The proxy's `HealthProbe` flips the worker to `dead` after `unhealthyAfterMisses` consecutive timeouts; in-dialog requests then fall back via `selectForNewDialog` to the peer worker, which serves them from its `bak:` partition.
+_Avoid_: "hard drain", "tier-2 drain".
+
+**Drain budget**:
+The cluster-shared SLO that bounds the sipp-observable failure impact of one graceful drain event: `final_fail_count ≤ (1.5 / num_workers) × system_cps`. Encoded as the `worker-pod-graceful` rule set in [tests/k8s/endurance/expectedImpact.ts](tests/k8s/endurance/expectedImpact.ts). The residual is funded by transaction-layer state not being replicated (UAC retransmission absorbs ~1 s of latency between primary and backup).
+
 ## Flagged ambiguities
 
 - **"mirror"** was overloaded: it was used both as a description of the act of dual-writing across two sidecars AND as the name for the `entryGen=0` sentinel bucket. Resolved: keep "mirror" for the wire-level `entryGen=0` sentinel only; use "replication channel" / "dual-write" for the higher-level concept.
@@ -204,3 +220,4 @@ The 60s-tick daemon in `CallState` that purges calls the rule-engine cleanup pat
 - **"pull stream" / "delta stream"** were both used for `/replog`. Resolved: **replog stream**.
 - **"cold pull" / "snapshot" / "restart stream"** were all used for `/bootstrap`. Resolved: **bootstrap stream**.
 - **"gen" vs "epoch"** — same concept, two names. Resolved: keep both; `gen` is the wire field name, "epoch" is the prose name (and the type name `EpochCounter`).
+- **chaos event `worker-pod-graceful`** — historically implemented as `kubectl delete pod --grace-period=0 --force`, which is the *opposite* of a graceful shutdown (force-delete skips the kubelet's grace protocol entirely). Resolved (2026-05-18): renamed the legacy event to `worker-pod-api-delete-force`; the new `worker-pod-graceful` invokes `kubectl delete pod --grace-period=20` so SIGTERM actually drives the two-tier drain protocol.

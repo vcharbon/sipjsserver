@@ -1,55 +1,78 @@
 /**
- * DrainingState — D5 (Draining model) of the SIP Front Proxy plan, worker side.
+ * DrainingState — two-tier graceful drain protocol (ADR-0008).
  *
- * Single source of truth for whether this B2BUA worker is currently
- * `serving` (default) or `draining`. The OPTIONS handler reads this flag
- * to decide between `200 OK` (serving) and `503 Service Unavailable` +
- * `Retry-After: 0` (draining), per RFC 3261 §11 / §21.5.4 / §20.33.
+ * The worker walks `serving → draining-new → draining-quiet → exit` after
+ * SIGTERM. Each transition has a distinct effect on how the proxy treats
+ * the worker:
  *
- * Why a tiny dedicated service rather than a flag on AppConfig: the flag
- * is *mutable* at runtime (SIGTERM flips it), so it must live behind a
- * `Ref` and be readable from the request-processing path without
- * crossing a Layer boundary on every read.
+ *   - `serving`: OPTIONS → 200 OK with normal `X-Overload`. Normal routing.
+ *   - `draining-new`: OPTIONS → 200 OK but with `X-Overload: elu=1.0;
+ *     reason=draining; ...`. The proxy's `WorkerLoadObserver` puts the
+ *     worker in the `above_critical` ELU band, which excludes it from
+ *     `selectForNewDialog`. In-dialog routing is unchanged so live calls
+ *     keep flowing through this worker for the `drainGraceMs=5s` window
+ *     while replication keeps the peer's `bak:` partition current.
+ *   - `draining-quiet`: OPTIONS get no reply at all. The proxy's
+ *     `HealthProbe` flips the worker to `dead` after `unhealthyAfterMisses`
+ *     consecutive timeouts; in-dialog falls back via `selectForNewDialog`
+ *     to the peer worker (which serves the calls out of `bak:`).
  *
- * Lifecycle:
- *   - `Default` Layer: initial state `'serving'`, installs a SIGTERM
- *     handler that flips the flag to `'draining'`. The handler is
- *     installed via `Layer.effectDiscard` so the listener tracks the
- *     Layer's scope and is removed when the process tears down (e.g. an
- *     in-process test reload).
- *   - `Test` Layer (`DrainingState.test`): same shape, no SIGTERM hook —
- *     tests drive `markDraining` / `markServing` explicitly.
+ * Production layer installs a SIGTERM handler that forks an orchestrator
+ * fiber walking `draining-new → sleep(DRAIN_TIER1_MS) → draining-quiet →
+ * sleep(DRAIN_TIER2_MS) → process.exit(0)`. The orchestrator is detached
+ * (`Effect.forkDetach`) so it survives Layer teardown — the whole point
+ * is that it outlives the application and ends the process itself.
  *
- * The proxy-side counterpart (`HealthProbe`) lives in
- * `src/sip-front-proxy/health/HealthProbe.ts`. The two NEVER cross-import:
- * the proxy observes the worker's mode by reading the OPTIONS keepalive
- * response (200 vs 503) over UDP — no in-process wire.
+ * Test layer exposes the same surface with NO SIGTERM hook and NO
+ * orchestrator; tests drive `markDrainingNew` / `markDrainingQuiet` /
+ * `markServing` directly.
+ *
+ * The proxy-side counterpart (`HealthProbe` + `WorkerLoadObserver`) lives
+ * in `src/sip-front-proxy/`. The two NEVER cross-import: the proxy reads
+ * the worker's state out of OPTIONS replies over UDP. See ADR-0008 for
+ * the full protocol + invariants.
  */
 
-import { Effect, Layer, MutableRef, ServiceMap } from "effect"
+import { Deferred, Effect, Layer, MutableRef, ServiceMap } from "effect"
+
+// ---------------------------------------------------------------------------
+// Timing constants (ADR-0008 invariants)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tier 1 duration: how long the worker stays in `draining-new` before
+ * silencing OPTIONS. Sized to 3 × proxy OPTIONS interval (1 s) so the
+ * proxy is guaranteed to observe the new band at least once before the
+ * worker disappears from the LB-visible candidate set. Lower this only if
+ * `optionsIntervalMs` is also lowered.
+ */
+export const DRAIN_TIER1_MS = 3_000
+
+/**
+ * Tier 2 duration: how long the worker stays in `draining-quiet` before
+ * exiting. Sized to cover the proxy's `unhealthyAfterMisses ×
+ * optionsIntervalMs` detection window plus a ~1-2 s replication-settle
+ * margin. Lowering it risks in-dialog requests arriving at an
+ * already-exited worker after the proxy's last LB tick.
+ */
+export const DRAIN_TIER2_MS = 5_000
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-/**
- * Worker serving mode. `'serving'` = healthy, accepting new calls;
- * `'draining'` = SIGTERM received, finishing in-flight calls but
- * refusing new ones. The mode is one-way in production (a draining
- * worker exits, it does not return to serving), but the test API
- * exposes `markServing` so unit tests can flip back and forth.
- */
-export type DrainingMode = "serving" | "draining"
+export type DrainingMode = "serving" | "draining-new" | "draining-quiet"
 
 export interface DrainingStateApi {
-  /** Read the current mode. Strictly non-suspending: a single `Ref.get`. */
+  /** Read the current mode. Strictly non-suspending: a single `MutableRef.get`. */
   readonly mode: Effect.Effect<DrainingMode>
-  /** Flip the mode to `'draining'`. Idempotent. */
-  readonly markDraining: Effect.Effect<void>
+  /** Flip the mode to `'draining-new'` (tier 1). Idempotent. */
+  readonly markDrainingNew: Effect.Effect<void>
+  /** Flip the mode to `'draining-quiet'` (tier 2). Idempotent. */
+  readonly markDrainingQuiet: Effect.Effect<void>
   /**
-   * Flip the mode to `'serving'`. Idempotent. Production code should
-   * never call this — exposed so tests can drive the OPTIONS handler
-   * through both branches without a fresh layer build.
+   * Flip the mode to `'serving'`. Idempotent. Production never calls this —
+   * exposed so unit tests can flip back without rebuilding the layer.
    */
   readonly markServing: Effect.Effect<void>
 }
@@ -58,43 +81,62 @@ export class DrainingState extends ServiceMap.Service<DrainingState, DrainingSta
   "@sipjsserver/b2bua/DrainingState"
 ) {
   /**
-   * Production layer: installs a `SIGTERM` listener that flips the mode to
-   * `draining`. The listener is removed on Layer teardown so repeat builds
-   * (tests, hot-reload) don't leak handlers.
-   *
-   * The actual `process.exit` is **not** scheduled here — that's the bin
-   * entry's responsibility (it sleeps `terminationGracePeriodSeconds` and
-   * then exits). DrainingState only exposes the flag.
+   * Production layer. Installs a SIGTERM handler that releases a Deferred;
+   * a detached orchestrator fiber awaits the Deferred, walks the modes,
+   * and calls `process.exit(0)` when done. The fiber is detached so it
+   * outlives Layer teardown — the orchestrator is what *ends* the process.
    */
   static readonly Default: Layer.Layer<DrainingState> = Layer.effect(
     DrainingState,
-    Effect.sync(() => {
-      // Plain `MutableRef` (not `Ref`) so the OS-signal callback can
-      // flip the mode without fabricating an Effect runtime. The
-      // surface API still exposes `Effect`-returning getters/setters
-      // so callers don't need to know the storage shape.
+    Effect.gen(function* () {
       const ref = MutableRef.make<DrainingMode>("serving")
-      const api: DrainingStateApi = {
+      const trigger = yield* Deferred.make<void>()
+      const parentServices = yield* Effect.services<never>()
+
+      yield* Effect.forkDetach(
+        Effect.gen(function* () {
+          yield* Deferred.await(trigger)
+          MutableRef.set(ref, "draining-new")
+          yield* Effect.logInfo(
+            `drain: tier 1 (draining-new) — proxy excludes from new-INVITE selection; ` +
+              `holding ${DRAIN_TIER1_MS}ms for OPTIONS round-trip`
+          )
+          yield* Effect.sleep(`${DRAIN_TIER1_MS} millis`)
+          MutableRef.set(ref, "draining-quiet")
+          yield* Effect.logInfo(
+            `drain: tier 2 (draining-quiet) — OPTIONS silenced; holding ${DRAIN_TIER2_MS}ms ` +
+              `for HealthProbe unhealthy detection + replication settle`
+          )
+          yield* Effect.sleep(`${DRAIN_TIER2_MS} millis`)
+          yield* Effect.logInfo(`drain: exit`)
+          return yield* Effect.sync(() => process.exit(0) as never)
+        })
+      )
+
+      const onSigterm = (): void => {
+        Effect.runForkWith(parentServices)(Deferred.succeed(trigger, undefined))
+      }
+      process.on("SIGTERM", onSigterm)
+
+      return {
         mode: Effect.sync(() => MutableRef.get(ref)),
-        markDraining: Effect.sync(() => {
-          MutableRef.set(ref, "draining")
+        markDrainingNew: Effect.sync(() => {
+          MutableRef.set(ref, "draining-new")
+        }),
+        markDrainingQuiet: Effect.sync(() => {
+          MutableRef.set(ref, "draining-quiet")
         }),
         markServing: Effect.sync(() => {
           MutableRef.set(ref, "serving")
         }),
-      }
-      const onSigterm = (): void => {
-        MutableRef.set(ref, "draining")
-      }
-      process.on("SIGTERM", onSigterm)
-      return api
+      } satisfies DrainingStateApi
     })
   )
 
   /**
-   * Test layer: same surface, **no** SIGTERM hook. Use this in `it.effect`
-   * tests so flipping `markDraining` / `markServing` from the test body is
-   * the only way the mode changes.
+   * Test layer: same surface, NO SIGTERM hook, NO orchestrator. Tests
+   * walk the modes explicitly via `markDrainingNew` / `markDrainingQuiet` /
+   * `markServing`.
    */
   static readonly test: Layer.Layer<DrainingState> = Layer.effect(
     DrainingState,
@@ -102,13 +144,16 @@ export class DrainingState extends ServiceMap.Service<DrainingState, DrainingSta
       const ref = MutableRef.make<DrainingMode>("serving")
       return {
         mode: Effect.sync(() => MutableRef.get(ref)),
-        markDraining: Effect.sync(() => {
-          MutableRef.set(ref, "draining")
+        markDrainingNew: Effect.sync(() => {
+          MutableRef.set(ref, "draining-new")
+        }),
+        markDrainingQuiet: Effect.sync(() => {
+          MutableRef.set(ref, "draining-quiet")
         }),
         markServing: Effect.sync(() => {
           MutableRef.set(ref, "serving")
         }),
-      }
+      } satisfies DrainingStateApi
     })
   )
 }

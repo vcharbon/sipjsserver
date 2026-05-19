@@ -63,6 +63,7 @@ export const dispatchChaos = (
     case "proxy-cutoff-vrrp":
       return proxyCutoffEvent({ namespace, kind: "vrrp" }, rand)
     case "worker-pod-graceful":
+    case "worker-pod-api-delete-force":
     case "worker-pod-kill9":
     case "proxy-pod-graceful":
     case "proxy-pod-kill9":

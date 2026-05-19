@@ -50,7 +50,8 @@ export interface SchedulerOpts {
 }
 
 const DEFAULT_WEIGHTS: Record<ChaosEventType, number> = {
-  "worker-pod-graceful": 5,
+  "worker-pod-graceful": 3,
+  "worker-pod-api-delete-force": 2,
   "worker-pod-kill9": 13,
   "proxy-pod-graceful": 3,
   "proxy-pod-kill9": 3,

@@ -117,16 +117,31 @@ two-leg topology.
 
 ## Drain semantics (D5)
 
-- The worker's `DrainingState.Default` SIGTERM handler flips the
-  OPTIONS reply to `503 Service Unavailable` + `Retry-After: 0`
-  immediately on receipt of SIGTERM (RFC 3261 §11 / §21.5.4).
+- The worker's `DrainingState.Default` SIGTERM handler kicks off the
+  two-tier drain protocol (ADR-0008):
+  1. **draining-new** (3 s): OPTIONS reply stays `200 OK` but the
+     `X-Overload` payload is forced to `elu=1.000; reason=draining`.
+     The proxy's `WorkerLoadObserver` puts the worker in the
+     `above_critical` ELU band → excluded from `selectForNewDialog`.
+     In-dialog routing unchanged so replication keeps the peer's
+     `bak:` partition current.
+  2. **draining-quiet** (5 s): OPTIONS go unanswered. The proxy's
+     `HealthProbe` flips the worker to `dead` after
+     `unhealthyAfterMisses` consecutive timeouts; in-dialog falls
+     back via `selectForNewDialog` to the peer (which serves the
+     calls out of `bak:`).
+  3. **exit**: `process.exit(0)` from the drain-orchestrator fiber.
 - The proxy's K8s watch additionally treats
   `pod.metadata.deletionTimestamp != null` as `draining` (the
   deletion-timestamp accelerant), so detection is bounded above by
   the K8s watch latency rather than the OPTIONS interval.
-- `terminationGracePeriodSeconds: 200` (default) covers RFC 3261
-  Timer C (180s) plus 20s safety so in-flight INVITEs / CANCELs reach
-  the original worker for the entire window.
+- `terminationGracePeriodSeconds: 20` covers the two-tier drain
+  budget (8 s) plus ~12 s safety + kubelet bookkeeping. Timer C
+  (180 s) is no longer the binding constraint — all call state is
+  replicated to the peer's `bak:` partition, and in-flight
+  transactions span the gap via SIP retransmission. Lowering this
+  further requires lowering `DRAIN_TIER1_MS` / `DRAIN_TIER2_MS`
+  too.
 
 ## Probes
 

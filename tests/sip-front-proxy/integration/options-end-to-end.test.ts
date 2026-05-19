@@ -9,14 +9,16 @@
  * (proxy probe with hand-crafted worker replies). Here both halves are
  * the production code — only the network fabric is virtualised.
  *
- * Sequence:
+ * Sequence (two-tier drain protocol — ADR-0008):
  *   1. Start the B2BUA router. Probe runs at INTERVAL_MS = 1s, three
  *      threshold misses to call `dead`. Worker default state = serving.
  *   2. Probe ticks → B2BUA short-circuit replies 200 → registry stays alive.
- *   3. Flip B2BUA `DrainingState.markDraining`.
- *   4. Next probe tick → 503 + Retry-After: 0 → registry → draining.
- *   5. Interrupt the B2BUA router fiber so OPTIONS go unanswered.
- *      `THRESHOLD` consecutive misses → registry → dead.
+ *   3. Flip B2BUA `DrainingState.markDrainingNew` (tier 1).
+ *   4. Next probe tick → 200 OK with `X-Overload: elu=1.000; reason=draining`.
+ *      Registry health stays `alive` (only band changes); proxy LB
+ *      excludes via `above_critical` band, not via registry demotion.
+ *   5. Flip B2BUA `DrainingState.markDrainingQuiet` (tier 2). Probe ticks
+ *      → no reply → THRESHOLD consecutive misses → registry → dead.
  *
  * Why this matters: it's the only test in the suite that proves the
  * OPTIONS request the probe constructs is parseable by the real
@@ -125,9 +127,9 @@ const oneTick = Effect.gen(function* () {
   }
 })
 
-describe("integration: HealthProbe ↔ real B2BUA OPTIONS handler", () => {
+describe("integration: HealthProbe ↔ real B2BUA OPTIONS handler (two-tier drain)", () => {
   it.effect(
-    "alive (200) → draining (503) → dead (silence past threshold)",
+    "alive (200) → draining-new keeps alive (200 + elu=1.0) → draining-quiet → dead",
     () =>
       Effect.gen(function* () {
         const router = yield* SipRouter
@@ -135,40 +137,30 @@ describe("integration: HealthProbe ↔ real B2BUA OPTIONS handler", () => {
         const probe = yield* HealthProbe
         const registry = yield* WorkerRegistry
         const control = yield* WorkerRegistryControl
-        void control // hold ref so the layer can't drop it
+        void control
 
-        // Bring up the B2BUA event loop.
         const routerFiber = yield* Effect.forkChild(router.start(handlers))
-        // Enable the probe loop.
         yield* probe.start
 
-        // ── 1. Two ticks with B2BUA in 'serving' → registry stays alive ──
+        // ── 1. Serving → alive ─────────────────────────────────────
         yield* oneTick
         yield* oneTick
-        const aliveAfter = yield* health(registry)
-        expect(aliveAfter).toBe("alive")
+        expect(yield* health(registry)).toBe("alive")
 
-        // ── 2. Flip B2BUA to draining → next tick reports 503 → registry draining ──
-        yield* draining.markDraining
+        // ── 2. draining-new → still alive (200 OK with elu=1.0+reason=draining) ──
+        yield* draining.markDrainingNew
         yield* oneTick
-        const drainingAfter = yield* health(registry)
-        expect(drainingAfter).toBe("draining")
+        // Health stays alive — exclusion is via load-observer band, not via probe.
+        expect(yield* health(registry)).toBe("alive")
 
-        // ── 3. Kill the B2BUA → OPTIONS go unanswered → THRESHOLD misses → dead ──
-        // Reset health to `alive` so the timeout path is what flips it,
-        // not the 503 sticking around.
-        yield* control.setHealth(W, "alive")
-        yield* Fiber.interrupt(routerFiber)
-
-        // After router interruption, the B2BUA's bound endpoint queue still
-        // exists (the layer scope holds the bind), but no consumer pulls
-        // from it — OPTIONS arrive and rot. Each tick increments
-        // consecutiveMisses; once it crosses THRESHOLD the probe demotes.
+        // ── 3. draining-quiet → silence → dead after THRESHOLD misses ──
+        yield* draining.markDrainingQuiet
         for (let tick = 0; tick < THRESHOLD; tick++) {
           yield* oneTick
         }
-        const deadAfter = yield* health(registry)
-        expect(deadAfter).toBe("dead")
+        expect(yield* health(registry)).toBe("dead")
+
+        yield* Fiber.interrupt(routerFiber)
       }).pipe(Effect.provide(buildLayer()))
   )
 })

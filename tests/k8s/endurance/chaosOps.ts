@@ -36,7 +36,15 @@ export class ChaosOpsError extends Data.TaggedError("ChaosOpsError")<{
 }
 
 export type ChaosEventType =
+  // `worker-pod-graceful` invokes `kubectl delete --grace-period=20` so
+  // SIGTERM actually drives the two-tier drain protocol (ADR-0008).
   | "worker-pod-graceful"
+  // `worker-pod-api-delete-force` invokes `kubectl delete --grace-period=0
+  // --force` — fast API-side removal that skips kubelet graceful protocol.
+  // Models a node-lost-style failure routed through the control plane.
+  // (This is the renamed legacy `worker-pod-graceful`, which was misnamed
+  // because `--grace-period=0 --force` is the opposite of graceful.)
+  | "worker-pod-api-delete-force"
   | "worker-pod-kill9"
   | "proxy-pod-graceful"
   | "proxy-pod-kill9"
@@ -59,6 +67,7 @@ export type ChaosEventType =
 /** All ChaosEventType values as an array; single source of truth. */
 export const ALL_CHAOS_EVENT_TYPES: ReadonlyArray<ChaosEventType> = [
   "worker-pod-graceful",
+  "worker-pod-api-delete-force",
   "worker-pod-kill9",
   "proxy-pod-graceful",
   "proxy-pod-kill9",
@@ -267,6 +276,7 @@ export interface KillPodEventOpts {
   readonly namespace: string
   readonly type:
     | "worker-pod-graceful"
+    | "worker-pod-api-delete-force"
     | "worker-pod-kill9"
     | "proxy-pod-graceful"
     | "proxy-pod-kill9"
@@ -333,7 +343,7 @@ export const killPodEvent = (
     // before it can serve the snapshot).
     if (
       opts.captureForensicsBeforeKill !== undefined &&
-      opts.type === "worker-pod-graceful"
+      (opts.type === "worker-pod-graceful" || opts.type === "worker-pod-api-delete-force")
     ) {
       yield* Effect.logInfo(
         `chaos[${opts.type}] capturing pre-kill forensics on ${target.name}`,
@@ -636,6 +646,14 @@ interface PodEventDecoded {
 const decodePodEvent = (type: KillPodEventOpts["type"]): PodEventDecoded => {
   switch (type) {
     case "worker-pod-graceful":
+      return {
+        label: WORKER_LABEL,
+        mode: "delete-grace20",
+        replicas: WORKER_REPLICAS,
+        deploymentLike: WORKER_STATEFULSET,
+        kind: "worker",
+      }
+    case "worker-pod-api-delete-force":
       return {
         label: WORKER_LABEL,
         mode: "delete-grace0",

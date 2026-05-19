@@ -1,16 +1,19 @@
 /**
  * B2BUA OPTIONS / DrainingState integration test.
  *
- * Verifies the worker-side OPTIONS handler wired into `SipRouter`:
+ * Verifies the worker-side OPTIONS handler wired into `SipRouter` walks
+ * the two-tier graceful-drain protocol (ADR-0008):
  *
- *   - `DrainingState = serving`  → 200 OK
- *   - `DrainingState = draining` → 503 Service Unavailable + Retry-After: 0
+ *   - `DrainingState = serving`        → 200 OK + normal `X-Overload`
+ *   - `DrainingState = draining-new`   → 200 OK + `X-Overload: elu=1.000;
+ *                                         reason=draining; ...`
+ *   - `DrainingState = draining-quiet` → no reply at all
  *
  * RFC anchors:
  *   - §11 (OPTIONS): UAS responds with capabilities; minimal response
  *     is permitted.
- *   - §21.5.4 (503), §20.33 (Retry-After: 0): canonical "drained" signal
- *     proxies use to demote a worker to `draining`.
+ *   - §21.5.4 (503), §20.33 (Retry-After: 0): canonical "boot drain"
+ *     signal — kept for the not-ready branch only.
  *
  * Topology: a UAC endpoint bound on the simulated UDP fabric sends an
  * out-of-dialog OPTIONS at the B2BUA's bind port. The OPTIONS short-
@@ -71,74 +74,84 @@ const pump = (cycles = 1) =>
     }
   })
 
-describe("b2bua/DrainingState — OPTIONS keepalive", () => {
-  it.effect("serving → 200 OK; draining → 503 + Retry-After: 0", () =>
-    Effect.gen(function* () {
-      const router = yield* SipRouter
-      const draining = yield* DrainingState
+describe("b2bua/DrainingState — two-tier OPTIONS keepalive (ADR-0008)", () => {
+  it.effect(
+    "serving → 200; draining-new → 200 with elu=1.000+reason=draining; draining-quiet → silence; back to serving → 200",
+    () =>
+      Effect.gen(function* () {
+        const router = yield* SipRouter
+        const draining = yield* DrainingState
 
-      // Start the router in the background. The effect blocks on the
-      // TransactionEvent stream forever, so we forkChild and interrupt
-      // at the end of the test.
-      const routerFiber = yield* Effect.forkChild(router.start(handlers))
+        const routerFiber = yield* Effect.forkChild(router.start(handlers))
 
-      // Bind a UAC endpoint on the simulated fabric.
-      const network = yield* SignalingNetwork
-      const uac = yield* network
-        .bindUdp({ ip: UAC.ip, port: UAC.port, queueMax: 16 })
-        .pipe(Effect.orDie)
+        const network = yield* SignalingNetwork
+        const uac = yield* network
+          .bindUdp({ ip: UAC.ip, port: UAC.port, queueMax: 16 })
+          .pipe(Effect.orDie)
 
-      // ── 1. Serving → 200 OK ─────────────────────────────────────
-      yield* uac.send(buildOptions("opts-serving@probe", "z9hG4bK-1"), SIP_PORT, "127.0.0.1")
-      yield* pump(2) // OPTIONS in + 200 OK out
+        // ── 1. Serving → 200 OK ───────────────────────────────────
+        yield* uac.send(buildOptions("opts-serving@probe", "z9hG4bK-1"), SIP_PORT, "127.0.0.1")
+        yield* pump(2)
 
-      const respServingPkt = yield* uac.poll()
-      expect(respServingPkt).not.toBeNull()
-      const respServing = parse(respServingPkt!.raw)
-      expect(respServing.type).toBe("response")
-      if (respServing.type !== "response") throw new Error("unreachable")
-      expect(respServing.status).toBe(200)
-      // Echoed Vias / From / Call-ID / CSeq per RFC 3261 §8.2.6.2.
-      expect(respServing.getHeader("call-id")).toBe("opts-serving@probe")
-      expect(respServing.getHeader("cseq").method).toBe("OPTIONS")
-      // No Retry-After in the serving branch.
-      expect(
-        respServing.headers.find((h) => h.name.toLowerCase() === "retry-after")
-      ).toBeUndefined()
+        const respServingPkt = yield* uac.poll()
+        expect(respServingPkt).not.toBeNull()
+        const respServing = parse(respServingPkt!.raw)
+        expect(respServing.type).toBe("response")
+        if (respServing.type !== "response") throw new Error("unreachable")
+        expect(respServing.status).toBe(200)
+        expect(respServing.getHeader("call-id")).toBe("opts-serving@probe")
+        expect(respServing.getHeader("cseq").method).toBe("OPTIONS")
+        // Serving X-Overload must NOT advertise drain.
+        const servingOverload = respServing.headers.find(
+          (h) => h.name.toLowerCase() === "x-overload"
+        )
+        expect(servingOverload).toBeDefined()
+        expect(servingOverload!.value).not.toContain("reason=draining")
+        expect(respServing.headers.find((h) => h.name.toLowerCase() === "retry-after")).toBeUndefined()
 
-      // ── 2. Flip to draining → 503 + Retry-After: 0 ──────────────
-      yield* draining.markDraining
+        // ── 2. Flip to draining-new → 200 OK but elu=1.000 + reason=draining ──
+        yield* draining.markDrainingNew
 
-      yield* uac.send(buildOptions("opts-draining@probe", "z9hG4bK-2"), SIP_PORT, "127.0.0.1")
-      yield* pump(2)
+        yield* uac.send(buildOptions("opts-draining-new@probe", "z9hG4bK-2"), SIP_PORT, "127.0.0.1")
+        yield* pump(2)
 
-      const respDrainingPkt = yield* uac.poll()
-      expect(respDrainingPkt).not.toBeNull()
-      const respDraining = parse(respDrainingPkt!.raw)
-      expect(respDraining.type).toBe("response")
-      if (respDraining.type !== "response") throw new Error("unreachable")
-      expect(respDraining.status).toBe(503)
-      const retryAfter = respDraining.headers.find(
-        (h) => h.name.toLowerCase() === "retry-after"
-      )
-      expect(retryAfter).toBeDefined()
-      expect(retryAfter!.value.trim()).toBe("0")
+        const respTier1Pkt = yield* uac.poll()
+        expect(respTier1Pkt).not.toBeNull()
+        const respTier1 = parse(respTier1Pkt!.raw)
+        expect(respTier1.type).toBe("response")
+        if (respTier1.type !== "response") throw new Error("unreachable")
+        expect(respTier1.status).toBe(200)
+        const drainOverload = respTier1.headers.find(
+          (h) => h.name.toLowerCase() === "x-overload"
+        )
+        expect(drainOverload).toBeDefined()
+        expect(drainOverload!.value).toMatch(/elu=1\.000/)
+        expect(drainOverload!.value).toMatch(/reason=draining/)
+        expect(respTier1.headers.find((h) => h.name.toLowerCase() === "retry-after")).toBeUndefined()
 
-      // ── 3. Flip back to serving → 200 OK again ──────────────────
-      yield* draining.markServing
+        // ── 3. Flip to draining-quiet → no reply ───────────────────
+        yield* draining.markDrainingQuiet
 
-      yield* uac.send(buildOptions("opts-serving2@probe", "z9hG4bK-3"), SIP_PORT, "127.0.0.1")
-      yield* pump(2)
+        yield* uac.send(buildOptions("opts-draining-quiet@probe", "z9hG4bK-3"), SIP_PORT, "127.0.0.1")
+        yield* pump(3)
 
-      const respServing2Pkt = yield* uac.poll()
-      expect(respServing2Pkt).not.toBeNull()
-      const respServing2 = parse(respServing2Pkt!.raw)
-      expect(respServing2.type).toBe("response")
-      if (respServing2.type !== "response") throw new Error("unreachable")
-      expect(respServing2.status).toBe(200)
+        const silentPkt = yield* uac.poll()
+        expect(silentPkt).toBeNull()
 
-      // Cleanup: interrupt the router fiber so the test scope can end.
-      yield* Fiber.interrupt(routerFiber)
-    }).pipe(Effect.provide(stack))
+        // ── 4. Flip back to serving → 200 OK ───────────────────────
+        yield* draining.markServing
+
+        yield* uac.send(buildOptions("opts-serving2@probe", "z9hG4bK-4"), SIP_PORT, "127.0.0.1")
+        yield* pump(2)
+
+        const respServing2Pkt = yield* uac.poll()
+        expect(respServing2Pkt).not.toBeNull()
+        const respServing2 = parse(respServing2Pkt!.raw)
+        expect(respServing2.type).toBe("response")
+        if (respServing2.type !== "response") throw new Error("unreachable")
+        expect(respServing2.status).toBe(200)
+
+        yield* Fiber.interrupt(routerFiber)
+      }).pipe(Effect.provide(stack))
   )
 })

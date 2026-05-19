@@ -126,7 +126,46 @@ const EMPTY: ExpectedImpact = {
 
 export const EXPECTED_IMPACT: Record<ChaosEventType, ExpectedImpact> = {
   /* ---- existing events (already covered by analyzer's chaos-window categorisation) -- */
-  "worker-pod-graceful": EMPTY,
+  /**
+   * True graceful drain: `kubectl delete --grace-period=20`. The worker
+   * walks the two-tier drain protocol (ADR-0008) — `serving →
+   * draining-new → draining-quiet → exit` over ~8s — before kubelet
+   * SIGKILLs. CAPS-failure budget: ≤ `(1.5 / num_workers) × system_cps`
+   * sipp-observed final-fails per drain event. At 2 workers + 35 cps
+   * over a 90s window that's ≤ 26 / 3150 ≈ 0.83% failure rate, with
+   * mid-dialog failures bounded much tighter (backup partition serves
+   * confirmed calls).
+   */
+  "worker-pod-graceful": {
+    description:
+      "True graceful drain via SIGTERM → two-tier OPTIONS protocol → exit (ADR-0008). Budget: ≤ (1.5 / num_workers) × system_cps sipp-observed final-fails per event. Mid-dialog calls established before drain MUST survive via backup partition.",
+    rules: [
+      {
+        description:
+          "Short-hold failure rate during the drain window ≤ 1.5% — covers the actual two-tier protocol footprint (DRAIN_TIER1_MS=3s + DRAIN_TIER2_MS=5s + replication-settle grace). The 20s window stays bounded to the drain itself; longer windows would catch baseline failures unrelated to the drain.",
+        window: { anchor: "tFire", startOffsetMs: 0, durationMs: 20_000 },
+        metric: { kind: "failureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.015 },
+        severity: "fail",
+      },
+      {
+        description:
+          "Mid-dialog failures during the drain window ≤ 1% — confirmed calls must fail over to the peer's bak: partition. The Redis sidecar preStop hook keeps storage available throughout the drain so the dying worker remains authoritative for its share of in-dialog traffic.",
+        window: { anchor: "tFire", startOffsetMs: 0, durationMs: 20_000 },
+        metric: { kind: "midDialogFailureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.01 },
+        severity: "fail",
+      },
+    ],
+  },
+  /**
+   * Fast API-side delete: `kubectl delete --grace-period=0 --force`.
+   * Bypasses the kubelet's graceful protocol entirely; SIGTERM is
+   * followed immediately by SIGKILL. Models a node-lost-style failure
+   * routed through the control plane. Contract: a separate concern from
+   * the graceful path; ships with no bound until validated.
+   */
+  "worker-pod-api-delete-force": EMPTY,
   "worker-pod-kill9": EMPTY,
   "proxy-pod-graceful": EMPTY,
   "proxy-pod-kill9": EMPTY,

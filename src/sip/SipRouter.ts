@@ -636,25 +636,29 @@ export class SipRouter extends ServiceMap.Service<
           // These are infrastructure pings, not call-bound — short-circuit
           // BEFORE call resolution so they never touch CallStateCache.
           //
-          // Reply must agree with the K8s `/ready` HTTP probe so the
-          // proxy's two readiness signals (Endpoints membership +
-          // SIP HealthProbe) cannot disagree:
-          //   - serving   AND  ready   → 200 OK (RFC 3261 §11; minimal
-          //                              response, no Allow body — operators
-          //                              use Prometheus / SIP probes for
-          //                              feature discovery in this codebase).
-          //   - serving   AND  !ready  → 503 + `Retry-After: 0` (boot-time
-          //                              ReadyGate still draining peers'
-          //                              `propagate:N` queues — pod is also
-          //                              out of K8s Endpoints, so few SIP
-          //                              probes reach here, but if any do
-          //                              we must mirror the HTTP gate).
-          //   - draining               → 503 + `Retry-After: 0`
-          //                              (RFC 3261 §21.5.4 + §20.33).
-          //                              `Retry-After: 0` is the canonical
-          //                              "drained" signal proxies use to
-          //                              demote the worker to
-          //                              `health=draining`.
+          // Four reply shapes, all driven by `DrainingState.mode` and the
+          // boot-time readiness gate (see ADR-0008):
+          //   - serving + ready          → 200 OK with normal `X-Overload`.
+          //   - serving + !ready         → 503 + `Retry-After: 0` +
+          //                                `Reason: ...; text="not-ready (boot drain)"`
+          //                                (boot-time ReadyGate still
+          //                                draining peers' `propagate:N`).
+          //   - draining-new             → 200 OK but with `X-Overload`
+          //                                forced to `elu=1.000; reason=draining`.
+          //                                The proxy's `WorkerLoadObserver`
+          //                                puts the worker in `above_critical`
+          //                                → excluded from `selectForNewDialog`.
+          //                                In-dialog routing is unchanged so
+          //                                live calls keep flowing through
+          //                                this worker for the drainGrace
+          //                                window.
+          //   - draining-quiet           → no reply. Proxy's `HealthProbe`
+          //                                times out and flips the worker
+          //                                to `dead` after
+          //                                `unhealthyAfterMisses`. In-dialog
+          //                                then falls back via
+          //                                `selectForNewDialog` to the peer
+          //                                (which serves out of `bak:`).
           //
           // In-dialog OPTIONS (To-tag present) falls through to the rule
           // chain so existing transparent-relay rules handle it.
@@ -668,7 +672,34 @@ export class SipRouter extends ServiceMap.Service<
             const ready = yield* readiness.currentReady
             const req = event.message
             const respDest = { host: event.rinfo.address, port: event.rinfo.port }
-            if (mode === "serving" && ready) {
+
+            if (mode === "draining-quiet") {
+              yield* Effect.logDebug(
+                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → drop (draining-quiet)`
+              )
+              return
+            }
+
+            if (mode === "draining-new") {
+              // Tier 1: 200 OK but force `elu=1.000` so the proxy's
+              // WorkerLoadObserver puts us in `above_critical` band and
+              // skips us for new-dialog selection. `reason=draining` is a
+              // diagnostic tag; the parser at parseXOverloadHeader ignores
+              // unknown segments.
+              const base = overload.xOverloadHeaderValue()
+              const drainingValue = `${base.replace(/elu=[^;]+/, "elu=1.000")}; reason=draining`
+              const ok = generateResponse(req, 200, "OK", {
+                toTag: newTag(),
+                extraHeaders: [{ name: "X-Overload", value: drainingValue }],
+              })
+              yield* Effect.logDebug(
+                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 200 (draining-new, elu=1.000)`
+              )
+              yield* txnLayer.send(ok, respDest, "response")
+              return
+            }
+
+            if (ready) {
               const ok = generateResponse(req, 200, "OK", {
                 toTag: newTag(),
                 extraHeaders: [
@@ -680,17 +711,11 @@ export class SipRouter extends ServiceMap.Service<
               )
               yield* txnLayer.send(ok, respDest, "response")
             } else {
-              // Encode the worker-side cause in a `Reason:` header
-              // (RFC 3326) so the proxy's HealthProbe can distinguish a
-              // SIGTERM-driven `draining` reply from a boot-time
-              // `not-ready` reply. Both are 503 + Retry-After: 0 so an
-              // RFC-compliant probe still demotes the worker; the
-              // `Reason` text adds the proxy-internal qualifier we need
-              // for the decode_forward → decode_forward_backup
-              // promotion in Slice E1 of the respawn fix.
-              const reason =
-                mode === "draining" ? "draining" : "not-ready (boot drain)"
-              const reasonHeader = `SIP;cause=503;text="${reason}"`
+              // Boot-time: not yet drained the peers' `propagate:N` queue.
+              // Reply 503 + `Reason: text="not-ready (boot drain)"` so the
+              // proxy's HealthProbe `classify503` keeps this distinct from
+              // a SIGTERM-driven drain.
+              const reasonHeader = `SIP;cause=503;text="not-ready (boot drain)"`
               const unavailable = generateResponse(req, 503, "Service Unavailable", {
                 toTag: newTag(),
                 extraHeaders: [
@@ -700,7 +725,7 @@ export class SipRouter extends ServiceMap.Service<
                 ],
               })
               yield* Effect.logDebug(
-                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 503 (${reason})`
+                `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 503 (not-ready boot drain)`
               )
               yield* txnLayer.send(unavailable, respDest, "response")
             }

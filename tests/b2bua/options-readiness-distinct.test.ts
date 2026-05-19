@@ -1,21 +1,21 @@
 /**
- * Slice E1 of the decode-forward-respawn-bye-481 fix — worker-side OPTIONS
- * keepalive distinguishes `draining` from `not-ready (boot drain)` via an
- * RFC 3326 `Reason` header so the proxy's HealthProbe can classify the
- * worker accurately.
+ * Worker-side OPTIONS keepalive — two-tier graceful drain (ADR-0008) +
+ * boot-time not-ready disambiguation.
  *
  * Matrix (from `src/sip/SipRouter.ts` OPTIONS short-circuit):
  *
  *   serving + ready         → 200 OK
  *   serving + !ready        → 503 + Retry-After: 0
  *                             + `Reason: SIP;cause=503;text="not-ready (boot drain)"`
- *   draining + (any)        → 503 + Retry-After: 0
- *                             + `Reason: SIP;cause=503;text="draining"`
+ *   draining-new            → 200 OK + `X-Overload: ...; elu=1.000;
+ *                             ...; reason=draining` (no Reason header,
+ *                             not a 503 — exclusion is via the load-
+ *                             observer band, not via probe demotion).
+ *   draining-quiet          → no reply (silent so the proxy's
+ *                             HealthProbe times out and marks `dead`).
  *
  * The test drives `WorkerReadiness` and `DrainingState` directly and
- * asserts the response headers. No proxy is involved — this is a pure
- * UAS-side unit test that complements the existing
- * `b2bua/draining-options.test.ts` for the `draining` branch.
+ * asserts the response headers.
  */
 
 import { describe, expect, it } from "@effect/vitest"
@@ -72,9 +72,9 @@ const pump = (cycles = 1) =>
     }
   })
 
-describe("b2bua/SipRouter — OPTIONS Reason discriminates draining vs not-ready", () => {
+describe("b2bua/SipRouter — OPTIONS reflects two-tier drain + not-ready disambiguation", () => {
   it.effect(
-    "serving + !ready → 503 + Reason: not-ready; draining → 503 + Reason: draining",
+    "serving+!ready → 503 not-ready; draining-new → 200 + elu=1.000 reason=draining; draining-quiet → silence",
     () =>
       Effect.gen(function* () {
         const router = yield* SipRouter
@@ -121,25 +121,33 @@ describe("b2bua/SipRouter — OPTIONS Reason discriminates draining vs not-ready
         expect(reasonNR!.value).toMatch(/cause=503/)
         expect(reasonNR!.value.toLowerCase()).toContain("not-ready")
 
-        // ── 3. Flip back to ready, then mark draining → 503 + Reason: draining ─
+        // ── 3. Flip back to ready, then markDrainingNew → 200 OK + elu=1.000 reason=draining ─
         yield* readiness.markReady(true)
-        yield* draining.markDraining
-        yield* uac.send(buildOptions("opts-draining@probe", "z9hG4bK-r3"), SIP_PORT, "127.0.0.1")
+        yield* draining.markDrainingNew
+        yield* uac.send(buildOptions("opts-draining-new@probe", "z9hG4bK-r3"), SIP_PORT, "127.0.0.1")
         yield* pump(2)
-        const respDrainPkt = yield* uac.poll()
-        expect(respDrainPkt).not.toBeNull()
-        const respDrain = parse(respDrainPkt!.raw)
-        if (respDrain.type !== "response") throw new Error("expected response")
-        expect(respDrain.status).toBe(503)
-        const reasonDrain = respDrain.headers.find(
-          (h) => h.name.toLowerCase() === "reason"
+        const respDrainNewPkt = yield* uac.poll()
+        expect(respDrainNewPkt).not.toBeNull()
+        const respDrainNew = parse(respDrainNewPkt!.raw)
+        if (respDrainNew.type !== "response") throw new Error("expected response")
+        expect(respDrainNew.status).toBe(200)
+        // No Retry-After / Reason on the tier-1 200 OK.
+        expect(respDrainNew.headers.find((h) => h.name.toLowerCase() === "retry-after")).toBeUndefined()
+        expect(respDrainNew.headers.find((h) => h.name.toLowerCase() === "reason")).toBeUndefined()
+        // The drain signal rides on X-Overload.
+        const overloadHeader = respDrainNew.headers.find(
+          (h) => h.name.toLowerCase() === "x-overload"
         )
-        expect(reasonDrain).toBeDefined()
-        expect(reasonDrain!.value).toMatch(/cause=503/)
-        expect(reasonDrain!.value.toLowerCase()).toContain("draining")
-        // The text MUST NOT include "not-ready" — the proxy's classifier
-        // distinguishes on substring.
-        expect(reasonDrain!.value.toLowerCase()).not.toContain("not-ready")
+        expect(overloadHeader).toBeDefined()
+        expect(overloadHeader!.value).toMatch(/elu=1\.000/)
+        expect(overloadHeader!.value).toMatch(/reason=draining/)
+
+        // ── 4. markDrainingQuiet → no reply at all ────────────────
+        yield* draining.markDrainingQuiet
+        yield* uac.send(buildOptions("opts-draining-quiet@probe", "z9hG4bK-r4"), SIP_PORT, "127.0.0.1")
+        yield* pump(3)
+        const silentPkt = yield* uac.poll()
+        expect(silentPkt).toBeNull()
 
         yield* Fiber.interrupt(routerFiber)
       }).pipe(Effect.provide(stack))

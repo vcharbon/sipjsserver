@@ -668,7 +668,7 @@ export const StatusServerLayer: Layer.Layer<
             const mode = yield* draining.mode
             const ok = ready && mode === "serving"
             return yield* HttpServerResponse.json(
-              { ready: ok, replicationReady: ready, draining: mode === "draining" },
+              { ready: ok, replicationReady: ready, draining: mode !== "serving" },
               { status: ok ? 200 : 503 }
             )
           })

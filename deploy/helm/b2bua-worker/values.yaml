@@ -25,13 +25,13 @@ sipPort: 5060
 # the headless StatefulSet DNS (`<pod>.<svc>.<ns>:adminPort/replog`).
 adminPort: 3002
 
-# RFC 3261 Timer C (180s) + 20s safety. The worker's
-# `DrainingState.Default` SIGTERM handler flips OPTIONS replies to 503
-# immediately on receipt of SIGTERM; the proxy observes the
-# deletion-timestamp accelerant in the K8s view as well. The worker
-# keeps serving in-flight calls (ACK / CANCEL especially) for the
-# entire grace window before K8s SIGKILLs.
-terminationGracePeriodSeconds: 200
+# Two-tier graceful drain budget (ADR-0008): DRAIN_TIER1_MS (3s) +
+# DRAIN_TIER2_MS (5s) = 8s, plus ~12s of safety headroom + kubelet
+# bookkeeping. Timer C (180s) is no longer the binding constraint
+# because all call state is replicated to the peer's `bak:` partition;
+# in-flight transactions span the gap via UAC retransmission. Lowering
+# this further requires lowering DRAIN_TIER1_MS / DRAIN_TIER2_MS too.
+terminationGracePeriodSeconds: 20
 
 # Optional preStop sleep — keeps the pod in `Terminating` state for
 # this many seconds before the kubelet SIGTERMs the worker. Set > 0
@@ -138,3 +138,9 @@ redis:
     - "no"
     - "--maxmemory-policy"
     - "noeviction"
+  # Seconds the sidecar's preStop hook sleeps before SIGTERM reaches
+  # redis-server. Must exceed the worker's two-tier drain budget
+  # (DRAIN_TIER1_MS + DRAIN_TIER2_MS = 8 s) so the local pri:/bak:
+  # partition stays available for the full drain. Default 10 s leaves
+  # 2 s of margin and is well below terminationGracePeriodSeconds=20 s.
+  preStopSleepSec: 10
