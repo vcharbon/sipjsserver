@@ -446,10 +446,10 @@ export function writeIndexReport(
     const badge = status === "fail"
       ? `<span class="badge fail">FAIL</span>`
       : `<span class="badge pass">PASS</span>`
-    // Distinct networks the scenario touched — sorted so the column is
-    // stable across runs. A pure-`ext` scenario shows just `ext`; a
-    // dual-stack scenario shows both.
-    const networks = Array.from(new Set(r.participants.map((p) => p.network))).sort()
+    // Distinct networks the scenario touched — derived from `lanes`
+    // (the `(ip,port)`-keyed identity), not the deprecated `participants`
+    // name list. Sorted so the column is stable across runs.
+    const networks = Array.from(new Set(r.lanes.map((l) => l.network))).sort()
     const networksLabel = networks.length > 0 ? networks.join(", ") : "—"
     return `<tr>
       <td>${badge}</td>

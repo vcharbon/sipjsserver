@@ -70,8 +70,10 @@ export type {
   NetworkTag,
   HeaderOverrides,
   ReceivedPacket,
+  Lane,
+  LaneKey,
 } from "./framework/types.js"
-export { TransportError, DEFAULT_NETWORK, ALL_SUTS, DEFAULT_APPLICABLE_SUTS } from "./framework/types.js"
+export { TransportError, DEFAULT_NETWORK, ALL_SUTS, DEFAULT_APPLICABLE_SUTS, laneKey } from "./framework/types.js"
 
 // Scenario execution
 export { executeScenario } from "./framework/interpreter.js"

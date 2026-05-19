@@ -379,7 +379,17 @@ export const DEFAULT_NETWORK: NetworkTag = "ext"
  */
 export type TransportKind = "fake" | "live" | "hybrid"
 
-/** Participant entry in `ScenarioResult.participants` — name + network. */
+/**
+ * Participant entry in `ScenarioResult.participants` — name + network.
+ *
+ * @deprecated Lane identity moved to `(ip,port)` (see `Lane`). The
+ * renderer and text-report no longer read this type; it is retained on
+ * `ScenarioResult` for one release so external consumers can migrate.
+ * Replace any read of `participants` with `lanes` and, when you need a
+ * name string, take `lane.names[0]` (or render `lane.ip:lane.port` when
+ * the lane is anonymous). Scheduled for removal — see
+ * `docs/external-usage/test-harness.md` § "Migrating off `participants`".
+ */
 export interface Participant {
   readonly name: string
   readonly network: NetworkTag
@@ -653,13 +663,22 @@ export interface TraceEntry {
   readonly sentMs: number
   /** Virtual-clock instant the receiver observed the packet. */
   readonly receivedMs: number
+  /**
+   * @deprecated Name strings on `TraceEntry` are scheduled for removal.
+   * Internal renderers now resolve names from the lane registry via
+   * `fromAddr` / `toAddr`. Use `lanes` to look up a name for an
+   * address (`lane.names[0]`) instead of reading this field. See
+   * `docs/external-usage/test-harness.md` § "Migrating off
+   * `participants`".
+   */
   readonly from: string
+  /** @deprecated See `TraceEntry.from`. */
   readonly to: string
   /**
-   * Wire-level addresses corresponding to `from` / `to`. Required so the
-   * renderer can key lanes on `(ip,port)` rather than name — this is the
-   * structural defense against "report invents names/IPs" (Slice 2 of
-   * `.claude/plans/html-report-recording-layer-faithful-trace.md`).
+   * Wire-level addresses. Required and authoritative — the renderer
+   * keys lanes on `(ip,port)`, never on the deprecated `from` / `to`
+   * name strings. This is the structural defense against "report
+   * invents names/IPs".
    *
    * For synthesized placeholder entries (dangling-offer / dangling-PRACK
    * sentinels emitted at scenario end) the addresses are derived from
@@ -706,16 +725,20 @@ export interface ScenarioResult {
    * lanes by fabric. Order is "first appearance in the trace" so the
    * SVG lays out columns in the order the conversation flows.
    *
-   * @deprecated — kept for backward compatibility with consumers that
-   * read participant names. The renderer reads `lanes` instead, which
-   * is keyed by `(ip,port)` and immune to name fabrication.
+   * @deprecated Scheduled for removal. Use `lanes` instead — it is
+   * keyed by `(ip,port)` and immune to name fabrication. To get a name
+   * string for display, read `lane.names[0]` (may be empty for
+   * anonymous lanes; fall back to `lane.ip:lane.port`). Internal
+   * renderers (`html-report.ts`, `text-report.ts`) no longer read this
+   * field. See `docs/external-usage/test-harness.md`
+   * § "Migrating off `participants`" for grep patterns and rewrites.
    */
   readonly participants: ReadonlyArray<Participant>
   /**
-   * `(ip,port)`-keyed lanes. The renderer uses these as the column
-   * identity; names from `participants` decorate the lane headers but
-   * are not the lookup key. Ordering: by `NetworkTag` group (`ext`
-   * left, `core` right), then first appearance within the group.
+   * `(ip,port)`-keyed lanes. The canonical column identity used by every
+   * internal renderer; names attached to a lane decorate the lane header
+   * but are never the lookup key. Ordering: by `NetworkTag` group
+   * (`ext` left, `core` right), then first appearance within the group.
    */
   readonly lanes: ReadonlyArray<Lane>
   /**
