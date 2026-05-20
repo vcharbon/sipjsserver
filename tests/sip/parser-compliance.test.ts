@@ -13,6 +13,7 @@ import { Result } from "effect"
 import { jssipParser } from "../../src/sip/parsers/jssip-adapter.js"
 import { sipParserNpm } from "../../src/sip/parsers/sip-parser-adapter.js"
 import { customParser } from "../../src/sip/parsers/custom/index.js"
+import { nativeParser } from "../../src/sip/parsers/native-adapter.js"
 import type { SipParserImpl } from "../../src/sip/parsers/interface.js"
 import { runAllStrictLazyParsers } from "../../src/sip/parsers/custom/lazy-parsers.js"
 
@@ -69,7 +70,7 @@ const invalidCases: Array<[string, Buffer]> = [
 // All parsers under test
 // ---------------------------------------------------------------------------
 
-const parsers: SipParserImpl[] = [jssipParser, sipParserNpm, customParser]
+const parsers: SipParserImpl[] = [jssipParser, sipParserNpm, customParser, nativeParser]
 
 // ---------------------------------------------------------------------------
 // Valid message tests — MUST parse successfully
@@ -92,6 +93,19 @@ const knownFailValid: Record<string, Set<string>> = {
     "3.1.1.7", "3.1.1.8", "3.1.1.9", "3.1.1.10", "3.1.1.11", "3.1.1.12", "3.1.1.13",
   ]),
   custom: new Set(["3.1.1.1", "3.1.1.7", "3.1.1.10"]),
+  // native (rvoip-sip-core strict mode) — same ADR-0007 rejections as custom
+  // (3.1.1.1 / 3.1.1.7 / 3.1.1.10), plus rvoip's own strict lexical gate
+  // rejecting these torture fixtures that other adapters accept:
+  //   3.1.1.2 — wide char range — rvoip URI parser nom-Tag error at offset 0
+  //   3.1.1.3 — valid percent escaping — rvoip drops Call-ID under percent-escaped header form
+  //   3.1.1.8 — extra trailing octets — rvoip strict mode is all_consuming
+  //   3.1.1.11 — multipart MIME — rvoip body framing trips on multipart boundary
+  //   3.1.1.13 — empty reason phrase — rvoip status-line parser requires a reason token
+  // These are upstream parser strictness, not regressions in our pipeline.
+  native: new Set([
+    "3.1.1.1", "3.1.1.2", "3.1.1.3", "3.1.1.7", "3.1.1.8",
+    "3.1.1.10", "3.1.1.11", "3.1.1.13",
+  ]),
 }
 
 describe.each(parsers)("$name — RFC 4475 valid messages", (impl) => {
@@ -154,6 +168,13 @@ const knownLenient: Record<string, Set<string>> = {
   custom: new Set([
     "3.1.2.10", "3.1.2.11",
   ]),
+  // native — rvoip + extract-fields accept these start-line shape
+  // malformations that RFC 4475 says reject. The TS gates target header
+  // content, not start-line layout. Comparable to jssip's profile here.
+  //   3.1.2.10 — trailing whitespace in request-line
+  //   3.1.2.11 — escaped headers in Request-URI (rvoip's URI parser tolerates)
+  //   3.1.2.16 — unknown SIP version
+  native: new Set(["3.1.2.10", "3.1.2.11", "3.1.2.16"]),
 }
 
 /**
@@ -258,6 +279,7 @@ const knownCveLenient: Record<string, Set<string>> = {
   jssip: new Set([]),
   "sip-parser": new Set([]),
   custom: new Set([]),
+  native: new Set([]),
 }
 
 describe.each(parsers)("$name — CVE regression (must reject)", (impl) => {
@@ -320,6 +342,7 @@ const knownParamGapLenient: Record<string, Set<string>> = {
   jssip: new Set([]),
   "sip-parser": new Set([]),
   custom: new Set([]),
+  native: new Set([]),
 }
 
 // ---------------------------------------------------------------------------
@@ -369,12 +392,14 @@ const knownIpv6ValidFail: Record<string, Set<string>> = {
     "RFC5118-4.10b",
   ]),
   custom: new Set([]),
+  native: new Set([]),
 }
 
 const knownIpv6InvalidLenient: Record<string, Set<string>> = {
   jssip: new Set([]),
   "sip-parser": new Set([]),
   custom: new Set([]),
+  native: new Set([]),
 }
 
 describe.each(parsers)("$name — RFC 5118 IPv6 torture (valid, must parse)", (impl) => {

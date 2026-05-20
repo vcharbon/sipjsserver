@@ -100,6 +100,19 @@ export const AppConfigData = Schema.Struct({
   udpQueueMax: Schema.Int,
   /** Tier 1 emergency brake activation threshold (% of udpQueueMax). */
   udpQueueTier1ThresholdPct: Schema.Int,
+
+  /**
+   * SIP UDP stack selector — picks between the JS dgram + custom TS parser
+   * pipeline ("js", the legacy default) and the native Rust pipeline
+   * ("native") that owns the UDP socket, runs the Tier-1 brake in Rust,
+   * parses inline, and emits pre-parsed messages over a threadsafe channel.
+   *
+   * Both stacks satisfy the same `SignalingNetwork` contract, so the same
+   * binary can be deployed twice — one pod per stack — for endurance and
+   * robustness A/B comparison. Sourced from `SIP_UDP_STACK`. Defaults to
+   * "js" so existing deployments are unaffected.
+   */
+  sipUdpStack: Schema.Literals(["js", "native"]),
   /** Per-worker emergency-class queue capacity. */
   workerQueueEmergencyMax: Schema.Int,
   /** Per-worker in-dialog-class queue capacity. */
@@ -339,6 +352,43 @@ function resolveWorkerOrdinalLabel(): string | undefined {
   return undefined
 }
 
+/**
+ * Resolve which SIP UDP stack this worker should run. Precedence:
+ *   1. `SIP_UDP_STACK` — explicit `js` or `native`; wins outright.
+ *   2. `SIP_UDP_STACK_BY_ORDINAL` — comma-separated list indexed by the
+ *      worker's StatefulSet ordinal (parsed from `POD_NAME` /
+ *      `WORKER_ORDINAL_LABEL` / `HOSTNAME`). Used by the K8s endurance
+ *      A/B default so b2bua-worker-0 runs `js` and b2bua-worker-1 runs
+ *      `native` from the same image without per-pod manifests.
+ *   3. Default — `js` (current production pipeline).
+ *
+ * Exported so `main.ts` and `AppConfig.readConfigFromEnv` agree on the
+ * resolved value; the layer selection in `main.ts` runs at module-eval
+ * time before AppConfig has materialised.
+ */
+export function resolveSipUdpStack(): "js" | "native" {
+  const direct = process.env["SIP_UDP_STACK"]
+  if (direct === "native") return "native"
+  if (direct === "js") return "js"
+
+  const byOrdinal = process.env["SIP_UDP_STACK_BY_ORDINAL"]
+  if (byOrdinal !== undefined && byOrdinal.length > 0) {
+    const stacks = byOrdinal
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+    const label = resolveWorkerOrdinalLabel() ?? ""
+    const m = label.match(/-(\d+)$/)
+    if (m !== null && stacks.length > 0) {
+      const ord = parseInt(m[1]!, 10)
+      const picked = stacks[ord % stacks.length]
+      if (picked === "native") return "native"
+      if (picked === "js") return "js"
+    }
+  }
+  return "js"
+}
+
 function readConfigFromEnv(): AppConfigData {
   const outbound = parseB2bOutboundProxy()
   const ordinal = resolveWorkerOrdinalLabel()
@@ -375,6 +425,7 @@ function readConfigFromEnv(): AppConfigData {
     callCleanupDelaySec: 32,
     udpQueueMax: parseInt(envOrDefault("UDP_QUEUE_MAX", "100"), 10),
     udpQueueTier1ThresholdPct: parseInt(envOrDefault("UDP_QUEUE_TIER1_THRESHOLD_PCT", "70"), 10),
+    sipUdpStack: resolveSipUdpStack(),
     workerQueueEmergencyMax: parseInt(envOrDefault("WORKER_QUEUE_EMERGENCY_MAX", "500"), 10),
     workerQueueInDialogMax: parseInt(envOrDefault("WORKER_QUEUE_INDIALOG_MAX", "400"), 10),
     workerQueueNewCallMax: parseInt(envOrDefault("WORKER_QUEUE_NEWCALL_MAX", "100"), 10),

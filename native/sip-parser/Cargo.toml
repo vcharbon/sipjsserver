@@ -1,0 +1,25 @@
+[package]
+name = "sipjs-native-parser"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Native SIP parser adapter for @vcharbon/sipjs (Phase 1)"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", default-features = false, features = ["napi8", "tokio_rt"] }
+napi-derive = "2"
+rvoip-sip-core = { path = "../../repos/rvoip/crates/rvoip-sip-core", default-features = false }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "macros"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = "symbols"

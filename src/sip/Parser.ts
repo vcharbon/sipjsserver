@@ -11,6 +11,7 @@ import type { SipMessage } from "./types.js"
 import { SipParseError } from "./parsers/errors.js"
 import type { SipParserImpl, SipParserLimits } from "./parsers/interface.js"
 import { customParser, createCustomParser } from "./parsers/custom/index.js"
+import { nativeParser } from "./parsers/native-adapter.js"
 
 export { SipParseError } from "./parsers/errors.js"
 
@@ -43,4 +44,14 @@ export class SipParser extends ServiceMap.Service<
   static withLimits(limits: Partial<SipParserLimits>) {
     return SipParser.fromImpl(createCustomParser(limits))
   }
+
+  /**
+   * Opt-in layer using the napi-rs binding over rvoip-sip-core. The native
+   * side handles wire-format framing; the same ADR-0007 strict-grammar gates
+   * fire on the resulting headers via `extractRequestFields` /
+   * `extractResponseFields`, so the message-acceptance contract matches
+   * {@link customParser}. Phase 1 only — Phase 2 will push UDP recv into
+   * the native side and emit a `Stream<SipMessage>` directly.
+   */
+  static readonly nativeLayer = SipParser.fromImpl(nativeParser)
 }

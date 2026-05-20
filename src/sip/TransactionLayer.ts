@@ -745,7 +745,13 @@ export class TransactionLayer extends ServiceMap.Service<
           Effect.gen(function* () {
             yield* Effect.logDebug(`SIP IN <- ${packet.rinfo.address}:${packet.rinfo.port} ${sipSummary(packet.raw)}`)
             yield* Effect.logDebug(packet.raw.toString('utf-8'))
-            const maybeSip = yield* parser.parse(packet.raw).pipe(
+            // Native UDP stack pre-parses inline; reuse that result instead of
+            // re-parsing the wire bytes. Falls back to the configured SipParser
+            // for the JS dgram stack and any fabric that doesn't pre-parse.
+            const parseEffect = packet.parsed !== undefined
+              ? Effect.succeed(packet.parsed)
+              : parser.parse(packet.raw)
+            const maybeSip = yield* parseEffect.pipe(
               Effect.catchTag("SipParseError", (e) => {
                 const preview = packet.raw.toString("utf-8", 0, Math.min(packet.raw.length, 500))
                 return Effect.logWarning(

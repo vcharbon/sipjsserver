@@ -46,7 +46,7 @@ import {
 } from "effect"
 import * as Fiber from "effect/Fiber"
 import { ConnectivityGate, type ConnectivityGateApi } from "./ConnectivityGate.js"
-import type { RemoteInfo } from "./types.js"
+import type { RemoteInfo, SipMessage } from "./types.js"
 
 /**
  * Read the active fiber's `ConnectivityGate` reference. Falls back to
@@ -77,6 +77,14 @@ export interface UdpPacket {
    * used to live in `tests/fullcall/framework/{live,simulated}-backend.ts`.
    */
   readonly arrivalMs: number
+  /**
+   * Pre-parsed SIP message — present when the native UDP stack
+   * (`SIP_UDP_STACK=native`) is active. The native pipeline parses inline
+   * before emitting the packet to JS, so the TransactionLayer parse hop
+   * is skipped. JS dgram-backed fabrics leave this `undefined`; callers
+   * must fall back to `SipParser.parse(raw)`.
+   */
+  readonly parsed?: SipMessage
 }
 
 /** Per-endpoint counters. Plain object; O(1) reads/writes. */

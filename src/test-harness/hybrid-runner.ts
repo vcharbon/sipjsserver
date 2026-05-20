@@ -166,6 +166,7 @@ function defaultHybridAppConfig(): AppConfigData {
   return {
     sipLocalIp: "0.0.0.0",
     sipLocalPort: 5060,
+    sipUdpStack: "js",
     workerServiceName: "b2bua-worker",
     redisUrl: "redis://unused",
     limiterRedisUrl: "redis://unused",

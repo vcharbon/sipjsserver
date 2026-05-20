@@ -127,6 +127,77 @@ contamination modes that motivated this policy are recorded in
 Cluster is **always fresh on entry** and **never auto-torn down on
 exit**. Manual teardown: `npm run test:k8s:down`.
 
+## SIP UDP stack A/B
+
+The endurance run pins **`b2bua-worker-0` to the JS dgram + `customParser`
+stack** and **`b2bua-worker-1` to the native (Rust UDP + rvoip strict
+parse) stack** by default. Same image, same load, same chaos schedule,
+two transport pipelines side-by-side — that's the comparison.
+
+Mechanism: the endurance overlay
+([tests/k8s/values/b2bua-worker.endurance.yaml](../tests/k8s/values/b2bua-worker.endurance.yaml))
+exports `SIP_UDP_STACK_BY_ORDINAL=js,native` to every worker pod;
+[`resolveSipUdpStack()`](../src/config/AppConfig.ts) reads the StatefulSet
+ordinal off `POD_NAME` (`b2bua-worker-N`) and indexes that list — `-0`
+gets `js`, `-1` gets `native`, `-2` would cycle back to `js`. The chosen
+stack is logged at startup:
+
+```
+[startup] sipUdpStack=native (SIP_UDP_STACK= SIP_UDP_STACK_BY_ORDINAL=js,native POD_NAME=b2bua-worker-1)
+```
+
+Both stacks satisfy the same `SignalingNetwork` Effect contract — see
+[CONTEXT.md § "SIP UDP stack"](../CONTEXT.md#sip-udp-stack) for the
+domain glossary. Downstream behaviour is identical: same admission
+gates, same brake counters, same Prometheus surface. The difference is
+where the UDP socket is owned and where the wire-level parse runs.
+
+### Overriding the default
+
+To run both workers with the JS stack:
+
+```yaml
+# extraEnv overlay
+- name: SIP_UDP_STACK
+  value: "js"
+```
+
+`SIP_UDP_STACK` set explicitly always wins over `SIP_UDP_STACK_BY_ORDINAL`.
+Useful for isolating regressions to the new pipeline, or for re-running a
+historical baseline.
+
+To flip the assignment (worker-0 native, worker-1 JS):
+
+```yaml
+- name: SIP_UDP_STACK_BY_ORDINAL
+  value: "native,js"
+```
+
+For a 3-replica run, list 3 entries; for >3 replicas the list cycles.
+
+### What to compare in the analyzer
+
+The analyzer breaks per-worker metrics out by pod name, so the two
+stacks show up as distinct columns in:
+
+- **Event-loop lag** (`b2bua_event_loop_lag_seconds_p99`) — native side
+  runs only the SipMessage materialise + queue offer; large gap = the
+  win we're after.
+- **Parse-drop counter** (`b2bua_parse_dropped_total`) — sourced from
+  the configured `SipParser` for the JS stack and from rvoip's strict
+  parser for the native stack; rvoip is stricter so this often shows
+  a steady-state gap on adversarial corpora.
+- **Memory residency** (`container_memory_working_set_bytes`) — native
+  side allocates the parsed envelope in tokio + libuv before handoff;
+  per-packet overhead profile differs from the JS heap path.
+- **Tier-1 brake counters** (`dropsTier1Brake`, `tier1RejectSent` in the
+  status page) — should track within ±1 % over a sustained run. A
+  significant gap indicates a behavioural divergence and is a real
+  finding, not noise.
+
+A sustained run where one column degrades and the other doesn't is the
+signal the A/B layout was designed to surface.
+
 ## Call mix
 
 At default CAPS=45:

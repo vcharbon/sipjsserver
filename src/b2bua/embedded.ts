@@ -44,6 +44,7 @@ import { StackIdentity } from "./stack-identity.js"
 export const defaultEmbeddedAppConfig: AppConfigData = {
   sipLocalIp: "0.0.0.0",
   sipLocalPort: 5060,
+  sipUdpStack: "js",
   workerServiceName: "embedded-b2bua",
   redisUrl: "redis://unused",
   limiterRedisUrl: "redis://unused",

@@ -29,6 +29,15 @@ extraEnv:
     value: "http://call-control:8080"
   - name: B2B_OUTBOUND_PROXY
     value: "172.20.255.250:5060"
+  # A/B between the JS dgram + custom TS parser stack and the native
+  # (Rust UDP socket + rvoip strict parse inline) stack within the same
+  # endurance run. The list is indexed by the StatefulSet ordinal parsed
+  # from POD_NAME — `b2bua-worker-0` picks `js`, `b2bua-worker-1` picks
+  # `native`. See [docs/k8s-endurance.md](../../../docs/k8s-endurance.md)
+  # § "SIP UDP stack A/B". Override at-runtime with `SIP_UDP_STACK` (an
+  # explicit value wins over the per-ordinal list).
+  - name: SIP_UDP_STACK_BY_ORDINAL
+    value: "js,native"
   # Endurance leak diagnostics:
   # - `--heapsnapshot-signal=SIGUSR2` lets `kill -USR2 1` (or the
   #   orchestrator) trigger a v8 heap snapshot to the worker's CWD.

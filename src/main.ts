@@ -18,7 +18,7 @@ import * as NodeSdk from "@effect/opentelemetry/NodeSdk"
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base"
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http"
 import { SipRouter } from "./sip/SipRouter.js"
-import { AppConfig, type AppConfigData } from "./config/AppConfig.js"
+import { AppConfig, resolveSipUdpStack, type AppConfigData } from "./config/AppConfig.js"
 import { CallState } from "./call/CallState.js"
 import { PartitionedRelayStorage } from "./cache/PartitionedRelayStorage.js"
 import { BufferedTerminateWriter } from "./cache/BufferedTerminateWriter.js"
@@ -46,6 +46,7 @@ import { RedisClient } from "./redis/RedisClient.js"
 import { LimiterRedisClient } from "./redis/LimiterRedisClient.js"
 import { UdpTransport } from "./sip/UdpTransport.js"
 import { SignalingNetwork } from "./sip/SignalingNetwork.js"
+import { NativeSignalingNetwork } from "./sip/NativeSignalingNetwork.js"
 import { StatusServerLayer } from "./http/StatusServer.js"
 import { HttpReferenceAdapterLayer } from "./decision/adapters/http-reference/HttpReferenceAdapter.js"
 import { TracingService } from "./tracing/TracingService.js"
@@ -233,10 +234,27 @@ const OtelLayer = Layer.unwrap(
   })
 ).pipe(Layer.provide(AppConfigLayer))
 
+// SignalingNetwork variant selected by `resolveSipUdpStack()` (honours
+// `SIP_UDP_STACK` first, then `SIP_UDP_STACK_BY_ORDINAL` for K8s endurance
+// A/B). Resolved at module-eval time so the Layer composition stays
+// static — AppConfig is provided to children of UdpLayer but isn't
+// available at layer-construction time.
+const resolvedSipUdpStack = resolveSipUdpStack()
+console.log(
+  `[startup] sipUdpStack=${resolvedSipUdpStack} ` +
+  `(SIP_UDP_STACK=${process.env["SIP_UDP_STACK"] ?? ""} ` +
+  `SIP_UDP_STACK_BY_ORDINAL=${process.env["SIP_UDP_STACK_BY_ORDINAL"] ?? ""} ` +
+  `POD_NAME=${process.env["POD_NAME"] ?? ""})`,
+)
+const SignalingNetworkLayer: Layer.Layer<SignalingNetwork> =
+  resolvedSipUdpStack === "native"
+    ? NativeSignalingNetwork.layer
+    : SignalingNetwork.real
+
 const UdpLayer = UdpTransport.layer.pipe(
   Layer.provide(AppConfigLayer),
   Layer.provide(MetricsRegistryLayer),
-  Layer.provide(SignalingNetwork.real)
+  Layer.provide(SignalingNetworkLayer)
 )
 
 // ---------------------------------------------------------------------------

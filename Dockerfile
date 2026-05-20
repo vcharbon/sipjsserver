@@ -14,6 +14,19 @@ COPY src/ ./src/
 COPY bin/ ./bin/
 RUN npm run build
 
+# Stage 1b: Native SIP parser (rvoip strict) compiled for musl so it
+# loads inside the alpine runtime. The local host build produces a
+# glibc .node which is incompatible with alpine's musl loader.
+FROM rust:1-alpine AS native-build
+RUN apk add --no-cache musl-dev
+WORKDIR /build
+COPY repos/rvoip ./repos/rvoip
+COPY native ./native
+WORKDIR /build/native/sip-parser
+# musl defaults to static linking; cdylib requires the dynamic crt.
+ENV RUSTFLAGS="-C target-feature=-crt-static"
+RUN cargo build --release
+
 # Stage 2: Runtime image (production deps only).
 FROM node:22-alpine
 WORKDIR /app
@@ -26,6 +39,10 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/dist-bin ./dist-bin
+COPY --chown=node:node native/sip-parser/index.cjs ./native/sip-parser/index.cjs
+COPY --from=native-build --chown=node:node \
+  /build/native/sip-parser/target/release/libsipjs_native_parser.so \
+  ./native/sip-parser/sipjs-native-parser.linux-x64-musl.node
 
 USER node
 

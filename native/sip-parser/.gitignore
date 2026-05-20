@@ -1,0 +1,11 @@
+# Cargo build directory — ~440 MB of compiled deps + intermediate
+# artifacts. Reproduced by `cargo build --release` from Cargo.toml +
+# Cargo.lock; never committed.
+/target/
+
+# Built native addons. The `index.cjs` loader resolves per-platform
+# `.node` files (linux-x64-gnu, linux-x64-musl, …) at runtime; they
+# are produced by the build pipeline (host: `cargo build --release`
+# + rename; Alpine: Docker cross-build). Committing host-built
+# binaries would mix platform artifacts with source.
+*.node

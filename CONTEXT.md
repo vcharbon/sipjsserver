@@ -148,6 +148,68 @@ The five gates an external new-dialog non-emergency INVITE traverses in order, t
 
 Emergency INVITEs skip gates 2, 3, 4, 5. In-dialog traffic skips gates 2, 3, 4. Internal (worker-originated) traffic skips gate 2.
 
+### SIP UDP stack
+
+The B2BUA ships two interchangeable implementations of the UDP transport
+layer — same `SignalingNetwork` service contract, same `UdpEndpoint` shape,
+same `Stream<UdpPacket>` semantics — selected per-process by env var.
+Both produce a `SipMessage` for downstream code; they differ in **where**
+the wire-level parse runs.
+
+**JS stack**:
+The legacy default. A Node `dgram` socket receives datagrams on the libuv
+main thread; the `preIngress` hook (Tier-1 brake) runs synchronously
+in-handler; accepted packets land in an Effect `Queue` with `parsed`
+unset; `TransactionLayer` then calls `SipParser.parse(raw)` (default
+`customParser` — a hand-written zero-regex TS state machine). Implemented
+in [src/sip/SignalingNetwork.ts](src/sip/SignalingNetwork.ts) as
+`SignalingNetwork.real`.
+
+**Native stack**:
+A Rust napi-rs addon owns the UDP socket. A tokio runtime runs the recv
+loop; `rvoip-sip-core` parses each datagram in strict mode inline; the
+result is dispatched to a JS callback via a `ThreadsafeFunction`. The JS
+callback runs the same ADR-0007 strict gates (`extractRequestFields` /
+`extractResponseFields`), materialises a `SipMessage`, and offers it
+into the Effect `Queue` with `UdpPacket.parsed` pre-set. `TransactionLayer`'s
+parse hop short-circuits when `parsed` is present. Native module in
+[native/sip-parser/](native/sip-parser/), Effect façade in
+[src/sip/NativeSignalingNetwork.ts](src/sip/NativeSignalingNetwork.ts).
+_Avoid_: "Rust parser" (overloaded — Phase 1 had a Rust adapter that
+kept the JS socket; the Phase 2 native stack owns the socket too).
+
+**Stack toggle**:
+The startup-time switch picking which stack a worker boots with. Resolved
+by `resolveSipUdpStack()` ([src/config/AppConfig.ts](src/config/AppConfig.ts)):
+explicit `SIP_UDP_STACK=js|native` wins, else
+`SIP_UDP_STACK_BY_ORDINAL=js,native` maps the worker's StatefulSet
+ordinal (`POD_NAME` → `b2bua-worker-N`) to a list index, else default
+`js`. Surfaced as `AppConfig.sipUdpStack`. The K8s endurance run uses
+the per-ordinal form so `b2bua-worker-0` and `-1` run different stacks
+side-by-side under the same load — see
+[docs/k8s-endurance.md](docs/k8s-endurance.md) § "SIP UDP stack A/B".
+_Avoid_: "stack flag" (it's not a feature flag — there is no on/off,
+just a choice between two production implementations).
+
+**Pre-parsed packet**:
+The Phase-2-only state where `UdpPacket.parsed` is set on emit, so
+`TransactionLayer` and any cooperating consumer skip
+`SipParser.parse(raw)`. The native stack always sets `parsed`; the JS
+stack never does (downstream parser path remains the source of truth
+for the JS pipeline). Defined in
+[src/sip/SignalingNetwork.ts](src/sip/SignalingNetwork.ts) `UdpPacket`
+type.
+
+**Tier-1 brake placement**:
+Gate 1 in the [Gate order](#gate-order) — UDP queue depth threshold —
+runs in `UdpTransport.preIngress` for both stacks today. The JS stack
+applies it pre-parse in the dgram handler; the native stack applies it
+post-parse in the JS-side TSFN callback (Phase 2A scope). Phase 2B
+will port the brake into Rust so the native stack applies it pre-parse
+identically to the JS stack. Brake metrics (`dropsTier1Brake`,
+`tier1RejectSent`) surface the same Prometheus labels regardless of
+stack.
+
 ### Abuse classes
 
 Four disjoint axes of bad input the B2BUA must survive. Each is defended by a different mechanism; tests live in different homes.

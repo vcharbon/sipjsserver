@@ -9,6 +9,7 @@
 import { jssipParser } from "../src/sip/parsers/jssip-adapter.js"
 import { sipParserNpm } from "../src/sip/parsers/sip-parser-adapter.js"
 import { customParser } from "../src/sip/parsers/custom/index.js"
+import { nativeParser } from "../src/sip/parsers/native-adapter.js"
 import type { SipParserImpl } from "../src/sip/parsers/interface.js"
 import { generateInvites, generateOKs, generateBYEs } from "./corpus.js"
 
@@ -99,7 +100,7 @@ console.log(`  Corpus: ${CORPUS_SIZE} unique messages per type`)
 console.log(`  GC available: ${typeof globalThis.gc === "function" ? "yes" : "no (run with --expose-gc for heap metrics)"}`)
 console.log()
 
-const parsers: SipParserImpl[] = [jssipParser, sipParserNpm, customParser]
+const parsers: SipParserImpl[] = [jssipParser, sipParserNpm, customParser, nativeParser]
 const corpora: Array<{ name: string; buffers: Buffer[] }> = [
   { name: "INVITE", buffers: generateInvites(CORPUS_SIZE) },
   { name: "200 OK", buffers: generateOKs(CORPUS_SIZE) },

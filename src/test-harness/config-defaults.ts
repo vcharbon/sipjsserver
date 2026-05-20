@@ -22,6 +22,7 @@ export function testAppConfigDefaults(overrides?: Partial<AppConfigData>): AppCo
   return {
     sipLocalIp: "127.0.0.1",
     sipLocalPort: 15060,
+    sipUdpStack: "js",
     workerServiceName: "b2bua-worker",
     redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
     limiterRedisUrl:
