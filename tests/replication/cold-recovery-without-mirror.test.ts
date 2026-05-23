@@ -27,6 +27,7 @@ import { Effect, MutableHashMap } from "effect"
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
 import { makeReplicationApply } from "../../src/replication/EchoApply.js"
 import type { DataFrame } from "../../src/replication/ReplicationProtocol.js"
+import { bodyBuf } from "../support/codecHelpers.js"
 import {
   KvBackend,
   type MemoryStoreEntry,
@@ -69,9 +70,11 @@ const frame = (
   callRef,
   body: op === "delete"
     ? null
-    : { _topology: { gen: topologyGen }, name: callRef },
+    : bodyBuf({ _topology: { gen: topologyGen }, name: callRef }),
   body_ttl_remaining_sec: op === "delete" ? 0 : 60,
   latency_ms: 0,
+  callGen: topologyGen,
+  indexes: [],
 })
 
 describe("apply path — no echo + update/delete crossing safety", () => {
@@ -103,21 +106,23 @@ describe("apply path — no echo + update/delete crossing safety", () => {
           op: "update",
           partition: "pri",
           callRef: "call-with-indexes",
-          body: {
+          body: bodyBuf({
             _topology: { gen: 1 },
             aLeg: { callId: "cid1", fromTag: "ftag1", dialogs: [] },
             bLegs: [],
-          },
+          }),
           body_ttl_remaining_sec: 60,
           latency_ms: 0,
+          callGen: 1,
+          indexes: ["leg:cid1|ftag1"],
         }
         yield* apply(seed)
         expect(
           yield* kv.bodyGet(`bak:${SOURCE}:call:call-with-indexes`),
         ).not.toBeNull()
-        expect(yield* kv.bodyGet(`idx:leg:cid1|ftag1`)).toBe(
-          "call-with-indexes",
-        )
+        expect(
+          (yield* kv.bodyGet(`idx:leg:cid1|ftag1`))?.toString("utf8"),
+        ).toBe("call-with-indexes")
 
         const tomb: DataFrame = {
           _tag: "Data",
@@ -129,6 +134,8 @@ describe("apply path — no echo + update/delete crossing safety", () => {
           body: null,
           body_ttl_remaining_sec: 0,
           latency_ms: 0,
+          callGen: 1,
+          indexes: ["leg:cid1|ftag1"],
         }
         yield* apply(tomb)
 

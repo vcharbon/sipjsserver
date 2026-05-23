@@ -41,8 +41,9 @@ describe("NS4 — reverse propagation (G7 path)", () => {
         entryGen: A.outgoing.gen,
         partition: "pri",
         callRef: "X",
-        bodyValue: '{"ver":"original","gen":31}',
+        bodyValue: Buffer.from('{"ver":"original","gen":31}'),
         bodyTtlSec: 60,
+        callGen: 31,
         indexes: [],
       })
       const bPuller = yield* forkPuller({ source: A, consumer: B })
@@ -60,8 +61,9 @@ describe("NS4 — reverse propagation (G7 path)", () => {
         entryGen: B.outgoing.gen,
         partition: "bak",
         callRef: "X",
-        bodyValue: '{"ver":"updated-by-backup","gen":32}',
+        bodyValue: Buffer.from('{"ver":"updated-by-backup","gen":32}'),
         bodyTtlSec: 60,
+        callGen: 32,
         indexes: [],
       })
 
@@ -86,7 +88,7 @@ describe("NS4 — reverse propagation (G7 path)", () => {
 
       // A's pri:{A}: now holds B's version.
       const recovered = yield* A.kv.bodyGet("pri:worker-A:call:X")
-      expect(recovered).toBe('{"ver":"updated-by-backup","gen":32}')
+      expect(recovered?.toString("utf8")).toBe('{"ver":"updated-by-backup","gen":32}')
 
       yield* aPuller.stop
     })

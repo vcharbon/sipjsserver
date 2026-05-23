@@ -510,12 +510,15 @@ export const buildDataFrame = (
 ): DataFrame | null => {
   const parts = parseMember(entry.member)
   if (parts === null) return null
-  // Decode the body once on the source side to extract callGen +
-  // indexes for the wire envelope. Commit 4 lifts these to a sidecar
-  // read so the source side no longer decodes either.
+  // callGen comes from the entry's `:gen` sidecar (read at pull time by
+  // channelPullBatch). When the sidecar is missing — pre-sidecar entries
+  // or a TTL race — we fall back to a body decode. The indexes still
+  // require a body decode (no `:idx` sidecar today); that decode also
+  // supplies the writtenAtMs latency_ms metric.
   const metadata = entry.body !== null ? extractBodyMetadata(entry.body) : null
   const writtenAtMs = metadata?.writtenAtMs ?? null
   const latency_ms = writtenAtMs !== null ? Math.max(0, nowMs - writtenAtMs) : 0
+  const callGen = entry.callGen ?? metadata?.callGen ?? 0
   return {
     _tag: "Data",
     gen: entry.entryGen,
@@ -526,7 +529,7 @@ export const buildDataFrame = (
     body: entry.body,
     body_ttl_remaining_sec: entry.body_ttl_remaining_sec,
     latency_ms,
-    callGen: metadata?.callGen ?? 0,
+    callGen,
     indexes: metadata?.indexes ?? [],
   }
 }

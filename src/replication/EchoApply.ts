@@ -51,9 +51,7 @@
  *     `idx:*` TTL out".
  */
 
-import { Effect, MutableHashMap, Option } from "effect"
-import { callIndexKeysFromUnknown } from "../call/CallModel.js"
-import { mpUnpack, stripStampedPrefix } from "../call/CallCodec.js"
+import { Effect } from "effect"
 import type { Partition } from "./ChannelIndex.js"
 import type { DataFrame } from "./ReplicationProtocol.js"
 import { KvBackend, type KvBackendApi, type KvError } from "../storage/KvBackend.js"
@@ -83,57 +81,7 @@ export interface ReplicationApplyConfig {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Extract the per-call content-version from a decoded body object.
- * Schema-tolerant: missing field, wrong type, or null body all map to
- * `-Infinity` so the apply gate succeeds (create-if-not-exist).
- *
- * Looks for `_topology.gen` first (set by `CallState.flushToRedis` on
- * every put), then top-level `callGen` (legacy compatibility). Strict
- * max so a body carrying both never regresses.
- */
-const extractCallGen = (body: unknown): number => {
-  if (body === null || typeof body !== "object") return Number.NEGATIVE_INFINITY
-  const obj = body as Record<string, unknown>
-  let max = Number.NEGATIVE_INFINITY
-  const topology = obj["_topology"]
-  if (topology !== null && typeof topology === "object") {
-    const tgen = (topology as Record<string, unknown>)["gen"]
-    if (typeof tgen === "number" && Number.isFinite(tgen)) {
-      if (tgen > max) max = tgen
-    }
-  }
-  const top = obj["callGen"]
-  if (typeof top === "number" && Number.isFinite(top)) {
-    if (top > max) max = top
-  }
-  return max
-}
-
-type IndexCache = MutableHashMap.MutableHashMap<string, ReadonlyArray<string>>
-
-const cacheKeyOf = (source: string, callRef: string): string =>
-  `${source}|${callRef}`
-
 const idxKey = (k: string): string => `idx:${k}`
-
-/**
- * Decode a body Buffer, dispatching between legacy JSON and msgpack on
- * the first byte (matches `CallCodec.decodeBodyAuto`'s logic — the
- * apply path needs the SAME auto-detect because the originator and
- * receiver may briefly run different codec versions during a rolling
- * upgrade).
- */
-const safeDecodeBody = (buf: Buffer): unknown => {
-  try {
-    if (buf.length > 0 && buf[0] === 0x7b) {
-      return JSON.parse(buf.toString("utf8"))
-    }
-    return mpUnpack(stripStampedPrefix(buf))
-  } catch {
-    return null
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Public factory
@@ -142,11 +90,6 @@ const safeDecodeBody = (buf: Buffer): unknown => {
 export const makeReplicationApply = (
   config: ReplicationApplyConfig,
 ): ((frame: DataFrame) => Effect.Effect<void, KvError>) => {
-  const indexCache: IndexCache = MutableHashMap.empty<
-    string,
-    ReadonlyArray<string>
-  >()
-
   return (frame) =>
     Effect.gen(function* () {
       const targetPartition: Partition =
@@ -164,86 +107,56 @@ export const makeReplicationApply = (
         // reaches this peer (from the originator); there is no
         // crossing-tombstone scenario to mediate.
         //
-        // Body + indexes are DEL'd ATOMICALLY in one exclusive section.
-        // Sequential `bodyDel`s would cycle the per-store mutex and
-        // open a window where the SIP hot path observes a deleted body
-        // but lingering idx entries (or vice-versa) and 481s an in-
-        // flight call — see `applyReplicaDelete` rationale in
-        // src/storage/KvBackend.ts.
-        const cached = MutableHashMap.get(
-          indexCache,
-          cacheKeyOf(config.source, frame.callRef),
-        )
-        const indexesToRemove = Option.isSome(cached) ? cached.value : []
+        // Body + sidecar + indexes are DEL'd ATOMICALLY in one
+        // exclusive section. Indexes come from frame.indexes — the
+        // originator stamps them on both UPDATE and DELETE so the peer
+        // does not need a per-call cache to know which idx:* keys to
+        // remove.
         yield* config.localKv.applyReplicaDelete({
           bodyKey: targetBodyKey,
-          indexKeys: indexesToRemove.map(idxKey),
+          indexKeys: frame.indexes.map(idxKey),
         })
-        MutableHashMap.remove(
-          indexCache,
-          cacheKeyOf(config.source, frame.callRef),
-        )
         return
       }
 
       // ---- UPDATE path -------------------------------------------------
-      // Per-call content gate (UPDATE only).
-      const localBodyRaw = yield* config.localKv.bodyGet(targetBodyKey)
-      const localCallGen =
-        localBodyRaw === null
-          ? Number.NEGATIVE_INFINITY
-          : extractCallGen(safeDecodeBody(localBodyRaw))
-      // The incoming frame body is the originator's raw msgpack bytes;
-      // unpack once for the apply gate + index derivation. The raw
-      // Buffer is what we write to local storage — no re-encoding.
-      if (frame.body === null) {
-        return
-      }
-      const decodedBody = safeDecodeBody(frame.body)
-      const incomingCallGen = extractCallGen(decodedBody)
+      // Per-call content gate (UPDATE only). Read the local callGen from
+      // the 4-byte sidecar key — the body is NEVER decoded on this path
+      // post-opaque-apply.
+      const sidecarRaw = yield* config.localKv.bodyGet(
+        KvBackend.bodyGenSidecarKey(targetBodyKey),
+      )
+      const localCallGen = KvBackend.decodeCallGenSidecar(sidecarRaw)
+      const incomingCallGen = frame.callGen
       if (
-        localBodyRaw !== null &&
-        Number.isFinite(localCallGen) &&
+        localCallGen !== null &&
         Number.isFinite(incomingCallGen) &&
         incomingCallGen <= localCallGen
       ) {
         return
       }
 
-      const derivedIndexes = callIndexKeysFromUnknown(decodedBody)
       const bodyTtlSec =
         frame.body_ttl_remaining_sec > 0
           ? frame.body_ttl_remaining_sec
           : config.bodyTtlSec
-      // Body + indexes set ATOMICALLY (see applyReplicaUpdate rationale
-      // in src/storage/KvBackend.ts — the SIP hot path's
+      // Body + sidecar + indexes set ATOMICALLY (see applyReplicaUpdate
+      // rationale in src/storage/KvBackend.ts — the SIP hot path's
       // `resolveFromSipKey` requires body and indexes to be visible
       // together). The bodyValue is the originator's bytes passed
       // through opaquely so the local copy is bit-for-bit identical to
       // the source.
-      // Commit 2: the per-call callGen sidecar is now written alongside
-      // the body. We extract callGen from the decoded body here as a
-      // transitional measure — commit 4 will pull it from `frame.callGen`
-      // and remove the body decode entirely.
-      const sidecarCallGen = Number.isFinite(incomingCallGen)
-        ? Math.max(0, incomingCallGen)
-        : 0
       yield* config.localKv.applyReplicaUpdate({
         bodyKey: targetBodyKey,
         bodyValue: frame.body,
         bodyTtlSec,
-        callGen: sidecarCallGen,
-        indexes: derivedIndexes.map((k) => ({
+        callGen: Math.max(0, incomingCallGen),
+        indexes: frame.indexes.map((k) => ({
           key: idxKey(k),
           value: frame.callRef,
           ttlSec: bodyTtlSec,
         })),
       })
-      MutableHashMap.set(
-        indexCache,
-        cacheKeyOf(config.source, frame.callRef),
-        derivedIndexes,
-      )
     })
 }
 

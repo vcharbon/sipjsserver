@@ -40,8 +40,9 @@ describe("T6 — reverse propagation under brief primary unavailability", () => 
           entryGen: A.outgoing.gen,
           partition: "pri",
           callRef: "X",
-          bodyValue: '{"ver":"v0","gen":81}',
+          bodyValue: Buffer.from('{"ver":"v0","gen":81}'),
           bodyTtlSec: 60,
+          callGen: 81,
           indexes: [],
         })
 
@@ -64,14 +65,15 @@ describe("T6 — reverse propagation under brief primary unavailability", () => 
           entryGen: B.outgoing.gen,
           partition: "bak",
           callRef: "X",
-          bodyValue: '{"ver":"v1-by-backup","gen":82}',
+          bodyValue: Buffer.from('{"ver":"v1-by-backup","gen":82}'),
           bodyTtlSec: 60,
+          callGen: 82,
           indexes: [],
         })
 
         // Sanity: A's pri:{A}:call:X is still v0 — A hasn't pulled yet.
         const beforeRecovery = yield* A.kv.bodyGet("pri:worker-A:call:X")
-        expect(beforeRecovery).toBe('{"ver":"v0","gen":81}')
+        expect(beforeRecovery?.toString("utf8")).toBe('{"ver":"v0","gen":81}')
 
         // A recovers — re-fork its puller. Resume from (0, 0) since
         // we discarded the prior view; in a real supervisor reconcile
@@ -86,7 +88,7 @@ describe("T6 — reverse propagation under brief primary unavailability", () => 
 
         // A's pri:{A}:call:X now holds the version B wrote during A's outage.
         const afterRecovery = yield* A.kv.bodyGet("pri:worker-A:call:X")
-        expect(afterRecovery).toBe('{"ver":"v1-by-backup","gen":82}')
+        expect(afterRecovery?.toString("utf8")).toBe('{"ver":"v1-by-backup","gen":82}')
 
         yield* bPuller.stop
         yield* aPullerRecovered.stop

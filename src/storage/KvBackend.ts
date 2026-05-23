@@ -77,6 +77,13 @@ export interface PulledEntry {
    */
   readonly body: Buffer | null
   readonly body_ttl_remaining_sec: number
+  /**
+   * Per-call content version read from the `${bodyKey}:gen` sidecar at
+   * pull time. `null` when the sidecar key is missing (pre-sidecar
+   * entries; sidecar TTL'd before pull). Callers fall back to body
+   * decode or `0` when null.
+   */
+  readonly callGen: number | null
 }
 
 export interface ChannelPullResult {
@@ -480,9 +487,9 @@ return counter
    * Atomic batched pull across all buckets of a channel, lex-ordered
    * by `(entryGen, counter)`. Walks per-bucket sorted sets in
    * ascending entryGen order. For each entry returns
-   * `[entryGen, counter, member, body, bodyTtlMs]` so the wire layer
-   * can stamp per-entry gen and the receiver can preserve the body's
-   * remaining TTL.
+   * `[entryGen, counter, member, body, bodyTtlMs, callGenSidecar]`
+   * so the wire layer can stamp per-entry gen + callGen and the
+   * receiver can preserve the body's remaining TTL.
    *
    * KEYS = [counterKeyBase, channelBase, bucketsSetKey]
    * ARGV = [sinceGen, sinceCounter, limit, prefixWithColon]
@@ -491,12 +498,15 @@ return counter
    *     prefixed bodyKey from the unprefixed bodyKey suffix encoded in
    *     each ZSET member.
    * Returns: [headGen, headCounter,
-   *           entryGen1, counter1, member1, body1, bodyTtlMs1,
-   *           entryGen2, counter2, member2, body2, bodyTtlMs2, ...]
+   *           entryGen1, counter1, member1, body1, bodyTtlMs1, callGenSidecar1,
+   *           entryGen2, counter2, member2, body2, bodyTtlMs2, callGenSidecar2,
+   *           ...]
    *   - body* may be `false` (Redis-nil) when the body has been DEL'd or
    *     TTL'd between write and pull. The caller maps false → null.
    *   - bodyTtlMs* is the body's PTTL (ms remaining) or 0 when missing
    *     / no-expire. The caller divides by 1000 and ceils to seconds.
+   *   - callGenSidecar* is the 4-byte BE Buffer at `${bodyKey}:gen` or
+   *     `false` when missing.
    */
   static readonly CHANNEL_PULL_BATCH_LUA = `
 local sinceGen = tonumber(ARGV[1])
@@ -551,11 +561,13 @@ for _, g in ipairs(gens) do
       else
         pttl = 0
       end
+      local callGenSidecar = redis.call("GET", prefixedBodyKey .. ":gen")
       table.insert(response, g)
       table.insert(response, score)
       table.insert(response, member)
       table.insert(response, body)
       table.insert(response, pttl)
+      table.insert(response, callGenSidecar)
       emitted = emitted + 1
       i = i + 2
     end
@@ -986,12 +998,22 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
               live === null
                 ? 0
                 : Math.max(0, Math.ceil((live.expiresAtMs - ms) / 1000))
+            const sidecarEntry = liveEntry(
+              store,
+              KvBackend.bodyGenSidecarKey(bodyKey),
+              ms,
+            )
+            const callGen =
+              sidecarEntry !== null
+                ? KvBackend.decodeCallGenSidecar(asBuffer(sidecarEntry.value))
+                : null
             entries.push({
               member,
               entryGen,
               score,
               body: live === null ? null : asBuffer(live.value),
               body_ttl_remaining_sec,
+              callGen,
             })
           }
           if (entries.length >= args.limit) break
@@ -1064,13 +1086,14 @@ const decodePullBatchResult = (raw: unknown): ChannelPullResult => {
   }
   const entries: Array<PulledEntry> = []
   let i = 2
-  while (i + 4 < raw.length + 1) {
-    if (i + 4 >= raw.length + 1) break
+  const stride = 6 // [entryGen, counter, member, body, bodyTtlMs, callGenSidecar]
+  while (i + stride - 1 < raw.length) {
     const entryGen = cellToNumber(raw[i])
     const score = cellToNumber(raw[i + 1])
     const member = cellToString(raw[i + 2])
     const bodyCell = raw[i + 3]
     const bodyTtlMs = cellToNumber(raw[i + 4])
+    const sidecarCell = raw[i + 5]
     if (entryGen === null || score === null || member === null) {
       // Malformed payload — should never happen with our Lua; fail loudly
       // rather than silently swallow.
@@ -1088,14 +1111,21 @@ const decodePullBatchResult = (raw: unknown): ChannelPullResult => {
       : typeof bodyCell === "string"
         ? Buffer.from(bodyCell)
         : null
+    const sidecarBuf: Buffer | null = Buffer.isBuffer(sidecarCell)
+      ? sidecarCell
+      : typeof sidecarCell === "string"
+        ? Buffer.from(sidecarCell)
+        : null
+    const callGen = KvBackend.decodeCallGenSidecar(sidecarBuf)
     entries.push({
       member,
       entryGen,
       score,
       body,
       body_ttl_remaining_sec,
+      callGen,
     })
-    i += 5
+    i += stride
   }
   return { entries, head }
 }
