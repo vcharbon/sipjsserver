@@ -40,6 +40,23 @@ import {
 } from "effect"
 import type { HttpClient } from "effect/unstable/http"
 import { callIndexKeysFromUnknown } from "../call/CallModel.js"
+import { mpUnpack, stripStampedPrefix } from "../call/CallCodec.js"
+
+/**
+ * Decode a body Buffer (legacy JSON or msgpack via first-byte dispatch).
+ * Decode failure returns `null` so the bootstrap apply path treats the
+ * entry as un-indexable — better than crashing the bootstrap loop.
+ */
+const safeDecodeBody = (buf: Buffer): unknown => {
+  try {
+    if (buf.length > 0 && buf[0] === 0x7b) {
+      return JSON.parse(buf.toString("utf8"))
+    }
+    return mpUnpack(stripStampedPrefix(buf))
+  } catch {
+    return null
+  }
+}
 import type { PeerEndpointResolverApi } from "../cache/PeerEndpointResolver.js"
 import type { WorkerOrdinal } from "../cache/PeerCachePort.js"
 import type { KvBackendApi } from "../storage/KvBackend.js"
@@ -415,18 +432,13 @@ const scanEntryToDataFrame = (entry: ScanEntry): DataFrame => ({
   op: "create",
   partition: "pri",
   callRef: entry.callRef,
-  body: safeParseJsonValue(entry.json),
+  // Body passes through opaquely — the bootstrap apply path writes
+  // the same bytes to local storage without re-encoding. The applier
+  // unpacks once for index derivation only.
+  body: entry.body,
   body_ttl_remaining_sec: entry.ttlSec,
   latency_ms: 0,
 })
-
-const safeParseJsonValue = (raw: string): unknown => {
-  try {
-    return JSON.parse(raw) as unknown
-  } catch {
-    return null
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Bootstrap metrics state — allocates counter maps + the
@@ -501,11 +513,29 @@ const applyBootstrapEntry = (
       ? frame.body_ttl_remaining_sec
       : ctx.fallbackBodyTtlSec
   const bodyKey = `pri:${ctx.self}:call:${frame.callRef}`
-  const derivedIndexes = callIndexKeysFromUnknown(frame.body)
+  // Unpack once for index derivation; the raw msgpack bytes
+  // (`frame.body`) are what we persist locally so the bootstrapped
+  // copy is bit-for-bit identical to the source peer's body.
+  const decoded = safeDecodeBody(frame.body)
+  const derivedIndexes = callIndexKeysFromUnknown(decoded)
+  // Extract callGen from the decoded body to populate the sidecar;
+  // commit 4 will let the frame carry it directly.
+  const decodedTopologyGen =
+    decoded !== null &&
+    typeof decoded === "object" &&
+    decoded !== null &&
+    typeof (decoded as { _topology?: { gen?: unknown } })._topology === "object"
+      ? (decoded as { _topology?: { gen?: unknown } })._topology?.gen
+      : undefined
+  const callGen =
+    typeof decodedTopologyGen === "number" && Number.isFinite(decodedTopologyGen)
+      ? Math.max(0, decodedTopologyGen)
+      : 0
   return ctx.kv.applyReplicaUpdate({
     bodyKey,
-    bodyValue: JSON.stringify(frame.body),
+    bodyValue: frame.body,
     bodyTtlSec,
+    callGen,
     indexes: derivedIndexes.map((k) => ({
       key: `idx:${k}`,
       value: frame.callRef,

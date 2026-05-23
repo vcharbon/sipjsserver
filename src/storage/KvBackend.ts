@@ -69,7 +69,13 @@ export interface PulledEntry {
   readonly member: string
   readonly entryGen: number
   readonly score: number
-  readonly body: string | null
+  /**
+   * Raw body bytes, or `null` when the body slot has TTL'd / been DEL'd
+   * between the channel write and the pull. msgpackr-encoded after the
+   * codec migration (see `src/call/CallCodec.ts`); callers decode via
+   * `decodeBodyAuto` for rolling-upgrade-safe parsing.
+   */
+  readonly body: Buffer | null
   readonly body_ttl_remaining_sec: number
 }
 
@@ -109,8 +115,16 @@ export interface ChannelWriteUpdateArgs {
   readonly entryGen: number
   readonly member: string
   readonly bodyKey: string
-  readonly bodyValue: string
+  /** msgpack-encoded body bytes — passed opaquely to Redis (SETEX accepts binary). */
+  readonly bodyValue: Buffer
   readonly bodyTtlSec: number
+  /**
+   * Per-call content version (`_topology.gen` at flush time). Written
+   * atomically to the `${bodyKey}:gen` sidecar key alongside the body
+   * so the peer's apply path can read it without decoding the body.
+   * Dead-weight today (commit 4 wires the read side).
+   */
+  readonly callGen: number
   readonly indexes: ReadonlyArray<IndexWrite>
 }
 
@@ -145,7 +159,7 @@ export interface ChannelPullBatchArgs {
 export interface KvBackendApi {
   // ---- Body store --------------------------------------------------------
 
-  readonly bodyGet: (key: string) => Effect.Effect<string | null, KvError>
+  readonly bodyGet: (key: string) => Effect.Effect<Buffer | null, KvError>
   /**
    * Direct body write WITHOUT bumping any propagate channel. Used by
    * the puller's apply path: a frame that arrived via replication
@@ -160,13 +174,13 @@ export interface KvBackendApi {
    */
   readonly bodySet: (
     key: string,
-    value: string,
+    value: Buffer,
     ttlSec: number
   ) => Effect.Effect<void, KvError>
   readonly bodyDel: (key: string) => Effect.Effect<void, KvError>
   readonly bodyMget: (
     keys: ReadonlyArray<string>
-  ) => Effect.Effect<ReadonlyArray<string | null>, KvError>
+  ) => Effect.Effect<ReadonlyArray<Buffer | null>, KvError>
 
   /**
    * Atomic local apply for the replication puller — SET body + SET
@@ -185,8 +199,10 @@ export interface KvBackendApi {
    */
   readonly applyReplicaUpdate: (args: {
     readonly bodyKey: string
-    readonly bodyValue: string
+    readonly bodyValue: Buffer
     readonly bodyTtlSec: number
+    /** Per-call content version — see ChannelWriteUpdateArgs.callGen. */
+    readonly callGen: number
     readonly indexes: ReadonlyArray<IndexWrite>
   }) => Effect.Effect<void, KvError>
 
@@ -300,6 +316,34 @@ export class KvBackend extends ServiceMap.Service<KvBackend, KvBackendApi>()(
   }
 
   /**
+   * Per-call `:gen` sidecar key — holds a 4-byte BE callGen alongside
+   * the body so the peer apply path can read callGen without decoding
+   * the body. Written atomically with the body, DEL'd alongside it.
+   */
+  static readonly bodyGenSidecarKey = (bodyKey: string): string =>
+    `${bodyKey}:gen`
+
+  /** Encode a callGen as the 4-byte BE Buffer stored in the sidecar. */
+  static readonly encodeCallGenSidecar = (callGen: number): Buffer => {
+    const b = Buffer.allocUnsafe(4)
+    // callGen is `_topology.gen`, a small integer that increments per
+    // flush. Mod 2^32 covers ~136 years at 1 flush/sec; safe.
+    b.writeUInt32BE(callGen >>> 0, 0)
+    return b
+  }
+
+  /**
+   * Decode a 4-byte BE Buffer from the sidecar. Returns `null` for
+   * wrong-length / missing input — callers gate on null.
+   */
+  static readonly decodeCallGenSidecar = (
+    buf: Buffer | null,
+  ): number | null => {
+    if (buf === null || buf.length !== 4) return null
+    return buf.readUInt32BE(0)
+  }
+
+  /**
    * Memory backend — single mutex around a `MutableHashMap`. Equivalent
    * atomicity to a Redis Lua script for the purposes of test parity.
    *
@@ -333,16 +377,16 @@ export class KvBackend extends ServiceMap.Service<KvBackend, KvBackendApi>()(
   // -----------------------------------------------------------------------
 
   /**
-   * Atomic write of (counter+1, body, indexes, ZADD member). Per
-   * Story 7d the channel is partitioned into per-`entryGen` buckets;
-   * this Lua derives the bucket-scoped sorted-set key and counter
-   * key from the base names by appending `:gen:{entryGen}`. The
+   * Atomic write of (counter+1, body, callGen-sidecar, indexes, ZADD member).
+   * Per Story 7d the channel is partitioned into per-`entryGen` buckets;
+   * this Lua derives the bucket-scoped sorted-set key and counter key
+   * from the base names by appending `:gen:{entryGen}`. The
    * bucket-membership marker (`gens:{channel}` SADD) makes the pull
    * script's bucket enumeration cheap.
    *
    * KEYS = [counterKeyBase, channelBase, bucketsSetKey, bodyKey, idx1, idx2, ...]
-   * ARGV = [entryGen, member, bodyValue, bodyTtlSec, idxCount,
-   *         idxValue1, idxTtl1, idxValue2, idxTtl2, ...]
+   * ARGV = [entryGen, member, bodyValue, bodyTtlSec, callGenSidecar,
+   *         idxCount, idxValue1, idxTtl1, idxValue2, idxTtl2, ...]
    * Returns: counter (integer) — within the entryGen bucket
    */
   static readonly CHANNEL_WRITE_UPDATE_LUA = `
@@ -351,12 +395,14 @@ local bucketCounterKey = KEYS[1] .. ":gen:" .. entryGen
 local bucketChannelKey = KEYS[2] .. ":gen:" .. entryGen
 local counter = redis.call("INCR", bucketCounterKey)
 redis.call("SADD", KEYS[3], entryGen)
-redis.call("SETEX", KEYS[4], tonumber(ARGV[4]), ARGV[3])
-local idxCount = tonumber(ARGV[5])
+local bodyTtl = tonumber(ARGV[4])
+redis.call("SETEX", KEYS[4], bodyTtl, ARGV[3])
+redis.call("SETEX", KEYS[4] .. ":gen", bodyTtl, ARGV[5])
+local idxCount = tonumber(ARGV[6])
 for i = 1, idxCount do
   local key = KEYS[4 + i]
-  local val = ARGV[5 + (i - 1) * 2 + 1]
-  local ttl = tonumber(ARGV[5 + (i - 1) * 2 + 2])
+  local val = ARGV[6 + (i - 1) * 2 + 1]
+  local ttl = tonumber(ARGV[6 + (i - 1) * 2 + 2])
   redis.call("SETEX", key, ttl, val)
 end
 redis.call("ZADD", bucketChannelKey, counter, ARGV[2])
@@ -374,20 +420,24 @@ return counter
    */
   /**
    * Atomic local apply for the replication puller — SETEX body +
-   * SETEX each index, no channel side effect. Matches the in-memory
-   * backend's `applyReplicaUpdate` exclusive() block.
+   * SETEX callGen-sidecar + SETEX each index, no channel side
+   * effect. Matches the in-memory backend's `applyReplicaUpdate`
+   * exclusive() block.
    *
    * KEYS = [bodyKey, idx1, idx2, ...]
-   * ARGV = [bodyValue, bodyTtlSec, idxCount, idxVal1, idxTtl1, idxVal2, idxTtl2, ...]
+   * ARGV = [bodyValue, bodyTtlSec, callGenSidecar,
+   *         idxCount, idxVal1, idxTtl1, idxVal2, idxTtl2, ...]
    * Returns: nothing meaningful.
    */
   static readonly APPLY_REPLICA_UPDATE_LUA = `
-redis.call("SETEX", KEYS[1], tonumber(ARGV[2]), ARGV[1])
-local idxCount = tonumber(ARGV[3])
+local bodyTtl = tonumber(ARGV[2])
+redis.call("SETEX", KEYS[1], bodyTtl, ARGV[1])
+redis.call("SETEX", KEYS[1] .. ":gen", bodyTtl, ARGV[3])
+local idxCount = tonumber(ARGV[4])
 for i = 1, idxCount do
   local k = KEYS[1 + i]
-  local v = ARGV[3 + (i - 1) * 2 + 1]
-  local t = tonumber(ARGV[3 + (i - 1) * 2 + 2])
+  local v = ARGV[4 + (i - 1) * 2 + 1]
+  local t = tonumber(ARGV[4 + (i - 1) * 2 + 2])
   redis.call("SETEX", k, t, v)
 end
 return 1
@@ -395,13 +445,16 @@ return 1
 
   /**
    * Atomic local delete for the replication puller — DEL body + DEL
-   * each named index.
+   * sidecar + DEL each named index. The sidecar key is derived from
+   * the body key by appending ":gen".
    *
    * KEYS = [bodyKey, idx1, idx2, ...]
    * ARGV = []
    */
   static readonly APPLY_REPLICA_DELETE_LUA = `
-for i = 1, #KEYS do
+redis.call("DEL", KEYS[1])
+redis.call("DEL", KEYS[1] .. ":gen")
+for i = 2, #KEYS do
   redis.call("DEL", KEYS[i])
 end
 return 1
@@ -414,6 +467,7 @@ local bucketChannelKey = KEYS[2] .. ":gen:" .. entryGen
 local counter = redis.call("INCR", bucketCounterKey)
 redis.call("SADD", KEYS[3], entryGen)
 redis.call("DEL", KEYS[4])
+redis.call("DEL", KEYS[4] .. ":gen")
 local removeCount = tonumber(ARGV[3])
 for i = 1, removeCount do
   redis.call("DEL", KEYS[4 + i])
@@ -551,12 +605,15 @@ return response
 // ---------------------------------------------------------------------------
 
 /**
- * Shape of an in-memory entry. Bodies and indexes use the `value` field
- * directly. The `propagate:{...}` channel is a single composite entry whose
- * `value` is a JSON-encoded sorted view (see `ChannelView`).
+ * Shape of an in-memory entry. The `value` is `string | Buffer` because
+ * the same store holds both string-valued slots (index entries, counter
+ * keys serialised as `String(n)`) and binary-valued slots (msgpack-
+ * encoded call bodies). Counter helpers always read/write strings;
+ * body helpers always read/write Buffers. The union avoids splitting
+ * the store into two maps with disjoint key spaces.
  */
 export interface MemoryStoreEntry {
-  readonly value: string
+  readonly value: string | Buffer
   readonly expiresAtMs: number
 }
 
@@ -628,11 +685,19 @@ const liveEntry = (
 const setEntry = (
   store: MemoryStore,
   key: string,
-  value: string,
+  value: string | Buffer,
   expiresAtMs: number
 ): void => {
   MutableHashMap.set(store, key, { value, expiresAtMs })
 }
+
+/** Coerce a stored entry's value to a Buffer for body-read paths. */
+const asBuffer = (v: string | Buffer): Buffer =>
+  Buffer.isBuffer(v) ? v : Buffer.from(v)
+
+/** Coerce a stored entry's value to a string for index-/counter-read paths. */
+const asString = (v: string | Buffer): string =>
+  Buffer.isBuffer(v) ? v.toString("utf8") : v
 
 const removeEntry = (store: MemoryStore, key: string): void => {
   MutableHashMap.remove(store, key)
@@ -701,7 +766,7 @@ const incrCounter = (
   nowMs: number
 ): number => {
   const live = liveEntry(store, key, nowMs)
-  const next = live === null ? 1 : Number(live.value) + 1
+  const next = live === null ? 1 : Number(asString(live.value)) + 1
   setEntry(store, key, String(next), NO_EXPIRY_MS)
   return next
 }
@@ -713,7 +778,7 @@ const readCounter = (
 ): number => {
   const live = liveEntry(store, key, nowMs)
   if (live === null) return 0
-  const n = Number(live.value)
+  const n = Number(asString(live.value))
   return Number.isFinite(n) && n > 0 ? n : 0
 }
 
@@ -752,7 +817,7 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
       Effect.gen(function* () {
         const ms = yield* nowMs
         const live = liveEntry(store, key, ms)
-        return live === null ? null : live.value
+        return live === null ? null : asBuffer(live.value)
       })
     )
 
@@ -763,10 +828,10 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
     exclusive(
       Effect.gen(function* () {
         const ms = yield* nowMs
-        const out: Array<string | null> = []
+        const out: Array<Buffer | null> = []
         for (const k of keys) {
           const live = liveEntry(store, k, ms)
-          out.push(live === null ? null : live.value)
+          out.push(live === null ? null : asBuffer(live.value))
         }
         return out
       })
@@ -776,8 +841,15 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
     exclusive(
       Effect.gen(function* () {
         const ms = yield* nowMs
+        const expiresAtMs = ms + args.bodyTtlSec * 1000
         yield* Effect.sync(() => {
-          setEntry(store, args.bodyKey, args.bodyValue, ms + args.bodyTtlSec * 1000)
+          setEntry(store, args.bodyKey, args.bodyValue, expiresAtMs)
+          setEntry(
+            store,
+            KvBackend.bodyGenSidecarKey(args.bodyKey),
+            KvBackend.encodeCallGenSidecar(args.callGen),
+            expiresAtMs,
+          )
           for (const idx of args.indexes) {
             setEntry(store, idx.key, idx.value, ms + idx.ttlSec * 1000)
           }
@@ -789,6 +861,7 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
     exclusive(
       Effect.sync(() => {
         removeEntry(store, args.bodyKey)
+        removeEntry(store, KvBackend.bodyGenSidecarKey(args.bodyKey))
         for (const idx of args.indexKeys) {
           removeEntry(store, idx)
         }
@@ -816,7 +889,14 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
             bucketCounterKeyOf(args.counterKey, args.entryGen),
             ms
           )
-          setEntry(store, args.bodyKey, args.bodyValue, ms + args.bodyTtlSec * 1000)
+          const bodyExpiresAtMs = ms + args.bodyTtlSec * 1000
+          setEntry(store, args.bodyKey, args.bodyValue, bodyExpiresAtMs)
+          setEntry(
+            store,
+            KvBackend.bodyGenSidecarKey(args.bodyKey),
+            KvBackend.encodeCallGenSidecar(args.callGen),
+            bodyExpiresAtMs,
+          )
           for (const idx of args.indexes) {
             setEntry(store, idx.key, idx.value, ms + idx.ttlSec * 1000)
           }
@@ -848,6 +928,7 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
           // `channelPullBatch`; that maps cleanly to "delete" in
           // `EchoApply` without any tombstone-aware decode.
           removeEntry(store, args.bodyKey)
+          removeEntry(store, KvBackend.bodyGenSidecarKey(args.bodyKey))
           for (const idxKey of args.indexesToRemove) {
             removeEntry(store, idxKey)
           }
@@ -909,7 +990,7 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
               member,
               entryGen,
               score,
-              body: live === null ? null : live.value,
+              body: live === null ? null : asBuffer(live.value),
               body_ttl_remaining_sec,
             })
           }
@@ -946,34 +1027,51 @@ const makeMemoryUnsafe = (store: MemoryStore): KvBackendApi => {
 const wrapRedisErr = (err: { reason: string }): KvError =>
   new KvError({ reason: err.reason })
 
+/** Coerce a Lua-array cell (Buffer when read via evalBuffer) to string. */
+const cellToString = (cell: unknown): string | null => {
+  if (Buffer.isBuffer(cell)) return cell.toString("utf8")
+  if (typeof cell === "string") return cell
+  return null
+}
+
+/** Coerce a Lua-array cell to a finite number, handling Buffer/string/number. */
+const cellToNumber = (cell: unknown): number | null => {
+  if (typeof cell === "number" && Number.isFinite(cell)) return cell
+  if (Buffer.isBuffer(cell)) {
+    const n = Number(cell.toString("utf8"))
+    return Number.isFinite(n) ? n : null
+  }
+  const n = Number(cell)
+  return Number.isFinite(n) ? n : null
+}
+
 /**
  * Decode the
  * `[headGen, headCounter, entryGen1, counter1, member1, body1, bodyTtlMs1, ...]`
- * payload returned by CHANNEL_PULL_BATCH_LUA into a typed result.
- *
- * `body` arrives as `string` for an existing key, or `false` (Redis-nil)
- * for a missing one — we normalize the latter to `null` so callers see a
- * consistent type regardless of backend. `bodyTtlMs` is an integer ≥ 0;
- * we ceil to seconds to match the memory backend's `expiresAtMs` math.
+ * payload returned by CHANNEL_PULL_BATCH_LUA (via `evalBuffer`) into a
+ * typed result. `evalBuffer` returns every string cell as a Buffer; the
+ * coercion helpers above normalise non-body cells back to number/string,
+ * leaving only the body slot as a Buffer (or `null` when the body has
+ * TTL'd / been DEL'd between channel write and pull).
  */
 const decodePullBatchResult = (raw: unknown): ChannelPullResult => {
   if (!Array.isArray(raw) || raw.length < 2) {
     return { entries: [], head: { gen: 0, counter: 0 } }
   }
   const head = {
-    gen: toFiniteNumber(raw[0]) ?? 0,
-    counter: toFiniteNumber(raw[1]) ?? 0,
+    gen: cellToNumber(raw[0]) ?? 0,
+    counter: cellToNumber(raw[1]) ?? 0,
   }
   const entries: Array<PulledEntry> = []
   let i = 2
   while (i + 4 < raw.length + 1) {
     if (i + 4 >= raw.length + 1) break
-    const entryGen = toFiniteNumber(raw[i])
-    const score = toFiniteNumber(raw[i + 1])
-    const member = raw[i + 2]
-    const body = raw[i + 3]
-    const bodyTtlMs = toFiniteNumber(raw[i + 4])
-    if (entryGen === null || score === null || typeof member !== "string") {
+    const entryGen = cellToNumber(raw[i])
+    const score = cellToNumber(raw[i + 1])
+    const member = cellToString(raw[i + 2])
+    const bodyCell = raw[i + 3]
+    const bodyTtlMs = cellToNumber(raw[i + 4])
+    if (entryGen === null || score === null || member === null) {
       // Malformed payload — should never happen with our Lua; fail loudly
       // rather than silently swallow.
       break
@@ -981,11 +1079,20 @@ const decodePullBatchResult = (raw: unknown): ChannelPullResult => {
     const body_ttl_remaining_sec = bodyTtlMs !== null && bodyTtlMs > 0
       ? Math.max(0, Math.ceil(bodyTtlMs / 1000))
       : 0
+    // Lua nil bodies arrive as `null`/`undefined` via evalBuffer (Redis-nil →
+    // JS null). Buffer body is the post-migration shape; we also accept a
+    // string body as legacy compat in case the Lua script renders a non-
+    // binary slot (defensive — should never happen in practice).
+    const body: Buffer | null = Buffer.isBuffer(bodyCell)
+      ? bodyCell
+      : typeof bodyCell === "string"
+        ? Buffer.from(bodyCell)
+        : null
     entries.push({
       member,
       entryGen,
       score,
-      body: typeof body === "string" ? body : null,
+      body,
       body_ttl_remaining_sec,
     })
     i += 5
@@ -1011,10 +1118,10 @@ const makeRedisKv = (
   prefixWithColon: string
 ): KvBackendApi => {
   const bodyGet: KvBackendApi["bodyGet"] = (key) =>
-    redis.get(key).pipe(Effect.mapError(wrapRedisErr))
+    redis.getBuffer(key).pipe(Effect.mapError(wrapRedisErr))
 
   const bodySet: KvBackendApi["bodySet"] = (key, value, ttlSec) =>
-    redis.setex(key, ttlSec, value).pipe(Effect.mapError(wrapRedisErr))
+    redis.setexBuffer(key, ttlSec, value).pipe(Effect.mapError(wrapRedisErr))
 
   const bodyDel: KvBackendApi["bodyDel"] = (key) =>
     redis.del(key).pipe(Effect.mapError(wrapRedisErr), Effect.asVoid)
@@ -1025,9 +1132,9 @@ const makeRedisKv = (
       // MGET but it goes through the prefix-aware ops surface, and the
       // call sites for body MGET are short-lists (~10s in pull-batch's
       // null-body race fallback), so the perf delta is negligible.
-      const out: Array<string | null> = []
+      const out: Array<Buffer | null> = []
       for (const k of keys) {
-        const v = yield* redis.get(k).pipe(Effect.mapError(wrapRedisErr))
+        const v = yield* redis.getBuffer(k).pipe(Effect.mapError(wrapRedisErr))
         out.push(v)
       }
       return out
@@ -1036,9 +1143,10 @@ const makeRedisKv = (
   const applyReplicaUpdate: KvBackendApi["applyReplicaUpdate"] = (args) => {
     const keys: Array<string> = [args.bodyKey]
     for (const idx of args.indexes) keys.push(idx.key)
-    const argv: Array<string | number> = [
+    const argv: Array<string | number | Buffer> = [
       args.bodyValue,
       args.bodyTtlSec,
+      KvBackend.encodeCallGenSidecar(args.callGen),
       args.indexes.length,
     ]
     for (const idx of args.indexes) {
@@ -1046,7 +1154,7 @@ const makeRedisKv = (
       argv.push(idx.ttlSec)
     }
     return redis
-      .eval(KvBackend.APPLY_REPLICA_UPDATE_LUA, keys, argv)
+      .evalBuffer(KvBackend.APPLY_REPLICA_UPDATE_LUA, keys, argv)
       .pipe(Effect.mapError(wrapRedisErr), Effect.asVoid)
   }
 
@@ -1076,22 +1184,23 @@ const makeRedisKv = (
       args.bodyKey,
     ]
     for (const idx of args.indexes) keys.push(idx.key)
-    const argv: Array<string | number> = [
+    const argv: Array<string | number | Buffer> = [
       args.entryGen,
       args.member,
       args.bodyValue,
       args.bodyTtlSec,
+      KvBackend.encodeCallGenSidecar(args.callGen),
       args.indexes.length,
     ]
     for (const idx of args.indexes) {
       argv.push(idx.value, idx.ttlSec)
     }
     return redis
-      .eval(KvBackend.CHANNEL_WRITE_UPDATE_LUA, keys, argv)
+      .evalBuffer(KvBackend.CHANNEL_WRITE_UPDATE_LUA, keys, argv)
       .pipe(
         Effect.mapError(wrapRedisErr),
         Effect.flatMap((raw) => {
-          const counter = toFiniteNumber(raw)
+          const counter = cellToNumber(raw)
           if (counter === null) {
             return Effect.fail(
               new KvError({ reason: "channelWriteUpdate: bad Lua return" })
@@ -1134,7 +1243,7 @@ const makeRedisKv = (
 
   const channelPullBatch: KvBackendApi["channelPullBatch"] = (args) =>
     redis
-      .eval(
+      .evalBuffer(
         KvBackend.CHANNEL_PULL_BATCH_LUA,
         [args.counterKey, args.channel, channelGensSetOf(args.channel)],
         [args.since.gen, args.since.counter, args.limit, prefixWithColon]

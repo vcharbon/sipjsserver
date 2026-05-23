@@ -85,16 +85,24 @@ export interface PeerCachePortApi {
   /**
    * Full create/overwrite. Sends `{ state, indexes, ttlSec }` to the
    * peer; receiver writes the call + every named index entry under
-   * the partitioned key prefix `{role}:{owner}:`.
+   * the partitioned key prefix `{role}:{owner}:`. `state` is the
+   * msgpack-encoded body bytes (HTTP transport base64-encodes them
+   * over the JSON envelope).
    */
   readonly putCall: (args: {
     readonly peer: WorkerOrdinal
     readonly role: PartitionRole
     readonly owner: WorkerOrdinal
     readonly callRef: string
-    readonly state: string
+    readonly state: Buffer
     readonly indexes: ReadonlyArray<string>
     readonly ttlSec: number
+    /**
+     * Per-call content version forwarded into the body's :gen sidecar.
+     * Optional — recovery / scan paths default to 0 (dead-weight in
+     * commit 2; commit 4 wires the read side).
+     */
+    readonly callGen?: number
   }) => Effect.Effect<void, PeerWriteError>
 
   /**

@@ -43,9 +43,10 @@ interface PutJob {
   readonly role: PartitionRole
   readonly owner: string
   readonly callRef: string
-  readonly json: string
+  readonly body: Buffer
   readonly indexes: ReadonlyArray<string>
   readonly ttlSec: number
+  readonly callGen: number | undefined
   readonly opts: PartitionedRelayWriteOptions | undefined
 }
 
@@ -66,9 +67,15 @@ export interface BufferedTerminateWriterApi {
     role: PartitionRole,
     owner: string,
     callRef: string,
-    json: string,
+    body: Buffer,
     indexes: ReadonlyArray<string>,
     ttlSec: number,
+    /**
+     * Per-call content version forwarded into the body's :gen sidecar.
+     * Optional for test-only callers; production passes
+     * `bumped._topology.gen ?? 0`.
+     */
+    callGen?: number,
     opts?: PartitionedRelayWriteOptions,
   ) => Effect.Effect<void>
 }
@@ -106,9 +113,10 @@ export class BufferedTerminateWriter extends ServiceMap.Service<
             ? storage.deleteCall(job.role, job.owner, job.callRef, job.indexes, job.opts)
             : storage.deleteCall(job.role, job.owner, job.callRef, job.indexes)
         }
+        const callGenArg = job.callGen ?? 0
         return job.opts !== undefined
-          ? storage.putCall(job.role, job.owner, job.callRef, job.json, job.indexes, job.ttlSec, job.opts)
-          : storage.putCall(job.role, job.owner, job.callRef, job.json, job.indexes, job.ttlSec)
+          ? storage.putCall(job.role, job.owner, job.callRef, job.body, job.indexes, job.ttlSec, callGenArg, job.opts)
+          : storage.putCall(job.role, job.owner, job.callRef, job.body, job.indexes, job.ttlSec, callGenArg)
       }
 
       if (queueMax <= 0) {
@@ -133,8 +141,8 @@ export class BufferedTerminateWriter extends ServiceMap.Service<
         return {
           submitTerminateDelete: (role, owner, callRef, indexes, opts) =>
             direct({ kind: "delete", role, owner, callRef, indexes, opts }),
-          submitTerminatePut: (role, owner, callRef, json, indexes, ttlSec, opts) =>
-            direct({ kind: "put", role, owner, callRef, json, indexes, ttlSec, opts }),
+          submitTerminatePut: (role, owner, callRef, body, indexes, ttlSec, callGen, opts) =>
+            direct({ kind: "put", role, owner, callRef, body, indexes, ttlSec, callGen, opts }),
         }
       }
 
@@ -205,8 +213,8 @@ export class BufferedTerminateWriter extends ServiceMap.Service<
       return {
         submitTerminateDelete: (role, owner, callRef, indexes, opts) =>
           submit({ kind: "delete", role, owner, callRef, indexes, opts }),
-        submitTerminatePut: (role, owner, callRef, json, indexes, ttlSec, opts) =>
-          submit({ kind: "put", role, owner, callRef, json, indexes, ttlSec, opts }),
+        submitTerminatePut: (role, owner, callRef, body, indexes, ttlSec, callGen, opts) =>
+          submit({ kind: "put", role, owner, callRef, body, indexes, ttlSec, callGen, opts }),
       }
     }),
   )

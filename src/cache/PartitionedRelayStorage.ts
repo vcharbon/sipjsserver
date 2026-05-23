@@ -64,7 +64,8 @@ export type PartitionRole = "pri" | "bak"
 /** One scanned entry returned to the relay's GET /scan handler. */
 export interface ScanEntry {
   readonly callRef: string
-  readonly json: string
+  /** Raw body bytes (msgpack-encoded post-migration); decode via `CallCodec.decodeBodyAuto`. */
+  readonly body: Buffer
   readonly ttlSec: number
 }
 
@@ -100,15 +101,16 @@ export class StorageError extends Data.TaggedError("PartitionedRelayStorageError
 
 export interface PartitionedRelayStorageApi {
   /**
-   * Read the call's JSON state from the (role, owner) partition.
+   * Read the call's body bytes from the (role, owner) partition.
    * Returns `null` if missing or expired (sweep-on-touch in
-   * memoryLayer; Redis natively expires keys).
+   * memoryLayer; Redis natively expires keys). The body is opaque
+   * to PRS — callers decode via `CallCodec.decodeBodyAuto`.
    */
   readonly getCall: (
     role: PartitionRole,
     owner: string,
     callRef: string
-  ) => Effect.Effect<string | null, StorageError>
+  ) => Effect.Effect<Buffer | null, StorageError>
 
   /**
    * Read a flat index entry. Returns the stored callRef value, or
@@ -121,20 +123,32 @@ export interface PartitionedRelayStorageApi {
   ) => Effect.Effect<string | null, StorageError>
 
   /**
-   * Full create/overwrite. Writes the call's state JSON + every index
+   * Full create/overwrite. Writes the call's body bytes + every index
    * entry atomically (Slice 1 — Lua / mutex). When `opts.peer` is
    * provided, also bumps `propagate_seq:{peer}` and ZADDs the callRef
    * into `propagate:{peer}` with sliding TTL (Slice 2). Pass
    * `peer=undefined` (or empty string) for calls without an
    * LB-assigned backup — those skip the propagate side effect entirely.
+   *
+   * `body` is opaque bytes — typically `stampEncodedBody(encodeCall(...),
+   * writtenAtMs)` (a 9-byte writtenAtMs prefix + msgpack Call). PRS
+   * does NOT inspect or modify it; the wire-level `latency_ms` is
+   * derived by stripping the prefix on the puller side.
    */
   readonly putCall: (
     role: PartitionRole,
     owner: string,
     callRef: string,
-    json: string,
+    body: Buffer,
     indexes: ReadonlyArray<string>,
     ttlSec: number,
+    /**
+     * Per-call content version forwarded into the body's :gen sidecar.
+     * Defaults to 0 when callers don't have a value (tests, recovery
+     * paths). Production hot path (CallState.flushToRedis) passes
+     * `bumped._topology.gen ?? 0`.
+     */
+    callGen?: number,
     opts?: PartitionedRelayWriteOptions
   ) => Effect.Effect<void, StorageError>
 
@@ -288,7 +302,7 @@ export class PartitionedRelayStorage extends ServiceMap.Service<
  * Adapt `makeKvBackedMemoryApi`'s return shape (whose store carries
  * `MemoryStoreEntry` from `KvBackend`) to this module's
  * `MemoryApiHandle` shape (`MemoryEntry`). The two entry types are
- * structurally identical (`{ value: string; expiresAtMs: number }`),
+ * structurally identical (`{ value: string | Buffer; expiresAtMs: number }`),
  * so the cast at the boundary is safe; the alternative would be a
  * runtime copy of every entry on every call, which is wasteful for
  * a test-only path.
@@ -307,7 +321,8 @@ const kvBackedMemoryApiHandle = (self: string, gen: number): MemoryApiHandle => 
 // ---------------------------------------------------------------------------
 
 interface MemoryEntry {
-  readonly value: string
+  /** `string` for counters / index entries; `Buffer` for msgpack-encoded bodies. */
+  readonly value: string | Buffer
   readonly expiresAtMs: number
 }
 

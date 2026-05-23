@@ -49,12 +49,19 @@ export interface ChannelWriteArgs {
   readonly partition: Partition
   readonly callRef: string
   /**
-   * The body to store, encoded as a JSON string. Caller is responsible
-   * for embedding any per-call metadata (e.g. `callGen` field) into
-   * the payload — `ChannelIndex` does not parse or rewrite the body.
+   * The body to store as raw bytes (msgpack-encoded by `CallCodec.mpPack`
+   * on the originating write path). Caller is responsible for embedding
+   * any per-call metadata (e.g. `_topology.gen`) into the encoded body —
+   * `ChannelIndex` does not parse or rewrite it.
    */
-  readonly bodyValue: string
+  readonly bodyValue: Buffer
   readonly bodyTtlSec: number
+  /**
+   * Per-call content version — `_topology.gen` at flush time. Stored
+   * in the body's `:gen` sidecar so peers can gate apply without
+   * decoding the body. Forwarded into `KvBackend.channelWriteUpdate`.
+   */
+  readonly callGen: number
   readonly indexes: ReadonlyArray<{
     readonly key: string
     readonly value: string
@@ -156,6 +163,7 @@ const make = (
       bodyKey,
       bodyValue: args.bodyValue,
       bodyTtlSec: args.bodyTtlSec,
+      callGen: args.callGen,
       indexes: args.indexes,
     })
   }

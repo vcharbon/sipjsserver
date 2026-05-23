@@ -407,11 +407,12 @@ const makeCachePort = (
     state,
     indexes,
     ttlSec,
+    callGen,
   }) =>
     dispatch(peer, (st) =>
       wrapStorageWriteErr(
         peer,
-        st.handle.api.putCall(role, owner, callRef, state, indexes, ttlSec)
+        st.handle.api.putCall(role, owner, callRef, state, indexes, ttlSec, callGen ?? 0)
       )
     )
 
@@ -528,7 +529,13 @@ const makeControlApi = (inner: FabricInner): PeerFabricControlApi => {
       const entries: Array<{ readonly key: string; readonly value: string }> =
         []
       for (const [k, v] of st.handle.store) {
-        entries.push({ key: k, value: v.value })
+        // Body slots now hold Buffer (msgpack bytes); render as
+        // hex-prefixed string for diagnostic-only snapshot output so
+        // test assertions remain string-comparable.
+        const valueStr = Buffer.isBuffer(v.value)
+          ? `<msgpack:0x${v.value.toString("hex")}>`
+          : v.value
+        entries.push({ key: k, value: valueStr })
       }
       return {
         ordinal: st.ordinal,

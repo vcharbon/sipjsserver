@@ -20,7 +20,7 @@
  * Semaphore is released before async cache flush.
  */
 
-import { Clock, Duration, Effect, Layer, MutableHashMap, Option, Ref, Schema, Semaphore, ServiceMap, Stream } from "effect"
+import { Clock, Duration, Effect, Layer, MutableHashMap, Option, Ref, Semaphore, ServiceMap, Stream } from "effect"
 import { BufferedTerminateWriter } from "../cache/BufferedTerminateWriter.js"
 import {
   PartitionedRelayStorage,
@@ -32,8 +32,9 @@ import { AppConfig } from "../config/AppConfig.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
 import { RedisError } from "../redis/RedisClient.js"
 import { CallLimiter } from "./CallLimiter.js"
+import { CallDecodeError, decodeBodyAutoEffect, encodeCall, stampEncodedBody } from "./CallCodec.js"
 import type { Call } from "./CallModel.js"
-import { Call as CallSchema, callIndexKeys, isFullyResolved, parseCallRef, setByeDisposition } from "./CallModel.js"
+import { callIndexKeys, isFullyResolved, parseCallRef, setByeDisposition } from "./CallModel.js"
 import type { TimerEntry } from "./CallModel.js"
 import { replaceTimerById, TERMINATING_TIMEOUT_MS } from "./timer-helpers.js"
 import { MetricsRegistry, type TerminatingCallsByBucket } from "../observability/MetricsRegistry.js"
@@ -41,57 +42,43 @@ import { TimerService } from "./TimerService.js"
 import { TransactionLayer } from "../sip/TransactionLayer.js"
 import { PerCallDispatcher } from "../sip/PerCallDispatcher.js"
 
-const JsonCallSchema = Schema.fromJsonString(CallSchema)
-
 // ---------------------------------------------------------------------------
-// Schema-error diagnostics
+// Codec-error diagnostics
 // ---------------------------------------------------------------------------
 //
 // Endurance run 2026-05-09 surfaced a `SchemaError: Missing key at
 // ['callRef']` from inside a `terminating_timeout` timer body, which
 // `Effect.orDie` converted to a defect that halted the safety-net
-// rule chain. The actual offending JSON / Call value never made it
-// into the log — the error was just `cause`-formatted with no
-// payload context. The two helpers below log the failing
-// payload (truncated) before re-promoting the SchemaError to a
-// defect, so the next occurrence prints what is actually wrong with
-// the data.
+// rule chain. The actual offending payload never made it into the
+// log — the error was just `cause`-formatted with no payload context.
+// Post-msgpackr-migration the encode path is no longer fallible (we
+// trust the in-memory Call shape), so only the decode-failure
+// diagnostic remains; it logs the truncated raw bytes hex so the
+// next occurrence is identifiable.
 
-const MAX_DIAG_PAYLOAD_CHARS = 2_000
+const MAX_DIAG_PAYLOAD_BYTES = 256
 
-const truncate = (s: string): string =>
-  s.length <= MAX_DIAG_PAYLOAD_CHARS
-    ? s
-    : `${s.slice(0, MAX_DIAG_PAYLOAD_CHARS)}…(truncated, full length=${s.length})`
-
-const safeStringifyCall = (call: Call): string => {
-  try {
-    // Encoded → JSON-serialisable shape, but skip schema validation so
-    // the diagnostic itself can never throw.
-    return truncate(JSON.stringify(call))
-  } catch (err) {
-    return `<JSON.stringify failed: ${err instanceof Error ? err.message : String(err)}>`
-  }
+const truncateBuffer = (buf: Buffer): string => {
+  const slice = buf.length <= MAX_DIAG_PAYLOAD_BYTES
+    ? buf
+    : buf.subarray(0, MAX_DIAG_PAYLOAD_BYTES)
+  const suffix =
+    buf.length <= MAX_DIAG_PAYLOAD_BYTES
+      ? ""
+      : `…(truncated, full length=${buf.length})`
+  return `${slice.toString("hex")}${suffix}`
 }
 
 const logDecodeFailure = (
   source: string,
   callRef: string | undefined,
-  raw: string,
+  raw: Buffer,
 ) =>
-  Effect.fnUntraced(function* (err: Schema.SchemaError) {
+  Effect.fnUntraced(function* (err: CallDecodeError) {
     yield* Effect.logError(
-      `[CallState] SchemaError on ${source}` +
-        `${callRef !== undefined ? ` callRef=${callRef}` : ""} — ${err.message}` +
-        ` payload=${truncate(raw)}`,
-    )
-  })
-
-const logEncodeFailure = (source: string, call: Call) =>
-  Effect.fnUntraced(function* (err: Schema.SchemaError) {
-    yield* Effect.logError(
-      `[CallState] SchemaError on ${source} callRef=${call.callRef} state=${call.state}` +
-        ` — ${err.message} value=${safeStringifyCall(call)}`,
+      `[CallState] CallDecodeError on ${source}` +
+        `${callRef !== undefined ? ` callRef=${callRef}` : ""} — ${err.reason}` +
+        ` payload(hex)=${truncateBuffer(raw)}`,
     )
   })
 
@@ -126,8 +113,18 @@ export class CallState extends ServiceMap.Service<
       callRef: string,
       body: (call: Call | undefined) => Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E | RedisError, R>
-    /** Update a call in memory (must be inside a `withCall` body). */
-    readonly update: (callRef: string, fn: (call: Call) => Call) => Effect.Effect<void>
+    /**
+     * Update a call in memory (must be inside a `withCall` body).
+     *
+     * `sourceLegId`, when present, identifies the leg whose event drove
+     * this update. While `state === "terminating"`, only the first
+     * update from each distinct leg refreshes the safety-purge timer —
+     * subsequent updates from the same leg apply the mutation but leave
+     * the timer running. Pass `undefined` for synthetic updates that
+     * shouldn't extend the terminating window (timer rescheduling
+     * helpers, trace-id seeding, etc.).
+     */
+    readonly update: (callRef: string, fn: (call: Call) => Call, sourceLegId?: string) => Effect.Effect<void>
     /** Get call without serialisation (read-only, from memory only). */
     readonly peek: (callRef: string) => Effect.Effect<Call | undefined>
     /**
@@ -238,6 +235,17 @@ export class CallState extends ServiceMap.Service<
       const callsMap = MutableHashMap.empty<string, Call>()
       const sipIndex = MutableHashMap.empty<string, string>()
       const semaphores = MutableHashMap.empty<string, Semaphore.Semaphore>()
+      // Fix #3: per-callRef cache of the last flushed (call ref, body) pair.
+      // Hit when an auto-flush fires but the in-memory Call hasn't changed
+      // since the previous flush — re-submits the cached body to refresh
+      // TTL without re-encoding. Invalidated via `remove`/`forcePurgeOne`.
+      const flushCache = MutableHashMap.empty<
+        string,
+        { readonly call: Call; readonly body: Buffer }
+      >()
+      // Diagnostic: count flushToRedis dedup hits + misses.
+      let flushDedupHits = 0
+      let flushDedupMisses = 0
       const totalRef = yield* Ref.make(0)
       // Plain mutable counter shadowing totalRef for sync reads (metrics interval).
       let totalSync = 0
@@ -433,14 +441,17 @@ export class CallState extends ServiceMap.Service<
         if (inMemory !== undefined) return inMemory
 
         const { role, primary } = partitionOf(callRef)
-        const json = yield* storage
+        const body = yield* storage
           .getCall(role, primary, callRef)
           .pipe(Effect.mapError(toRedisErr))
 
-        if (json === null) return undefined
+        if (body === null) return undefined
 
-        const decodedOpt = yield* Schema.decodeUnknownEffect(JsonCallSchema)(json).pipe(
-          Effect.tapErrorTag("SchemaError", logDecodeFailure("loadCall", callRef, json)),
+        const decodedOpt = yield* decodeBodyAutoEffect(body, callRef).pipe(
+          Effect.tapErrorTag(
+            "CallDecodeError",
+            logDecodeFailure("loadCall", callRef, body),
+          ),
           Effect.option,
         )
         if (Option.isNone(decodedOpt)) return undefined
@@ -500,7 +511,8 @@ export class CallState extends ServiceMap.Service<
 
       const update = Effect.fnUntraced(function* (
         callRef: string,
-        fn: (call: Call) => Call
+        fn: (call: Call) => Call,
+        sourceLegId?: string,
       ) {
         // Phase 5 of "must-run effects under interruption" (ADR 0003):
         // every transition into `terminating` must install the safety
@@ -521,17 +533,22 @@ export class CallState extends ServiceMap.Service<
 
             const enteringTerminating =
               prev.state !== "terminating" && next.state === "terminating"
-            // Stage 4: while the call is in `terminating`, every update
-            // (peer 200/487, BYE response, own retransmits, ...) refreshes
-            // the safety timer so the orphan sweep only fires when the
-            // call has been silent for `TERMINATING_TIMEOUT_MS` from any
-            // source. This is the predicate that closes the 2026-05-15
-            // limiter-Redis cascade: in-flight dialogs that get a peer
-            // response during the chaos window no longer get purged.
-            const refreshingTerminating =
+            // While the call is in `terminating`, refresh the safety timer
+            // at most ONCE per distinct leg. Each leg gets one budgeted
+            // refresh — e.g. peer BYE 200 / 487 — and further updates
+            // from the same leg apply the mutation but no longer extend
+            // the window. Adversarial in-dialog noise (re-INVITE / OPTIONS
+            // flood from a single leg) therefore cannot keep a call
+            // immortal in `terminating`.
+            const inTerminating =
               !enteringTerminating &&
               prev.state === "terminating" &&
               next.state === "terminating"
+            const refreshedLegs = next.terminatingRefreshLegs ?? []
+            const refreshingTerminating =
+              inTerminating &&
+              sourceLegId !== undefined &&
+              !refreshedLegs.includes(sourceLegId)
 
             if (!enteringTerminating && !refreshingTerminating) {
               MutableHashMap.set(callsMap, callRef, next)
@@ -544,9 +561,15 @@ export class CallState extends ServiceMap.Service<
               type: "terminating_timeout",
               fireAt: now + TERMINATING_TIMEOUT_MS,
             }
+            const updatedRefreshedLegs = enteringTerminating
+              ? []
+              : sourceLegId !== undefined && !refreshedLegs.includes(sourceLegId)
+                ? [...refreshedLegs, sourceLegId]
+                : refreshedLegs
             const withTimer: Call = {
               ...next,
               timers: replaceTimerById(next.timers, safetyEntry),
+              terminatingRefreshLegs: updatedRefreshedLegs,
             }
             MutableHashMap.set(callsMap, callRef, withTimer)
             yield* timers.schedule(callRef, safetyEntry, (cr) =>
@@ -565,6 +588,30 @@ export class CallState extends ServiceMap.Service<
       const flushToRedis = Effect.fnUntraced(function* (callRef: string) {
         const call = Option.getOrUndefined(MutableHashMap.get(callsMap, callRef))
         if (call === undefined) return
+
+        // Fix #3 — dedup gate. If the in-memory Call reference is the
+        // same one we flushed last time, re-submit the cached body to
+        // refresh TTL on the primary (and propagate to the backup,
+        // where the content-gate in EchoApply will skip the apply
+        // because `_topology.gen` is unchanged). Skips the gen bump,
+        // the msgpack pack of a ~100-field schema, and the 9-byte
+        // stamp prefix alloc.
+        const cached = MutableHashMap.get(flushCache, callRef)
+        if (Option.isSome(cached) && cached.value.call === call) {
+          flushDedupHits++
+          const { role, primary } = partitionOf(callRef)
+          const indexes = callIndexKeys(call)
+          const peerOpt = propagatePeerFor(role, primary, call._topology)
+          const direction = directionFor(role)
+          const dedupCallGen = call._topology?.gen ?? 0
+          yield* terminateWriter.submitTerminatePut(
+            role, primary, callRef, cached.value.body, indexes, ttl, dedupCallGen,
+            { peer: peerOpt, direction },
+          )
+          yield* Effect.logDebug(`Flushed call ${callRef} to cache (dedup hit)`)
+          return
+        }
+        flushDedupMisses++
 
         // Slice 5: bump `_topology.gen` BEFORE encoding so the persisted
         // value carries the new generation. Newest-`gen` wins on
@@ -585,10 +632,15 @@ export class CallState extends ServiceMap.Service<
           )
         }
 
-        const json = yield* Schema.encodeEffect(JsonCallSchema)(bumped).pipe(
-          Effect.tapErrorTag("SchemaError", logEncodeFailure("flushToRedis", bumped)),
-          Effect.orDie
-        )
+        // Stamp the wall-clock encode time as an 8-byte binary prefix
+        // on the encoded body. Replaces the pre-Fix-#2 spread (which
+        // allocated a ~100-field plain object before msgpack pack);
+        // the prefix is one 9-byte alloc + one concat. Receivers read
+        // it via `readStampedWrittenAtMs` to compute `latency_ms`
+        // without decoding the body.
+        const writtenAtMs = yield* Clock.currentTimeMillis
+        const body = stampEncodedBody(encodeCall(bumped), writtenAtMs)
+        MutableHashMap.set(flushCache, callRef, { call: bumped, body })
         const { role, primary } = partitionOf(callRef)
         const indexes = callIndexKeys(bumped)
         // Slice 2: when role==="pri" and the LB has assigned a backup,
@@ -606,8 +658,9 @@ export class CallState extends ServiceMap.Service<
         // terminate paths get the un-stallable guarantee that closes
         // the production incident (Phase 5 safety net + non-blocking
         // body inside the critical-effects mask in processResult).
+        const flushCallGen = bumped._topology?.gen ?? 0
         yield* terminateWriter.submitTerminatePut(
-          role, primary, callRef, json, indexes, ttl,
+          role, primary, callRef, body, indexes, ttl, flushCallGen,
           { peer: peerOpt, direction },
         )
 
@@ -637,6 +690,10 @@ export class CallState extends ServiceMap.Service<
         yield* Effect.sync(() => {
           MutableHashMap.remove(callsMap, callRef)
           MutableHashMap.remove(semaphores, callRef)
+          // Fix #3 — drop the dedup-cache entry so a later create with
+          // the same callRef doesn't accidentally hit an alias of a
+          // dead Call object via `===`.
+          MutableHashMap.remove(flushCache, callRef)
 
           if (call !== undefined) {
             MutableHashMap.remove(sipIndex, `${call.aLeg.callId}|${call.aLeg.fromTag}`)
@@ -798,10 +855,10 @@ export class CallState extends ServiceMap.Service<
         const loaded: Call[] = []
 
         for (const entry of entries) {
-          const decoded = yield* Schema.decodeUnknownEffect(JsonCallSchema)(entry.json).pipe(
+          const decoded = yield* decodeBodyAutoEffect(entry.body).pipe(
             Effect.tapErrorTag(
-              "SchemaError",
-              logDecodeFailure("loadOwnedCalls", undefined, entry.json),
+              "CallDecodeError",
+              logDecodeFailure("loadOwnedCalls", undefined, entry.body),
             ),
             Effect.orDie,
           )
@@ -853,10 +910,8 @@ export class CallState extends ServiceMap.Service<
           if (bumped !== call) {
             MutableHashMap.set(callsMap, callRef, bumped)
           }
-          const json = yield* Schema.encodeEffect(JsonCallSchema)(bumped).pipe(
-            Effect.tapErrorTag("SchemaError", logEncodeFailure("flushAllCalls", bumped)),
-            Effect.orDie,
-          )
+          const writtenAtMs = yield* Clock.currentTimeMillis
+          const body = stampEncodedBody(encodeCall(bumped), writtenAtMs)
           const { role, primary } = partitionOf(callRef)
           const indexes = callIndexKeys(bumped)
           // Slice 6 + Slice B: same peer-selection rule as flushToRedis;
@@ -864,8 +919,9 @@ export class CallState extends ServiceMap.Service<
           // fan-out.
           const peerOpt = propagatePeerFor(role, primary, bumped._topology)
           const direction = directionFor(role)
+          const allFlushCallGen = bumped._topology?.gen ?? 0
           yield* storage
-            .putCall(role, primary, callRef, json, indexes, ttl, {
+            .putCall(role, primary, callRef, body, indexes, ttl, allFlushCallGen, {
               peer: peerOpt,
               direction,
             })
@@ -959,6 +1015,8 @@ export class CallState extends ServiceMap.Service<
 
         MutableHashMap.remove(callsMap, callRef)
         MutableHashMap.remove(semaphores, callRef)
+        // Fix #3 — same invalidation as `remove()`.
+        MutableHashMap.remove(flushCache, callRef)
         MutableHashMap.remove(sipIndex, `${promoted.aLeg.callId}|${promoted.aLeg.fromTag}`)
         for (const dialog of promoted.aLeg.dialogs) {
           const aLocalTag = dialog.sip.localTag

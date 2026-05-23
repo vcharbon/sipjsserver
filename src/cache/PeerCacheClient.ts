@@ -34,11 +34,14 @@ import type {
 // Wire-level schemas
 // ---------------------------------------------------------------------------
 
+// Wire shape: msgpack bodies are sent as base64 since the HTTP scan
+// envelope is JSON. Recovery-only path; not on the replication hot
+// path (that's `/replog` via `ReplLogServer`).
 const ScanResponse = Schema.Struct({
   items: Schema.Array(
     Schema.Struct({
       callRef: Schema.String,
-      json: Schema.String,
+      body_b64: Schema.String,
       ttlSec: Schema.Int,
     })
   ),
@@ -149,12 +152,20 @@ export const PeerCacheClientLayer = Layer.effect(
       state,
       indexes,
       ttlSec,
+      callGen,
     }) =>
       Effect.gen(function* () {
         const url = yield* baseUrl(peer)
         const request = HttpClientRequest.put(
           `${url}${cachePath(role, owner, callRef)}`
-        ).pipe(HttpClientRequest.bodyJsonUnsafe({ state, indexes, ttlSec }))
+        ).pipe(
+          HttpClientRequest.bodyJsonUnsafe({
+            state_b64: state.toString("base64"),
+            indexes,
+            ttlSec,
+            callGen: callGen ?? 0,
+          }),
+        )
         yield* sendWrite(peer, request)
       })
 
@@ -226,7 +237,13 @@ export const PeerCacheClientLayer = Layer.effect(
           )
         }
         return Stream.fromIterable(
-          decoded.success.items as ReadonlyArray<ScanEntry>
+          decoded.success.items.map(
+            (it): ScanEntry => ({
+              callRef: it.callRef,
+              body: Buffer.from(it.body_b64, "base64"),
+              ttlSec: it.ttlSec,
+            }),
+          ),
         )
       })
       return Stream.unwrap(streamEffect)

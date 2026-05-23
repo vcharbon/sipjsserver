@@ -33,10 +33,17 @@ import {
 // Body schemas
 // ---------------------------------------------------------------------------
 
+// `state_b64` carries the msgpack-encoded body as a base64 string —
+// the HTTP envelope cannot transit raw binary inside a JSON wire shape.
+// Recovery-only path; the hot replication channel does not flow
+// through this endpoint.
 const PutCallBody = Schema.Struct({
-  state: Schema.String,
+  state_b64: Schema.String,
   indexes: Schema.Array(Schema.String),
   ttlSec: Schema.Int,
+  // Per-call content version forwarded into the body's :gen sidecar.
+  // Optional for back-compat — recovery-only path doesn't gate on it.
+  callGen: Schema.optional(Schema.Int),
 })
 
 const RefreshCallBody = Schema.Struct({
@@ -106,9 +113,10 @@ export const addPeerRelayRoutes = (
             role,
             owner,
             callRef,
-            body.state,
+            Buffer.from(body.state_b64, "base64"),
             body.indexes,
-            body.ttlSec
+            body.ttlSec,
+            body.callGen ?? 0
           )
         )
         if (Result.isFailure(writeResult)) {
@@ -202,8 +210,17 @@ export const addPeerRelayRoutes = (
         if (Result.isFailure(collected)) {
           return yield* internalError(collected.failure.reason)
         }
+        // Bodies are opaque bytes post-msgpackr-migration; base64-
+        // encode them so the JSON wire-shape survives. The client
+        // decodes back to Buffer at `PeerCacheClient`. Switching the
+        // whole endpoint to a binary content-type is a future
+        // optimization — this scan path is recovery-only, not hot.
         return HttpServerResponse.jsonUnsafe({
-          items: Array.from(collected.success),
+          items: Array.from(collected.success).map((e) => ({
+            callRef: e.callRef,
+            body_b64: e.body.toString("base64"),
+            ttlSec: e.ttlSec,
+          })),
         })
       })
     )

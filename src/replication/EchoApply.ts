@@ -53,6 +53,7 @@
 
 import { Effect, MutableHashMap, Option } from "effect"
 import { callIndexKeysFromUnknown } from "../call/CallModel.js"
+import { mpUnpack, stripStampedPrefix } from "../call/CallCodec.js"
 import type { Partition } from "./ChannelIndex.js"
 import type { DataFrame } from "./ReplicationProtocol.js"
 import { KvBackend, type KvBackendApi, type KvError } from "../storage/KvBackend.js"
@@ -82,11 +83,9 @@ export interface ReplicationApplyConfig {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-const encodeBody = (body: unknown): string => JSON.stringify(body)
-
 /**
- * Extract the per-call content-version from a JSON-decoded body. Schema-
- * tolerant: missing field, wrong type, or null body all map to
+ * Extract the per-call content-version from a decoded body object.
+ * Schema-tolerant: missing field, wrong type, or null body all map to
  * `-Infinity` so the apply gate succeeds (create-if-not-exist).
  *
  * Looks for `_topology.gen` first (set by `CallState.flushToRedis` on
@@ -118,9 +117,19 @@ const cacheKeyOf = (source: string, callRef: string): string =>
 
 const idxKey = (k: string): string => `idx:${k}`
 
-const safeParseJson = (raw: string): unknown => {
+/**
+ * Decode a body Buffer, dispatching between legacy JSON and msgpack on
+ * the first byte (matches `CallCodec.decodeBodyAuto`'s logic — the
+ * apply path needs the SAME auto-detect because the originator and
+ * receiver may briefly run different codec versions during a rolling
+ * upgrade).
+ */
+const safeDecodeBody = (buf: Buffer): unknown => {
   try {
-    return JSON.parse(raw) as unknown
+    if (buf.length > 0 && buf[0] === 0x7b) {
+      return JSON.parse(buf.toString("utf8"))
+    }
+    return mpUnpack(stripStampedPrefix(buf))
   } catch {
     return null
   }
@@ -183,8 +192,15 @@ export const makeReplicationApply = (
       const localCallGen =
         localBodyRaw === null
           ? Number.NEGATIVE_INFINITY
-          : extractCallGen(safeParseJson(localBodyRaw))
-      const incomingCallGen = extractCallGen(frame.body)
+          : extractCallGen(safeDecodeBody(localBodyRaw))
+      // The incoming frame body is the originator's raw msgpack bytes;
+      // unpack once for the apply gate + index derivation. The raw
+      // Buffer is what we write to local storage — no re-encoding.
+      if (frame.body === null) {
+        return
+      }
+      const decodedBody = safeDecodeBody(frame.body)
+      const incomingCallGen = extractCallGen(decodedBody)
       if (
         localBodyRaw !== null &&
         Number.isFinite(localCallGen) &&
@@ -194,8 +210,7 @@ export const makeReplicationApply = (
         return
       }
 
-      const derivedIndexes = callIndexKeysFromUnknown(frame.body)
-      const bodyValue = encodeBody(frame.body)
+      const derivedIndexes = callIndexKeysFromUnknown(decodedBody)
       const bodyTtlSec =
         frame.body_ttl_remaining_sec > 0
           ? frame.body_ttl_remaining_sec
@@ -203,11 +218,21 @@ export const makeReplicationApply = (
       // Body + indexes set ATOMICALLY (see applyReplicaUpdate rationale
       // in src/storage/KvBackend.ts — the SIP hot path's
       // `resolveFromSipKey` requires body and indexes to be visible
-      // together).
+      // together). The bodyValue is the originator's bytes passed
+      // through opaquely so the local copy is bit-for-bit identical to
+      // the source.
+      // Commit 2: the per-call callGen sidecar is now written alongside
+      // the body. We extract callGen from the decoded body here as a
+      // transitional measure — commit 4 will pull it from `frame.callGen`
+      // and remove the body decode entirely.
+      const sidecarCallGen = Number.isFinite(incomingCallGen)
+        ? Math.max(0, incomingCallGen)
+        : 0
       yield* config.localKv.applyReplicaUpdate({
         bodyKey: targetBodyKey,
-        bodyValue,
+        bodyValue: frame.body,
         bodyTtlSec,
+        callGen: sidecarCallGen,
         indexes: derivedIndexes.map((k) => ({
           key: idxKey(k),
           value: frame.callRef,

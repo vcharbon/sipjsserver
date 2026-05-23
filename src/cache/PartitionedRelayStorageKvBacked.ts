@@ -144,7 +144,7 @@ const makeChannelRegistry = (
 const memoryBodySet = (
   store: MemoryStore,
   key: string,
-  value: string,
+  value: string | Buffer,
   ttlSec: number,
   nowMs: number
 ): void => {
@@ -204,7 +204,12 @@ export const makeKvBackedMemoryUnsafe = (
 export const makeKvBackedFromBackend = (
   kv: KvBackendApi,
   directBodyOps: {
-    readonly bodySet: (
+    readonly bodySetBuffer: (
+      key: string,
+      value: Buffer,
+      ttlSec: number
+    ) => Effect.Effect<void, KvError>
+    readonly bodySetString: (
       key: string,
       value: string,
       ttlSec: number
@@ -215,7 +220,7 @@ export const makeKvBackedFromBackend = (
     ) => Effect.Effect<void, KvError>
     readonly scanByPrefix: (
       prefix: string
-    ) => Stream.Stream<{ readonly key: string; readonly value: string; readonly ttlSec: number }, KvError>
+    ) => Stream.Stream<{ readonly key: string; readonly value: Buffer; readonly ttlSec: number }, KvError>
   },
   config: KvBackedPrsConfig
 ): PartitionedRelayStorageApi => makeKvBackedExplicit(kv, directBodyOps, config)
@@ -233,7 +238,16 @@ const makeKvBacked = (
   // and these helpers operate on the same MutableHashMap so a body
   // written here is visible to a ChannelIndex.pullBatch and vice versa.
   const directBodyOps = {
-    bodySet: (
+    bodySetBuffer: (
+      key: string,
+      value: Buffer,
+      ttlSec: number
+    ): Effect.Effect<void, KvError> =>
+      Effect.gen(function* () {
+        const ms = yield* Clock.currentTimeMillis
+        yield* Effect.sync(() => memoryBodySet(store, key, value, ttlSec, ms))
+      }),
+    bodySetString: (
       key: string,
       value: string,
       ttlSec: number
@@ -253,7 +267,7 @@ const makeKvBacked = (
     scanByPrefix: (
       prefix: string
     ): Stream.Stream<
-      { readonly key: string; readonly value: string; readonly ttlSec: number },
+      { readonly key: string; readonly value: Buffer; readonly ttlSec: number },
       KvError
     > =>
       Stream.unwrap(
@@ -261,7 +275,7 @@ const makeKvBacked = (
           const ms = yield* Clock.currentTimeMillis
           const out: Array<{
             readonly key: string
-            readonly value: string
+            readonly value: Buffer
             readonly ttlSec: number
           }> = []
           for (const [k, entry] of store) {
@@ -271,7 +285,10 @@ const makeKvBacked = (
               0,
               Math.ceil((entry.expiresAtMs - ms) / 1000)
             )
-            out.push({ key: k, value: entry.value, ttlSec })
+            const value = Buffer.isBuffer(entry.value)
+              ? entry.value
+              : Buffer.from(entry.value)
+            out.push({ key: k, value, ttlSec })
           }
           return Stream.fromIterable(out)
         })
@@ -281,52 +298,29 @@ const makeKvBacked = (
 }
 
 // ---------------------------------------------------------------------------
-// JSON written_at_ms stamper
-// ---------------------------------------------------------------------------
-
-/**
- * Stamp `written_at_ms` into a JSON body without parsing — opens the
- * top-level object after the leading `{`, splices in the field,
- * preserves the rest. Falls back to `JSON.parse + stringify` if the
- * body isn't an opaque object literal (rare; the SIP path always
- * passes a `Call` JSON which is one).
- *
- * Pure helper outside Effect.gen so the Effect plugin's
- * `preferSchemaOverJson` rule does not fire (the body is opaque
- * pass-through state — the SIP layer owns its schema).
- */
-const stampWrittenAtMs = (json: string, nowMs: number): string => {
-  const trimmed = json.trimStart()
-  if (trimmed.startsWith("{") && !trimmed.startsWith("{}")) {
-    // Insert immediately after the first `{`. The result is still
-    // valid JSON because `written_at_ms` is the FIRST key — duplicate
-    // keys later in the object are invalid in strict JSON but JSON.parse
-    // tolerates them; for our purposes the stamp is what matters.
-    return `{"written_at_ms":${nowMs},${trimmed.slice(1)}`
-  }
-  if (trimmed === "{}") {
-    return `{"written_at_ms":${nowMs}}`
-  }
-  // Fallback for non-object payloads (rare).
-  try {
-    const parsed = JSON.parse(trimmed) as unknown
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      return JSON.stringify({ written_at_ms: nowMs, ...(parsed as Record<string, unknown>) })
-    }
-  } catch {
-    // Pass through non-JSON bodies as-is.
-  }
-  return json
-}
-
-// ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
+//
+// Note on `written_at_ms`: the legacy JSON path spliced a wall-clock
+// stamp into the encoded body inside PRS so the receiver could compute
+// `latency_ms`. With msgpack the body is opaque bytes; Fix #2 moved the
+// stamp out of the msgpack body entirely. CallState now calls
+// `stampEncodedBody(encodeCall(call), writtenAtMs)` to prepend a 9-byte
+// binary header (`[0x01][BE uint64]`) before storage. PRS still treats
+// the body as opaque; receivers read the stamp via
+// `readStampedWrittenAtMs` without decoding the body.
+// Indexes are short strings (no stamping needed) and pass through as
+// strings unchanged.
 
 const makeKvBackedExplicit = (
   kv: KvBackendApi,
   ops: {
-    readonly bodySet: (
+    readonly bodySetBuffer: (
+      key: string,
+      value: Buffer,
+      ttlSec: number
+    ) => Effect.Effect<void, KvError>
+    readonly bodySetString: (
       key: string,
       value: string,
       ttlSec: number
@@ -337,7 +331,7 @@ const makeKvBackedExplicit = (
     ) => Effect.Effect<void, KvError>
     readonly scanByPrefix: (
       prefix: string
-    ) => Stream.Stream<{ readonly key: string; readonly value: string; readonly ttlSec: number }, KvError>
+    ) => Stream.Stream<{ readonly key: string; readonly value: Buffer; readonly ttlSec: number }, KvError>
   },
   config: KvBackedPrsConfig
 ): PartitionedRelayStorageApi => {
@@ -364,28 +358,39 @@ const makeKvBackedExplicit = (
       .bodyGet(callBodyKey(role, owner, callRef))
       .pipe(Effect.mapError(wrapKv))
 
+  // Index values are short callRef strings stored in the same KV slot
+  // shape as bodies. `kv.bodyGet` returns Buffer (the binary path); we
+  // decode back to UTF-8 here because callers expect a string callRef.
   const getIndex: PartitionedRelayStorageApi["getIndex"] = (indexKey) =>
-    kv.bodyGet(indexStorageKey(indexKey)).pipe(Effect.mapError(wrapKv))
+    kv.bodyGet(indexStorageKey(indexKey)).pipe(
+      Effect.mapError(wrapKv),
+      Effect.map((buf) => (buf === null ? null : buf.toString("utf8"))),
+    )
 
   const putCall: PartitionedRelayStorageApi["putCall"] = (
     role,
     owner,
     callRef,
-    json,
+    body,
     indexes,
     ttlSec,
+    callGen,
     opts
   ) =>
     Effect.gen(function* () {
-      const ms = yield* Clock.currentTimeMillis
-      const stampedJson = stampWrittenAtMs(json, ms)
+      const callGenValue = callGen ?? 0
       const peer = opts?.peer
       if (peer === undefined || peer.length === 0) {
-        // No-peer path: direct body write + per-index write. No
-        // propagate side effect.
-        yield* ops.bodySet(callBodyKey(role, owner, callRef), stampedJson, ttlSec)
+        // No-peer path: direct body write + sidecar + per-index write.
+        // No propagate side effect.
+        yield* ops.bodySetBuffer(callBodyKey(role, owner, callRef), body, ttlSec)
+        yield* ops.bodySetBuffer(
+          KvBackend.bodyGenSidecarKey(callBodyKey(role, owner, callRef)),
+          KvBackend.encodeCallGenSidecar(callGenValue),
+          ttlSec,
+        )
         for (const idx of indexes) {
-          yield* ops.bodySet(indexStorageKey(idx), callRef, ttlSec)
+          yield* ops.bodySetString(indexStorageKey(idx), callRef, ttlSec)
         }
         return
       }
@@ -403,8 +408,9 @@ const makeKvBackedExplicit = (
           entryGen: channel.gen,
           partition: partitionOf(role),
           callRef,
-          bodyValue: stampedJson,
+          bodyValue: body,
           bodyTtlSec: ttlSec,
+          callGen: callGenValue,
           indexes: indexes.map((k) => ({
             key: indexStorageKey(k),
             value: callRef,
@@ -425,8 +431,12 @@ const makeKvBackedExplicit = (
     Effect.gen(function* () {
       const peer = opts?.peer
       if (peer === undefined || peer.length === 0) {
-        // No-peer refresh: extend TTL on body + indexes only.
+        // No-peer refresh: extend TTL on body + sidecar + indexes.
         yield* ops.bodyExpire(callBodyKey(role, owner, callRef), ttlSec)
+        yield* ops.bodyExpire(
+          KvBackend.bodyGenSidecarKey(callBodyKey(role, owner, callRef)),
+          ttlSec,
+        )
         for (const idx of indexes) {
           yield* ops.bodyExpire(indexStorageKey(idx), ttlSec)
         }
@@ -447,6 +457,14 @@ const makeKvBackedExplicit = (
         callBodyKey(role, owner, callRef)
       )
       if (existing === null) return
+      // The sidecar preserves the existing callGen on a refresh —
+      // refresh is content-preserving, so the callGen does not advance.
+      // A missing sidecar (e.g. pre-sidecar entry) falls back to 0.
+      const existingSidecar = yield* kv.bodyGet(
+        KvBackend.bodyGenSidecarKey(callBodyKey(role, owner, callRef))
+      )
+      const existingCallGen =
+        KvBackend.decodeCallGenSidecar(existingSidecar) ?? 0
       const channel = channels.forPeer(peer)
       yield* channel
         .write({
@@ -455,6 +473,7 @@ const makeKvBackedExplicit = (
           callRef,
           bodyValue: existing,
           bodyTtlSec: ttlSec,
+          callGen: existingCallGen,
           indexes: indexes.map((k) => ({
             key: indexStorageKey(k),
             value: callRef,
@@ -474,9 +493,12 @@ const makeKvBackedExplicit = (
     Effect.gen(function* () {
       const peer = opts?.peer
       if (peer === undefined || peer.length === 0) {
-        // No-peer delete: hard-delete body + indexes (no consumer
-        // needs the deletion notification).
+        // No-peer delete: hard-delete body + sidecar + indexes (no
+        // consumer needs the deletion notification).
         yield* kv.bodyDel(callBodyKey(role, owner, callRef))
+        yield* kv.bodyDel(
+          KvBackend.bodyGenSidecarKey(callBodyKey(role, owner, callRef)),
+        )
         for (const idx of indexes) {
           yield* kv.bodyDel(indexStorageKey(idx))
         }
@@ -500,9 +522,12 @@ const makeKvBackedExplicit = (
   const scanCalls: PartitionedRelayStorageApi["scanCalls"] = (role, owner) => {
     const prefix = `${role}:${owner}:call:`
     return ops.scanByPrefix(prefix).pipe(
+      // The `${bodyKey}:gen` sidecar shares the same prefix; filter it
+      // out so callers only see call body entries.
+      Stream.filter((row) => !row.key.endsWith(":gen")),
       Stream.map((row): ScanEntry => ({
         callRef: row.key.slice(prefix.length),
-        json: row.value,
+        body: row.value,
         ttlSec: row.ttlSec,
       })),
       Stream.mapError(wrapKv)
@@ -584,7 +609,12 @@ const makeRedisDirectOps = (
   redis: RedisOps,
   scanBatch: number
 ): {
-  readonly bodySet: (
+  readonly bodySetBuffer: (
+    key: string,
+    value: Buffer,
+    ttlSec: number
+  ) => Effect.Effect<void, KvError>
+  readonly bodySetString: (
     key: string,
     value: string,
     ttlSec: number
@@ -595,12 +625,15 @@ const makeRedisDirectOps = (
   ) => Effect.Effect<void, KvError>
   readonly scanByPrefix: (
     prefix: string
-  ) => Stream.Stream<{ readonly key: string; readonly value: string; readonly ttlSec: number }, KvError>
+  ) => Stream.Stream<{ readonly key: string; readonly value: Buffer; readonly ttlSec: number }, KvError>
 } => {
   const wrapErr = (e: { reason: string }): KvError =>
     new KvError({ reason: e.reason })
 
-  const bodySet = (key: string, value: string, ttlSec: number) =>
+  const bodySetBuffer = (key: string, value: Buffer, ttlSec: number) =>
+    redis.setexBuffer(key, ttlSec, value).pipe(Effect.mapError(wrapErr))
+
+  const bodySetString = (key: string, value: string, ttlSec: number) =>
     redis.setex(key, ttlSec, value).pipe(Effect.mapError(wrapErr))
 
   const bodyExpire = (key: string, ttlSec: number) =>
@@ -626,7 +659,7 @@ const makeRedisDirectOps = (
       })
     )
 
-  return { bodySet, bodyExpire, scanByPrefix }
+  return { bodySetBuffer, bodySetString, bodyExpire, scanByPrefix }
 }
 
 const scanPatternWithGlobalPrefix = (redis: RedisOps, pattern: string): string => {
@@ -648,7 +681,7 @@ const fetchScanEntries = (
   redis: RedisOps,
   localKeys: ReadonlyArray<string>
 ): Effect.Effect<
-  ReadonlyArray<{ readonly key: string; readonly value: string; readonly ttlSec: number }>,
+  ReadonlyArray<{ readonly key: string; readonly value: Buffer; readonly ttlSec: number }>,
   KvError
 > =>
   Effect.tryPromise({
@@ -657,15 +690,19 @@ const fetchScanEntries = (
       const prefix =
         (redis.raw as { options?: { keyPrefix?: string } }).options?.keyPrefix ?? ""
       const fullKeys = localKeys.map((k) => `${prefix}${k}`)
+      // mgetBuffer returns Buffer | null per key — required for msgpack
+      // bodies (string-decoded path would mojibake binary bytes). ioredis
+      // exposes this on the raw client; we cast through the same shape
+      // pattern as the legacy mget call.
       const rawClient = redis.raw as unknown as {
-        readonly mget: (...keys: Array<string>) => Promise<Array<string | null>>
+        readonly mgetBuffer: (...keys: Array<string>) => Promise<Array<Buffer | null>>
         readonly pttl: (key: string) => Promise<number>
       }
-      const values = await rawClient.mget(...fullKeys)
+      const values = await rawClient.mgetBuffer(...fullKeys)
       const ttls = await Promise.all(fullKeys.map((k) => rawClient.pttl(k)))
       const out: Array<{
         readonly key: string
-        readonly value: string
+        readonly value: Buffer
         readonly ttlSec: number
       }> = []
       for (let i = 0; i < localKeys.length; i++) {
