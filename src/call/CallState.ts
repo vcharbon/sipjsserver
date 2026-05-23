@@ -32,7 +32,7 @@ import { AppConfig } from "../config/AppConfig.js"
 import { CdrWriter } from "../cdr/CdrWriter.js"
 import { RedisError } from "../redis/RedisClient.js"
 import { CallLimiter } from "./CallLimiter.js"
-import { CallDecodeError, decodeBodyAutoEffect, encodeCall, stampEncodedBody } from "./CallCodec.js"
+import { CallDecodeError, decodeBodyAutoEffect, encodeCall } from "./CallCodec.js"
 import type { Call } from "./CallModel.js"
 import { callIndexKeys, isFullyResolved, parseCallRef, setByeDisposition } from "./CallModel.js"
 import type { TimerEntry } from "./CallModel.js"
@@ -632,14 +632,10 @@ export class CallState extends ServiceMap.Service<
           )
         }
 
-        // Stamp the wall-clock encode time as an 8-byte binary prefix
-        // on the encoded body. Replaces the pre-Fix-#2 spread (which
-        // allocated a ~100-field plain object before msgpack pack);
-        // the prefix is one 9-byte alloc + one concat. Receivers read
-        // it via `readStampedWrittenAtMs` to compute `latency_ms`
-        // without decoding the body.
-        const writtenAtMs = yield* Clock.currentTimeMillis
-        const body = stampEncodedBody(encodeCall(bumped), writtenAtMs)
+        // ADR-0011: bare codec bytes, no stamp prefix. The peer's
+        // apply gate uses the wire frame's callGen, not a body-level
+        // timestamp.
+        const body = encodeCall(bumped)
         MutableHashMap.set(flushCache, callRef, { call: bumped, body })
         const { role, primary } = partitionOf(callRef)
         const indexes = callIndexKeys(bumped)
@@ -910,8 +906,7 @@ export class CallState extends ServiceMap.Service<
           if (bumped !== call) {
             MutableHashMap.set(callsMap, callRef, bumped)
           }
-          const writtenAtMs = yield* Clock.currentTimeMillis
-          const body = stampEncodedBody(encodeCall(bumped), writtenAtMs)
+          const body = encodeCall(bumped)
           const { role, primary } = partitionOf(callRef)
           const indexes = callIndexKeys(bumped)
           // Slice 6 + Slice B: same peer-selection rule as flushToRedis;

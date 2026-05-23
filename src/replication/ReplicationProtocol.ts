@@ -40,7 +40,7 @@
 
 import { Data } from "effect"
 import { Encoder } from "msgpackr"
-import { mpUnpack, readStampedWrittenAtMs, stripStampedPrefix } from "../call/CallCodec.js"
+import { mpUnpack } from "../call/CallCodec.js"
 import { callIndexKeysFromUnknown } from "../call/CallModel.js"
 import {
   KvBackend,
@@ -506,18 +506,15 @@ export const parseMember = (member: string): MemberParts | null => {
  */
 export const buildDataFrame = (
   entry: PulledEntry,
-  nowMs: number
+  _nowMs: number
 ): DataFrame | null => {
   const parts = parseMember(entry.member)
   if (parts === null) return null
-  // callGen comes from the entry's `:gen` sidecar (read at pull time by
-  // channelPullBatch). When the sidecar is missing — pre-sidecar entries
-  // or a TTL race — we fall back to a body decode. The indexes still
-  // require a body decode (no `:idx` sidecar today); that decode also
-  // supplies the writtenAtMs latency_ms metric.
+  // callGen comes from the entry's `:gen` sidecar (read at pull time
+  // by channelPullBatch). The body-decode fallback covers pre-sidecar
+  // entries or a TTL race. Indexes still require a body decode because
+  // there is no `:idx` sidecar today.
   const metadata = entry.body !== null ? extractBodyMetadata(entry.body) : null
-  const writtenAtMs = metadata?.writtenAtMs ?? null
-  const latency_ms = writtenAtMs !== null ? Math.max(0, nowMs - writtenAtMs) : 0
   const callGen = entry.callGen ?? metadata?.callGen ?? 0
   return {
     _tag: "Data",
@@ -528,36 +525,33 @@ export const buildDataFrame = (
     callRef: parts.callRef,
     body: entry.body,
     body_ttl_remaining_sec: entry.body_ttl_remaining_sec,
-    latency_ms,
+    // ADR-0011: writtenAtMs stamp removed. latency_ms is always 0 on
+    // the wire; if reinstated the puller would derive it from
+    // received-time deltas across consecutive frames.
+    latency_ms: 0,
     callGen,
     indexes: metadata?.indexes ?? [],
   }
 }
 
 interface BodyMetadata {
-  readonly writtenAtMs: number | null
   readonly callGen: number
   readonly indexes: ReadonlyArray<string>
 }
 
 /**
- * Extract callGen, indexes, and writtenAtMs from a body Buffer in one
- * decode. writtenAtMs may come from the binary stamp prefix without
- * decoding; callGen + indexes always require a body decode (transitional
- * — commit 4 reads them from a sidecar instead).
+ * Extract callGen + indexes from a body Buffer. ADR-0011 contract:
+ * bodies are bare codec output (no stamp prefix, no JSON dispatch).
+ * Used as a fallback when the sidecar callGen is missing AND for
+ * indexes (no `:idx` sidecar exists today).
  */
 const extractBodyMetadata = (body: Buffer): BodyMetadata => {
-  // writtenAtMs fast path: binary prefix; if absent, fall through to a
-  // body decode that also yields callGen + indexes.
-  const stamped = readStampedWrittenAtMs(body)
   try {
-    const obj = mpUnpack(stripStampedPrefix(body)) as unknown
+    const obj = mpUnpack(body) as unknown
     if (typeof obj !== "object" || obj === null) {
-      return { writtenAtMs: stamped, callGen: 0, indexes: [] }
+      return { callGen: 0, indexes: [] }
     }
     const objRec = obj as Record<string, unknown>
-    const writtenAtMs =
-      stamped !== null ? stamped : toFiniteNumber(objRec["__writtenAtMs"])
     const topology = objRec["_topology"]
     const callGen =
       topology !== null && typeof topology === "object"
@@ -566,8 +560,8 @@ const extractBodyMetadata = (body: Buffer): BodyMetadata => {
           ) ?? 0)
         : 0
     const indexes = callIndexKeysFromUnknown(obj)
-    return { writtenAtMs, callGen, indexes }
+    return { callGen, indexes }
   } catch {
-    return { writtenAtMs: stamped, callGen: 0, indexes: [] }
+    return { callGen: 0, indexes: [] }
   }
 }

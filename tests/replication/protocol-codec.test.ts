@@ -274,21 +274,7 @@ describe("buildDataFrame", () => {
     expect(frame!.counter).toBe(7)
   })
 
-  it("computes latency_ms from body.__writtenAtMs when present", () => {
-    const frame = buildDataFrame(
-      {
-        member: "U:pri:worker-A:call:abc",
-        entryGen: 1,
-        score: 1,
-        body: bodyBuf({ __writtenAtMs: 900 }),
-        body_ttl_remaining_sec: 60,
-      },
-      1_000,
-    )
-    expect(frame!.latency_ms).toBe(100)
-  })
-
-  it("latency_ms = 0 when body has no __writtenAtMs field", () => {
+  it("ADR-0011 — latency_ms is always 0 (writtenAtMs stamp removed)", () => {
     const frame = buildDataFrame(
       {
         member: "U:pri:worker-A:call:abc",
@@ -296,6 +282,7 @@ describe("buildDataFrame", () => {
         score: 1,
         body: bodyBuf({ x: 1 }),
         body_ttl_remaining_sec: 60,
+        callGen: 0,
       },
       1_000,
     )

@@ -49,7 +49,7 @@ import {
   type PullFrame,
 } from "./ReplicationProtocol.js"
 import { KvBackend, type KvBackendApi } from "../storage/KvBackend.js"
-import { mpUnpack, stripStampedPrefix } from "../call/CallCodec.js"
+import { mpUnpack } from "../call/CallCodec.js"
 import { callIndexKeysFromUnknown } from "../call/CallModel.js"
 import {
   PartitionedRelayStorage,
@@ -369,11 +369,7 @@ const toBootstrapDataFrame = (entry: ScanEntry): DataFrame => {
   let decoded: unknown = null
   if (entry.body !== null) {
     try {
-      if (entry.body.length > 0 && entry.body[0] === 0x7b) {
-        decoded = JSON.parse(entry.body.toString("utf8"))
-      } else {
-        decoded = mpUnpack(stripStampedPrefix(entry.body))
-      }
+      decoded = mpUnpack(entry.body)
     } catch {
       decoded = null
     }

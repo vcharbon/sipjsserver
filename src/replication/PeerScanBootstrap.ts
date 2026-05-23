@@ -40,19 +40,17 @@ import {
 } from "effect"
 import type { HttpClient } from "effect/unstable/http"
 import { callIndexKeysFromUnknown } from "../call/CallModel.js"
-import { mpUnpack, stripStampedPrefix } from "../call/CallCodec.js"
+import { mpUnpack } from "../call/CallCodec.js"
 
 /**
- * Decode a body Buffer (legacy JSON or msgpack via first-byte dispatch).
- * Decode failure returns `null` so the bootstrap apply path treats the
- * entry as un-indexable — better than crashing the bootstrap loop.
+ * Decode a body Buffer. Post-ADR-0011 bodies are bare codec output
+ * (no stamp prefix, no JSON dispatch). Decode failure returns `null`
+ * so the bootstrap apply path treats the entry as un-indexable —
+ * better than crashing the bootstrap loop.
  */
 const safeDecodeBody = (buf: Buffer): unknown => {
   try {
-    if (buf.length > 0 && buf[0] === 0x7b) {
-      return JSON.parse(buf.toString("utf8"))
-    }
-    return mpUnpack(stripStampedPrefix(buf))
+    return mpUnpack(buf)
   } catch {
     return null
   }

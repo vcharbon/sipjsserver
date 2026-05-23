@@ -5,10 +5,48 @@
 
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import type { ScenarioResult } from "./types.js"
+import type { ReplicationTraceEntry, ScenarioResult } from "./types.js"
 import { renderSequenceDiagram, serializeMessage } from "./svg-sequence-diagram.js"
 import { ruleRegistry } from "../../b2bua/B2buaCore.js"
 import { snapshot as ruleSnapshot } from "./rule-usage-collector.js"
+import { mpUnpack } from "../../call/CallCodec.js"
+
+// ---------------------------------------------------------------------------
+// Replication-frame display helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Convert a `ReplicationTraceEntry` into a JSON-serialisable shape with
+ * the binary `frame.body` decoded back into a JS object. Post-msgpackr-
+ * migration the body is opaque msgpack bytes; rendering it verbatim
+ * would dump base64-like noise into the detail panel. We dispatch on
+ * the first byte (legacy JSON vs msgpack) and fall back to a hex
+ * placeholder if decoding fails — the surrounding envelope still
+ * displays so the operator sees `op`, `partition`, `callRef`, etc.
+ */
+const decodeReplBodyForDisplay = (entry: ReplicationTraceEntry): unknown => {
+  const frame = entry.frame
+  if (typeof frame !== "object" || frame === null) return entry
+  const obj = frame as Record<string, unknown>
+  const tag = obj["_tag"]
+  if (tag !== "Data") return entry
+  const body = obj["body"]
+  if (!Buffer.isBuffer(body) && !(body instanceof Uint8Array)) return entry
+  const buf = Buffer.isBuffer(body) ? body : Buffer.from(body)
+  let decoded: unknown
+  try {
+    decoded = mpUnpack(buf)
+  } catch (err) {
+    decoded = {
+      __decode_error: err instanceof Error ? err.message : String(err),
+      __hex: buf.toString("hex").slice(0, 256),
+    }
+  }
+  return {
+    ...entry,
+    frame: { ...obj, body: decoded },
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Escape helpers
@@ -140,9 +178,18 @@ export function writeScenarioReport(
   // SIP arrows by timestamp. Each replication arrow carries
   // `data-repl-index` that maps into this dictionary so the click
   // handler shows the full decoded JSON in the detail panel.
+  //
+  // Post-msgpackr-migration, `frame.body` is `Buffer` (the originator's
+  // raw msgpack bytes) — unreadable in raw form. Decode it back to a
+  // JS object so the detail panel shows the actual Call shape, not a
+  // base64 / hex blob.
   const replicationJson: Record<number, string> = {}
   for (let i = 0; i < replicationEntries.length; i++) {
-    replicationJson[i] = JSON.stringify(replicationEntries[i]!, null, 2)
+    replicationJson[i] = JSON.stringify(
+      decodeReplBodyForDisplay(replicationEntries[i]!),
+      null,
+      2,
+    )
   }
 
   const html = `<!DOCTYPE html>
