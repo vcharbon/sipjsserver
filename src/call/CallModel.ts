@@ -722,6 +722,17 @@ export const Call = Schema.Struct({
    * into a 200 OK on the a-leg. Cleared once normal in-dialog flow resumes.
    */
   earlyPromote: Schema.optional(Schema.NullOr(EarlyPromoteState)),
+  /**
+   * Per-call message counter for MAX_MESSAGES_PER_CALL cap-defense.
+   * Bumped by SipRouter on every event resolved to this call. Lives on
+   * the schema so the rule pipeline's existing `appendAutoFlush`
+   * persists it alongside the per-message dialog mutations
+   * (`remoteCSeq` / `localCSeq` bumps) that already happen on every
+   * relayed message — no extra flush is incurred on the hot path.
+   * Cap-defense isn't safety-critical across restarts, so the field is
+   * optional and omitted from the wire when zero.
+   */
+  messageCount: Schema.optional(Schema.Int),
 })
 
 export type Call = typeof Call.Type

@@ -47,6 +47,8 @@ import {
   deriveCallRef,
 } from "../call/CallModel.js"
 import { parseStickinessCookie } from "../cache/StickinessCookie.js"
+import { executeActions } from "../b2bua/rules/framework/ActionExecutor.js"
+import type { RuleContext } from "../b2bua/rules/framework/RuleDefinition.js"
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -232,6 +234,16 @@ export const emptyEffects: HandlerEffects = {
   fireAndForget: [],
 }
 
+// Zero-id external span used to detach long-lived forks from the
+// per-message processing span. Effect's built-in tracerLogger skips
+// `_tag === "ExternalSpan"`, so any log inside such a fork no longer
+// writes events onto a span that may already have ended.
+const DETACHED_FORK_PARENT = Tracer.externalSpan({
+  traceId: "0".repeat(32),
+  spanId: "0".repeat(16),
+  sampled: false,
+})
+
 /** Result returned by handlers — pure data, no side effects. */
 export interface HandlerResult {
   readonly call: Call
@@ -380,11 +392,39 @@ export class SipRouter extends ServiceMap.Service<
         const key = `${method}|${status}`
         staleResponseDroppedTotal[key] = (staleResponseDroppedTotal[key] ?? 0) + 1
       }
+      // Per-Call-ID event shedding for the "Unroutable" WARN line. At ~3.9k
+      // routed messages/sec the pino+OTel cost of one WARN per orphaned
+      // packet collapses worker ELU. We keep one token per Call-ID per
+      // second (last-log timestamp); messages within the suppression window
+      // bump a counter but emit nothing. The OTel error span is retained —
+      // it's a fraction of the pino cost.
+      const unroutableLogLastMs = new Map<string, number>()
+
+      const UNROUTABLE_LOG_WINDOW_MS = 1000
+      const UNROUTABLE_LOG_MAP_MAX = 10_000
+      let unroutableSuppressedTotal = 0
+      const shouldEmitUnroutableLog = (key: string, nowMs: number): boolean => {
+        const last = unroutableLogLastMs.get(key)
+        if (last !== undefined && nowMs - last < UNROUTABLE_LOG_WINDOW_MS) {
+          unroutableSuppressedTotal++
+          return false
+        }
+        if (unroutableLogLastMs.size >= UNROUTABLE_LOG_MAP_MAX) {
+          // Cheap pseudo-LRU: drop the oldest insertion. Map iteration
+          // order is insertion order in JS, so the first entry is the
+          // oldest seen.
+          const firstKey = unroutableLogLastMs.keys().next().value
+          if (firstKey !== undefined) unroutableLogLastMs.delete(firstKey)
+        }
+        unroutableLogLastMs.set(key, nowMs)
+        return true
+      }
       registry.sipRouter = {
         eventHandlerTimeoutTotal: () => eventHandlerTimeoutTotal,
         forcePurgeTotal: () => forcePurgeTotal,
         staleResponseDroppedTotal: () => ({ ...staleResponseDroppedTotal }),
         zombieTimeoutTotal: () => zombieTimeoutTotal,
+        unroutableSuppressedTotal: () => unroutableSuppressedTotal,
       }
       // Bind background forks to the layer's scope so they die when
       // the worker scope closes. Required for the simulated cluster's
@@ -575,6 +615,11 @@ export class SipRouter extends ServiceMap.Service<
           yield* Effect.forEach(result.effects.buffered, applyBuffered, { discard: true })
 
           // ── Fire-and-forget: async REFER, forked into the layer scope. ─
+          // Detach the fork's `Tracer.ParentSpan` from the per-message
+          // processing span — the fork outlives the request, and the HTTP
+          // client + internal-event re-entry would otherwise route log
+          // events onto the now-ended span (see TransactionLayer for the
+          // full mechanism). `withCall` reopens its own processing span.
           const applyFork = (effect: typeof result.effects.fireAndForget[number]): Effect.Effect<void> => {
             switch (effect.type) {
               case "refer-async-http": {
@@ -598,7 +643,7 @@ export class SipRouter extends ServiceMap.Service<
                       payload,
                     }
                     yield* withCall(handlers, internalEvent)
-                  }),
+                  }).pipe(Effect.withParentSpan(DETACHED_FORK_PARENT)),
                   layerScope,
                 ).pipe(Effect.asVoid)
               }
@@ -817,8 +862,19 @@ export class SipRouter extends ServiceMap.Service<
                 "sip.summary": summary,
                 "sip.call_id": callId
               }
+              // Per-Call-ID event shedding: span always fires, WARN only at
+              // most once per second per Call-ID (suppressed messages bump
+              // `b2bua_unroutable_log_suppressed_total`). Key on Call-ID
+              // when present (it always is here — getHeader returns ""),
+              // falling back to source addr so an attacker can't trivially
+              // bypass with random Call-IDs from one IP.
+              const shedKey = callId !== "" ? `cid:${callId}` : `ip:${event.rinfo.address}`
+              const nowMs = yield* Clock.currentTimeMillis
+              const emitLog = shouldEmitUnroutableLog(shedKey, nowMs)
               yield* tracing.withErrorSpan("sip.unroutable", attrs,
-                Effect.logWarning(`Unroutable ${summary} from ${event.rinfo.address}:${event.rinfo.port} Call-ID=${callId} fromTag=${fromTag} toTag=${toTag} [${resolveDetail}] — rejecting`)
+                emitLog
+                  ? Effect.logWarning(`Unroutable ${summary} from ${event.rinfo.address}:${event.rinfo.port} Call-ID=${callId} fromTag=${fromTag} toTag=${toTag} [${resolveDetail}] — rejecting`)
+                  : Effect.void
               )
               // Stale-response anomaly counter — bumped per RFC 3261
               // §17.1.1.2 silent-drop path so operators can see the
@@ -890,14 +946,26 @@ export class SipRouter extends ServiceMap.Service<
                 return
               }
 
+              // MAX_MESSAGES_PER_CALL — bump the counter on the Call.
+              // The same per-message mutation path (remoteCSeq /
+              // localCSeq bumps via the rule chain) already produces a
+              // new Call ref and triggers `appendAutoFlush`, so this
+              // immutable clone piggybacks on the existing flush.
+              const bumpedCount = (call.messageCount ?? 0) + 1
+              const bumpedCall: Call = { ...call, messageCount: bumpedCount }
+              const capExceeded =
+                bumpedCount > config.maxMessagesPerCall &&
+                bumpedCall.state !== "terminating" &&
+                bumpedCall.state !== "terminated"
+
               // Step 3: Determine leg and dialog
               const { leg, dialog, direction } = legHint
-                ? findLegAndDialog(call, legHint)
-                : { leg: call.aLeg, dialog: call.aLeg.dialogs[0] as Dialog | undefined, direction: "from-a" as const }
+                ? findLegAndDialog(bumpedCall, legHint)
+                : { leg: bumpedCall.aLeg, dialog: bumpedCall.aLeg.dialogs[0] as Dialog | undefined, direction: "from-a" as const }
 
               const nowMs = yield* Clock.currentTimeMillis
               const resolvedCtx: ResolvedContext = {
-                call, callRef, leg, dialog, direction, event, config, callControl, limiter, nowMs
+                call: bumpedCall, callRef, leg, dialog, direction, event, config, callControl, limiter, nowMs
               }
 
               // Step 4: Run handler inside tracing span
@@ -940,7 +1008,57 @@ export class SipRouter extends ServiceMap.Service<
                 if (result.spanEvents && result.spanEvents.length > 0) {
                   yield* tracing.emitSpanEvents(result.spanEvents)
                 }
-                yield* processResult(callRef, result, handlers, nowMs)
+
+                // MAX_MESSAGES_PER_CALL — append begin-termination if the
+                // bumped count crossed the threshold AND the handler did
+                // not already terminate the call. The action runs through
+                // the standard ActionExecutor so dialog tag ownership,
+                // BYE/CANCEL emission per leg, and the safety-timer arming
+                // contract from ADR-0003 apply uniformly with rule-driven
+                // terminations.
+                if (
+                  capExceeded &&
+                  result.call.state !== "terminating" &&
+                  result.call.state !== "terminated"
+                ) {
+                  yield* Effect.logWarning(
+                    `Call ${callRef} exceeded MAX_MESSAGES_PER_CALL (${bumpedCount} > ${config.maxMessagesPerCall}) — terminating`
+                  )
+                  const capCtx: RuleContext = {
+                    call: result.call,
+                    callRef,
+                    event,
+                    sourceLeg: leg,
+                    sourceDialog: dialog,
+                    direction,
+                    config,
+                    callControl,
+                    limiter,
+                    nowMs,
+                  }
+                  const capResult = executeActions(
+                    [{ type: "begin-termination", reason: 'SIP;cause=503;text="message-cap-exceeded"' }],
+                    capCtx,
+                    "max-messages-per-call",
+                  )
+                  const merged = {
+                    call: capResult.call,
+                    effects: {
+                      critical: [...result.effects.critical, ...capResult.effects.critical],
+                      outbound: [...result.effects.outbound, ...capResult.effects.outbound],
+                      soft: [...result.effects.soft, ...capResult.effects.soft],
+                      buffered: [...result.effects.buffered, ...capResult.effects.buffered],
+                      fireAndForget: [...result.effects.fireAndForget, ...capResult.effects.fireAndForget],
+                    },
+                    spanEvents: [
+                      ...(result.spanEvents ?? []),
+                      ...(capResult.spanEvents ?? []),
+                    ],
+                  }
+                  yield* processResult(callRef, merged, handlers, nowMs)
+                } else {
+                  yield* processResult(callRef, result, handlers, nowMs)
+                }
               })
 
               yield* tracing.withProcessingSpan({ call, name: spanName, attributes: attrs, effect: inner })
