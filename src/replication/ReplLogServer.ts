@@ -49,6 +49,8 @@ import {
   type PullFrame,
 } from "./ReplicationProtocol.js"
 import { KvBackend, type KvBackendApi } from "../storage/KvBackend.js"
+import { mpUnpack, stripStampedPrefix } from "../call/CallCodec.js"
+import { callIndexKeysFromUnknown } from "../call/CallModel.js"
 import {
   PartitionedRelayStorage,
   type PartitionedRelayStorageApi,
@@ -360,23 +362,45 @@ const buildBootstrapStream = (
   return encodeFramesToBytes(buildChannelStream(initial, step))
 }
 
-const toBootstrapDataFrame = (entry: ScanEntry): DataFrame => ({
-  _tag: "Data",
-  gen: 0,
-  counter: 0,
-  op: "create",
-  partition: "pri",
-  callRef: entry.callRef,
-  body: safeParseJsonValue(entry.json),
-  body_ttl_remaining_sec: entry.ttlSec,
-  latency_ms: 0,
-})
-
-const safeParseJsonValue = (raw: string): unknown => {
-  try {
-    return JSON.parse(raw) as unknown
-  } catch {
-    return null
+const toBootstrapDataFrame = (entry: ScanEntry): DataFrame => {
+  // Decode the body once on the bootstrap source to populate the wire
+  // envelope's callGen + indexes. Commit 4 lifts these to a sidecar
+  // read so this decode disappears.
+  let decoded: unknown = null
+  if (entry.body !== null) {
+    try {
+      if (entry.body.length > 0 && entry.body[0] === 0x7b) {
+        decoded = JSON.parse(entry.body.toString("utf8"))
+      } else {
+        decoded = mpUnpack(stripStampedPrefix(entry.body))
+      }
+    } catch {
+      decoded = null
+    }
+  }
+  const decodedTopGen =
+    decoded !== null &&
+    typeof decoded === "object" &&
+    typeof (decoded as { _topology?: { gen?: unknown } })._topology === "object"
+      ? (decoded as { _topology?: { gen?: unknown } })._topology?.gen
+      : undefined
+  const callGen =
+    typeof decodedTopGen === "number" && Number.isFinite(decodedTopGen)
+      ? Math.max(0, decodedTopGen)
+      : 0
+  const indexes = callIndexKeysFromUnknown(decoded)
+  return {
+    _tag: "Data",
+    gen: 0,
+    counter: 0,
+    op: "create",
+    partition: "pri",
+    callRef: entry.callRef,
+    body: entry.body,
+    body_ttl_remaining_sec: entry.ttlSec,
+    latency_ms: 0,
+    callGen,
+    indexes,
   }
 }
 

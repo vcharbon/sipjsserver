@@ -425,20 +425,36 @@ export const makeDirectBootstrapStream = (
     })
   )
 
-const scanEntryToDataFrame = (entry: ScanEntry): DataFrame => ({
-  _tag: "Data",
-  gen: 0,
-  counter: 0,
-  op: "create",
-  partition: "pri",
-  callRef: entry.callRef,
-  // Body passes through opaquely — the bootstrap apply path writes
-  // the same bytes to local storage without re-encoding. The applier
-  // unpacks once for index derivation only.
-  body: entry.body,
-  body_ttl_remaining_sec: entry.ttlSec,
-  latency_ms: 0,
-})
+const scanEntryToDataFrame = (entry: ScanEntry): DataFrame => {
+  // Decode the body once on the scan source to populate the wire
+  // envelope's callGen + indexes. Commit 4 sources both from a
+  // sidecar instead so this decode disappears entirely.
+  const decoded = entry.body !== null ? safeDecodeBody(entry.body) : null
+  const decodedTopGen =
+    decoded !== null &&
+    typeof decoded === "object" &&
+    typeof (decoded as { _topology?: { gen?: unknown } })._topology === "object"
+      ? (decoded as { _topology?: { gen?: unknown } })._topology?.gen
+      : undefined
+  const callGen =
+    typeof decodedTopGen === "number" && Number.isFinite(decodedTopGen)
+      ? Math.max(0, decodedTopGen)
+      : 0
+  const indexes = callIndexKeysFromUnknown(decoded)
+  return {
+    _tag: "Data",
+    gen: 0,
+    counter: 0,
+    op: "create",
+    partition: "pri",
+    callRef: entry.callRef,
+    body: entry.body,
+    body_ttl_remaining_sec: entry.ttlSec,
+    latency_ms: 0,
+    callGen,
+    indexes,
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Bootstrap metrics state — allocates counter maps + the

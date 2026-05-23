@@ -39,8 +39,7 @@ import {
   type NoopFrame,
 } from "../../src/replication/ReplicationProtocol.js"
 import { makeReplicationSupervisor } from "../../src/replication/ReplicationSupervisor.js"
-
-const enc = new TextEncoder()
+import { bodyBuf } from "../support/codecHelpers.js"
 
 const dataFrame = (
   gen: number,
@@ -54,9 +53,14 @@ const dataFrame = (
   op: "update",
   partition: "pri",
   callRef,
-  body,
+  // Body Buffer post-msgpackr-migration; encode the test's JS object
+  // through the real codec so the frame's bytes match what production
+  // produces.
+  body: bodyBuf(body),
   body_ttl_remaining_sec: 60,
   latency_ms: 0,
+  callGen: gen,
+  indexes: [],
 })
 
 const noopFrame = (gen: number, counter: number): NoopFrame => ({
@@ -69,7 +73,9 @@ const noopFrame = (gen: number, counter: number): NoopFrame => ({
 const framesToBytes = (
   frames: ReadonlyArray<ProtoDataFrame | NoopFrame>
 ): Stream.Stream<Uint8Array, PullerTransportError> =>
-  Stream.fromIterable(frames.map((f) => enc.encode(encodeFrame(f))))
+  // `encodeFrame` already returns a length-prefixed Buffer chunk; stream
+  // it through directly (no TextEncoder — payload is binary).
+  Stream.fromIterable(frames.map((f): Uint8Array => encodeFrame(f)))
 
 /** Bytes stream that emits the frames, then never completes — mimics the long-lived /replog stream. */
 const longLivedFrames = (
@@ -320,7 +326,7 @@ describe("ReplicationSupervisor — peer disappear/reappear preserves watermark"
                   watermark: { gen: 1, counter: 5 },
                   everCaughtUp: true,
                 })
-                yield* Effect.never
+                return yield* Effect.never
               })
             )
           }),

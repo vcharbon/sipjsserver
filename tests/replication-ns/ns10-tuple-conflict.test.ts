@@ -30,8 +30,7 @@ import {
   type DataFrame as ProtoDataFrame,
   type NoopFrame,
 } from "../../src/replication/ReplicationProtocol.js"
-
-const enc = new TextEncoder()
+import { bodyBuf, decodeBuf } from "../support/codecHelpers.js"
 
 const dataFrame = (
   gen: number,
@@ -45,9 +44,11 @@ const dataFrame = (
   op: "update",
   partition: "pri",
   callRef,
-  body: { ver, _topology: { gen: counter } },
+  body: bodyBuf({ ver, _topology: { gen: counter } }),
   body_ttl_remaining_sec: 60,
   latency_ms: 0,
+  callGen: counter,
+  indexes: [],
 })
 
 const noopFrame = (gen: number, counter: number): NoopFrame => ({
@@ -61,8 +62,9 @@ const longLivedFrames = (
   frames: ReadonlyArray<ProtoDataFrame | NoopFrame>
 ): Stream.Stream<Uint8Array, PullerTransportError> =>
   Stream.concat(
-    Stream.fromIterable(frames.map((f) => enc.encode(encodeFrame(f)))),
-    Stream.never
+    // encodeFrame returns a length-prefixed Buffer; emit directly.
+    Stream.fromIterable(frames.map((f): Uint8Array => encodeFrame(f))),
+    Stream.never,
   )
 
 describe("NS10 — tuple-conflict resolution", () => {
@@ -148,7 +150,8 @@ describe("NS10 — tuple-conflict resolution", () => {
         // for the cross-direction race protection (separate from the
         // wire-level (gen, counter) watermark).
         const last = applied[applied.length - 1]!
-        expect(last.body).toEqual({ ver: "new", _topology: { gen: 1 } })
+        expect(last.body).not.toBeNull()
+        expect(decodeBuf(last.body as Buffer)).toEqual({ ver: "new", _topology: { gen: 1 } })
 
         yield* Fiber.interrupt(fiber)
       })
