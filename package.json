@@ -80,7 +80,8 @@
     "@opentelemetry/sdk-trace-node": "^2.6.1",
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "effect": "4.0.0-beta.43",
-    "ioredis": "^5.10.1"
+    "ioredis": "^5.10.1",
+    "msgpackr": "^1.11.9"
   },
   "devDependencies": {
     "@effect/language-service": "latest",

@@ -52,6 +52,20 @@ export const AppConfigData = Schema.Struct({
    * means rule-chain handlers are doing more work than expected.
    */
   timerHandlerTimeoutMs: Schema.Int,
+  /**
+   * Max inbound messages a single Call-ID may consume before SipRouter
+   * synthesises a `begin-termination`. Counts every resolved SIP request,
+   * provisional + final response, timer firing, and internal event landing
+   * on the call. Defended against routable in-dialog floods (e.g. abuse
+   * re-INVITE scenarios at 0-2 ms spacing) which would otherwise pump
+   * hundreds of messages into a single established call. The Unroutable
+   * path (no callRef) is shed earlier by `b2bua_unroutable_log_suppressed_total`.
+   * Default 100 — short-hold legit calls (uac-endurance-short: INVITE / 200 /
+   * ACK / 30 s hold / BYE ≈ 7-10 messages) sit well below; abuse archetypes
+   * at 0-2 ms spacing trip the cap inside the first second. Raise for
+   * long-running calls with periodic re-INVITEs.
+   */
+  maxMessagesPerCall: Schema.Int,
   redisFlushIdleMs: Schema.Int,
   traceSampleRate: Schema.Number,
   otelTracesUrl: Schema.String,
@@ -416,6 +430,7 @@ function readConfigFromEnv(): AppConfigData {
     callControlReferTimeoutMs: parseInt(envOrDefault("CALL_CONTROL_REFER_TIMEOUT_MS", "5000"), 10),
     eventHandlerTimeoutMs: parseInt(envOrDefault("EVENT_HANDLER_TIMEOUT_MS", "10000"), 10),
     timerHandlerTimeoutMs: parseInt(envOrDefault("TIMER_HANDLER_TIMEOUT_MS", "5000"), 10),
+    maxMessagesPerCall: parseInt(envOrDefault("MAX_MESSAGES_PER_CALL", "100"), 10),
     redisFlushIdleMs: parseInt(envOrDefault("REDIS_FLUSH_IDLE_MS", "2000"), 10),
     traceSampleRate: parseFloat(envOrDefault("TRACE_SAMPLE_RATE", "1.0")),
     otelTracesUrl: envOrDefault("OTEL_TRACES_URL", "http://localhost:4318/v1/traces"),
@@ -489,24 +504,31 @@ function readConfigFromEnv(): AppConfigData {
 // ---------------------------------------------------------------------------
 
 /**
- * The `terminating_timeout` safety net must exceed the longest expected
- * gap between peer activity by a comfortable margin. Otherwise a routine
- * silent interval (an OPTIONS keepalive cycle, a session-timer refresh
- * window) gets mistaken for "this call is dead" and the orphan sweep
- * force-purges live dialogs. See ADR-0004 and plan
- * docs/plan/to-review-and-properly-swift-moler.md Stage 4.
+ * Floor for the `terminating_timeout` safety-net delay.
  *
- * Throws so the worker refuses to start on inconsistent configuration
- * — the platform must never run with this gate misconfigured.
+ * Historically the floor was `keepaliveIntervalSec * 1000 + 60_000` —
+ * under the pre-A1 always-refresh contract, an OPTIONS keepalive
+ * arrival on a live dialog had to be long enough to be mistaken for
+ * "still alive" and refresh the timer. That contract was replaced on
+ * 2026-05-23 by the per-leg refresh budget (see `CallState.update`),
+ * so the keepalive-derived floor no longer applies: the budget caps
+ * the worst-case adversarial lifetime in `terminating` at
+ * `N_legs × TERMINATING_TIMEOUT_MS` regardless of keepalive cadence.
+ *
+ * The remaining floor is the SIP retransmission absorption window for
+ * the BYE / 2xx pair: Timer H (INVITE) and Timer J (non-INVITE) are
+ * both 32 s (RFC 3261 §17.2). We enforce a small lower bound (1 s) so
+ * misconfiguration is still rejected; the SIP-derived target is set
+ * in `src/call/timer-helpers.ts:TERMINATING_TIMEOUT_MS`.
  */
 export function validateTerminatingTimeoutConsistency(cfg: AppConfigData): void {
-  const requiredMs = cfg.keepaliveIntervalSec * 1000 + 60_000
-  if (TERMINATING_TIMEOUT_MS <= requiredMs) {
+  void cfg
+  const MIN_MS = 1_000
+  if (TERMINATING_TIMEOUT_MS < MIN_MS) {
     throw new Error(
       `Inconsistent config: TERMINATING_TIMEOUT_MS (${TERMINATING_TIMEOUT_MS}) ` +
-        `must exceed keepaliveIntervalSec*1000 + 60000 (${requiredMs}). ` +
-        `Bump TERMINATING_TIMEOUT_MS in src/call/timer-helpers.ts or lower ` +
-        `KEEPALIVE_INTERVAL_SEC.`,
+        `must be at least ${MIN_MS}ms. Bump the constant in ` +
+        `src/call/timer-helpers.ts.`,
     )
   }
 }

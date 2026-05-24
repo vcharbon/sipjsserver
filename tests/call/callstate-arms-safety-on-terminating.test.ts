@@ -19,6 +19,7 @@ import { TestClock } from "effect/testing"
 import { CallState } from "../../src/call/CallState.js"
 import { TimerService } from "../../src/call/TimerService.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
+import { TERMINATING_TIMEOUT_MS } from "../../src/call/timer-helpers.js"
 import { fakeStackLayer } from "../support/fakeStack.js"
 import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
 
@@ -36,12 +37,14 @@ function makeActiveCall(callRef: string): Call {
     fromTag: "uac-tag",
     source: { address: "127.0.0.1", port: 5060 },
     state: "confirmed",
-    disposition: "confirmed",
+    disposition: "bridged",
     dialogs: [],
   }
   return {
     callRef,
     aLeg,
+    aLegInvite: { uri: "sip:dest@example.com", headers: [], body: new Uint8Array() },
+    tagMap: [],
     bLegs: [],
     activePeer: null,
     limiterEntries: [],
@@ -83,33 +86,60 @@ describe("CallState.update — structural safety-net install on transition to te
   )
 
   it.effect(
-    "Stage 4: updates while in `terminating` REFRESH the safety timer fireAt (replaces former idempotent contract)",
+    "per-leg refresh budget: first update from a leg refreshes fireAt; second update from the same leg does NOT",
     () =>
       Effect.gen(function* () {
         const callState = yield* CallState
         const timers = yield* TimerService
 
-        const callRef = "self|call-refresh-on-update"
+        const callRef = "self|call-refresh-per-leg"
         yield* callState.create(makeActiveCall(callRef))
 
         yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }))
-        const firstSafetyId = `terminating-timeout-${callRef}`
-        const firstFireAt = (yield* callState.peek(callRef))?.timers.find(
-          (t) => t.id === firstSafetyId,
+        const safetyId = `terminating-timeout-${callRef}`
+        const fireAtOnEntry = (yield* callState.peek(callRef))?.timers.find(
+          (t) => t.id === safetyId,
         )?.fireAt
 
-        // Advance virtual clock so the refreshed fireAt is provably later.
+        // 1) First update from leg "a" while still terminating — refreshes.
         yield* TestClock.adjust("10 seconds")
         yield* Effect.yieldNow
+        yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }), "a")
+        const fireAtAfterA1 = (yield* callState.peek(callRef))?.timers.find(
+          (t) => t.id === safetyId,
+        )?.fireAt
+        expect(fireAtAfterA1).toBeGreaterThan(fireAtOnEntry ?? 0)
 
-        // Another mutation while still terminating — refreshes fireAt.
+        // 2) Second update from leg "a" — budget consumed, no refresh.
+        yield* TestClock.adjust("10 seconds")
+        yield* Effect.yieldNow
+        yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }), "a")
+        const fireAtAfterA2 = (yield* callState.peek(callRef))?.timers.find(
+          (t) => t.id === safetyId,
+        )?.fireAt
+        expect(fireAtAfterA2).toBe(fireAtAfterA1)
+
+        // 3) First update from leg "b" — its own budget, refreshes.
+        yield* TestClock.adjust("10 seconds")
+        yield* Effect.yieldNow
+        yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }), "b")
+        const fireAtAfterB1 = (yield* callState.peek(callRef))?.timers.find(
+          (t) => t.id === safetyId,
+        )?.fireAt
+        expect(fireAtAfterB1).toBeGreaterThan(fireAtAfterA2 ?? 0)
+
+        // 4) Update with no sourceLegId — never refreshes (synthetic updates).
+        yield* TestClock.adjust("10 seconds")
+        yield* Effect.yieldNow
         yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }))
+        const fireAtAfterAnon = (yield* callState.peek(callRef))?.timers.find(
+          (t) => t.id === safetyId,
+        )?.fireAt
+        expect(fireAtAfterAnon).toBe(fireAtAfterB1)
 
-        const after = yield* callState.peek(callRef)
-        const refreshed = after?.timers.find((t) => t.id === firstSafetyId)
-        expect(refreshed?.fireAt).toBeGreaterThan(firstFireAt ?? 0)
-        // Still exactly one timer fiber — replaceTimerById + schedule
-        // cancels the prior fiber and installs a new one under the same id.
+        // Still exactly one timer fiber throughout — replaceTimerById +
+        // schedule cancels the prior fiber and installs a new one under
+        // the same id on refreshes; non-refreshes leave the existing fiber.
         expect(yield* timers.activeCount()).toBe(1)
       }).pipe(Effect.provide(stack)),
   )
@@ -124,10 +154,15 @@ describe("CallState.update — structural safety-net install on transition to te
         yield* callState.create(makeActiveCall(callRef))
         yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }))
 
-        // Drive past TERMINATING_TIMEOUT_MS (17 min). 30 s slices keep
-        // virtual-clock progress visible to each sleeping fiber.
-        for (let i = 0; i < 36; i++) {
-          yield* TestClock.adjust("30 seconds")
+        // Drive past TERMINATING_TIMEOUT_MS in fine-grained slices so
+        // each sleeping fiber sees virtual-clock progress. Slice size
+        // is one tenth of the timeout (min 100 ms) so the test scales
+        // with the constant.
+        const sliceMs = Math.max(100, Math.floor(TERMINATING_TIMEOUT_MS / 10))
+        const advanceMs = TERMINATING_TIMEOUT_MS + sliceMs
+        const slices = Math.ceil(advanceMs / sliceMs)
+        for (let i = 0; i < slices; i++) {
+          yield* TestClock.adjust(`${sliceMs} millis`)
           yield* Effect.yieldNow
         }
 
@@ -138,7 +173,7 @@ describe("CallState.update — structural safety-net install on transition to te
   )
 
   it.effect(
-    "Stage 4: orphan sweep refreshes on peer activity — late update inside `terminating` postpones the safety fire",
+    "a first-time per-leg update inside `terminating` postpones the safety fire by one window",
     () =>
       Effect.gen(function* () {
         const callState = yield* CallState
@@ -147,38 +182,91 @@ describe("CallState.update — structural safety-net install on transition to te
         yield* callState.create(makeActiveCall(callRef))
         yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }))
 
-        // 8 minutes in — half-way through the 17-min window. The call
-        // simulates an in-flight peer response: stays terminating but
-        // gets a mutating update (e.g. byeDisposition flip on one leg).
-        for (let i = 0; i < 16; i++) {
-          yield* TestClock.adjust("30 seconds")
-          yield* Effect.yieldNow
-        }
+        const sliceMs = Math.max(100, Math.floor(TERMINATING_TIMEOUT_MS / 10))
+        const halfWindowMs = Math.floor(TERMINATING_TIMEOUT_MS / 2)
+        const advanceBy = (totalMs: number) =>
+          Effect.gen(function* () {
+            const slices = Math.ceil(totalMs / sliceMs)
+            for (let i = 0; i < slices; i++) {
+              yield* TestClock.adjust(`${sliceMs} millis`)
+              yield* Effect.yieldNow
+            }
+          })
+
+        // Half-window in. The call simulates an in-flight peer response
+        // from leg "a" (its first and only budgeted refresh).
+        yield* advanceBy(halfWindowMs)
         yield* callState.update(callRef, (c) => ({
           ...c,
           state: "terminating",
           // Touch some inert field so the update is non-trivial.
           cdrEvents: [...c.cdrEvents],
-        }))
+        }), "a")
 
-        // Now advance another 16 min total (8 min from refresh point).
-        // Without refresh, safety would have fired at minute 17 — the
-        // call would be gone here. With refresh (re-armed at minute 8
-        // for +17), it survives until ~minute 25.
-        for (let i = 0; i < 16; i++) {
-          yield* TestClock.adjust("30 seconds")
-          yield* Effect.yieldNow
-        }
+        // Advance another half-window. Without refresh, safety would
+        // have fired at exactly one full window — call would be gone.
+        // With the leg-"a" refresh (re-armed at the half-window mark),
+        // it survives until ~1.5 windows from entry.
+        yield* advanceBy(halfWindowMs)
 
         const stillPresent = yield* callState.peek(callRef)
         expect(stillPresent).toBeDefined()
         expect(stillPresent?.state).toBe("terminating")
 
         // Drive past the refreshed deadline.
-        for (let i = 0; i < 36; i++) {
-          yield* TestClock.adjust("30 seconds")
+        yield* advanceBy(TERMINATING_TIMEOUT_MS + sliceMs)
+        const after = yield* callState.peek(callRef)
+        expect(after).toBeUndefined()
+      }).pipe(Effect.provide(stack)),
+  )
+
+  it.effect(
+    "adversarial refresh: repeated updates from the SAME leg cannot keep a terminating call alive past TERMINATING_TIMEOUT_MS",
+    () =>
+      Effect.gen(function* () {
+        const callState = yield* CallState
+
+        const callRef = "self|call-adversarial-refresh"
+        yield* callState.create(makeActiveCall(callRef))
+        yield* callState.update(callRef, (c) => ({ ...c, state: "terminating" }))
+
+        const sliceMs = Math.max(100, Math.floor(TERMINATING_TIMEOUT_MS / 10))
+        const advanceBy = (totalMs: number) =>
+          Effect.gen(function* () {
+            const slices = Math.ceil(totalMs / sliceMs)
+            for (let i = 0; i < slices; i++) {
+              yield* TestClock.adjust(`${sliceMs} millis`)
+              yield* Effect.yieldNow
+            }
+          })
+
+        // Burn the per-leg refresh once at one slice in.
+        yield* advanceBy(sliceMs)
+        yield* callState.update(callRef, (c) => ({
+          ...c,
+          state: "terminating",
+          cdrEvents: [...c.cdrEvents],
+        }), "a")
+
+        // Now hammer with further updates from the same leg every
+        // slice. After the first refresh (above) the budget for "a"
+        // is exhausted, so none of these should extend the window.
+        // Advance enough to cover 2.5× the timeout — well past even
+        // the post-refresh deadline.
+        const advanceMs = Math.ceil(TERMINATING_TIMEOUT_MS * 2.5)
+        const slices = Math.ceil(advanceMs / sliceMs)
+        for (let i = 0; i < slices; i++) {
+          yield* TestClock.adjust(`${sliceMs} millis`)
           yield* Effect.yieldNow
+          yield* callState.update(callRef, (c) => ({
+            ...c,
+            state: "terminating",
+            cdrEvents: [...c.cdrEvents],
+          }), "a")
         }
+
+        // Refreshed deadline was at (sliceMs + TERMINATING_TIMEOUT_MS);
+        // we're past 2.5× the timeout → gone.
         const after = yield* callState.peek(callRef)
         expect(after).toBeUndefined()
       }).pipe(Effect.provide(stack)),

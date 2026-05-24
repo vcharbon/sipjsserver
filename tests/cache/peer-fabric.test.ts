@@ -26,6 +26,7 @@ import {
   PeerCachePort,
   WorkerOrdinal,
 } from "../../src/cache/PeerCachePort.js"
+import { bodyBuf } from "../support/codecHelpers.js"
 
 const A = WorkerOrdinal("A")
 const B = WorkerOrdinal("B")
@@ -48,7 +49,7 @@ describe("PeerFabric.simulated", () => {
           role,
           owner: A,
           callRef: "ref-1",
-          state: '{"hi":1}',
+          state: bodyBuf({ hi: 1 }),
           indexes: ["leg:abc|tag1"],
           ttlSec: 60,
         })
@@ -81,7 +82,7 @@ describe("PeerFabric.simulated", () => {
             role,
             owner: A,
             callRef: "ref-2",
-            state: "{}",
+            state: bodyBuf({}),
             indexes: [],
             ttlSec: 60,
           })
@@ -100,7 +101,7 @@ describe("PeerFabric.simulated", () => {
           role,
           owner: A,
           callRef: "ref-3",
-          state: "{}",
+          state: bodyBuf({}),
           indexes: [],
           ttlSec: 60,
         })
@@ -129,7 +130,7 @@ describe("PeerFabric.simulated", () => {
             role,
             owner: A,
             callRef: "ref-p",
-            state: "{}",
+            state: bodyBuf({}),
             indexes: [],
             ttlSec: 60,
           })
@@ -145,7 +146,7 @@ describe("PeerFabric.simulated", () => {
           role,
           owner: A,
           callRef: "ref-p",
-          state: "{}",
+          state: bodyBuf({}),
           indexes: [],
           ttlSec: 60,
         })
@@ -172,7 +173,7 @@ describe("PeerFabric.simulated", () => {
           role,
           owner: A,
           callRef: "ref-lat",
-          state: "{}",
+          state: bodyBuf({}),
           indexes: [],
           ttlSec: 60,
         })
@@ -208,7 +209,7 @@ describe("PeerFabric.simulated", () => {
             role,
             owner: A,
             callRef: "ref-err",
-            state: "{}",
+            state: bodyBuf({}),
             indexes: [],
             ttlSec: 60,
           })
@@ -227,8 +228,8 @@ describe("PeerFabric.simulated", () => {
       // Seed B directly via its storage layer.
       yield* Effect.gen(function* () {
         const storage = yield* PartitionedRelayStorage
-        yield* storage.putCall("bak", A, "ref-1", '{"x":1}', [], 60)
-        yield* storage.putCall("bak", A, "ref-2", '{"x":2}', [], 60)
+        yield* storage.putCall("bak", A, "ref-1", bodyBuf({ x: 1 }), [], 60)
+        yield* storage.putCall("bak", A, "ref-2", bodyBuf({ x: 2 }), [], 60)
       }).pipe(Effect.provide(fabric.storageLayerOf(B)))
 
       const portLayer = fabric.cachePortLayerOf(A)

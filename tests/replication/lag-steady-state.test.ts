@@ -3,12 +3,12 @@
  *
  * Asserts G3 (sub-second steady-state replication lag). The puller's
  * applied DataFrames carry `latency_ms` derived from the body's
- * `written_at_ms` stamp; this test verifies the wiring is correct
+ * `__writtenAtMs` stamp; this test verifies the wiring is correct
  * end-to-end so a production observability dashboard backed by these
  * values reflects reality.
  *
  * Scope: under in-memory KvBackend + real (it.live) clock, write 50
- * calls with a body stamped with `written_at_ms = Date.now()` and
+ * calls with a body stamped with `__writtenAtMs = Date.now()` and
  * assert the puller observes them with `latency_ms` ≥ 0 and bounded
  * (we verify boundedness, not absolute value — k8s tier owns the
  * 500-writes-per-second + P99 ≤ 1s assertion per design doc §D9 T7).
@@ -40,7 +40,7 @@ const N_CALLS = 50
 
 describe("T7 — steady-state lag through the puller", () => {
   it.live(
-    "puller captures latency_ms from body.written_at_ms; lag bounded under steady writes",
+    "puller captures latency_ms from body.__writtenAtMs; lag bounded under steady writes",
     () =>
       Effect.gen(function* () {
         const storeA = MutableHashMap.empty<string, MemoryStoreEntry>()
@@ -50,7 +50,7 @@ describe("T7 — steady-state lag through the puller", () => {
           kvA
         )
 
-        // Write N_CALLS, each with `written_at_ms` stamped at write
+        // Write N_CALLS, each with `__writtenAtMs` stamped at write
         // time. Spaced ~2ms apart in real time so the puller actually
         // observes a non-trivial lag spread.
         const writeStartedAt = Date.now()
@@ -60,11 +60,11 @@ describe("T7 — steady-state lag through the puller", () => {
             entryGen: channel.gen,
             partition: "pri",
             callRef: `c-${i}`,
-            bodyValue: JSON.stringify({
+            bodyValue: Buffer.from(JSON.stringify({
               _topology: { gen: i + 1 },
               i,
-              written_at_ms: nowMs,
-            }),
+              __writtenAtMs: nowMs,
+            })),
             bodyTtlSec: 60,
             indexes: [],
           })

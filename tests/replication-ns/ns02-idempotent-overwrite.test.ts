@@ -24,6 +24,7 @@ import {
   makeWorker,
   waitFor,
 } from "./twoWorkerHarness.js"
+import { bodyBuf, decodeBuf } from "../support/codecHelpers.js"
 
 const A_GEN = 21
 const B_GEN = 22
@@ -39,7 +40,7 @@ describe("NS2 — idempotent overwrite", () => {
           entryGen: A.outgoing.gen,
           partition: "pri",
           callRef: "X",
-          bodyValue: JSON.stringify({ ver: v, gen: A_GEN }),
+          bodyValue: bodyBuf({ ver: v, gen: A_GEN }),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -58,7 +59,8 @@ describe("NS2 — idempotent overwrite", () => {
 
       // B's body is v3.
       const body = yield* B.kv.bodyGet("bak:worker-A:call:X")
-      expect(body).toBe('{"ver":"v3","gen":21}')
+      expect(body).not.toBeNull()
+      expect(decodeBuf(body as Buffer)).toEqual({ ver: "v3", gen: A_GEN })
 
       // Watermark
       expect(MutableRef.get(puller.viewRef).watermark).toEqual({

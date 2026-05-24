@@ -11,7 +11,6 @@
 
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
-import { TestClock } from "effect/testing"
 import { AppConfig } from "../../src/config/AppConfig.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
 import { BufferedCdrLayer } from "../../src/cdr/BufferedCdrLayer.js"
@@ -38,7 +37,7 @@ function makeBlockingInner(): {
   let writeCount = 0
   const pending: Array<() => void> = []
   const layer = Layer.succeed(CdrWriter, {
-    write: (_call) =>
+    write: (_call: Call) =>
       Effect.callback<void>((resume) => {
         writeCount++
         pending.push(() => resume(Effect.void))
@@ -116,7 +115,7 @@ describe("BufferedCdrLayer", () => {
       const config = testAppConfigDefaults({ cdrBufferQueueMax: 0 })
       let calls = 0
       const inner = Layer.succeed(CdrWriter, {
-        write: (_call) => Effect.sync(() => { calls++ }),
+        write: (_call: Call) => Effect.sync(() => { calls++ }),
         readAll: Effect.succeed([]),
       } as unknown as CdrWriter["Service"])
 

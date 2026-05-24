@@ -675,12 +675,16 @@ export const startAbuseStreams = (
         ...(a.injectCsv !== undefined && {
           inject: `/scenarios/${a.injectCsv}`,
         }),
-        // Abuse flows trigger unsolicited 481s, in-dialog OPTIONS, and
-        // BYEs from the B2BUA. sipp's default behaviors would auto-reply
-        // / auto-BYE / abort the call; disabling them lets the scenario
-        // keep dispatching new calls instead of dying on the first
-        // unexpected message.
-        extraArgs: ["-default_behaviors", "none"],
+        // Abuse flows now respect MAX_MESSAGES_PER_CALL: when the cap
+        // fires the worker emits BYE to both legs (begin-termination).
+        // `-default_behaviors bye,pingreply` lets the abuse UAC ACK the
+        // worker-issued BYE and reply 200 to in-dialog OPTIONS coming
+        // back from the worker, so the call ends cleanly instead of
+        // sipp continuing to blast packets at a deleted Call-ID. The
+        // earlier `none` setting was paired with no per-call defense;
+        // with the cap in place we want sipp to be a well-behaved
+        // attacker that yields when defended.
+        extraArgs: ["-default_behaviors", "bye,pingreply"],
         artifactDir: opts.artifactDir,
         ...(opts.proxyTarget !== undefined && { target: opts.proxyTarget }),
       })

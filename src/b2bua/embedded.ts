@@ -64,6 +64,7 @@ export const defaultEmbeddedAppConfig: AppConfigData = {
   callControlReferTimeoutMs: 5000,
   eventHandlerTimeoutMs: 10_000,
   timerHandlerTimeoutMs: 5_000,
+  maxMessagesPerCall: 100,
   redisFlushIdleMs: 2000,
   traceSampleRate: 0,
   otelTracesUrl: "http://unused",

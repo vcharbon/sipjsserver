@@ -73,7 +73,7 @@ describe("NS5 — sidecar wipe recovery via peer-scan-bootstrap", () => {
           entryGen: channelA0toB.gen,
           partition: "pri",
           callRef: "X",
-          bodyValue: '{"_topology":{"gen":1},"name":"X"}',
+          bodyValue: Buffer.from('{"_topology":{"gen":1},"name":"X"}'),
           bodyTtlSec: 60,
           indexes: [],
         })

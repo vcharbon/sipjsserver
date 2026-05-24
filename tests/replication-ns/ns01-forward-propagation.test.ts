@@ -37,7 +37,7 @@ describe("NS1 — forward propagation", () => {
         entryGen: A.outgoing.gen,
         partition: "pri",
         callRef: "X",
-        bodyValue: '{"name":"X","gen":11}',
+        bodyValue: Buffer.from('{"name":"X","gen":11}'),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -51,9 +51,9 @@ describe("NS1 — forward propagation", () => {
       )
 
       // Body landed on bak:{A}: on B.
-      expect(yield* B.kv.bodyGet("bak:worker-A:call:X")).toBe(
-        '{"name":"X","gen":11}'
-      )
+      expect(
+        (yield* B.kv.bodyGet("bak:worker-A:call:X"))?.toString("utf8")
+      ).toBe('{"name":"X","gen":11}')
 
       // Watermark advanced to A's (gen, counter=1).
       expect(MutableRef.get(puller.viewRef).watermark).toEqual({

@@ -34,7 +34,6 @@ import {
 } from "effect"
 import * as Arr from "effect/Array"
 import * as Duration from "effect/Duration"
-import * as Fiber from "effect/Fiber"
 import { TestPace } from "../../src/observability/TestPace.js"
 
 interface SleepEntry {
@@ -59,7 +58,7 @@ export interface PumpableClockShape {
   readonly currentTimeMillis: Effect.Effect<number>
   readonly currentTimeNanos: Effect.Effect<bigint>
   readonly sleep: (duration: Duration.Duration) => Effect.Effect<void>
-  readonly adjust: (duration: Duration.DurationInput) => Effect.Effect<void>
+  readonly adjust: (duration: Duration.Input) => Effect.Effect<void>
   readonly setTime: (timestamp: number) => Effect.Effect<void>
   readonly withLive: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
   /** Snapshot of pending deadlines, ascending. */
@@ -189,7 +188,7 @@ const buildImpl = Effect.gen(function* () {
         }
       })
 
-      yield* Fiber.await(yield* Effect.forkScoped(Effect.yieldNow))
+      yield* Effect.yieldNow
       const endTimestamp = step(currentTimestamp)
       while (Arr.isArrayNonEmpty(sleeps)) {
         if (Arr.lastNonEmpty(sleeps).timestamp > endTimestamp) break
@@ -212,7 +211,7 @@ const buildImpl = Effect.gen(function* () {
       yield* drainAsyncWork
     }).pipe(runSemaphore.withPermits(1))
 
-  const adjust = (duration: Duration.DurationInput) => {
+  const adjust = (duration: Duration.Input) => {
     const millis = Duration.toMillis(Duration.fromInputUnsafe(duration))
     return run((timestamp) => timestamp + millis)
   }
@@ -263,7 +262,7 @@ const buildImpl = Effect.gen(function* () {
  * Wire this in `tests/support/fakeStack.ts` so every fake-stack scenario
  * gets it. Real-clock tests must NOT pull this layer in.
  */
-export const PumpableClockLayer: Layer.Layer<PumpableClock | Clock.Clock | TestPace> = Layer.effectServices(
+export const PumpableClockLayer: Layer.Layer<PumpableClock | TestPace> = Layer.effectServices(
   Effect.gen(function* () {
     const impl = yield* buildImpl
     // The Clock service we register also has to satisfy the upstream

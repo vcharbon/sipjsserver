@@ -13,7 +13,7 @@
  * Output: `snapshot.json` in the artifact dir.
  */
 
-import { Data, Effect } from "effect"
+import { Data, Duration, Effect } from "effect"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { exec } from "../fixtures/exec.js"
@@ -84,11 +84,17 @@ export const captureSnapshot = (
       workerPods.filter((p) => p.oomKilledHistorical).length +
       limiterRedisPods.filter((p) => p.oomKilledHistorical).length
 
-    // Pull any heap snapshots written by the worker (V8 auto-snapshot
-    // via --heapsnapshot-near-heap-limit, or the recorder's RSS
-    // watchdog via /debug/heap-snapshot / SIGUSR2). Best-effort; if
-    // /heapdumps isn't mounted (production-style helm values), the
-    // copy is a no-op.
+    // Trigger graceful shutdown of each worker so Node's `--cpu-prof`
+    // flushes its `.cpuprofile` to /heapdumps before we collect.
+    // Without this, the cpuprofile file is never written (V8 only
+    // emits it at clean process exit). Best-effort: pods may already
+    // be terminating from chaos / drain.
+    yield* flushCpuProfiles(opts.namespace, workerPods)
+
+    // Pull any heap snapshots and cpu profiles written by the worker
+    // (V8 auto-snapshot via --heapsnapshot-near-heap-limit, /debug/heap-snapshot,
+    // SIGUSR2, and --cpu-prof on clean exit). Best-effort; if /heapdumps
+    // isn't mounted (production-style helm values), the copy is a no-op.
     yield* collectHeapdumps(opts.namespace, opts.artifactDir, workerPods)
 
     const snap: Snapshot = {
@@ -111,6 +117,50 @@ export const captureSnapshot = (
       ),
     )
     return snap
+  })
+
+/**
+ * Send SIGTERM (kill -15 1) to each worker's PID 1 so Node's
+ * `--cpu-prof` flushes the `.cpuprofile` to /heapdumps. V8 only writes
+ * the profile on clean process exit; without this the file never lands.
+ *
+ * After SIGTERM the StatefulSet controller restarts the worker
+ * container — its emptyDir survives the container restart, so the
+ * old profile remains until kubectl cp picks it up. The race window
+ * before the new container also starts writing to /heapdumps is
+ * bounded by the post-SIGTERM grace + the new container's boot time
+ * (sleep below covers both).
+ *
+ * Best-effort: failures are swallowed; if a worker is already
+ * terminating from chaos we still proceed.
+ */
+const flushCpuProfiles = (
+  namespace: string,
+  workerPods: ReadonlyArray<PodSnapshot>,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    if (workerPods.length === 0) return
+    yield* Effect.forEach(
+      workerPods,
+      (pod) =>
+        exec("kubectl", [
+          "-n",
+          namespace,
+          "exec",
+          pod.name,
+          "-c",
+          "worker",
+          "--",
+          "kill",
+          "-15",
+          "1",
+        ]).pipe(Effect.ignore),
+      { discard: true, concurrency: "unbounded" },
+    )
+    // Worker SIGTERM handler runs (drain ≲ 1 s) and then Node exits.
+    // V8 flushes --cpu-prof on the exit path. 8 s gives generous slack
+    // for the drain + flush before kubectl cp.
+    yield* Effect.sleep(Duration.seconds(8))
   })
 
 /**
@@ -157,7 +207,11 @@ const collectHeapdumps = (
       const files = listed
         .split("\n")
         .map((s) => s.trim())
-        .filter((s) => s.length > 0 && s.endsWith(".heapsnapshot"))
+        .filter(
+          (s) =>
+            s.length > 0 &&
+            (s.endsWith(".heapsnapshot") || s.endsWith(".cpuprofile")),
+        )
       if (files.length === 0) continue
       // `kubectl cp <pod>:<src> <dst>` copies the directory contents
       // recursively when the source ends in `/.`.

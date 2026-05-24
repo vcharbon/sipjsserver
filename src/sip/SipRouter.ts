@@ -375,6 +375,16 @@ export class SipRouter extends ServiceMap.Service<
       // at zero in a healthy run.
       let eventHandlerTimeoutTotal = 0
       let forcePurgeTotal = 0
+      // In-dialog non-ACK/non-BYE requests rejected with 481 by the
+      // synchronous fast-path because the owning call was already in
+      // `terminating`. Skips the rule chain + `update()` (the latter
+      // would otherwise consume the per-leg safety-timer refresh budget
+      // and let adversarial in-dialog floods extend the terminating
+      // window). Sustained non-zero is expected under abuse traffic
+      // (re-INVITE / OPTIONS flood); the brake-tier counters
+      // (`tier1RejectSent` etc.) cover the same surface at the UDP
+      // boundary for unrouted traffic.
+      let fastRejectTerminatingTotal = 0
       // Counts Timer B/F firings whose owning call has already vanished.
       // After TransactionLayer.cancelTxnsForCall is wired into every
       // call-eviction path, this should be unreachable; a non-zero
@@ -425,6 +435,7 @@ export class SipRouter extends ServiceMap.Service<
         staleResponseDroppedTotal: () => ({ ...staleResponseDroppedTotal }),
         zombieTimeoutTotal: () => zombieTimeoutTotal,
         unroutableSuppressedTotal: () => unroutableSuppressedTotal,
+        fastRejectTerminatingTotal: () => fastRejectTerminatingTotal,
       }
       // Bind background forks to the layer's scope so they die when
       // the worker scope closes. Required for the simulated cluster's
@@ -499,12 +510,20 @@ export class SipRouter extends ServiceMap.Service<
       // ── processResult: execute handler output in fixed order ────────
 
       const processResult = Effect.fnUntraced(
-        function* (callRef: string, result: HandlerResult, handlers: HandlerRegistry, nowMs: number) {
+        function* (
+          callRef: string,
+          result: HandlerResult,
+          handlers: HandlerRegistry,
+          nowMs: number,
+          sourceLegId?: string,
+        ) {
           // Persist updated call state BEFORE running any effects — upholds
           // the "state updates before sending" invariant AND auto-arms the
           // safety timer when entering `terminating` (Phase 5). Via/Contact
           // stamping happens at handler call-site time, not here.
-          yield* callState.update(callRef, () => result.call)
+          // `sourceLegId` budgets one safety-timer refresh per leg while
+          // the call is in `terminating` (see CallState.update doc).
+          yield* callState.update(callRef, () => result.call, sourceLegId)
 
           // ── Critical: must run, even under interruption ────────────────
           // Wrapped in `uninterruptibleMask`. Bodies are sync JS or
@@ -625,27 +644,26 @@ export class SipRouter extends ServiceMap.Service<
               case "refer-async-http": {
                 const referReq = effect.request
                 const asyncCallRef = effect.callRef
-                return Effect.forkIn(
-                  Effect.gen(function* () {
-                    const resp = yield* callControl.callRefer(referReq).pipe(
-                      Effect.map((r) => ({ ok: true as const, resp: r })),
-                      Effect.catchTag("CallDecisionError", (e) =>
-                        Effect.succeed({ ok: false as const, reason: e.detail }),
-                      ),
-                    )
-                    const outcome = resp.ok ? resp.resp.action : "error"
-                    const payload = resp.ok ? resp.resp : { error: resp.reason }
-                    const internalEvent: CallEvent = {
-                      type: "internal-event",
-                      callRef: asyncCallRef,
-                      topic: "refer-http-result",
-                      outcome,
-                      payload,
-                    }
-                    yield* withCall(handlers, internalEvent)
-                  }).pipe(Effect.withParentSpan(DETACHED_FORK_PARENT)),
-                  layerScope,
-                ).pipe(Effect.asVoid)
+                const referBody = Effect.gen(function* () {
+                  const resp = yield* callControl.callRefer(referReq).pipe(
+                    Effect.map((r) => ({ ok: true as const, resp: r })),
+                    Effect.catchTag("CallDecisionError", (e) =>
+                      Effect.succeed({ ok: false as const, reason: e.detail }),
+                    ),
+                  )
+                  const outcome = resp.ok ? resp.resp.action : "error"
+                  const payload = resp.ok ? resp.resp : { error: resp.reason }
+                  const internalEvent: CallEvent = {
+                    type: "internal-event",
+                    callRef: asyncCallRef,
+                    topic: "refer-http-result",
+                    outcome,
+                    payload,
+                  }
+                  yield* withCall(handlers, internalEvent)
+                }).pipe(Effect.withParentSpan(DETACHED_FORK_PARENT))
+                const tracked = registry.forkSites?.track("refer-async-http", referBody) ?? referBody
+                return Effect.forkIn(tracked, layerScope).pipe(Effect.asVoid)
               }
             }
           }
@@ -946,6 +964,38 @@ export class SipRouter extends ServiceMap.Service<
                 return
               }
 
+              // Fast-reject path for in-dialog noise on a `terminating`
+              // call. The dialog is on its way out; running the full rule
+              // chain (and the `update()` that follows) only burns CPU and
+              // — when `sourceLegId` is the noisy leg — extends the
+              // safety-purge window via the per-leg refresh budget.
+              // Skipping the chain entirely closes both costs.
+              //
+              // Exemptions:
+              //  - ACK: never gets a response (RFC 3261 §17.1.1.3).
+              //  - BYE: a fresh BYE during teardown is the normal
+              //    completion path; the rule chain answers it with 200 OK
+              //    and (when both legs have torn down) promotes the call
+              //    to `terminated` via `finalizeTermination`.
+              // Responses are unaffected — RFC 3261 §17.1.1.2 already
+              // silent-drops them via the `call === undefined` path
+              // when the matching transaction has retired.
+              if (
+                call.state === "terminating"
+                && event.type === "sip"
+                && event.message.type === "request"
+                && event.message.method !== "ACK"
+                && event.message.method !== "BYE"
+              ) {
+                const rejectMsg = generateResponse(event.message as SipRequest, 481, "Call/Transaction Does Not Exist", {
+                  toTag: newTag(),
+                  contact: { user: "b2bua", host: transport.localAddress.ip, port: transport.localAddress.port },
+                })
+                yield* txnLayer.send(rejectMsg, { host: event.rinfo.address, port: event.rinfo.port }, "response")
+                fastRejectTerminatingTotal++
+                return
+              }
+
               // MAX_MESSAGES_PER_CALL — bump the counter on the Call.
               // The same per-message mutation path (remoteCSeq /
               // localCSeq bumps via the rule chain) already produces a
@@ -1055,9 +1105,9 @@ export class SipRouter extends ServiceMap.Service<
                       ...(capResult.spanEvents ?? []),
                     ],
                   }
-                  yield* processResult(callRef, merged, handlers, nowMs)
+                  yield* processResult(callRef, merged, handlers, nowMs, leg.legId)
                 } else {
-                  yield* processResult(callRef, result, handlers, nowMs)
+                  yield* processResult(callRef, result, handlers, nowMs, leg.legId)
                 }
               })
 
@@ -1187,7 +1237,7 @@ export class SipRouter extends ServiceMap.Service<
             if (result.spanEvents && result.spanEvents.length > 0) {
               yield* tracing.emitSpanEvents(result.spanEvents)
             }
-            yield* processResult(callRef, result, handlers, nowMs)
+            yield* processResult(callRef, result, handlers, nowMs, aLeg.legId)
           })
 
           const { traceId, spanId } = yield* tracing.withRootSpan({

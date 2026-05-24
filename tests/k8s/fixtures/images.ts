@@ -22,8 +22,11 @@ export const SIPP_IMAGE_TAG = "sipp:dev"
 export const SIPP_DOCKERFILE_DIR = resolve(REPO_ROOT, "tests/k8s/charts/sipp")
 
 export const dockerBuild = Effect.gen(function* () {
-  yield* Effect.logInfo(`docker build -t ${IMAGE_TAG} ${REPO_ROOT}`)
-  yield* exec("docker", ["build", "-t", IMAGE_TAG, REPO_ROOT], {
+  yield* Effect.logInfo(`docker build --network=host -t ${IMAGE_TAG} ${REPO_ROOT}`)
+  // --network=host: buildkit's default network has intermittent DNS in
+  // WSL2 — npm ci times out reaching registry.npmjs.org. Host network
+  // bypasses buildkit's resolver and uses WSL2's own.
+  yield* exec("docker", ["build", "--network=host", "-t", IMAGE_TAG, REPO_ROOT], {
     timeoutMs: 10 * 60 * 1000,
   })
 })
@@ -38,10 +41,12 @@ export const kindLoad = Effect.gen(function* () {
 })
 
 export const dockerBuildSipp = Effect.gen(function* () {
-  yield* Effect.logInfo(`docker build -t ${SIPP_IMAGE_TAG} ${SIPP_DOCKERFILE_DIR}`)
-  yield* exec("docker", ["build", "-t", SIPP_IMAGE_TAG, SIPP_DOCKERFILE_DIR], {
-    timeoutMs: 10 * 60 * 1000,
-  })
+  yield* Effect.logInfo(`docker build --network=host -t ${SIPP_IMAGE_TAG} ${SIPP_DOCKERFILE_DIR}`)
+  yield* exec(
+    "docker",
+    ["build", "--network=host", "-t", SIPP_IMAGE_TAG, SIPP_DOCKERFILE_DIR],
+    { timeoutMs: 10 * 60 * 1000 },
+  )
 })
 
 export const kindLoadSipp = Effect.gen(function* () {

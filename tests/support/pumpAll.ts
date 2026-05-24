@@ -67,7 +67,7 @@ export interface PumpReport {
 
 export interface PumpOptions {
   /** Max virtual-time advance per call. Default: 1 second. */
-  readonly within?: Duration.DurationInput
+  readonly within?: Duration.Input
   /** Hard cap on sleeps fired in one pumpAll call. Default: 10000. */
   readonly maxSleepsFired?: number
   /** Per-deadline fire count above which the deadline is flagged periodic. Default: 3. */
@@ -77,11 +77,11 @@ export interface PumpOptions {
    * default (20ms) is the recommended setting per the plan — it surfaces
    * tests that secretly depend on external I/O.
    */
-  readonly realProbe?: Duration.DurationInput | undefined
+  readonly realProbe?: Duration.Input | undefined
 }
 
 const DEFAULTS: Required<Omit<PumpOptions, "realProbe">> & {
-  readonly realProbe: Duration.DurationInput
+  readonly realProbe: Duration.Input
 } = {
   within: "1 second",
   maxSleepsFired: 10000,

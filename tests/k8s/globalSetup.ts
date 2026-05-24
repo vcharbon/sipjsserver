@@ -34,7 +34,7 @@ export default async function setup(): Promise<void> {
 
   await Effect.runPromise(
     program.pipe(
-      Effect.provideService(References.MinimumLogLevel, LogLevel.Info),
+      Effect.provideService(References.MinimumLogLevel, "Info" as LogLevel.LogLevel),
     ),
   )
 }

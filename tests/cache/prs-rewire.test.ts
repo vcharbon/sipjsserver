@@ -20,6 +20,7 @@ import { Duration, Effect, Layer, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
 import { kvBackedMemoryLayer } from "../../src/cache/PartitionedRelayStorageKvBacked.js"
+import { bodyBuf, decodeBuf } from "../support/codecHelpers.js"
 
 const collect = <A, E>(s: Stream.Stream<A, E>) => Stream.runCollect(s)
 
@@ -40,19 +41,16 @@ const scenarios: ReadonlyArray<{
           "bak",
           "worker-A",
           "c-1",
-          '{"hello":"world"}',
+          bodyBuf({ hello: "world" }),
           ["leg:abc|tag1", "ctx:foo"],
           60
         )
         const items = Array.from(yield* collect(s.scanCalls("bak", "worker-A")))
         expect(items).toHaveLength(1)
         expect(items[0]!.callRef).toBe("c-1")
-        // The new layer stamps `written_at_ms` into the body; the old
-        // does not. To keep the cross-layer assertion meaningful, we
-        // check the original payload survives intact via the parsed
-        // shape rather than byte-equality. Both layers must satisfy:
-        // the call's user-supplied JSON content is recoverable.
-        const parsed = JSON.parse(items[0]!.json) as Record<string, unknown>
+        // Bodies are msgpack-encoded post-migration; decode via the
+        // auto-detect helper to recover the original JS shape.
+        const parsed = decodeBuf(items[0]!.body) as Record<string, unknown>
         expect(parsed["hello"]).toBe("world")
         expect(items[0]!.ttlSec).toBeGreaterThan(0)
       }),
@@ -62,8 +60,8 @@ const scenarios: ReadonlyArray<{
     run: () =>
       Effect.gen(function* () {
         const s = yield* PartitionedRelayStorage
-        yield* s.putCall("pri", "worker-A", "p-1", '{"x":1}', [], 60)
-        yield* s.putCall("bak", "worker-A", "b-1", '{"x":2}', [], 60)
+        yield* s.putCall("pri", "worker-A", "p-1", bodyBuf({ x: 1 }), [], 60)
+        yield* s.putCall("bak", "worker-A", "b-1", bodyBuf({ x: 2 }), [], 60)
         const priItems = Array.from(yield* collect(s.scanCalls("pri", "worker-A")))
         const bakItems = Array.from(yield* collect(s.scanCalls("bak", "worker-A")))
         expect(priItems.map((i) => i.callRef)).toEqual(["p-1"])
@@ -75,8 +73,8 @@ const scenarios: ReadonlyArray<{
     run: () =>
       Effect.gen(function* () {
         const s = yield* PartitionedRelayStorage
-        yield* s.putCall("bak", "worker-A", "c-1", "{}", [], 60)
-        yield* s.putCall("bak", "worker-B", "c-2", "{}", [], 60)
+        yield* s.putCall("bak", "worker-A", "c-1", bodyBuf({}), [], 60)
+        yield* s.putCall("bak", "worker-B", "c-2", bodyBuf({}), [], 60)
         const aRefs = Array.from(yield* collect(s.scanCalls("bak", "worker-A"))).map(
           (i) => i.callRef
         )
@@ -96,7 +94,7 @@ const scenarios: ReadonlyArray<{
           "bak",
           "worker-A",
           "c-1",
-          "{}",
+          bodyBuf({}),
           ["leg:1", "ctx:1"],
           60
         )
@@ -116,7 +114,7 @@ const scenarios: ReadonlyArray<{
     run: () =>
       Effect.gen(function* () {
         const s = yield* PartitionedRelayStorage
-        yield* s.putCall("bak", "worker-A", "c-1", "{}", [], 5)
+        yield* s.putCall("bak", "worker-A", "c-1", bodyBuf({}), [], 5)
         yield* TestClock.adjust(Duration.seconds(4))
         const before = Array.from(yield* collect(s.scanCalls("bak", "worker-A")))
         expect(before).toHaveLength(1)
@@ -130,7 +128,7 @@ const scenarios: ReadonlyArray<{
     run: () =>
       Effect.gen(function* () {
         const s = yield* PartitionedRelayStorage
-        yield* s.putCall("bak", "worker-A", "c-1", "{}", [], 5)
+        yield* s.putCall("bak", "worker-A", "c-1", bodyBuf({}), [], 5)
         yield* TestClock.adjust(Duration.seconds(4)) // 1s left
         yield* s.refreshCall("bak", "worker-A", "c-1", [], 30)
         yield* TestClock.adjust(Duration.seconds(10)) // would have expired
@@ -155,7 +153,7 @@ const scenarios: ReadonlyArray<{
             "bak",
             "worker-A",
             `c-${i}`,
-            `{"i":${i}}`,
+            bodyBuf({ i }),
             [],
             60
           )
@@ -180,10 +178,10 @@ const scenarios: ReadonlyArray<{
     run: () =>
       Effect.gen(function* () {
         const s = yield* PartitionedRelayStorage
-        yield* s.putCall("pri", "worker-A", "X", '{"v":42}', [], 60)
+        yield* s.putCall("pri", "worker-A", "X", bodyBuf({ v: 42 }), [], 60)
         const body = yield* s.getCall("pri", "worker-A", "X")
         expect(body).not.toBeNull()
-        const parsed = JSON.parse(body!) as Record<string, unknown>
+        const parsed = decodeBuf(body!) as Record<string, unknown>
         expect(parsed["v"]).toBe(42)
       }),
   },
@@ -196,7 +194,7 @@ const scenarios: ReadonlyArray<{
           "pri",
           "worker-A",
           "X",
-          '{"v":1}',
+          bodyBuf({ v: 1 }),
           ["leg:abc"],
           60,
           { peer: "worker-B" }
@@ -216,7 +214,7 @@ const scenarios: ReadonlyArray<{
         // The legacy hard-deletes; the new layer writes a tombstone.
         // Both satisfy "the original body content is gone".
         if (afterDel !== null) {
-          const parsed = JSON.parse(afterDel) as Record<string, unknown>
+          const parsed = decodeBuf(afterDel) as Record<string, unknown>
           expect(parsed["v"]).toBeUndefined()
         }
       }),

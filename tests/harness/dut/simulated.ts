@@ -80,9 +80,9 @@ export function createSimulatedDut(opts: SimulatedDutOpts = {}): DutTransport {
         return out
       }),
     ...(inner.verifyCleanState !== undefined
-      ? { verifyCleanState: () => inner.verifyCleanState!() }
+      ? { verifyCleanState: () => inner.verifyCleanState!() as Effect.Effect<ReadonlyArray<string>> }
       : {}),
-    ...(inner.settle !== undefined ? { settle: () => inner.settle!() } : {}),
+    ...(inner.settle !== undefined ? { settle: () => inner.settle!() as Effect.Effect<void> } : {}),
     ...(inner.networkDelayMs !== undefined ? { networkDelayMs: inner.networkDelayMs } : {}),
   }
 }

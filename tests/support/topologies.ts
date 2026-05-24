@@ -155,10 +155,6 @@ const makePump = (_transitMs: number) =>
 // Direct topology
 // ---------------------------------------------------------------------------
 
-interface DirectTopologyArgs {
-  readonly defaults: TopologyDefaults
-}
-
 const directLayer = (transitMs: number) =>
   SignalingNetwork.simulated({ transitDelayMs: transitMs }).pipe(
     Layer.provideMerge(PumpableClockLayer),
@@ -166,7 +162,7 @@ const directLayer = (transitMs: number) =>
 
 const directBody = (
   defaults: TopologyDefaults,
-  body: (t: Topology) => Effect.Effect<void, unknown, ProxyParticipants | SignalingNetwork | Scope.Scope>
+  body: (t: Topology) => Effect.Effect<void, unknown, ProxyParticipants | SignalingNetwork | PumpableClock | Scope.Scope>
 ) => {
   const transitMs = defaults.transitDelayMs ?? DEFAULT_TRANSIT_MS
   const pump = makePump(transitMs)
@@ -189,7 +185,7 @@ const withProxyBody = (
   defaults: TopologyDefaults,
   fx: ProxyFakeStack,
   workerId: WorkerId,
-  body: (t: Topology) => Effect.Effect<void, unknown, ProxyParticipants | SignalingNetwork | Scope.Scope>
+  body: (t: Topology) => Effect.Effect<void, unknown, ProxyParticipants | SignalingNetwork | PumpableClock | Scope.Scope>
 ) => {
   const transitMs = defaults.transitDelayMs ?? DEFAULT_TRANSIT_MS
   const pump = makePump(transitMs)
@@ -245,7 +241,7 @@ export interface TopologyTestOpts {
 export const topologyTest = (
   name: string,
   opts: TopologyTestOpts,
-  body: (t: Topology) => Effect.Effect<void, unknown, ProxyParticipants | SignalingNetwork | Scope.Scope>
+  body: (t: Topology) => Effect.Effect<void, unknown, ProxyParticipants | SignalingNetwork | PumpableClock | Scope.Scope>
 ): void => {
   const transitMs = opts.defaults.transitDelayMs ?? DEFAULT_TRANSIT_MS
   const description = opts.description ?? name

@@ -795,7 +795,11 @@ const handleRequestImpl = (args: HandleRequestArgs): Effect.Effect<void> =>
           const cookieParamsStr = Object.entries(strippedRouteParams)
             .map(([k, v]) => `${k}=${v}`)
             .join(",")
-          yield* Effect.logWarning(
+          // Demoted Warning → Debug 2026-05-20. Per-packet log fired ~30k+
+          // times over 30 min on abuse-INVITE archetypes whose src IP was
+          // never registered. `counters.workerOutboundClassificationMiss`
+          // covers the operator-visible signal.
+          yield* Effect.logDebug(
             `[ProxyCore] worker-outbound classification miss: ` +
               `method=${method} callId=${req.getHeader("call-id")} ` +
               `src=${src.address}:${src.port} registrySize=${snapshot.length} ` +
@@ -1144,8 +1148,12 @@ const tryStrategySelect = (
       Effect.sync(() => {
         counters.noTargetAvailable++
       }).pipe(
+        // Demoted Warning → Debug 2026-05-20. Fired ~119k times in 30 min
+        // during AIMD-collapse cycles (proxy considers all workers
+        // unhealthy and bounces every inbound call). `counters.noTargetAvailable`
+        // is the durable signal — exposed via `b2bua_proxy_no_target_total`.
         Effect.tap(() =>
-          Effect.logWarning(`[ProxyCore] strategy ${strategy.name} no target: ${err.reason}`),
+          Effect.logDebug(`[ProxyCore] strategy ${strategy.name} no target: ${err.reason}`),
         ),
         Effect.as({ _tag: "no_target" } as const),
       ),

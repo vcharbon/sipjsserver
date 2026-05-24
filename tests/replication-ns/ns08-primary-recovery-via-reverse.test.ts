@@ -43,7 +43,6 @@ import {
 } from "../../src/storage/KvBackend.js"
 
 const A_GEN_INITIAL = 1
-const A_GEN_AFTER_REBOOT = 100 // higher restartCount
 const B_GEN = 2
 
 describe("NS8 — primary recovery via reverse", () => {
@@ -74,7 +73,7 @@ describe("NS8 — primary recovery via reverse", () => {
           entryGen: channelA0toB.gen,
           partition: "pri",
           callRef: "X",
-          bodyValue: '{"gen":1,"v":"original"}',
+          bodyValue: Buffer.from('{"gen":1,"v":"original"}'),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -138,7 +137,7 @@ describe("NS8 — primary recovery via reverse", () => {
           entryGen: channelBtoA.gen,
           partition: "bak",
           callRef: "X",
-          bodyValue: '{"gen":2,"v":"updated-by-backup"}',
+          bodyValue: Buffer.from('{"gen":2,"v":"updated-by-backup"}'),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -189,7 +188,7 @@ describe("NS8 — primary recovery via reverse", () => {
         // B wrote during A's downtime).
         const recoveredBody = yield* kvA1.bodyGet("pri:worker-A:call:X")
         expect(recoveredBody).not.toBeNull()
-        expect(recoveredBody).toContain("updated-by-backup")
+        expect(recoveredBody!.toString("utf8")).toContain("updated-by-backup")
 
         yield* Fiber.interrupt(aFiber)
       })

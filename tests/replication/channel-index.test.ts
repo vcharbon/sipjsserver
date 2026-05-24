@@ -73,7 +73,7 @@ describe("ChannelIndex — write", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "call-1",
-        bodyValue: '{"_topology":{"gen":42},"x":1}',
+        bodyValue: Buffer.from('{"_topology":{"gen":42},"x":1}'),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -97,7 +97,7 @@ describe("ChannelIndex — write", () => {
         entryGen: chan.gen,
         partition: "bak",
         callRef: "call-1",
-        bodyValue: '{"_topology":{"gen":42},"x":2}',
+        bodyValue: Buffer.from('{"_topology":{"gen":42},"x":2}'),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -119,7 +119,7 @@ describe("ChannelIndex — write", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "a",
-        bodyValue: "{}",
+        bodyValue: Buffer.from("{}"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -127,7 +127,7 @@ describe("ChannelIndex — write", () => {
         entryGen: chan.gen,
         partition: "bak",
         callRef: "b",
-        bodyValue: "{}",
+        bodyValue: Buffer.from("{}"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -135,7 +135,7 @@ describe("ChannelIndex — write", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "c",
-        bodyValue: "{}",
+        bodyValue: Buffer.from("{}"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -154,7 +154,7 @@ describe("ChannelIndex — write", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "a",
-        bodyValue: '{"_topology":{"gen":1},"v":1}',
+        bodyValue: Buffer.from('{"_topology":{"gen":1},"v":1}'),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -162,7 +162,7 @@ describe("ChannelIndex — write", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "b",
-        bodyValue: '{"_topology":{"gen":1},"v":1}',
+        bodyValue: Buffer.from('{"_topology":{"gen":1},"v":1}'),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -170,7 +170,7 @@ describe("ChannelIndex — write", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "a",
-        bodyValue: '{"_topology":{"gen":2},"v":2}',
+        bodyValue: Buffer.from('{"_topology":{"gen":2},"v":2}'),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -192,7 +192,7 @@ describe("ChannelIndex — write", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "call-1",
-        bodyValue: "{}",
+        bodyValue: Buffer.from("{}"),
         bodyTtlSec: 60,
         indexes: [
           { key: "idx:leg:CID-1|tag-A", value: "call-1", ttlSec: 60 },
@@ -218,7 +218,7 @@ describe("ChannelIndex — tombstone", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "call-1",
-        bodyValue: '{"_topology":{"gen":42},"x":1}',
+        bodyValue: Buffer.from('{"_topology":{"gen":42},"x":1}'),
         bodyTtlSec: 60,
         indexes: [{ key: "idx:leg:CID-1", value: "call-1", ttlSec: 60 }],
       })
@@ -282,7 +282,7 @@ describe("ChannelIndex — bucket separation (Story 7d)", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "o",
-        bodyValue: "O",
+        bodyValue: Buffer.from("O"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -291,7 +291,7 @@ describe("ChannelIndex — bucket separation (Story 7d)", () => {
         entryGen: 0,
         partition: "bak",
         callRef: "m",
-        bodyValue: "M",
+        bodyValue: Buffer.from("M"),
         bodyTtlSec: 60,
         indexes: [],
       })

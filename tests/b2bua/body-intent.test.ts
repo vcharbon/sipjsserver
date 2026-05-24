@@ -120,7 +120,7 @@ describe("assembleMultipart", () => {
   })
 
   it("rejects incoming-sdp when no sdp segment is available", () => {
-    const bareCtx = { rawBody: utf8("raw"), sdp: undefined }
+    const bareCtx = { rawBody: utf8("raw") }
     expect(() =>
       assembleMultipart(
         {

@@ -46,7 +46,7 @@ const minimalCall = (): Call => ({
     fromTag: "alice-tag",
     source: rinfo,
     state: "early",
-    disposition: "ringing",
+    disposition: "pending",
     dialogs: [],
   },
   bLegs: [],
@@ -82,12 +82,14 @@ const minimalInvite = (): SipRequest =>
 const minimalFeatures = (): FeatureActivations => ({
   platform: {
     maxDurationSec: 7200,
-    keepalive: { type: "options", intervalSec: 900, timeoutSec: 10 } as FeatureActivations["platform"]["keepalive"],
+    keepalive: { intervalSec: 900, maxMissed: 3 },
   },
 })
 
 const aLegContact: ContactSpec = {
-  uri: "<sip:b2bua@10.0.0.1:5060>",
+  user: "b2bua",
+  host: "10.0.0.1",
+  port: 5060,
 }
 
 const cfg = (overrides: Partial<AppConfigData> = {}): AppConfigData =>
@@ -269,7 +271,7 @@ describe("applyRoute — INCR/DECR invariant (iff successful INCR ⇒ exactly on
         // **Eager DECR fired for both successful INCRs** — this is the
         // strong guarantee: any error after a successful INCR triggers
         // an immediate matching DECR.
-        expect(counting.decrementedIds().sort()).toEqual(["lim-A", "lim-B"])
+        expect([...counting.decrementedIds()].sort()).toEqual(["lim-A", "lim-B"])
       }),
   )
 })

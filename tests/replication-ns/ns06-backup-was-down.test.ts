@@ -20,12 +20,12 @@
 
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, MutableRef } from "effect"
-import { initialPeerView } from "../../src/replication/PullerFiber.js"
 import {
   forkPuller,
   makeWorker,
   waitFor,
 } from "./twoWorkerHarness.js"
+import { bodyBuf } from "../support/codecHelpers.js"
 
 const A_GEN = 41
 const B_GEN = 42
@@ -41,7 +41,7 @@ describe("NS6 — backup was down", () => {
         entryGen: A.outgoing.gen,
         partition: "pri",
         callRef: "X",
-        bodyValue: '{"name":"X"}',
+        bodyValue: Buffer.from('{"name":"X"}'),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -69,7 +69,7 @@ describe("NS6 — backup was down", () => {
           entryGen: A.outgoing.gen,
           partition: "pri",
           callRef: ref,
-          bodyValue: JSON.stringify({ name: ref }),
+          bodyValue: bodyBuf({ name: ref }),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -101,7 +101,7 @@ describe("NS6 — backup was down", () => {
       for (const ref of ["X", "Y", "Z", "W"]) {
         const body = yield* B.kv.bodyGet(`bak:worker-A:call:${ref}`)
         expect(body).not.toBeNull()
-        expect(body).toContain(ref)
+        expect(body!.toString("utf8")).toContain(ref)
       }
 
       yield* puller2.stop

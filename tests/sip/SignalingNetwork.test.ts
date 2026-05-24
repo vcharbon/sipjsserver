@@ -221,7 +221,7 @@ describe("SignalingNetwork.real — bind error surfacing", () => {
           s.once("error", (err) => resume(Effect.die(err)))
           s.bind(0, "127.0.0.1")
         }),
-        (s) => Effect.callback<void>((resume) => s.close(() => resume(Effect.void)))
+        (s) => Effect.callback<void>((resume) => { s.close(() => resume(Effect.void)) })
       )
       const takenPort = blocker.address().port
 

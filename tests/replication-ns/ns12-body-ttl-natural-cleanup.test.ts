@@ -36,16 +36,18 @@ describe("NS12 — body-ttl-natural-cleanup", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "X",
-        bodyValue: '{"gen":1,"state":"active"}',
+        bodyValue: Buffer.from('{"gen":1,"state":"active"}'),
         bodyTtlSec: 5,
         indexes: [{ key: "idx:leg:CID-100", value: "X", ttlSec: 5 }],
       })
 
       // Verify body and index are present immediately.
-      expect(yield* kv.bodyGet("pri:worker-A:call:X")).toBe(
-        '{"gen":1,"state":"active"}'
-      )
-      expect(yield* kv.bodyGet("idx:leg:CID-100")).toBe("X")
+      expect(
+        (yield* kv.bodyGet("pri:worker-A:call:X"))?.toString("utf8")
+      ).toBe('{"gen":1,"state":"active"}')
+      expect(
+        (yield* kv.bodyGet("idx:leg:CID-100"))?.toString("utf8")
+      ).toBe("X")
 
       // Advance past the body TTL without refreshing.
       yield* TestClock.adjust("6 seconds")

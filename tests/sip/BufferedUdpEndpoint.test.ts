@@ -65,7 +65,7 @@ const makeStub = (
           return yield* new SendError({ message: `stub fail to ${host}:${port}` })
         }
         // hang
-        yield* Effect.never
+        return yield* Effect.never
       })
     // Construct a no-traffic queue for `messages` so callers can still subscribe.
     const queue = yield* Queue.unbounded<UdpPacket>()

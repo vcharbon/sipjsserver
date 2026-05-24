@@ -62,10 +62,7 @@ import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
 import { CdrWriter, makeCdrRecordsBuffer } from "../../src/cdr/CdrWriter.js"
 import { CallLimiter, type LimiterMemoryStore, makeLimiterMemoryStore } from "../../src/call/CallLimiter.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
-import {
-  makeReplicationTraceRecorder,
-  type ReplicationTraceRecorder,
-} from "./ReplicationTraceRecorder.js"
+import type { ReplicationTraceRecorder } from "./ReplicationTraceRecorder.js"
 
 /** Default simulated transit delay — same as `fakeStack`'s. */
 export const DEFAULT_TRANSIT_DELAY_MS = 15
@@ -579,41 +576,43 @@ const makeHaPullerLayer = (
               noopIntervalMs: HA_REPL_PULL_RECONNECT_GAP_MS,
             })
             if (recorder === undefined) return base
-            return Stream.mapEffect(base, (bytes) =>
-              Effect.gen(function* () {
-                const now = yield* Clock.currentTimeMillis
-                const text = new TextDecoder().decode(bytes)
-                for (const line of text.split("\n")) {
-                  if (line.length === 0) continue
-                  // `decodeFrame` returns null for blank lines and throws
-                  // `ProtocolError` for malformed input; the buildPullStream
-                  // upstream only emits well-formed NDJSON so this should
-                  // never throw, but treat any failure as "skip the trace
-                  // entry" — the report is observability, not correctness.
-                  let frame: ReturnType<typeof decodeFrame> = null
-                  try {
-                    frame = decodeFrame(line)
-                  } catch {
-                    continue
+            // Post-msgpackr wire format is `[4-byte BE length][msgpack
+            // payload]`; one chunk may carry partial frames or several
+            // frames, so accumulate across chunks. Only Data frames are
+            // useful for understanding cause→effect in the report; Noop
+            // heartbeats fire on every idle pull cycle (every 1 s of
+            // virtual time over 15-min pauses → thousands per scenario)
+            // and would flood the SVG. Decode failures are swallowed —
+            // the report is observability, not correctness.
+            const traceRecorder = recorder
+            return Stream.suspend(() => {
+              let accumulator: Buffer = Buffer.alloc(0)
+              return Stream.mapEffect(base, (bytes) =>
+                Effect.gen(function* () {
+                  const now = yield* Clock.currentTimeMillis
+                  accumulator = Buffer.concat([accumulator, Buffer.from(bytes)])
+                  while (accumulator.length >= 4) {
+                    const length = accumulator.readUInt32BE(0)
+                    if (accumulator.length < 4 + length) break
+                    const payload = accumulator.subarray(4, 4 + length)
+                    accumulator = accumulator.subarray(4 + length)
+                    try {
+                      const frame = decodeFrame(payload)
+                      if (frame._tag !== "Data") continue
+                      traceRecorder.record({
+                        timestamp: now,
+                        from: peerOrdStr,
+                        to: selfOrdStr,
+                        frame,
+                      })
+                    } catch {
+                      continue
+                    }
                   }
-                  if (frame === null) continue
-                  // Only Data frames (actual state mutations) are useful
-                  // for understanding cause→effect in the report. Noop
-                  // heartbeats fire on every idle pull cycle (here every
-                  // 1 s of virtual time over 15-min pauses → thousands
-                  // per scenario) and would flood the SVG without
-                  // carrying any signal.
-                  if (frame._tag !== "Data") continue
-                  recorder.record({
-                    timestamp: now,
-                    from: peerOrdStr,
-                    to: selfOrdStr,
-                    frame,
-                  })
-                }
-                return bytes
-              }),
-            )
+                  return bytes
+                }),
+              )
+            })
           }
 
           const apply = makeReplicationApply({

@@ -30,6 +30,7 @@ import {
   KvBackend,
   type MemoryStoreEntry,
 } from "../../src/storage/KvBackend.js"
+import { bodyBuf, decodeBuf } from "../support/codecHelpers.js"
 
 const SELF = "worker-A"
 const PEER = "worker-B"
@@ -42,30 +43,31 @@ const setup = () => {
   return { kv, channel }
 }
 
-/** Decode a stream of `Uint8Array` chunks into `PullFrame`s. */
+/**
+ * Decode a stream of length-prefixed-msgpack `Uint8Array` chunks into
+ * `PullFrame`s. Post-msgpackr-migration the wire is binary: each frame
+ * is `[4-byte BE uint32 length][msgpack payload]`. The accumulator
+ * pattern mirrors `src/replication/NdjsonStream.ts:streamLengthPrefixedFrames`.
+ */
 const decodeStream = (
   stream: Stream.Stream<Uint8Array>,
   takeFrames: number
 ): Effect.Effect<ReadonlyArray<PullFrame>, never> =>
   Effect.gen(function* () {
-    const decoder = new TextDecoder()
-    let buffer = ""
+    let acc: Buffer = Buffer.alloc(0)
     const frames: Array<PullFrame> = []
     const chunks: ReadonlyArray<Uint8Array> = yield* Stream.runCollect(
       stream.pipe(Stream.take(takeFrames * 4)) // safety cap on byte chunks
     )
     for (const chunk of chunks) {
-      buffer += decoder.decode(chunk, { stream: true })
-      let nl = buffer.indexOf("\n")
-      while (nl !== -1) {
-        const line = buffer.slice(0, nl)
-        buffer = buffer.slice(nl + 1)
-        const frame = decodeFrame(line)
-        if (frame !== null) {
-          frames.push(frame)
-          if (frames.length >= takeFrames) return frames
-        }
-        nl = buffer.indexOf("\n")
+      acc = Buffer.concat([acc, Buffer.from(chunk)])
+      while (acc.length >= 4) {
+        const length = acc.readUInt32BE(0)
+        if (acc.length < 4 + length) break
+        const payload = acc.subarray(4, 4 + length)
+        acc = acc.subarray(4 + length)
+        frames.push(decodeFrame(payload))
+        if (frames.length >= takeFrames) return frames
       }
     }
     return frames
@@ -102,7 +104,7 @@ describe("buildPullStream — pre-existing entries are emitted as Data frames", 
       yield* channel.write({ entryGen: GEN,
         partition: "pri",
         callRef: "abc",
-        bodyValue: '{"gen":42,"state":"active"}',
+        bodyValue: bodyBuf({ gen: 42, state: "active" }),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -121,7 +123,8 @@ describe("buildPullStream — pre-existing entries are emitted as Data frames", 
       expect(data.partition).toBe("pri")
       expect(data.callRef).toBe("abc")
       expect(data.counter).toBe(1)
-      expect(data.body).toEqual({ gen: 42, state: "active" })
+      expect(data.body).not.toBeNull()
+      expect(decodeBuf(data.body as Buffer)).toEqual({ gen: 42, state: "active" })
       // Then a noop signaling caught-up at counter=1.
       expect(frames[1]?._tag).toBe("Noop")
       expect(frames[1]?.counter).toBe(1)
@@ -135,7 +138,7 @@ describe("buildPullStream — pre-existing entries are emitted as Data frames", 
         yield* channel.write({ entryGen: GEN,
           partition: "pri",
           callRef: ref,
-          bodyValue: `{"gen":42,"ref":"${ref}"}`,
+          bodyValue: bodyBuf({ gen: 42, ref }),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -169,7 +172,7 @@ describe("buildPullStream — chunk_size honored, noop emitted on partial batch"
         yield* channel.write({ entryGen: GEN,
           partition: "pri",
           callRef: ref,
-          bodyValue: "{}",
+          bodyValue: bodyBuf({}),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -201,7 +204,7 @@ describe("buildPullStream — sinceCounter respected", () => {
         yield* channel.write({ entryGen: GEN,
           partition: "pri",
           callRef: ref,
-          bodyValue: "{}",
+          bodyValue: bodyBuf({}),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -231,7 +234,7 @@ describe("buildPullStream — tombstones surface as delete frames", () => {
       yield* channel.write({ entryGen: GEN,
         partition: "pri",
         callRef: "x",
-        bodyValue: '{"gen":42}',
+        bodyValue: bodyBuf({ gen: 42 }),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -239,7 +242,6 @@ describe("buildPullStream — tombstones surface as delete frames", () => {
         entryGen: GEN,
         partition: "pri",
         callRef: "x",
-        callGen: 1,
         indexesToRemove: [],
       })
       const stream = buildPullStream({
@@ -269,7 +271,6 @@ describe("buildPullStream — tombstones surface as delete frames", () => {
         entryGen: GEN,
         partition: "pri",
         callRef: "x",
-        callGen: 1,
         indexesToRemove: [],
       })
       yield* kv.bodyDel("pri:worker-A:call:x")

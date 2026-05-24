@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package bench;
+
+message RemoteInfo {
+  string address = 1;
+  int32 port = 2;
+}
+
+message SipHeader {
+  string name = 1;
+  string value = 2;
+}
+
+message PendingRequest {
+  string method = 1;
+  int32 outboundCSeq = 2;
+  int32 inboundCSeq = 3;
+  repeated string sourceVias = 4;
+  string sourceCallId = 5;
+  string sourceFrom = 6;
+  string sourceTo = 7;
+  string direction = 8;
+}
+
+message StackDialog {
+  string callId = 1;
+  string localTag = 2;
+  string remoteTag = 3;
+  string localUri = 4;
+  string remoteUri = 5;
+  string remoteTarget = 6;
+  int32 localCSeq = 7;
+  repeated string routeSet = 8;
+}
+
+message B2buaDialogExt {
+  optional int32 remoteCSeq = 1;
+  repeated PendingRequest inboundPendingRequests = 2;
+  optional string ackBranch = 3;
+  optional bytes cachedSdp = 5;
+}
+
+message Dialog {
+  StackDialog sip = 1;
+  B2buaDialogExt ext = 2;
+}
+
+message Leg {
+  string legId = 1;
+  string callId = 2;
+  string fromTag = 3;
+  RemoteInfo source = 4;
+  string state = 5;
+  string disposition = 6;
+  repeated Dialog dialogs = 7;
+  optional string byeDisposition = 8;
+  optional string localUri = 9;
+  optional string remoteUri = 10;
+  optional string inviteRequestUri = 11;
+}
+
+message ALegInvite {
+  string uri = 1;
+  repeated SipHeader headers = 2;
+  bytes body = 3;
+}
+
+message TagMapping {
+  string aTag = 1;
+  string bLegId = 2;
+  string bTag = 3;
+}
+
+message CallLimiterState {
+  string limiterId = 1;
+  int32 limit = 2;
+  double originWindow = 3;
+  optional bool incrementSucceeded = 4;
+}
+
+message TimerEntry {
+  string id = 1;
+  string type = 2;
+  double fireAt = 3;
+  optional string legId = 4;
+}
+
+message CdrEvent {
+  string type = 1;
+  double timestamp = 2;
+  string legId = 3;
+  optional int32 statusCode = 4;
+  optional string reason = 5;
+}
+
+message CallTopology {
+  string pri = 1;
+  string bak = 2;
+  int32 gen = 3;
+}
+
+message ActiveRule {
+  string id = 1;
+  optional string paramsJson = 2;
+  bool active = 3;
+}
+
+message RuleStateEntry {
+  string ruleId = 1;
+  optional string stateJson = 2;
+}
+
+message ActivePeer {
+  string legA = 1;
+  string legB = 2;
+}
+
+message Call {
+  string callRef = 1;
+  Leg aLeg = 2;
+  repeated Leg bLegs = 3;
+  optional ActivePeer activePeer = 4;
+  optional string callbackContext = 5;
+  optional string billingContext = 6;
+  ALegInvite aLegInvite = 7;
+  repeated CallLimiterState limiterEntries = 8;
+  repeated TimerEntry timers = 9;
+  repeated CdrEvent cdrEvents = 10;
+  string state = 11;
+  double createdAt = 12;
+  repeated string aLegPendingVias = 13;
+  optional int32 aLegPendingCSeq = 14;
+  repeated TagMapping tagMap = 15;
+  optional string traceId = 16;
+  optional string rootSpanId = 17;
+  optional bool sampled = 18;
+  optional int32 workerIndex = 19;
+  optional CallTopology topology = 20;
+  optional bool emergency = 21;
+  optional string featuresJson = 22;
+  optional string policyUpdateHeadersJson = 23;
+  optional bytes policyUpdateBody = 24;
+  repeated ActiveRule activeRules = 25;
+  repeated RuleStateEntry ruleState = 26;
+  optional string transferJson = 27;
+  optional string earlyPromoteJson = 28;
+}
+
+message Frame {
+  int32 gen = 1;
+  int32 counter = 2;
+  string op = 3;
+  string partition = 4;
+  string callRef = 5;
+  bytes body = 6;
+  int32 bodyTtlRemainingSec = 7;
+  int32 latencyMs = 8;
+}

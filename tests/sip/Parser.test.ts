@@ -30,12 +30,6 @@ function findHeader(msg: SipMessage, name: string) {
   return msg.headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value
 }
 
-/** Helper: count headers matching name (case-insensitive, including compact form). */
-function countHeaders(msg: SipMessage, ...names: string[]) {
-  const lower = names.map((n) => n.toLowerCase())
-  return msg.headers.filter((h) => lower.includes(h.name.toLowerCase())).length
-}
-
 // ==========================================================================
 // Section 3.1.1 — Valid messages (MUST parse successfully)
 // ==========================================================================

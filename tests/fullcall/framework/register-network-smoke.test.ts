@@ -76,6 +76,7 @@ describe("network-tagged TraceEntry round-trip", () => {
     const trace: readonly TraceEntry[] = [
       {
         timestamp: 0,
+        seq: 0,
         sentMs: 0,
         receivedMs: 15,
         from: "alice",

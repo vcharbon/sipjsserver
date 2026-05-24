@@ -4,22 +4,37 @@
  * the deterministic fixture mixer from `tests/bench/call-codec/` for
  * representative coverage; the `propertyTest` wrapper enforces the
  * properties on every encode/decode call.
+ *
+ * Wiring follows the `effect-layer-test` skill: the wrapper stack is
+ * composed via Tag-static methods —
+ *
+ *   CallBodyCodec.propertyTest(
+ *     CallBodyCodec.paranoidInputs(layer)
+ *   )
+ *
+ * The recording wrapper (`scopedAudit`) is intentionally NOT applied
+ * here — these tests only exercise the per-call contract, not the
+ * cross-call aggregates a scope-close finalizer would assert.
+ *
+ * Every codec layer (Msgpack, MsgpackRecords, Protobuf) runs under
+ * the same stacked wrapper across the 200-sample fake-call fixture
+ * pool, exercised under `it.effect` (TestClock-backed fake clock).
  */
+
+// PA1 (Schema.is on encode input) is opt-in via `B2BUA_PARANOID`. Set it
+// before importing `contracts` so the wrapper picks it up.
+process.env["B2BUA_PARANOID"] = "1"
 
 import { describe, it, expect } from "@effect/vitest"
 import { Effect } from "effect"
 import {
   CallBodyCodec,
-} from "../../src/call/codec/CallBodyCodec.js"
-import {
   MsgpackLayer,
   MsgpackRecordsLayer,
-} from "../../src/call/codec/msgpack.js"
-import {
-  CallBodyCodecContracts,
+  ProtobufLayer,
   PropertyViolation,
   ParanoidInputViolation,
-} from "../../src/call/codec/contracts.js"
+} from "../../src/call/codec/index.js"
 import { representativeCall } from "../bench/call-codec/fixture.js"
 import { buildFixturePool, DEFAULT_MIX } from "../bench/call-codec/fixtureMix.js"
 import type { Call } from "../../src/call/CallModel.js"
@@ -27,12 +42,20 @@ import type { Call } from "../../src/call/CallModel.js"
 const CODEC_LAYERS = [
   { name: "MsgpackLayer", layer: MsgpackLayer },
   { name: "MsgpackRecordsLayer", layer: MsgpackRecordsLayer },
+  { name: "ProtobufLayer", layer: ProtobufLayer },
 ] as const
 
 const SAMPLE_POOL: ReadonlyArray<Call> = buildFixturePool(DEFAULT_MIX, 200)
 
 describe("CallBodyCodec contracts — property-based", () => {
   for (const { name, layer } of CODEC_LAYERS) {
+    // Skill-canonical wiring: propertyTest(paranoidInputs(impl)). Paranoid
+    // input check runs first (cheap precondition); then per-call property
+    // assertions fire on every encode/decode.
+    const stacked = CallBodyCodec.propertyTest(
+      CallBodyCodec.paranoidInputs(layer),
+    )
+
     describe(name, () => {
       it.effect("P1 round-trip preserves the representative fixture", () =>
         Effect.gen(function* () {
@@ -42,10 +65,10 @@ describe("CallBodyCodec contracts — property-based", () => {
           expect(decoded.callRef).toBe(representativeCall.callRef)
           expect(decoded.aLeg.callId).toBe(representativeCall.aLeg.callId)
           expect(decoded.bLegs.length).toBe(representativeCall.bLegs.length)
-        }).pipe(Effect.provide(CallBodyCodecContracts.propertyTest(layer))),
+        }).pipe(Effect.provide(stacked)),
       )
 
-      it.effect("P1-P14 over a 200-sample fixture pool", () =>
+      it.effect("P1-P14 over a 200-sample fixture pool (paranoid + property)", () =>
         Effect.gen(function* () {
           const codec = yield* CallBodyCodec
           for (const call of SAMPLE_POOL) {
@@ -54,7 +77,7 @@ describe("CallBodyCodec contracts — property-based", () => {
             const decoded = codec.decode(encoded)
             expect(decoded.callRef).toBe(call.callRef)
           }
-        }).pipe(Effect.provide(CallBodyCodecContracts.propertyTest(layer))),
+        }).pipe(Effect.provide(stacked)),
       )
 
       it.effect("P7 Uint8Array integrity at size 0 / 1 / 1k / 64k", () =>
@@ -92,20 +115,41 @@ describe("CallBodyCodec contracts — property-based", () => {
     })
   }
 
-  describe("paranoidInputs", () => {
-    it.effect("PA2 — empty Buffer decode throws synchronously", () =>
+  describe("paranoidInputs (Tag-static wiring)", () => {
+    it.effect("PA2 — empty Buffer decode throws synchronously (Msgpack)", () =>
       Effect.gen(function* () {
         const codec = yield* CallBodyCodec
         expect(() => codec.decode(Buffer.alloc(0))).toThrow(
           ParanoidInputViolation,
         )
       }).pipe(
-        Effect.provide(CallBodyCodecContracts.paranoidInputs(MsgpackLayer)),
+        Effect.provide(CallBodyCodec.paranoidInputs(MsgpackLayer)),
+      ),
+    )
+
+    it.effect("PA2 — empty Buffer decode throws synchronously (Protobuf)", () =>
+      Effect.gen(function* () {
+        const codec = yield* CallBodyCodec
+        expect(() => codec.decode(Buffer.alloc(0))).toThrow(
+          ParanoidInputViolation,
+        )
+      }).pipe(
+        Effect.provide(CallBodyCodec.paranoidInputs(ProtobufLayer)),
+      ),
+    )
+
+    it.effect("PA1 — Schema.is(CallSchema) rejects a malformed encode input (Protobuf)", () =>
+      Effect.gen(function* () {
+        const codec = yield* CallBodyCodec
+        const malformed = { ...representativeCall, callRef: 42 as unknown as string }
+        expect(() => codec.encode(malformed)).toThrow(ParanoidInputViolation)
+      }).pipe(
+        Effect.provide(CallBodyCodec.paranoidInputs(ProtobufLayer)),
       ),
     )
   })
 
-  describe("parity", () => {
+  describe("parity (Tag-static wiring)", () => {
     it.effect("Msgpack vs MsgpackRecords decode to deep-equal Calls", () =>
       Effect.gen(function* () {
         const codec = yield* CallBodyCodec
@@ -114,9 +158,19 @@ describe("CallBodyCodec contracts — property-based", () => {
         const decoded = codec.decode(bytes)
         expect(decoded.callRef).toBe(representativeCall.callRef)
       }).pipe(
-        Effect.provide(
-          CallBodyCodecContracts.parity(MsgpackLayer, MsgpackRecordsLayer),
-        ),
+        Effect.provide(CallBodyCodec.parity(MsgpackLayer, MsgpackRecordsLayer)),
+      ),
+    )
+
+    it.effect("Msgpack vs Protobuf decode to deep-equal Calls", () =>
+      Effect.gen(function* () {
+        const codec = yield* CallBodyCodec
+        const bytes = codec.encode(representativeCall)
+        expect(bytes.length).toBeGreaterThan(0)
+        const decoded = codec.decode(bytes)
+        expect(decoded.callRef).toBe(representativeCall.callRef)
+      }).pipe(
+        Effect.provide(CallBodyCodec.parity(MsgpackLayer, ProtobufLayer)),
       ),
     )
   })

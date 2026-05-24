@@ -6,7 +6,7 @@
  * runtime fibers are ephemeral and never persisted.
  */
 
-import { Clock, Duration, Effect, Fiber, Layer, MutableHashMap, Option, ServiceMap } from "effect"
+import { Clock, Duration, Effect, Fiber, Layer, MutableHashMap, Option, ServiceMap, Tracer } from "effect"
 import type { TimerEntry, TimerType } from "./CallModel.js"
 import { AppConfig } from "../config/AppConfig.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
@@ -51,6 +51,23 @@ export class TimerService extends ServiceMap.Service<
       const layerScope = yield* Effect.scope
       const registry = yield* MetricsRegistry
       const config = yield* AppConfig
+
+      // Timer fibers are scheduled from inside `processResult`'s
+      // `applyCritical`, which runs inside the per-message `withProcessingSpan`.
+      // The processing span ends as soon as the request returns, but the
+      // timer fiber sleeps for seconds-to-minutes and then logs a handler
+      // timeout (`Effect.logError` in `timerEffect`) — that log routes
+      // through Effect's `tracerLogger` and emits a span event on the
+      // already-ended processing span, triggering OTel's "Cannot execute
+      // the operation on ended Span" warning per firing. Re-parent the
+      // fork to an external (zero-id) span so `tracerLogger` short-
+      // circuits — see TransactionLayer for the same fix and the full
+      // analysis.
+      const DETACHED_PARENT = Tracer.externalSpan({
+        traceId: "0".repeat(32),
+        spanId: "0".repeat(16),
+        sampled: false,
+      })
 
       // Map timerId → { fiber, callRef }
       const fibersMap = MutableHashMap.empty<string, { fiber: Fiber.Fiber<void>; callRef: string }>()
@@ -126,7 +143,10 @@ export class TimerService extends ServiceMap.Service<
           Effect.catchCause(logTimerFailure(entry.id, entry.type, callRef)),
         )
 
-        const fiber = yield* Effect.forkIn(timerEffect, layerScope)
+        const fiber = yield* Effect.forkIn(
+          Effect.withParentSpan(timerEffect, DETACHED_PARENT),
+          layerScope,
+        )
         myFiber = fiber
         MutableHashMap.set(fibersMap, entry.id, { fiber, callRef })
 

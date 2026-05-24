@@ -30,16 +30,17 @@ function makeRule(opts: {
     | ReadonlyArray<TransferPhase | null>
     | null
 }): AnyRuleDefinition {
+  const match =
+    opts.transferPhase === undefined
+      ? ({ kind: "cancelled" } as const)
+      : ({ kind: "cancelled", transferPhase: opts.transferPhase } as const)
   return {
     id: opts.id,
     name: opts.id,
     alwaysActive: true,
     stateSchema: Schema.Undefined as Schema.Schema<unknown>,
     paramsSchema: Schema.Unknown as Schema.Schema<unknown>,
-    match: {
-      kind: "cancelled",
-      transferPhase: opts.transferPhase,
-    },
+    match,
     init: () => undefined,
     handle: () =>
       Effect.succeed({
@@ -65,7 +66,7 @@ function makeCtx(phase: TransferPhase | null): RuleContext {
   return {
     call,
     callRef: "test-ref",
-    event: { type: "cancelled" },
+    event: { type: "cancelled", callId: "test-call", fromTag: "tag-a" },
     sourceLeg: { legId: "a", state: "confirmed" } as unknown as RuleContext["sourceLeg"],
     sourceDialog: undefined,
     direction: "from-a",

@@ -91,7 +91,7 @@ describe("NS11 — peer disappear preserves watermark across reappear", () => {
           entryGen: channelAtoB.gen,
           partition: "pri",
           callRef: "X",
-          bodyValue: '{"gen":42,"name":"X"}',
+          bodyValue: Buffer.from('{"gen":42,"name":"X"}'),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -138,7 +138,7 @@ describe("NS11 — peer disappear preserves watermark across reappear", () => {
           entryGen: channelAtoB.gen,
           partition: "pri",
           callRef: "Y",
-          bodyValue: '{"gen":42,"name":"Y"}',
+          bodyValue: Buffer.from('{"gen":42,"name":"Y"}'),
           bodyTtlSec: 60,
           indexes: [],
         })

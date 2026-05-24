@@ -259,8 +259,8 @@ export function runDriveOnly(
   const layer: Layer.Layer<never> | undefined = transport.stackLayer
   const provided = layer
     ? program.pipe(Effect.provide(layer))
-    : (program as Effect.Effect<DriveOnlyRunResult, never, Scope.Scope>)
-  return Effect.orDie(Effect.scoped(provided as Effect.Effect<DriveOnlyRunResult, unknown, Scope.Scope>))
+    : (program as unknown as Effect.Effect<DriveOnlyRunResult, never, Scope.Scope>)
+  return Effect.orDie(Effect.scoped(provided as unknown as Effect.Effect<DriveOnlyRunResult, unknown, Scope.Scope>))
 }
 
 /** Helper used by tests to assert pass and surface failures. */

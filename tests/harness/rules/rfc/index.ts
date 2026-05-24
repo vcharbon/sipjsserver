@@ -214,7 +214,8 @@ function trackReceived(ds: AgentDialogState, msg: SipMessage): void {
     ds.callId = callIdHeader
     ds.callIdConfirmed = true
     ds.receivedInviteUri = msg.uri
-    if (msg.getHeader("via")[0].branch) ds.receivedInviteBranch = msg.getHeader("via")[0].branch
+    const branch = msg.getHeader("via")[0].branch
+    if (branch !== undefined) ds.receivedInviteBranch = branch
     if (!ds.dialogRemoteUri) ds.dialogRemoteUri = msg.getHeader("from").uri
   }
 

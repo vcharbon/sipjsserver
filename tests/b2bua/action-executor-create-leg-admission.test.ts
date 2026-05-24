@@ -112,7 +112,6 @@ describe("ActionExecutor create-leg admission gate", () => {
         type: "create-leg",
         destination: { host: "kindlab", port: 5060 },
         fromInvite: "snapshot",
-        callbackContext: undefined,
       },
     ]
 
@@ -132,7 +131,6 @@ describe("ActionExecutor create-leg admission gate", () => {
         type: "create-leg",
         destination: { host: "10.0.1.5", port: 5060 },
         fromInvite: "snapshot",
-        callbackContext: undefined,
       },
     ]
 
@@ -150,7 +148,6 @@ describe("ActionExecutor create-leg admission gate", () => {
         type: "create-leg",
         destination: { host: "kindlab", port: 5060 },
         fromInvite: "snapshot",
-        callbackContext: undefined,
       },
     ]
 

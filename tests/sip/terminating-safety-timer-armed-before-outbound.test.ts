@@ -66,12 +66,14 @@ function makeActiveCall(callRef: string): Call {
     fromTag: "uac-tag",
     source: { address: "127.0.0.1", port: 5060 },
     state: "confirmed",
-    disposition: "confirmed",
+    disposition: "bridged",
     dialogs: [],
   }
   return {
     callRef,
     aLeg,
+    aLegInvite: { uri: "sip:dest@example.com", headers: [], body: new Uint8Array() },
+    tagMap: [],
     bLegs: [],
     activePeer: null,
     limiterEntries: [],
@@ -133,7 +135,7 @@ describe("processResult ordering: schedule-timer effects must precede slow outbo
             fireAt: now + SAFETY_DELAY_MS,
           }
           yield* timers.schedule(callRef, safety, () => Ref.set(safetyScheduled, true))
-        })
+        }).pipe(Effect.orDie)
 
         const now = yield* Clock.currentTimeMillis
         const trigger: TimerEntry = {
@@ -190,7 +192,7 @@ describe("processResult ordering: schedule-timer effects must precede slow outbo
           }
           yield* timers.schedule(callRef, safety, () => Ref.set(safetyHandlerRan, true))
           yield* Effect.sleep(`${SLOW_OUTBOUND_MS} millis`)
-        })
+        }).pipe(Effect.orDie)
 
         const now = yield* Clock.currentTimeMillis
         const trigger: TimerEntry = {

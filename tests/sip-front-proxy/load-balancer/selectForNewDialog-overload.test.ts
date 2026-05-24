@@ -13,7 +13,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
 import {
-  HmacKeyProvider,
   hmacKeyProviderStaticLayer,
   LoadBalancerConfig,
   LoadBalancerStrategyLive,
@@ -144,8 +143,9 @@ describe("LoadBalancer.selectForNewDialog — overload behaviour", () => {
         .selectForNewDialog(buildInvite("ne1", false))
         .pipe(Effect.exit)
       expect(nonEm._tag).toBe("Failure")
-      if (nonEm._tag === "Failure" && nonEm.cause._tag === "Fail") {
-        expect(nonEm.cause.error._tag).toBe("NoTargetAvailable")
+      if (nonEm._tag === "Failure") {
+        const firstFail = nonEm.cause.reasons.find((r) => r._tag === "Fail")
+        expect(firstFail?.error._tag).toBe("NoTargetAvailable")
       }
 
       const em = yield* strategy

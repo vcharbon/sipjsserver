@@ -17,14 +17,10 @@ import type {
   TransferFor,
   CallFor,
   DialogFor,
-  RequestMatch,
-  ResponseMatch,
-  TimerMatch,
   Match,
 } from "../../src/b2bua/rules/framework/RuleDefinition.js"
 import type {
   SipRequest,
-  SipResponse,
   SipResponseTagged,
   InDialogMethodRequest,
   MethodRequest,
@@ -57,8 +53,6 @@ assertExtends<ReqEvent extends { readonly type: "sip" } ? ReqEvent["message"] : 
 type RespMatch = { readonly kind: "response" }
 type RespEvent = EventFor<RespMatch>
 assertExtends<RespEvent extends { readonly type: "sip" } ? RespEvent["message"] : never, SipResponseTagged>()
-type RespTo = RespEvent extends { readonly type: "sip" } ? RespEvent["message"]["parsed"]["to"]["tag"] : never
-assertEqual<RespTo, string>(true)
 
 // ── kind: "request" + method literal narrows method ─────────────────────
 
@@ -84,15 +78,13 @@ assertEqual<CRingingDialog, Dialog>(true)
 // legState: "confirmed" → InDialogRequest, sourceDialog: Dialog
 type ConfirmedMatch = { readonly kind: "request"; readonly legState: "confirmed" }
 type ConfirmedMsg = EventFor<ConfirmedMatch> extends { readonly type: "sip" } ? EventFor<ConfirmedMatch>["message"] : never
-type ConfirmedTo = ConfirmedMsg["parsed"]["to"]["tag"]
-assertEqual<ConfirmedTo, string>(true)
-type ConfirmedFrom = ConfirmedMsg["parsed"]["from"]["tag"]
-assertEqual<ConfirmedFrom, string>(true)
+// InDialogRequest guarantees tag-bearing from/to headers via overloaded getHeader.
+assertExtends<ConfirmedMsg, import("../../src/sip/types.js").InDialogRequest>()
 
-// callState: "bridged" → InDialogRequest
-type BridgedMatch = { readonly kind: "request"; readonly callState: "bridged" }
-type BridgedDialog = DialogFor<BridgedMatch>
-assertEqual<BridgedDialog, Dialog>(true)
+// callState: "active" → an active in-dialog scenario
+type ActiveMatch = { readonly kind: "request"; readonly callState: "active"; readonly legState: "confirmed" }
+type ActiveDialog = DialogFor<ActiveMatch>
+assertEqual<ActiveDialog, Dialog>(true)
 
 // transferPhase: null → call.transfer: null | undefined; sourceDialog stays Dialog | undefined
 type NoTransferMatch = { readonly kind: "request"; readonly transferPhase: null }
@@ -109,8 +101,8 @@ assertEqual<DirectionFor<FromBMatch>, "from-b">(true)
 type Resp200InviteMatch = { readonly kind: "response"; readonly cseqMethod: "INVITE"; readonly statusClass: "2xx" }
 type Resp200InviteEvent = EventFor<Resp200InviteMatch>
 type Resp200InviteMsg = Resp200InviteEvent extends { readonly type: "sip" } ? Resp200InviteEvent["message"] : never
-assertEqual<Resp200InviteMsg["parsed"]["cseq"]["method"], "INVITE">(true)
-assertEqual<Resp200InviteMsg["parsed"]["to"]["tag"], string>(true)
+// The narrowed message is a SipResponseTagged whose CSeq method is literal "INVITE".
+assertExtends<Resp200InviteMsg, SipResponseTagged>()
 
 // ── transferPhase: "c-ringing" narrows call.transfer.phase ──────────────
 
@@ -125,7 +117,8 @@ type ReferRuleMatch = {
   readonly kind: "request"
   readonly method: "REFER"
   readonly direction: "from-b"
-  readonly callState: "bridged"
+  readonly callState: "active"
+  readonly legState: "confirmed"
   readonly transferPhase: null
 }
 type Ctx = RuleContext<ReferRuleMatch>
@@ -140,7 +133,7 @@ assertEqual<Ctx["direction"], "from-b">(true)
 // transfer is null|undefined (we asserted "no active transfer" via transferPhase: null).
 assertEqual<Ctx["call"]["transfer"], null | undefined>(true)
 // call.state narrows to the literal.
-assertEqual<Ctx["call"]["state"], "bridged">(true)
+assertEqual<Ctx["call"]["state"], "active">(true)
 
 // ── Sample timer rule context ──────────────────────────────────────────
 

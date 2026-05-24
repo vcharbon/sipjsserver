@@ -1,10 +1,14 @@
 /**
- * Stage 4 of docs/plan/to-review-and-properly-swift-moler.md:
+ * Validator: TERMINATING_TIMEOUT_MS must be ≥ 1 s.
  *
- * The platform must refuse to start when `TERMINATING_TIMEOUT_MS` is
- * not large enough to cover `keepaliveIntervalSec*1000 + 60000`.
- * Otherwise a routine silent interval gets mistaken for "call is dead"
- * and the orphan sweep purges live dialogs (the 2026-05-15 cascade).
+ * Pre-2026-05-23 contract: validator gated against
+ * `keepaliveIntervalSec*1000 + 60_000` to prevent an OPTIONS keepalive
+ * gap from being mistaken for a stuck terminating call (always-refresh
+ * contract). That contract was replaced by the per-leg refresh budget
+ * (Fix A1) — keepalive cadence no longer constrains the timeout, so
+ * the validator now only enforces a sanity floor (1 s).
+ *
+ * See `validateTerminatingTimeoutConsistency` for the rationale.
  */
 
 import { describe, expect, test } from "vitest"
@@ -13,42 +17,22 @@ import { validateTerminatingTimeoutConsistency } from "../../src/config/AppConfi
 import type { AppConfigData } from "../../src/config/AppConfig.js"
 
 function minimalCfg(overrides: Partial<AppConfigData>): AppConfigData {
-  // Validator only reads `keepaliveIntervalSec`. Any cast through `as`
-  // keeps this test independent of churn in unrelated config fields.
   return overrides as unknown as AppConfigData
 }
 
 describe("AppConfig — terminating-timeout consistency validator", () => {
-  test("passes when TERMINATING_TIMEOUT_MS exceeds keepaliveIntervalSec*1000 + 60_000", () => {
-    // Floor at TERMINATING_TIMEOUT_MS - 60_001 (in seconds) gives the
-    // largest passing keepalive interval.
-    const maxPassingSec = Math.floor((TERMINATING_TIMEOUT_MS - 60_001) / 1000)
+  test("passes for the current constant regardless of keepaliveIntervalSec", () => {
+    // Constant is currently 32 s (SIP retransmission absorption window).
+    // The validator is now keepalive-independent.
+    expect(TERMINATING_TIMEOUT_MS).toBeGreaterThanOrEqual(1_000)
     expect(() =>
-      validateTerminatingTimeoutConsistency(
-        minimalCfg({ keepaliveIntervalSec: maxPassingSec }),
-      ),
+      validateTerminatingTimeoutConsistency(minimalCfg({ keepaliveIntervalSec: 30 })),
     ).not.toThrow()
-  })
-
-  test("rejects when keepaliveIntervalSec is too high relative to the safety constant", () => {
-    // Force the constraint violation by going well above the floor.
-    const violatingSec = Math.ceil(TERMINATING_TIMEOUT_MS / 1000) + 1
     expect(() =>
-      validateTerminatingTimeoutConsistency(
-        minimalCfg({ keepaliveIntervalSec: violatingSec }),
-      ),
-    ).toThrowError(/TERMINATING_TIMEOUT_MS .* must exceed/)
-  })
-
-  test("rejects exact equality (validator uses strict greater-than via the +60s margin)", () => {
-    // Pick the boundary: keepaliveIntervalSec*1000 + 60_000 === TERMINATING_TIMEOUT_MS.
-    // Requires TERMINATING_TIMEOUT_MS - 60_000 to be divisible by 1000 in seconds.
-    const boundarySec = (TERMINATING_TIMEOUT_MS - 60_000) / 1000
-    if (!Number.isInteger(boundarySec)) return // skip when constant doesn't align
+      validateTerminatingTimeoutConsistency(minimalCfg({ keepaliveIntervalSec: 900 })),
+    ).not.toThrow()
     expect(() =>
-      validateTerminatingTimeoutConsistency(
-        minimalCfg({ keepaliveIntervalSec: boundarySec }),
-      ),
-    ).toThrowError(/must exceed/)
+      validateTerminatingTimeoutConsistency(minimalCfg({ keepaliveIntervalSec: 86_400 })),
+    ).not.toThrow()
   })
 })

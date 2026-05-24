@@ -34,7 +34,8 @@ import {
   WorkerOrdinal,
 } from "../../src/cache/PeerCachePort.js"
 import { PeerEndpointResolver } from "../../src/cache/PeerEndpointResolver.js"
-import { addPeerRelayRoutes } from "../../src/cache/PeerRelay.ts"
+import { addPeerRelayRoutes } from "../../src/cache/PeerRelay.js"
+import { bodyBuf, decodeBuf } from "../support/codecHelpers.js"
 
 const PEER = WorkerOrdinal("worker-test")
 
@@ -80,7 +81,7 @@ describe("PeerCacheClient ↔ PeerRelay HTTP round-trip", () => {
           role: "bak",
           owner: WorkerOrdinal("worker-A"),
           callRef: "call-1@host",
-          state: '{"hello":"world"}',
+          state: bodyBuf({ hello: "world" }),
           indexes: ["leg:abc|tag1"],
           ttlSec: 60,
         })
@@ -95,9 +96,9 @@ describe("PeerCacheClient ↔ PeerRelay HTTP round-trip", () => {
         const arr = Array.from(items)
         expect(arr).toHaveLength(1)
         expect(arr[0]!.callRef).toBe("call-1@host")
-        // Slice 7c: PRS now stamps `written_at_ms` into the body for
-        // T7 latency. Parse-and-check rather than byte-equality.
-        const parsed = JSON.parse(arr[0]!.json) as Record<string, unknown>
+        // Bodies are msgpack-encoded post-migration; decode via the
+        // auto-detect helper.
+        const parsed = decodeBuf(arr[0]!.body) as Record<string, unknown>
         expect(parsed["hello"]).toBe("world")
       }).pipe(Effect.provide(clientLayer))
     }).pipe(Effect.provide(ServerLayer)) as Effect.Effect<void>
@@ -125,7 +126,7 @@ describe("PeerCacheClient ↔ PeerRelay HTTP round-trip", () => {
         }
         yield* port.putCall({
           ...args,
-          state: '{"v":1}',
+          state: bodyBuf({ v: 1 }),
           indexes: ["leg:x|y"],
           ttlSec: 30,
         })

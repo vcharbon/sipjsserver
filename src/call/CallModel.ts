@@ -733,6 +733,16 @@ export const Call = Schema.Struct({
    * optional and omitted from the wire when zero.
    */
   messageCount: Schema.optional(Schema.Int),
+  /**
+   * Leg IDs that have already triggered ONE safety-timer refresh while
+   * the call is in `terminating`. Cap is `aLeg + bLegs.length` total
+   * refreshes — once a leg has used its budget, further updates from
+   * that leg apply the mutation but do not extend the safety timer.
+   * Set is reset on enter-terminating. Adversarial in-dialog noise
+   * (re-INVITE / OPTIONS flood from one leg) can therefore only delay
+   * the force-purge by at most one TERMINATING_TIMEOUT_MS window.
+   */
+  terminatingRefreshLegs: Schema.optional(Schema.Array(Schema.String)),
 })
 
 export type Call = typeof Call.Type

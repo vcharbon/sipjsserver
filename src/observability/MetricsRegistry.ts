@@ -20,6 +20,7 @@ import { Layer, ServiceMap } from "effect"
 import type { UdpTransportMetrics } from "../sip/UdpTransport.js"
 import type { OverloadControllerMetrics } from "../b2bua/OverloadController.js"
 import type { TransactionLayerMetrics } from "../sip/TransactionLayer.js"
+import type { ForkSiteTracker } from "./ForkSiteTracker.js"
 
 // ---------------------------------------------------------------------------
 // Legacy cluster IPC types (inlined from the retired `src/cluster/IpcProtocol.ts`).
@@ -240,6 +241,22 @@ export interface SipRouterMetrics {
    * path that bypassed the cancel and is alert-worthy.
    */
   readonly zombieTimeoutTotal: () => number
+  /**
+   * `b2bua_unroutable_log_suppressed_total` — Unroutable WARN log lines
+   * dropped by the per-Call-ID 1/sec event shedder. The underlying 481
+   * reject and OTel error span still fire; only the formatted pino
+   * record was suppressed. Sustained non-zero indicates abuse traffic
+   * is being shed cleanly.
+   */
+  readonly unroutableSuppressedTotal: () => number
+  /**
+   * `b2bua_fast_reject_terminating_total` — in-dialog non-ACK/non-BYE
+   * requests 481'd by the synchronous fast-path on a call that was
+   * already in `terminating`. Skips the rule chain and the per-leg
+   * safety-timer refresh, so adversarial in-dialog floods cannot keep a
+   * terminating call alive.
+   */
+  readonly fastRejectTerminatingTotal: () => number
 }
 
 /**
@@ -393,6 +410,8 @@ export interface MetricsRegistryState {
   broadcastToWorkers: ((msg: MainToWorkerMessage) => void) | undefined
   /** CallDecisionEngine adapter error counters (dual-tier). */
   adapterErrors: AdapterErrorMetrics
+  /** Per-fork-site live + cumulative fiber counters (leak diagnostic). */
+  forkSites: ForkSiteTracker | undefined
 }
 
 export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, MetricsRegistryState>()(
@@ -420,5 +439,6 @@ export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, Metrics
       transient: { newCall: 0, callFailure: 0, callRefer: 0 },
       permanent: { newCall: 0, callFailure: 0, callRefer: 0 },
     },
+    forkSites: undefined,
   }))
 }

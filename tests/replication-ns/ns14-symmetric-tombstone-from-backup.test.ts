@@ -47,7 +47,7 @@ describe("NS14 — symmetric tombstone from backup", () => {
           entryGen: A.outgoing.gen,
           partition: "pri",
           callRef: "X",
-          bodyValue: '{"name":"X","gen":51}',
+          bodyValue: Buffer.from('{"name":"X","gen":51}'),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -57,9 +57,9 @@ describe("NS14 — symmetric tombstone from backup", () => {
           MutableRef.get(bPuller.viewRef).entriesAppliedTotal >= 1
         )
         // Sanity: B has X's body in bak:{A}:.
-        expect(yield* B.kv.bodyGet("bak:worker-A:call:X")).toBe(
-          '{"name":"X","gen":51}'
-        )
+        expect(
+          (yield* B.kv.bodyGet("bak:worker-A:call:X"))?.toString("utf8")
+        ).toBe('{"name":"X","gen":51}')
         yield* bPuller.stop
 
         // Step 2: B writes a tombstone for X to its own bak:{A}: via

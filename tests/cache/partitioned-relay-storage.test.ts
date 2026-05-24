@@ -15,6 +15,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Duration, Effect, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { PartitionedRelayStorage } from "../../src/cache/PartitionedRelayStorage.js"
+import { bodyBuf, decodeBuf } from "../support/codecHelpers.js"
 
 const provided = <A, E>(eff: Effect.Effect<A, E, PartitionedRelayStorage>) =>
   eff.pipe(Effect.provide(PartitionedRelayStorage.memoryLayer))
@@ -30,7 +31,7 @@ describe("PartitionedRelayStorage.memoryLayer", () => {
           "bak",
           "worker-A",
           "call-1",
-          '{"hello":"world"}',
+          bodyBuf({ hello: "world" }),
           ["leg:abc|tag1", "ctx:foo"],
           60
         )
@@ -38,11 +39,9 @@ describe("PartitionedRelayStorage.memoryLayer", () => {
         const items = Array.from(scanned)
         expect(items).toHaveLength(1)
         expect(items[0]!.callRef).toBe("call-1")
-        // Slice 7c: PRS now stamps `written_at_ms` into the body so
-        // the puller can compute end-to-end replication latency
-        // (T7). The user-supplied content is preserved; we parse and
-        // assert on the relevant fields rather than byte-equality.
-        const parsed = JSON.parse(items[0]!.json) as Record<string, unknown>
+        // Bodies are msgpack-encoded post-migration; decode via the
+        // same auto-detect dispatch the production read path uses.
+        const parsed = decodeBuf(items[0]!.body) as Record<string, unknown>
         expect(parsed["hello"]).toBe("world")
         expect(items[0]!.ttlSec).toBeGreaterThan(0)
       })
@@ -53,8 +52,8 @@ describe("PartitionedRelayStorage.memoryLayer", () => {
     provided(
       Effect.gen(function* () {
         const storage = yield* PartitionedRelayStorage
-        yield* storage.putCall("pri", "worker-A", "p-1", '{"x":1}', [], 60)
-        yield* storage.putCall("bak", "worker-A", "b-1", '{"x":2}', [], 60)
+        yield* storage.putCall("pri", "worker-A", "p-1", bodyBuf({ x: 1 }), [], 60)
+        yield* storage.putCall("bak", "worker-A", "b-1", bodyBuf({ x: 2 }), [], 60)
         const priItems = Array.from(yield* collect(storage.scanCalls("pri", "worker-A")))
         const bakItems = Array.from(yield* collect(storage.scanCalls("bak", "worker-A")))
         expect(priItems).toHaveLength(1)
@@ -69,8 +68,8 @@ describe("PartitionedRelayStorage.memoryLayer", () => {
     provided(
       Effect.gen(function* () {
         const storage = yield* PartitionedRelayStorage
-        yield* storage.putCall("bak", "worker-A", "c-1", '{}', [], 60)
-        yield* storage.putCall("bak", "worker-B", "c-2", '{}', [], 60)
+        yield* storage.putCall("bak", "worker-A", "c-1", bodyBuf({}), [], 60)
+        yield* storage.putCall("bak", "worker-B", "c-2", bodyBuf({}), [], 60)
         const aItems = Array.from(yield* collect(storage.scanCalls("bak", "worker-A")))
         const bItems = Array.from(yield* collect(storage.scanCalls("bak", "worker-B")))
         expect(aItems.map((i) => i.callRef)).toEqual(["c-1"])
@@ -87,7 +86,7 @@ describe("PartitionedRelayStorage.memoryLayer", () => {
           "bak",
           "worker-A",
           "c-1",
-          '{}',
+          bodyBuf({}),
           ["leg:1", "ctx:1"],
           60
         )
@@ -102,7 +101,7 @@ describe("PartitionedRelayStorage.memoryLayer", () => {
     provided(
       Effect.gen(function* () {
         const storage = yield* PartitionedRelayStorage
-        yield* storage.putCall("bak", "worker-A", "c-1", '{}', [], 5)
+        yield* storage.putCall("bak", "worker-A", "c-1", bodyBuf({}), [], 5)
         // Within TTL window
         yield* TestClock.adjust(Duration.seconds(4))
         const before = Array.from(yield* collect(storage.scanCalls("bak", "worker-A")))
@@ -119,7 +118,7 @@ describe("PartitionedRelayStorage.memoryLayer", () => {
     provided(
       Effect.gen(function* () {
         const storage = yield* PartitionedRelayStorage
-        yield* storage.putCall("bak", "worker-A", "c-1", '{}', [], 5)
+        yield* storage.putCall("bak", "worker-A", "c-1", bodyBuf({}), [], 5)
         yield* TestClock.adjust(Duration.seconds(4)) // 1s left
         // Refresh: extend by 30s
         yield* storage.refreshCall("bak", "worker-A", "c-1", [], 30)
@@ -139,7 +138,7 @@ describe("PartitionedRelayStorage.memoryLayer", () => {
       Effect.gen(function* () {
         const storage = yield* PartitionedRelayStorage
         for (let i = 0; i < 5; i++) {
-          yield* storage.putCall("bak", "worker-A", `c-${i}`, `{"i":${i}}`, [], 60)
+          yield* storage.putCall("bak", "worker-A", `c-${i}`, bodyBuf({ i }), [], 60)
         }
         const items = Array.from(yield* collect(storage.scanCalls("bak", "worker-A")))
         expect(items).toHaveLength(5)

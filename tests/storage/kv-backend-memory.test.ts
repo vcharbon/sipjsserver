@@ -61,6 +61,11 @@ const memberOf = KvBackend.memberOf
 
 const bodyKey = (callRef: string): string => `pri:self:call:${callRef}`
 
+// Bodies are now opaque binary payloads (msgpack on the production path);
+// the storage primitive does not inspect their contents. Wrap fixture
+// strings as Buffers so assertions compare bytes via Buffer equality.
+const buf = (s: string): Buffer => Buffer.from(s)
+
 describe("KvBackend.memory — body store", () => {
   it.effect("bodyGet returns null for missing key", () =>
     Effect.gen(function* () {
@@ -79,12 +84,12 @@ describe("KvBackend.memory — body store", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: '{"x":1}',
+        bodyValue: buf('{"x":1}'),
         bodyTtlSec: 60,
         indexes: [],
       })
       const v = yield* kv.bodyGet(bodyKey("a"))
-      expect(v).toBe('{"x":1}')
+      expect(v).toEqual(buf('{"x":1}'))
     })
   )
 
@@ -97,7 +102,7 @@ describe("KvBackend.memory — body store", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "{}",
+        bodyValue: buf("{}"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -116,7 +121,7 @@ describe("KvBackend.memory — body store", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "A",
+        bodyValue: buf("A"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -126,12 +131,12 @@ describe("KvBackend.memory — body store", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("c")),
         bodyKey: bodyKey("c"),
-        bodyValue: "C",
+        bodyValue: buf("C"),
         bodyTtlSec: 60,
         indexes: [],
       })
       const v = yield* kv.bodyMget([bodyKey("a"), bodyKey("b"), bodyKey("c")])
-      expect(v).toEqual(["A", null, "C"])
+      expect(v).toEqual([buf("A"), null, buf("C")])
     })
   )
 
@@ -144,7 +149,7 @@ describe("KvBackend.memory — body store", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "x",
+        bodyValue: buf("x"),
         bodyTtlSec: 30,
         indexes: [],
       })
@@ -173,7 +178,7 @@ describe("KvBackend.memory — counter (per-bucket)", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "{}",
+        bodyValue: buf("{}"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -183,7 +188,7 @@ describe("KvBackend.memory — counter (per-bucket)", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("b")),
         bodyKey: bodyKey("b"),
-        bodyValue: "{}",
+        bodyValue: buf("{}"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -193,7 +198,7 @@ describe("KvBackend.memory — counter (per-bucket)", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("c")),
         bodyKey: bodyKey("c"),
-        bodyValue: "{}",
+        bodyValue: buf("{}"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -212,7 +217,7 @@ describe("KvBackend.memory — counter (per-bucket)", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "{}",
+        bodyValue: buf("{}"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -233,7 +238,7 @@ describe("KvBackend.memory — counter (per-bucket)", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("o1")),
         bodyKey: bodyKey("o1"),
-        bodyValue: "O",
+        bodyValue: buf("O"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -244,7 +249,7 @@ describe("KvBackend.memory — counter (per-bucket)", () => {
         entryGen: 0,
         member: memberOf("U", "bak:peerA:call:m1"),
         bodyKey: "bak:peerA:call:m1",
-        bodyValue: "M",
+        bodyValue: buf("M"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -264,7 +269,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "BODY",
+        bodyValue: buf("BODY"),
         bodyTtlSec: 60,
         indexes: [
           { key: "idx:leg:CID-1", value: "a", ttlSec: 60 },
@@ -272,9 +277,9 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
         ],
       })
       expect(result.counter).toBe(1)
-      expect(yield* kv.bodyGet(bodyKey("a"))).toBe("BODY")
-      expect(yield* kv.bodyGet("idx:leg:CID-1")).toBe("a")
-      expect(yield* kv.bodyGet("idx:leg:CID-2")).toBe("a")
+      expect(yield* kv.bodyGet(bodyKey("a"))).toEqual(buf("BODY"))
+      expect(yield* kv.bodyGet("idx:leg:CID-1")).toEqual(buf("a"))
+      expect(yield* kv.bodyGet("idx:leg:CID-2")).toEqual(buf("a"))
       const pulled = yield* kv.channelPullBatch({
         channel: CHANNEL,
         counterKey: COUNTER,
@@ -299,7 +304,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "v1",
+        bodyValue: buf("v1"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -309,7 +314,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("b")),
         bodyKey: bodyKey("b"),
-        bodyValue: "B",
+        bodyValue: buf("B"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -319,7 +324,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "v2",
+        bodyValue: buf("v2"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -336,7 +341,7 @@ describe("KvBackend.memory — channelWriteUpdate", () => {
       expect(pulled.entries[0]?.score).toBe(2)
       expect(pulled.entries[1]?.member).toBe(memberOf("U", bodyKey("a")))
       expect(pulled.entries[1]?.score).toBe(3)
-      expect(pulled.entries[1]?.body).toBe("v2")
+      expect(pulled.entries[1]?.body).toEqual(buf("v2"))
       expect(pulled.head).toEqual({ gen: GEN, counter: 3 })
     })
   )
@@ -353,7 +358,7 @@ describe("KvBackend.memory — channelWriteTombstone", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "BODY",
+        bodyValue: buf("BODY"),
         bodyTtlSec: 60,
         indexes: [
           { key: "idx:leg:CID-1", value: "a", ttlSec: 60 },
@@ -431,7 +436,7 @@ describe("KvBackend.memory — channelPullBatch", () => {
           entryGen: GEN,
           member: memberOf("U", bodyKey(ref)),
           bodyKey: bodyKey(ref),
-          bodyValue: ref,
+          bodyValue: buf(ref),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -457,7 +462,7 @@ describe("KvBackend.memory — channelPullBatch", () => {
           entryGen: GEN,
           member: memberOf("U", bodyKey(ref)),
           bodyKey: bodyKey(ref),
-          bodyValue: ref,
+          bodyValue: buf(ref),
           bodyTtlSec: 60,
           indexes: [],
         })
@@ -482,7 +487,7 @@ describe("KvBackend.memory — channelPullBatch", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "x",
+        bodyValue: buf("x"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -507,7 +512,7 @@ describe("KvBackend.memory — channelPullBatch", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("a")),
         bodyKey: bodyKey("a"),
-        bodyValue: "x",
+        bodyValue: buf("x"),
         bodyTtlSec: 30,
         indexes: [],
       })
@@ -533,7 +538,7 @@ describe("KvBackend.memory — channelPullBatch", () => {
         entryGen: GEN,
         member: "malformed-no-prefix",
         bodyKey: "irrelevant",
-        bodyValue: "{}",
+        bodyValue: buf("{}"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -573,7 +578,7 @@ describe("KvBackend.memory — channelPullBatch", () => {
         entryGen: GEN,
         member: memberOf("U", bodyKey("o1")),
         bodyKey: bodyKey("o1"),
-        bodyValue: "O",
+        bodyValue: buf("O"),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -584,7 +589,7 @@ describe("KvBackend.memory — channelPullBatch", () => {
         entryGen: 0,
         member: memberOf("U", "bak:peerA:call:m1"),
         bodyKey: "bak:peerA:call:m1",
-        bodyValue: "M",
+        bodyValue: buf("M"),
         bodyTtlSec: 60,
         indexes: [],
       })

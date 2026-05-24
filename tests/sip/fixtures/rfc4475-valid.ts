@@ -66,14 +66,9 @@ a=rtpmap:31 LPC
 // ---------------------------------------------------------------------------
 
 export const wideRangeValidChars = (() => {
-  // The method and R-URI contain unusual but valid token chars
-  // UTF-8 bytes in To display name and extension header
-  const toDisplayName = Buffer.from([0x07]) // BEL
-  const nulByte = Buffer.from([0x00]) // NUL
-  const delByte = Buffer.from([0x7f]) // DEL
-  const fromParamUtf8 = Buffer.from("работающий", "utf-8")
-  const extHeaderUtf8 = Buffer.from([0xef, 0xbb, 0xbf, 0xe5, 0xa4, 0xa7, 0xe5, 0x81, 0x9c, 0xe9, 0x9b, 0xbb])
-
+  // The method and R-URI contain unusual but valid token chars.
+  // Display name / extension header byte payloads are kept inline in the
+  // template; the historical helper constants are not used at runtime.
   const msg = sipMsg`!interesting-Method0123456789_*+\`.\%indeed'~ sip:1_unusual.URI~(to-be!sure)&isn't+it$/crazy?,/;;*:&it+has=1,weird!*pas$wo~d_too.(doesn't-it)@example.com SIP/2.0
 Via: SIP/2.0/TCP host1.example.com;branch=z9hG4bK-.!%66*_+\`'~
 To: "BEL: NUL: DEL:" <sip:1_unusual.URI~(to-be!sure)&isn't+it$/crazy?,/;;*@example.com>

@@ -102,7 +102,7 @@ describe("PullerHttpTransport — end-to-end via FakeHttpFabric", () => {
           entryGen: channelAtoB.gen,
           partition: "pri",
           callRef: "X",
-          bodyValue: '{"_topology":{"gen":1},"name":"X"}',
+          bodyValue: Buffer.from('{"_topology":{"gen":1},"name":"X"}'),
           bodyTtlSec: 60,
           indexes: [
             { key: "idx:leg:test|tag", value: "X", ttlSec: 60 },

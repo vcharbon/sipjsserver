@@ -12,7 +12,7 @@
  * real UDP stack would expose them.
  */
 
-import { Effect, Option } from "effect"
+import { Effect, Option, type Scope } from "effect"
 import type { AgentInfo, NetworkTag, TestTransport } from "../../../src/test-harness/framework/types.js"
 import { DEFAULT_NETWORK } from "../../../src/test-harness/framework/types.js"
 import { pumpAll } from "../../support/pumpAll.js"
@@ -300,7 +300,7 @@ export function createSimulatedTransport(opts?: {
     kind: "fake" as const,
     stackLayer: StackLayer,
     setup: (agentConfigs, _b2buaTarget) =>
-      Effect.gen(function* () {
+      (Effect.gen(function* () {
         // All services come out of the single FakeStackLayer, so the
         // SignalingNetwork the agents bind on and the SignalingNetwork
         // inside the B2BUA's UdpTransport are guaranteed to be the same
@@ -384,12 +384,12 @@ export function createSimulatedTransport(opts?: {
             port,
             queueMax: AGENT_QUEUE_MAX,
           }).pipe(
-            Effect.catch((err) =>
-              new TransportError({
+            Effect.catchTag("BindError", (err) =>
+              Effect.fail(new TransportError({
                 message:
                   `Failed to bind agent "${name}" at ${ip}:${port} on network ${agentNetwork}: ${err.message}`,
                 cause: err,
-              })
+              }))
             )
           )
 
@@ -430,7 +430,7 @@ export function createSimulatedTransport(opts?: {
         )
 
         return agentInfos
-      }),
+      }) as Effect.Effect<Record<string, AgentInfo>, TransportError, Scope.Scope>),
 
     send: (agentName, buf, port, address) =>
       Effect.gen(function* () {

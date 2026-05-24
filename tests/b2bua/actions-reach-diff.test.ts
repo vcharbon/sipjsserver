@@ -257,7 +257,7 @@ describe("add-cdr-event reach-diff", () => {
     const { call, aLeg } = bridged()
     const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
     const { after } = runActions(
-      [{ type: "add-cdr-event", eventType: "answered", legId: "b-1", statusCode: 200 }],
+      [{ type: "add-cdr-event", eventType: "answer", legId: "b-1", statusCode: 200 }],
       ctx,
     )
     expect(diffCall(call, after)).toEqual(new Set(["cdrEvents"]))
@@ -287,7 +287,7 @@ describe("clear-transfer reach-diff", () => {
     const call: Call = {
       ...makeCall(aLeg, bLeg),
       transfer: {
-        phase: "authorized",
+        phase: "refer-authorizing",
         referrerLegId: "a",
         referToUri: "sip:charlie@example.com",
         startedAtMs: 0,

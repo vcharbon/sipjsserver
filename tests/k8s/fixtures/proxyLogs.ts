@@ -76,14 +76,14 @@ export const parseRoutingDecisions = (
     if (!m) continue
     const tDecided = m[2] ? parseTimestamp(m[2], ref) : undefined
     out.push({
-      proxyPod: m[1] || undefined,
+      ...(m[1] ? { proxyPod: m[1] } : {}),
       method: m[3] ?? "",
       callId: m[4] ?? "",
       workerIp: m[5] ?? "",
       workerPort: parseInt(m[6] ?? "0", 10),
       decision: m[7] ?? "",
       result: m[8] ?? "",
-      tDecided,
+      ...(tDecided !== undefined ? { tDecided } : {}),
     })
   }
   return out
@@ -112,9 +112,12 @@ export const fetchRoutingDecisions = (
     const logs = yield* podLogs(
       namespace,
       { labelSelector: "app.kubernetes.io/name=sip-front-proxy" },
-      { since: opts.since },
+      opts.since !== undefined ? { since: opts.since } : {},
     )
-    return parseRoutingDecisions(logs, { referenceDate: opts.referenceDate })
+    return parseRoutingDecisions(
+      logs,
+      opts.referenceDate !== undefined ? { referenceDate: opts.referenceDate } : {},
+    )
   })
 
 /**
@@ -191,8 +194,9 @@ export const waitForInvites = (
 ): Effect.Effect<WaitForInvitesResult> =>
   Effect.gen(function* () {
     const pollSec = opts.pollSec ?? 2
+    const sinceOpts = opts.since !== undefined ? { since: opts.since } : {}
     while (Date.now() < opts.deadlineMs) {
-      const decisions = yield* fetchRoutingDecisions(namespace, { since: opts.since })
+      const decisions = yield* fetchRoutingDecisions(namespace, sinceOpts)
       const invites = decisions.filter(
         (d) => d.callId.startsWith(opts.cidPrefix) && d.method === "INVITE",
       )
@@ -203,9 +207,9 @@ export const waitForInvites = (
     }
     // Final read after the deadline so the caller has the freshest
     // (still-empty) snapshot for the diagnostic.
-    const decisions = yield* fetchRoutingDecisions(namespace, { since: opts.since })
+    const decisions = yield* fetchRoutingDecisions(namespace, sinceOpts)
     const invites = decisions.filter(
       (d) => d.callId.startsWith(opts.cidPrefix) && d.method === "INVITE",
     )
     return { decisions, invites, satisfied: false }
-  })
+  }).pipe(Effect.catchTag("ExecError", () => Effect.die("waitForInvites kubectl failed")))

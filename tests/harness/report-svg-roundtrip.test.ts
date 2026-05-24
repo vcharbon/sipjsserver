@@ -91,6 +91,7 @@ function buildFixture(): { result: ScenarioResult; ips: Set<string>; names: Set<
   const trace: ReadonlyArray<TraceEntry> = [
     {
       timestamp: 0,
+      seq: 0,
       sentMs: 0,
       receivedMs: 5,
       from: "alice",
@@ -105,6 +106,7 @@ function buildFixture(): { result: ScenarioResult; ips: Set<string>; names: Set<
     },
     {
       timestamp: 10,
+      seq: 1,
       sentMs: 5,
       receivedMs: 10,
       from: "bob",

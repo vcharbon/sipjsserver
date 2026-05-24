@@ -154,7 +154,7 @@ describe("BYE-disposition regression — Slice 3 rule fix", () => {
     expect(result.call.bLegs[0]!.byeDisposition).toBe("bye_confirmed")
     // Rule attribution span event names which rule fired.
     const ruleAttribution = result.spanEvents?.find((e) => e.name === "rule_handled")
-    expect(ruleAttribution?.attributes["rule.id"]).toBe("resolve-bye-response")
+    expect(ruleAttribution?.attributes?.["rule.id"]).toBe("resolve-bye-response")
   })
 })
 

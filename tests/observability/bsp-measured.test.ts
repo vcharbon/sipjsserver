@@ -78,7 +78,7 @@ describe("MeasuredSpanExporter", () => {
 
   it("counts failed exports separately while still bumping exportedTotal", async () => {
     const failingInner: SpanExporter = {
-      export(spans, cb) {
+      export(_spans, cb) {
         cb({ code: ExportResultCode.FAILED, error: new Error("collector down") })
       },
       shutdown() { return Promise.resolve() },

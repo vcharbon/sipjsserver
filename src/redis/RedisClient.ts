@@ -58,14 +58,36 @@ export class RedisError extends Schema.TaggedErrorClass<RedisError>()(
 
 export interface RedisOps {
   readonly get: (key: string) => Effect.Effect<string | null, RedisError>
+  /**
+   * Binary variant of `get` — returns the raw bytes (Buffer) without
+   * UTF-8 decoding. Used by the msgpackr-backed call-body read path:
+   * `client.getBuffer(key)`. Returning a Buffer through a `string`-typed
+   * `get` would mojibake any byte outside ASCII.
+   */
+  readonly getBuffer: (key: string) => Effect.Effect<Buffer | null, RedisError>
   readonly set: (key: string, value: string) => Effect.Effect<void, RedisError>
   readonly setex: (key: string, ttl: number, value: string) => Effect.Effect<void, RedisError>
+  /**
+   * Binary variant of `setex` — writes a `Buffer` value without
+   * stringifying. ioredis sends Buffer values as raw bytes over the
+   * wire when passed directly. Used by msgpack-encoded call bodies.
+   */
+  readonly setexBuffer: (key: string, ttl: number, value: Buffer) => Effect.Effect<void, RedisError>
   readonly del: (...keys: Array<string>) => Effect.Effect<number, RedisError>
   readonly exists: (key: string) => Effect.Effect<boolean, RedisError>
   readonly incr: (key: string) => Effect.Effect<number, RedisError>
   readonly decr: (key: string) => Effect.Effect<number, RedisError>
   readonly expire: (key: string, ttl: number) => Effect.Effect<void, RedisError>
   readonly eval: (script: string, keys: Array<string>, args: Array<string | number>) => Effect.Effect<unknown, RedisError>
+  /**
+   * Binary variant of `eval` — accepts string-or-Buffer ARGV (so the
+   * caller can pass msgpack-encoded bodies as Lua argv) and returns
+   * the entire Lua response as Buffers. The Lua return for
+   * `CHANNEL_PULL_BATCH_LUA` mixes numbers, strings, and binary
+   * bodies; callers coerce numbers via `Number(buf.toString())` and
+   * leave bodies as-is.
+   */
+  readonly evalBuffer: (script: string, keys: Array<string>, args: Array<string | number | Buffer>) => Effect.Effect<unknown, RedisError>
   readonly pipeline: (commands: Array<[string, ...Array<string | number>]>) => Effect.Effect<Array<[Error | null, unknown]>, RedisError>
   readonly scanKeys: (pattern: string) => Effect.Effect<Array<string>, RedisError>
   readonly raw: RedisInstance
@@ -156,6 +178,13 @@ export const makeRedisOps = (
       })
     })
 
+    const getBuffer = Effect.fnUntraced(function* (key: string) {
+      return yield* Effect.tryPromise({
+        try: () => client.getBuffer(pk(key)),
+        catch: wrapErr
+      })
+    })
+
     const set = Effect.fnUntraced(function* (key: string, value: string) {
       yield* Effect.tryPromise({
         try: () => client.set(pk(key), value),
@@ -164,6 +193,13 @@ export const makeRedisOps = (
     })
 
     const setex = Effect.fnUntraced(function* (key: string, ttl: number, value: string) {
+      yield* Effect.tryPromise({
+        try: () => client.setex(pk(key), ttl, value),
+        catch: wrapErr
+      })
+    })
+
+    const setexBuffer = Effect.fnUntraced(function* (key: string, ttl: number, value: Buffer) {
       yield* Effect.tryPromise({
         try: () => client.setex(pk(key), ttl, value),
         catch: wrapErr
@@ -217,6 +253,28 @@ export const makeRedisOps = (
       })
     })
 
+    const evalBuffer = Effect.fnUntraced(function* (
+      script: string,
+      keys: Array<string>,
+      args: Array<string | number | Buffer>
+    ) {
+      // ioredis exposes the EVAL command but does not surface
+      // `evalBuffer` directly. `callBuffer` is the binary-reply
+      // primitive — invoke it with the same wire shape ioredis would
+      // produce for `eval` (script, numKeys, keys..., argv...).
+      return yield* Effect.tryPromise({
+        try: () =>
+          client.callBuffer(
+            "EVAL",
+            script,
+            String(keys.length),
+            ...keys.map(pk),
+            ...args,
+          ),
+        catch: wrapErr
+      })
+    })
+
     const pipeline = Effect.fnUntraced(function* (
       commands: Array<[string, ...Array<string | number>]>
     ) {
@@ -249,7 +307,7 @@ export const makeRedisOps = (
       })
     })
 
-    return { get, set, setex, del, exists, incr, decr, expire, eval: evalCmd, pipeline, scanKeys, raw: client } satisfies RedisOps
+    return { get, getBuffer, set, setex, setexBuffer, del, exists, incr, decr, expire, eval: evalCmd, evalBuffer, pipeline, scanKeys, raw: client } satisfies RedisOps
   })
 
 // ---------------------------------------------------------------------------

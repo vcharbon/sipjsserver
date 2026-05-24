@@ -175,7 +175,7 @@ describe("validateRejectUpdateHeaders", () => {
     ["Call-ID", "call-id"],
     ["call-id", "call-id"],
     ["CSeq", "cseq"],
-  ] as const)("rejects %s as RFC-mandated copy from request", (name) => {
+  ] as const)("rejects %s as RFC-mandated copy from request", (name, _canonical) => {
     const result = validateRejectUpdateHeaders("mock", "newCall", {
       [name]: "anything",
     })

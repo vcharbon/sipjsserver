@@ -25,7 +25,7 @@ const fakeSpan = (): ReadableSpan => ({} as ReadableSpan)
 class ScriptedExporter implements SpanExporter {
   callCount = 0
   constructor(private readonly outcomes: ReadonlyArray<"ok" | "fail">) {}
-  export(spans: ReadableSpan[], cb: (r: ExportResult) => void): void {
+  export(_spans: ReadableSpan[], cb: (r: ExportResult) => void): void {
     const idx = this.callCount
     this.callCount++
     const which = this.outcomes[idx] ?? this.outcomes[this.outcomes.length - 1]

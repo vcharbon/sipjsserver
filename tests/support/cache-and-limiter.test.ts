@@ -16,6 +16,7 @@ import { BufferedTerminateWriter } from "../../src/cache/BufferedTerminateWriter
 import { CallState } from "../../src/call/CallState.js"
 import { TimerService } from "../../src/call/TimerService.js"
 import type { Call, Leg } from "../../src/call/CallModel.js"
+import { TERMINATING_TIMEOUT_MS } from "../../src/call/timer-helpers.js"
 import { NoOpCdrLayer } from "./networkLeaves.js"
 import { MetricsRegistry } from "../../src/observability/MetricsRegistry.js"
 
@@ -178,9 +179,10 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
     //
     // Stage 4 update: the orphan sweep now respects the safety timer's
     // `fireAt`. A stuck `terminating` call without an armed timer falls
-    // back to `createdAt + TERMINATING_TIMEOUT_MS` (17 min) as its
-    // deadline — so the test advances past that threshold instead of
-    // the historical 60s.
+    // back to `createdAt + TERMINATING_TIMEOUT_MS` as its deadline — so
+    // the test advances past that threshold instead of the historical
+    // 60 s. (The constant itself moved from 17 min to 32 s on
+    // 2026-05-23 — see TERMINATING_TIMEOUT_MS for context.)
     Effect.gen(function* () {
       const lim = yield* CallLimiter
       const state = yield* CallState
@@ -211,12 +213,13 @@ describe("PartitionedRelayStorage.memoryLayer via real CallState", () => {
       }
       yield* state.create(stuck)
 
-      // 4. Drive past TERMINATING_TIMEOUT_MS (17 min) so the orphan
-      //    sweep treats the call as past its safety deadline. The
-      //    sweep daemon ticks every 60 s — advancing well past both
-      //    the tick cadence and the deadline guarantees one sweep
-      //    pass observes the call as eligible.
-      yield* TestClock.adjust("18 minutes")
+      // 4. Drive past TERMINATING_TIMEOUT_MS so the orphan sweep
+      //    treats the call as past its safety deadline. The sweep
+      //    daemon ticks every 60 s — advance ~2× the longer of the
+      //    cadence and the deadline so one sweep pass observes the
+      //    call as eligible regardless of which constant grows.
+      const advanceMs = Math.max(60_000, TERMINATING_TIMEOUT_MS) * 2 + 1_000
+      yield* TestClock.adjust(`${advanceMs} millis`)
 
       // 5. Limiter slot must be released — a fresh admission proves it.
       const after = yield* lim.checkAndIncrement("orphan-sweep-leak", 1)

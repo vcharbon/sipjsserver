@@ -20,21 +20,15 @@ import {
 } from "./k8sFakeStack.js"
 import { SimulatedK8sCluster } from "../../src/test-harness/internal/SimulatedK8sCluster.js"
 import { testAppConfigDefaults } from "../../src/test-harness/config-defaults.js"
-import {
-  HandlerRegistry,
-  type EventHandler,
-} from "../../src/sip/SipRouter.js"
+import type { Handler, HandlerRegistry } from "../../src/sip/SipRouter.js"
 import { WorkerRegistry } from "../../src/sip-front-proxy/index.js"
 
 // Minimal handler registry — the kill / snapshot machinery doesn't
 // process SIP messages; it just needs the routers to bootstrap.
-const NOOP_HANDLER: EventHandler = () => Effect.void
+const NOOP_HANDLER: Handler = () => Effect.succeed({ effects: { critical: [], outbound: [] } } as never)
 const noopHandlers: HandlerRegistry = {
-  sip: NOOP_HANDLER,
-  cancelled: NOOP_HANDLER,
-  timer: NOOP_HANDLER,
-  timeout: NOOP_HANDLER,
-  internalEvent: NOOP_HANDLER,
+  initialInvite: NOOP_HANDLER,
+  inDialog: NOOP_HANDLER,
 }
 
 const baseConfig = testAppConfigDefaults({

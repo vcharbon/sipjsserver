@@ -57,7 +57,6 @@ const CALL_ATOMIC_KEYS = [
   "sampled",
   "workerIndex",
   "emergency",
-  "policies",
   "policyUpdateHeaders",
   "activeRules",
   "ruleState",

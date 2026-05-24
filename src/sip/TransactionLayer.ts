@@ -13,7 +13,7 @@
  * In-memory only — transaction state is ephemeral (32s max lifetime).
  */
 
-import { Cause, Clock, Duration, Effect, Fiber, Layer, MutableHashMap, Option, Queue, ServiceMap, Stream } from "effect"
+import { Cause, Clock, Duration, Effect, Fiber, Layer, MutableHashMap, Option, Queue, ServiceMap, Stream, Tracer } from "effect"
 import type { RemoteInfo, SipMessage, SipRequest, SipResponse, SipResponseTagged, B2BUAMessage } from "./types.js"
 import { SipParser } from "./Parser.js"
 import { UdpTransport } from "./UdpTransport.js"
@@ -28,6 +28,7 @@ import { _generateAckForNon2xx, generateResponse } from "./generators.js"
 import { OverloadController } from "../b2bua/OverloadController.js"
 import { AppConfig } from "../config/AppConfig.js"
 import { MetricsRegistry } from "../observability/MetricsRegistry.js"
+import { makeForkSiteTracker } from "../observability/ForkSiteTracker.js"
 
 // ---------------------------------------------------------------------------
 // Transaction event types (emitted upstream to SipRouter)
@@ -279,6 +280,37 @@ export class TransactionLayer extends ServiceMap.Service<
       const forkInScope = <A, E>(eff: Effect.Effect<A, E>) =>
         Effect.forkIn(eff, layerScope)
 
+      // Long-lived fibers forked from inside a per-message processing span
+      // (e.g. Timer B/F/H/J watchers spawned by sendRequest/sendResponse)
+      // inherit `Tracer.ParentSpan = <processing span>` from the caller's
+      // service context. The processing span ends as soon as the caller
+      // returns; the watch fiber survives, and any later `Effect.log…`
+      // call routes through the built-in `tracerLogger`, which writes a
+      // span event onto that now-ended span. The OTel SDK then logs
+      // `Cannot execute the operation on ended Span` for every such
+      // event — ~109 k WARNs per 30-min endurance at 10 CAPS + 1 abuse
+      // CAPS before this fix. `tracerLogger` short-circuits on
+      // `_tag === "ExternalSpan"`, so re-parenting the forked fiber to a
+      // zero-id external span suppresses the event emission without
+      // affecting pino output or the legitimate trace tree (the watch
+      // fiber's work has no business in the per-message trace anyway —
+      // by the time it fires the request span is long gone).
+      const DETACHED_PARENT = Tracer.externalSpan({
+        traceId: "0".repeat(32),
+        spanId: "0".repeat(16),
+        sampled: false,
+      })
+      const forkDetachedInScope = <A, E>(eff: Effect.Effect<A, E>) =>
+        Effect.forkIn(Effect.withParentSpan(eff, DETACHED_PARENT), layerScope)
+
+      // Fork-site live counters — drives `b2bua_fork_site_live` /
+      // `b2bua_fork_site_total`. A site whose live counter grows
+      // unboundedly under sustained load is a leak.
+      const forkTracker = makeForkSiteTracker()
+      registry.forkSites = forkTracker
+      const tracked = <A, E>(site: string, eff: Effect.Effect<A, E>): Effect.Effect<A, E> =>
+        forkTracker.track(site, eff)
+
       const txnMap = MutableHashMap.empty<string, Transaction>()
       // Bounded event queue — sized at 4× the UDP recv queue so brief
       // scheduler stalls don't shed events unnecessarily, but a
@@ -364,7 +396,7 @@ export class TransactionLayer extends ServiceMap.Service<
       // ── Cleanup sweep ────────────────────────────────────────────────
 
       yield* forkInScope(
-        Effect.forever(
+        tracked("txn-sweep", Effect.forever(
           Effect.gen(function* () {
             yield* Effect.sleep(Duration.millis(TXN_SWEEP_INTERVAL))
             const now = yield* Clock.currentTimeMillis
@@ -376,7 +408,7 @@ export class TransactionLayer extends ServiceMap.Service<
               }
             })
           })
-        )
+        ))
       )
 
       // ── Client retransmission ────────────────────────────────────────
@@ -415,8 +447,8 @@ export class TransactionLayer extends ServiceMap.Service<
             yield* emit({ type: "timeout", branch, callRef: txn.callRef, legId: txn.legId, method })
           })
 
-          const rFiber = yield* forkInScope(retransmitEffect)
-          const tFiber = yield* forkInScope(timeoutEffect)
+          const rFiber = yield* forkDetachedInScope(tracked("client-retransmit", retransmitEffect))
+          const tFiber = yield* forkDetachedInScope(tracked("client-timeout", timeoutEffect))
 
           yield* Effect.sync(() => {
             const opt = MutableHashMap.get(txnMap, branch)
@@ -556,12 +588,14 @@ export class TransactionLayer extends ServiceMap.Service<
                   originalBuffer: undefined,
                 })
               })
-              // Timer H cleanup — if ACK for 487 never arrives, clean up after 32s
-              yield* forkInScope(
-                Effect.gen(function* () {
+              // Timer H cleanup — if ACK for 487 never arrives, clean up after 32s.
+              // Detached span context so any future log inside deleteTxn doesn't
+              // write to the now-ended per-message processing span.
+              yield* forkDetachedInScope(
+                tracked("timer-h-487", Effect.gen(function* () {
                   yield* Effect.sleep(Duration.millis(TIMER_H))
                   yield* deleteTxn(matchedBranch!)
-                })
+                }))
               )
             }
 
@@ -741,7 +775,7 @@ export class TransactionLayer extends ServiceMap.Service<
       // per external event via SipRouter (withProcessingSpan / withRootSpan).
       // Parse errors still get an always-sampled error span (re-enables tracing).
       yield* forkInScope(
-        Stream.runForEach(transport.messages, (packet) =>
+        tracked("inbound-packet-stream", Stream.runForEach(transport.messages, (packet) =>
           Effect.gen(function* () {
             yield* Effect.logDebug(`SIP IN <- ${packet.rinfo.address}:${packet.rinfo.port} ${sipSummary(packet.raw)}`)
             yield* Effect.logDebug(packet.raw.toString('utf-8'))
@@ -787,7 +821,7 @@ export class TransactionLayer extends ServiceMap.Service<
               Effect.logError(`TransactionLayer unhandled error`, cause)
             )
           )
-        )
+        ))
       )
 
       // ── Outbound send API ───────────────────────────────────────────
@@ -828,13 +862,16 @@ export class TransactionLayer extends ServiceMap.Service<
             })
             // Schedule Timer H/J cleanup for completed server transactions.
             // ACK arrival (for INVITE) or the sweep (safety net) may clean up earlier.
+            // Detached span: per-message span has already ended by the time
+            // Timer H/J fires 32 s later.
             if (completedKind !== undefined) {
               const delay = completedKind === "invite" ? TIMER_H : TIMER_J
-              yield* forkInScope(
-                Effect.gen(function* () {
+              const siteName = completedKind === "invite" ? "timer-h-server" : "timer-j-server"
+              yield* forkDetachedInScope(
+                tracked(siteName, Effect.gen(function* () {
                   yield* Effect.sleep(Duration.millis(delay))
                   yield* deleteTxn(branch)
-                })
+                }))
               )
             }
           }

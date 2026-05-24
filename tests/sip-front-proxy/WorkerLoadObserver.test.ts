@@ -125,16 +125,16 @@ describe("WorkerLoadObserver — AIMD increase ladder", () => {
       (obs) => {
         // Three increases at +5 cps each from 100 base.
         obs.applyPayload(W, payload(0.1), 1000)
-        let snap = obs.snapshot(1000)[0]
+        let snap = obs.snapshot(1000)[0]!
         expect(snap.lastAction).toBe("increase")
         expect(snap.capCps).toBe(105)
 
         obs.applyPayload(W, payload(0.1), 2000)
-        snap = obs.snapshot(2000)[0]
+        snap = obs.snapshot(2000)[0]!
         expect(snap.capCps).toBe(110)
 
         obs.applyPayload(W, payload(0.1), 3000)
-        snap = obs.snapshot(3000)[0]
+        snap = obs.snapshot(3000)[0]!
         expect(snap.capCps).toBe(115)
       },
       { capInitialCps: 100, aimdIncreaseStepCps: 5 },
@@ -148,7 +148,7 @@ describe("WorkerLoadObserver — AIMD increase ladder", () => {
         for (let i = 1; i <= 20; i++) {
           obs.applyPayload(W, payload(0.1), i * 1000)
         }
-        const snap = obs.snapshot(20000)[0]
+        const snap = obs.snapshot(20000)[0]!
         expect(snap.capCps).toBe(110)
       },
       { capInitialCps: 100, capCeilingCps: 110, aimdIncreaseStepCps: 5 },
@@ -169,7 +169,7 @@ describe("WorkerLoadObserver — AIMD decrease + cooldown", () => {
     withObserver(
       (obs) => {
         obs.applyPayload(W, payload(0.85), 1000)
-        const snap = obs.snapshot(1000)[0]
+        const snap = obs.snapshot(1000)[0]!
         expect(snap.lastAction).toBe("decrease")
         expect(snap.capCps).toBe(75) // 100 × 0.75
       },
@@ -182,18 +182,18 @@ describe("WorkerLoadObserver — AIMD decrease + cooldown", () => {
       (obs) => {
         // Decrease at t=1000ms. Cooldown = 3 ticks × 1000ms = 3000ms.
         obs.applyPayload(W, payload(0.85), 1000)
-        let snap = obs.snapshot(1000)[0]
+        let snap = obs.snapshot(1000)[0]!
         expect(snap.cooldownMsRemaining).toBe(3000)
         // At t=2000ms, elu drops to 0.1 — would normally increase, but
         // cooldown still active.
         obs.applyPayload(W, payload(0.1), 2000)
-        snap = obs.snapshot(2000)[0]
+        snap = obs.snapshot(2000)[0]!
         expect(snap.lastAction).toBe("cooldown")
         expect(snap.capCps).toBe(75) // unchanged
 
         // At t=5000ms, cooldown elapsed — increase enabled.
         obs.applyPayload(W, payload(0.1), 5000)
-        snap = obs.snapshot(5000)[0]
+        snap = obs.snapshot(5000)[0]!
         expect(snap.lastAction).toBe("increase")
         expect(snap.capCps).toBe(80) // 75 + 5
       },
@@ -216,7 +216,7 @@ describe("WorkerLoadObserver — AIMD decrease + cooldown", () => {
         for (let i = 0; i < 20; i++) {
           obs.applyPayload(W, payload(0.85), 1000 + i * 4000)
         }
-        const snap = obs.snapshot(100000)[0]
+        const snap = obs.snapshot(100000)[0]!
         expect(snap.capCps).toBeGreaterThanOrEqual(1)
         expect(snap.capCps).toBe(1) // floor pinned
       },
@@ -237,7 +237,7 @@ describe("WorkerLoadObserver — CRITICAL filter behaviour", () => {
     withObserver(
       (obs) => {
         obs.applyPayload(W, payload(0.99), 1000)
-        const snap = obs.snapshot(1000)[0]
+        const snap = obs.snapshot(1000)[0]!
         expect(snap.lastAction).toBe("decrease_critical")
         expect(snap.capCps).toBe(1)
         expect(snap.band).toBe("above_critical")
@@ -296,7 +296,7 @@ describe("WorkerLoadObserver — counter math", () => {
       obs.applyPayload(W, payload(0.5, 0), 0)
       // 100 admits over 1s → 100 cps treated rate.
       obs.applyPayload(W, payload(0.5, 100), 1000)
-      const snap = obs.snapshot(1000)[0]
+      const snap = obs.snapshot(1000)[0]!
       expect(snap.workerTreatedRateCps).toBeCloseTo(100, 5)
     }),
   )
@@ -307,11 +307,11 @@ describe("WorkerLoadObserver — counter math", () => {
       obs.applyPayload(W, payload(0.5, 1100), 1000)
       // Worker restarted — adm dropped back to 50.
       obs.applyPayload(W, payload(0.5, 50), 2000)
-      const snap = obs.snapshot(2000)[0]
+      const snap = obs.snapshot(2000)[0]!
       expect(snap.workerTreatedRateCps).toBe(0) // reset
       // From here forward, normal rate derivation resumes.
       obs.applyPayload(W, payload(0.5, 100), 3000)
-      const snap2 = obs.snapshot(3000)[0]
+      const snap2 = obs.snapshot(3000)[0]!
       expect(snap2.workerTreatedRateCps).toBeCloseTo(50, 5)
     }),
   )
@@ -322,7 +322,7 @@ describe("WorkerLoadObserver — counter math", () => {
       // This LB admits 30 in the first second; worker total is 100.
       for (let i = 0; i < 30; i++) obs.recordOwnAdmitted(W)
       obs.applyPayload(W, payload(0.5, 100), 1000)
-      const snap = obs.snapshot(1000)[0]
+      const snap = obs.snapshot(1000)[0]!
       // ownAdmittedRateCps EWMA-smoothed: 0.7 × 0 + 0.3 × 30 = 9
       expect(snap.ownAdmittedRateCps).toBeCloseTo(9, 5)
       // share = 9 / 100 = 0.09
@@ -339,7 +339,7 @@ describe("WorkerLoadObserver — stale-payload sweep", () => {
       (obs) => {
         obs.applyPayload(W, payload(0.7), 1000)
         obs.sweepStale(1500)
-        const snap = obs.snapshot(1500)[0]
+        const snap = obs.snapshot(1500)[0]!
         expect(snap.lastAction).toBe("hold")
         expect(snap.payloadMissingCount).toBe(0)
       },
@@ -352,7 +352,7 @@ describe("WorkerLoadObserver — stale-payload sweep", () => {
       (obs) => {
         obs.applyPayload(W, payload(0.7), 0)
         obs.sweepStale(6000)
-        const snap = obs.snapshot(6000)[0]
+        const snap = obs.snapshot(6000)[0]!
         expect(snap.lastAction).toBe("stale_decrease")
         expect(snap.capCps).toBe(75) // 100 × 0.75 — cap unchanged by seed (hold band)
         expect(snap.payloadMissingCount).toBe(1)
@@ -371,10 +371,10 @@ describe("WorkerLoadObserver — diagnostics", () => {
   it.effect("notePayloadMissing increments counter without an AIMD step", () =>
     withObserver((obs) => {
       obs.applyPayload(W, payload(0.7), 1000) // hold band — cap pinned
-      const before = obs.snapshot(1000)[0]
+      const before = obs.snapshot(1000)[0]!
       obs.notePayloadMissing(W, 2000)
       obs.notePayloadMissing(W, 2500)
-      const after = obs.snapshot(2500)[0]
+      const after = obs.snapshot(2500)[0]!
       expect(after.payloadMissingCount).toBe(2)
       expect(after.capCps).toBe(before.capCps) // unchanged
     }, BANDS_CFG),

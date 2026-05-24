@@ -18,7 +18,6 @@ import {
 import type { StackDialog } from "../../src/sip/Dialog.js"
 import type { InviteClientTransactionHandle } from "../../src/sip/TransactionLayer.js"
 import { getHeader, getHeaders } from "../../src/sip/MessageHelpers.js"
-import { serialize } from "../../src/sip/Serializer.js"
 import type { SipHeader, SipRequest } from "../../src/sip/types.js"
 import { hydrateRequest } from "../../src/sip/parsers/extract-fields.js"
 

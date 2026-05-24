@@ -31,13 +31,23 @@ extraEnv:
     value: "172.20.255.250:5060"
   # A/B between the JS dgram + custom TS parser stack and the native
   # (Rust UDP socket + rvoip strict parse inline) stack within the same
-  # endurance run. The list is indexed by the StatefulSet ordinal parsed
-  # from POD_NAME — `b2bua-worker-0` picks `js`, `b2bua-worker-1` picks
-  # `native`. See [docs/k8s-endurance.md](../../../docs/k8s-endurance.md)
-  # § "SIP UDP stack A/B". Override at-runtime with `SIP_UDP_STACK` (an
-  # explicit value wins over the per-ordinal list).
+  # endurance run. Temporarily pinned to `js,js` (2026-05-22) to isolate
+  # the OOM regression observed since commit 140d7886 "arr native
+  # parser": runs predating that commit had 0 worker OOMs, runs after
+  # had 5+ per 30 min. Comparing a JS-only endurance against the
+  # native-mixed runs at the same revision pins whether the off-heap
+  # growth is in the JS pipeline or the rvoip/Rust path. Restore to
+  # `js,native` after the JS-only baseline is captured.
   - name: SIP_UDP_STACK_BY_ORDINAL
-    value: "js,native"
+    value: "js,js"
+  # ADR-0010 — enable msgpackr records-mode with hardcoded shared
+  # structures. ~71 % smaller bodies at near-identical encode CPU per
+  # microbench; main wins are downstream (Redis I/O, replication
+  # bandwidth, GC pressure from buffer alloc). All workers in the
+  # endurance cluster must agree on the codec; the test harness
+  # always brings up a fresh cluster, so this is safe.
+  - name: B2BUA_CODEC
+    value: "MSGPACK_RECORDS"
   # Endurance leak diagnostics:
   # - `--heapsnapshot-signal=SIGUSR2` lets `kill -USR2 1` (or the
   #   orchestrator) trigger a v8 heap snapshot to the worker's CWD.
@@ -54,24 +64,48 @@ extraEnv:
   #   land in the container's CWD — with `heapdumps.enabled` below,
   #   that's `/heapdumps` (an emptyDir that survives container
   #   restart) instead of `/app` (writable layer, lost on OOM-kill).
+  # - `--cpu-prof --cpu-prof-dir=/heapdumps --cpu-prof-interval=5000`
+  #   samples the V8 CPU profile at 5 ms intervals over the full run
+  #   and writes `CPU.<date>.<pid>.<tid>.<seq>.cpuprofile` to the same
+  #   /heapdumps volume the SNAPSHOT phase already collects. The
+  #   profile is flushed when the process exits cleanly (DRAIN-phase
+  #   SIGTERM). 5 ms keeps the file at a manageable size for a 30 min
+  #   run (≈ 360 k samples) while still resolving hot stacks; raise to
+  #   1000 (1 ms) for short profiling runs that need finer resolution.
+  #   Overhead at 5 ms is ≤ 1 % per V8 docs. Do NOT enable in production.
+  # `--max-old-space-size=800` (was 400). Raised because the always-on
+  # `--cpu-prof` path (now removed) had pushed the previous 400 MB cap +
+  # 1Gi container into a 5-min OOMKill cycle. The looser headroom is
+  # kept even after dropping cpu-prof so we have a stable comparison
+  # baseline for the on-demand profile path (see below) and to leave
+  # room for `--heapsnapshot-near-heap-limit` to actually flush a
+  # complete snapshot before the cgroup OOM-killer fires.
+  #
+  # CPU profiling is now triggered on-demand via `POST /debug/cpu-profile?seconds=N`
+  # which uses the inspector module programmatically for a bounded
+  # window. The always-on `--cpu-prof` flag was inflating reported ELU
+  # (workers showed 60-70 % ELU at idle, tripping AIMD cap → 503 sanity
+  # failures) and adding ~200 MB of off-heap sample buffer.
   - name: NODE_OPTIONS
-    value: "--heapsnapshot-signal=SIGUSR2 --max-old-space-size=400 --heapsnapshot-near-heap-limit=2"
+    value: "--heapsnapshot-signal=SIGUSR2 --max-old-space-size=800 --heapsnapshot-near-heap-limit=2"
 
 # Cap worker app container memory so unreclaimable heap growth
-# becomes a deterministic OOMKilled at 1Gi instead of slow CPU
+# becomes a deterministic OOMKilled at 2Gi instead of slow CPU
 # saturation at 1.2 GB+ (the post-run idle state observed in
 # endurance-2026-05-09t20-26-22-853z). The production helm values
 # leave `resources: {}` — this cap is test-environment only.
 #
-# 1Gi vs --max-old-space-size=400: leaves ~624Mi of headroom above
-# V8's old-space cap. This is sized to let v8.writeHeapSnapshot
-# actually flush a complete snapshot before the cgroup OOM-killer
-# fires. Run oom-investigation-50pct-20260510-223300 proved a 512Mi
-# cap is too tight: the snapshot writer's transient allocations
-# pushed RSS past 512Mi within seconds and left 0-byte files.
+# 2Gi vs --max-old-space-size=800: leaves ~1.2 GiB headroom above
+# V8's old-space cap. Sized to accommodate the --cpu-prof sample
+# buffer (~100-300 MB over 30 min at 5 ms intervals) on top of V8
+# heap + native UDP/replication buffers, while still giving
+# v8.writeHeapSnapshot room to flush a complete snapshot before the
+# cgroup OOM-killer fires. Previous 1Gi cap was tight enough that
+# adding --cpu-prof tipped workers into a 5-min OOMKill cycle (round-3
+# endurance had 7+8 restarts in 30 min).
 resources:
   limits:
-    memory: 1Gi
+    memory: 2Gi
   requests:
     cpu: 25m
     memory: 100Mi

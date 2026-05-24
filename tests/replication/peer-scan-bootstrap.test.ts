@@ -34,6 +34,7 @@ import {
   KvBackend,
   type MemoryStoreEntry,
 } from "../../src/storage/KvBackend.js"
+import { bodyBuf, decodeBuf } from "../support/codecHelpers.js"
 
 const A = "worker-A"
 const B = "worker-B"
@@ -72,7 +73,7 @@ const makeTwoWorker = (callRefs: ReadonlyArray<string>) => {
   const seedEffect = Effect.gen(function* () {
     for (let i = 0; i < callRefs.length; i++) {
       const ref = callRefs[i]!
-      const body = JSON.stringify({
+      const body = bodyBuf({
         _topology: { gen: 1 },
         name: ref,
         index: i,
@@ -128,7 +129,7 @@ describe("runPeerScanBootstrap — happy path", () => {
         const body = yield* setup.kvA.bodyGet(`pri:${A}:call:${ref}`)
         expect(body).not.toBeNull()
         if (body !== null) {
-          const parsed = JSON.parse(body) as { name: string }
+          const parsed = decodeBuf(body) as { name: string }
           expect(parsed.name).toBe(ref)
         }
       }
@@ -189,7 +190,7 @@ describe("runPeerScanBootstrap — idempotency", () => {
       expect(r1[0]!.entriesImported).toBe(callRefs.length)
 
       // Snapshot A's body bytes between runs.
-      const beforeBytes = new Map<string, string>()
+      const beforeBytes = new Map<string, Buffer>()
       for (const ref of callRefs) {
         const body = yield* setup.kvA.bodyGet(`pri:${A}:call:${ref}`)
         if (body !== null) beforeBytes.set(ref, body)
@@ -203,7 +204,10 @@ describe("runPeerScanBootstrap — idempotency", () => {
       // byte-identical content.
       for (const ref of callRefs) {
         const body = yield* setup.kvA.bodyGet(`pri:${A}:call:${ref}`)
-        expect(body).toBe(beforeBytes.get(ref))
+        expect(body).not.toBeNull()
+        const prev = beforeBytes.get(ref)
+        expect(prev).not.toBeUndefined()
+        expect((body as Buffer).equals(prev as Buffer)).toBe(true)
       }
 
       // Outgoing channel still empty.

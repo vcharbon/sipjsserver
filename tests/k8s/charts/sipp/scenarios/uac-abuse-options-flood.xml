@@ -63,8 +63,11 @@
   -->
   <nop>
     <action>
-      <!-- Tuned for the kind cluster's headroom; see reinvite-flood. -->
-      <assign assign_to="options_loop" value="30"/>
+      <!-- Set well above MAX_MESSAGES_PER_CALL (default 100) so the
+           worker's begin-termination fires mid-loop and sipp's default
+           `bye` handler ends the scenario early. Effective wire load
+           is capped at the per-call defense, not at this upper bound. -->
+      <assign assign_to="options_loop" value="200"/>
     </action>
   </nop>
 

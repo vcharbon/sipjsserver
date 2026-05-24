@@ -90,8 +90,12 @@ function buildApi(): ProxyLoggerApi {
     "routing.strategy": log.strategy,
   })
 
+  // Demoted to logDebug 2026-05-20 — fires per routed message (~3.9k records/s
+  // observed at 10 CAPS legit + 1 CAPS abuse). All annotated fields are
+  // already covered by `sip_proxy_messages_total`,
+  // `sip_proxy_routing_decisions_total`, `sip_proxy_routing_duration_seconds`.
   const routingDecision = (log: RoutingDecisionLog): Effect.Effect<void> =>
-    Effect.logInfo(log.message).pipe(
+    Effect.logDebug(log.message).pipe(
       Effect.annotateLogs({
         ...baseAnnotations(log),
         "routing.decision": log.decision,

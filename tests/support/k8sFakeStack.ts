@@ -502,35 +502,43 @@ function buildClusterWithWorkersLayer(
               noopIntervalMs: REPL_PULL_RECONNECT_GAP_MS,
             })
             if (replicationTraceRecorder === undefined) return base
-            // Tee each NDJSON chunk through the recorder. Mirrors the
-            // proxyB2bFakeStack wiring: decode line-by-line, drop
-            // anything that isn't a Data frame (Noop heartbeats fire
-            // every reconnect-gap and would flood the report with no
-            // diagnostic value), and append everything else.
-            return Stream.mapEffect(base, (bytes) =>
-              Effect.gen(function* () {
-                const now = yield* Clock.currentTimeMillis
-                const text = new TextDecoder().decode(bytes)
-                for (const line of text.split("\n")) {
-                  if (line.length === 0) continue
-                  let frame: ReturnType<typeof decodeFrame> = null
-                  try {
-                    frame = decodeFrame(line)
-                  } catch {
-                    continue
+            // Tee each length-prefixed binary frame through the recorder.
+            // Mirrors the proxyB2bFakeStack wiring. The post-msgpackr
+            // wire format is `[4-byte BE length][msgpack payload]`; a
+            // single chunk may carry partial frames or several frames,
+            // so accumulate across chunks. Drop anything that isn't a
+            // Data frame (Noop heartbeats fire every reconnect-gap and
+            // would flood the report). Decode failures are swallowed —
+            // the recorder is observability, not correctness.
+            const recorder = replicationTraceRecorder
+            return Stream.suspend(() => {
+              let accumulator: Buffer = Buffer.alloc(0)
+              return Stream.mapEffect(base, (bytes) =>
+                Effect.gen(function* () {
+                  const now = yield* Clock.currentTimeMillis
+                  accumulator = Buffer.concat([accumulator, Buffer.from(bytes)])
+                  while (accumulator.length >= 4) {
+                    const length = accumulator.readUInt32BE(0)
+                    if (accumulator.length < 4 + length) break
+                    const payload = accumulator.subarray(4, 4 + length)
+                    accumulator = accumulator.subarray(4 + length)
+                    try {
+                      const frame = decodeFrame(payload)
+                      if (frame._tag !== "Data") continue
+                      recorder.record({
+                        timestamp: now,
+                        from: peerOrdStr,
+                        to: selfOrdStr,
+                        frame,
+                      })
+                    } catch {
+                      continue
+                    }
                   }
-                  if (frame === null) continue
-                  if (frame._tag !== "Data") continue
-                  replicationTraceRecorder.record({
-                    timestamp: now,
-                    from: peerOrdStr,
-                    to: selfOrdStr,
-                    frame,
-                  })
-                }
-                return bytes
-              }),
-            )
+                  return bytes
+                }),
+              )
+            })
           }
 
           // Replication apply is local-only — no mirror echo.

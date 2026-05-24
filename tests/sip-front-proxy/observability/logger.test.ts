@@ -28,7 +28,7 @@ const makeCapturingLogger = (sink: CapturedLog[]) =>
   })
 
 describe("sip-front-proxy/observability — ProxyLogger", () => {
-  it.effect("routingDecision log carries annotations", () =>
+  it.effect("routingDecision log emits at Debug level with annotations", () =>
     Effect.gen(function* () {
       const sink: CapturedLog[] = []
       yield* Effect.gen(function* () {
@@ -48,12 +48,15 @@ describe("sip-front-proxy/observability — ProxyLogger", () => {
             ProxyLogger.Default
           )
         ),
-        Effect.provideService(References.MinimumLogLevel, "Info")
+        // Hot-path routing-decision was demoted Info→Debug to drop ~3.9k
+        // records/sec at 10 CAPS. The annotated fields remain — they're
+        // also covered by the routing-decision metrics.
+        Effect.provideService(References.MinimumLogLevel, "Debug")
       )
 
       expect(sink.length).toBe(1)
       const entry = sink[0]!
-      expect(entry.level).toBe("Info")
+      expect(entry.level).toBe("Debug")
       // Effect wraps the log message in an array (it accepts variadic args).
       expect(entry.message).toEqual(["forwarded INVITE"])
       expect(entry.annotations["sip.callid"]).toBe("call-abc@host")

@@ -34,6 +34,7 @@ import {
   KvBackend,
   type MemoryStoreEntry,
 } from "../../src/storage/KvBackend.js"
+import { bodyBuf } from "../support/codecHelpers.js"
 
 const A_GEN = 5
 
@@ -58,7 +59,7 @@ describe("NS7 — backup re-bootstrap", () => {
             entryGen: channelAtoB.gen,
             partition: "pri",
             callRef: `call-${i}`,
-            bodyValue: `{"gen":${A_GEN},"i":${i}}`,
+            bodyValue: bodyBuf({ gen: A_GEN, i }),
             bodyTtlSec: 60,
             indexes: [],
           })

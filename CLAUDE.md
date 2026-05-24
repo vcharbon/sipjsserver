@@ -8,15 +8,17 @@ When adding comments be brief, only comment non obvious behavior. Do not referen
 
 Project use [Effect v4](./repos/effect/LLMS.md) extensively. ALways read the doc before writing or designing effect systems.
 
+Project is NOT IN PRODUCTION. Do not worry about upgrade path or rollout, we can deply platform from scratch at each release.
+
 ## Commands
 
 ```bash
 npm run typecheck       # Type-check all packages (run after every change)
 npm run build           # Build the project
 npm run test            # Fake stack + short-tier live (default dev loop)
+npm run test:fake       # Fake stack + various, MUST ALWAYS BE RUN
 npm run test:ci         # Fake stack + medium-tier live (CI)
 npm run test:nightly    # Fake stack + all live tiers (nightly)
-npm run test:fake       # Fake stack only (no real-clock scenarios)
 npm run dev             # Start the server in development mode
 ```
 

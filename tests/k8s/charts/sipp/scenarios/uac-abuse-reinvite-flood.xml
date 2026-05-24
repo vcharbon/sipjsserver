@@ -5,8 +5,10 @@
 
   INVITE → 200 → ACK, then loop [field0] re-INVITEs with [field1] ms
   spacing, then BYE. Designed to exercise the per-call message-count
-  defense (MAX_MESSAGES_PER_CALL, not yet implemented at time of
-  writing).
+  defense (MAX_MESSAGES_PER_CALL). When the worker fires
+  begin-termination, sipp's default_behaviors "bye" handler 200-OKs the
+  in-dialog BYE and ends the scenario early — the remaining loop
+  iterations are skipped.
 
   Each launched call consumes one row from
   /scenarios/uac-abuse-reinvite-flood.csv:
@@ -67,10 +69,12 @@
   -->
   <nop>
     <action>
-      <!-- Tuned to keep abuse load tolerable on the kind cluster
-           (~5 CAPS spread across 3 archetypes). Raise after the
-           per-call message-count defense lands. -->
-      <assign assign_to="reinvite_loop" value="20"/>
+      <!-- Set well above the per-call cap (default 100) so the worker's
+           begin-termination fires mid-loop; sipp's default `bye` handler
+           then ends the scenario early. The wire load is still bounded
+           because the call dies at MAX_MESSAGES_PER_CALL, not at this
+           upper bound. -->
+      <assign assign_to="reinvite_loop" value="200"/>
     </action>
   </nop>
 

@@ -38,7 +38,7 @@ describe("NS3 — delete-and-hard-DEL", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "X",
-        bodyValue: '{"gen":1,"state":"active"}',
+        bodyValue: Buffer.from('{"gen":1,"state":"active"}'),
         bodyTtlSec: 60,
         indexes: [
           { key: "idx:leg:CID-100", value: "X", ttlSec: 60 },
@@ -47,11 +47,15 @@ describe("NS3 — delete-and-hard-DEL", () => {
       })
 
       // Sanity: body and indexes are present.
-      expect(yield* kv.bodyGet("pri:worker-A:call:X")).toBe(
-        '{"gen":1,"state":"active"}'
-      )
-      expect(yield* kv.bodyGet("idx:leg:CID-100")).toBe("X")
-      expect(yield* kv.bodyGet("idx:leg:CID-101")).toBe("X")
+      expect(
+        (yield* kv.bodyGet("pri:worker-A:call:X"))?.toString("utf8")
+      ).toBe('{"gen":1,"state":"active"}')
+      expect(
+        (yield* kv.bodyGet("idx:leg:CID-100"))?.toString("utf8")
+      ).toBe("X")
+      expect(
+        (yield* kv.bodyGet("idx:leg:CID-101"))?.toString("utf8")
+      ).toBe("X")
 
       // Step 2: tombstone with the indexes named for removal.
       yield* chan.tombstone({

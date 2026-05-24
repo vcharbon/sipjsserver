@@ -12,3 +12,5 @@ report.html
 __pycache__/
 *.pyc
 .claude/scheduled_tasks.lock
+# Vendored read-only reference repo (47 MB, not editable per CLAUDE.md).
+repos/rvoip/

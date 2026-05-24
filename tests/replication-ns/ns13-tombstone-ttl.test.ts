@@ -14,6 +14,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, MutableHashMap } from "effect"
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
+import { bodyBuf } from "../support/codecHelpers.js"
 import {
   KvBackend,
   type MemoryStoreEntry,
@@ -33,7 +34,7 @@ describe("NS13 — tombstone-hard-DEL", () => {
         entryGen: chan.gen,
         partition: "pri",
         callRef: "X",
-        bodyValue: '{"gen":1}',
+        bodyValue: Buffer.from('{"gen":1}'),
         bodyTtlSec: 60,
         indexes: [],
       })
@@ -70,7 +71,7 @@ describe("NS13 — tombstone-hard-DEL", () => {
           entryGen: chan.gen,
           partition: "pri",
           callRef: ref,
-          bodyValue: `{"gen":1,"ref":"${ref}"}`,
+          bodyValue: bodyBuf({ gen: 1, ref }),
           bodyTtlSec: 60,
           indexes: [],
         })

@@ -28,7 +28,6 @@ import { TestClock } from "effect/testing"
 import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
 import type { PeerEnumeratorApi } from "../../src/cache/PeerEnumerator.js"
 import {
-  initialPeerView,
   PullerTransportError,
   runPullerFiber,
   type PeerView,

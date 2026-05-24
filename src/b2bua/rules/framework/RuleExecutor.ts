@@ -148,9 +148,43 @@ function logByeDispositionViolations(
 //
 // Action mutations always produce a new Call via immutable updateLeg /
 // updateDialog helpers, so reference equality is sound.
+//
+// Fix #4 — content-meaningful diff gate. Reference inequality alone
+// over-fires: the SipRouter's per-event `messageCount` bump (cap-
+// defense bookkeeping that piggybacks on the rule pipeline) creates
+// a new Call ref on every relayed message. If *only* `messageCount`
+// changed, skip the flush — the field is restart-tolerant and a
+// missed write will be re-stamped by the next genuine mutation. Any
+// other change (legs, dialogs, timers, ruleState, transfer, ...)
+// still flushes via the shallow reference-inequality test below.
+
+// `messageCount` is the only field whose mutation alone does NOT
+// warrant a Redis write. Every other persisted field on the Call
+// schema is safety- or correctness-relevant on restart / takeover.
+const NON_FLUSH_RELEVANT_KEYS: ReadonlySet<string> = new Set(["messageCount"])
+
+function persistedFieldsEqual(a: Call, b: Call): boolean {
+  // Quick reference test — most no-mutation paths bail out here.
+  if (a === b) return true
+  // Shallow per-field reference compare, skipping the non-relevant set.
+  // Immutable update helpers re-use sub-trees when their content is
+  // unchanged, so reference equality on a top-level field IS a content
+  // equality test on the sub-tree.
+  const aKeys = Object.keys(a)
+  if (aKeys.length !== Object.keys(b).length) return false
+  for (const k of aKeys) {
+    if (NON_FLUSH_RELEVANT_KEYS.has(k)) continue
+    if ((a as Record<string, unknown>)[k] !== (b as Record<string, unknown>)[k]) {
+      return false
+    }
+  }
+  return true
+}
+
 function appendAutoFlush(callBefore: Call, result: HandlerResult): HandlerResult {
   if (result.call === callBefore) return result
   if (result.effects.critical.some((e) => e.type === "flush-redis")) return result
+  if (persistedFieldsEqual(callBefore, result.call)) return result
   return {
     ...result,
     effects: {

@@ -27,14 +27,13 @@ function makeRule(opts: {
   readonly handleReturns?: "undefined" | "result"
   readonly overrides?: string
 }): AnyRuleDefinition {
-  return {
+  const base = {
     id: opts.id,
     name: opts.id,
-    alwaysActive: true,
-    overrides: opts.overrides,
+    alwaysActive: true as const,
     stateSchema: Schema.Undefined as Schema.Schema<unknown>,
     paramsSchema: Schema.Unknown as Schema.Schema<unknown>,
-    match: { kind: "cancelled" },
+    match: { kind: "cancelled" } as const,
     init: () => undefined,
     handle: () =>
       Effect.succeed(
@@ -43,6 +42,7 @@ function makeRule(opts: {
           : undefined,
       ),
   }
+  return opts.overrides === undefined ? base : { ...base, overrides: opts.overrides }
 }
 
 const dummyCtx = {

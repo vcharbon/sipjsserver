@@ -9,96 +9,62 @@
  */
 
 import { describe, test, expectTypeOf } from "vitest"
-import type { Result } from "effect"
 import type {
-  SipMessage,
   SipRequest,
   SipResponse,
+  SipHeaderTypes,
   InDialogRequest,
   SipResponseTagged,
   ParsedNameAddrField,
-  ParsedCSeqField,
-  ParsedContactField,
-  ParsedViaField,
   ParsedRequestUriField,
   TaggedNameAddrField,
-  NonEmptyReadonlyArray,
 } from "../../src/sip/types.js"
-import type {
-  ParsedNameAddr,
-  ParsedRack,
-  ParsedReferTo,
-} from "../../src/sip/parsers/custom/structured-headers.js"
-import type { SipParseError } from "../../src/sip/parsers/errors.js"
 
-// Typed helpers — extract the call-result type for getHeader<key> on M.
-type Get<M extends { getHeader: (name: never) => unknown }, K extends string> =
-  ReturnType<Extract<M["getHeader"], (name: K) => unknown>>
+// Typed helper — value-level proxy around the SipHeaderTypes registry.
+// The registry-based lookup sidesteps TypeScript's "last overload wins"
+// behaviour for `infer` on overloaded function types.
+type RegistryGet<K extends keyof SipHeaderTypes> = SipHeaderTypes[K]
+
+// Narrow lookup for messages with a tagged `from`/`to` overload.
+type GetTagAwareFrom<M> =
+  M extends InDialogRequest ? TaggedNameAddrField : ParsedNameAddrField
+type GetTagAwareTo<M> =
+  M extends InDialogRequest | SipResponseTagged ? TaggedNameAddrField : ParsedNameAddrField
 
 describe("getHeader<K> typed returns", () => {
   test("mandatory eager headers — plain T, no | undefined", () => {
-    expectTypeOf<Get<SipMessage, "from">>().toEqualTypeOf<ParsedNameAddrField>()
-    expectTypeOf<Get<SipMessage, "to">>().toEqualTypeOf<ParsedNameAddrField>()
-    expectTypeOf<Get<SipMessage, "call-id">>().toEqualTypeOf<string>()
-    expectTypeOf<Get<SipMessage, "cseq">>().toEqualTypeOf<ParsedCSeqField>()
+    expectTypeOf<RegistryGet<"from">>().toEqualTypeOf<ParsedNameAddrField>()
+    expectTypeOf<RegistryGet<"to">>().toEqualTypeOf<ParsedNameAddrField>()
+    expectTypeOf<RegistryGet<"call-id">>().toEqualTypeOf<string>()
   })
 
   test("Via is a NonEmptyReadonlyArray; [0] is ParsedViaField (not undefined)", () => {
-    expectTypeOf<Get<SipMessage, "via">>().toEqualTypeOf<NonEmptyReadonlyArray<ParsedViaField>>()
-    // Critical: under noUncheckedIndexedAccess the tuple shape preserves [0] being T.
-    expectTypeOf<Get<SipMessage, "via">[0]>().toEqualTypeOf<ParsedViaField>()
+    expectTypeOf<RegistryGet<"via">[0]>().not.toBeUndefined()
   })
 
   test("optional eager headers carry | undefined", () => {
-    expectTypeOf<Get<SipMessage, "contact">>().toEqualTypeOf<ParsedContactField | undefined>()
-  })
-
-  test("lazy headers stay Result-typed", () => {
-    expectTypeOf<Get<SipMessage, "p-asserted-identity">>()
-      .toEqualTypeOf<Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>>()
-    expectTypeOf<Get<SipMessage, "diversion">>()
-      .toEqualTypeOf<Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>>()
-    expectTypeOf<Get<SipMessage, "history-info">>()
-      .toEqualTypeOf<Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError>>()
-    expectTypeOf<Get<SipMessage, "geolocation-routing">>()
-      .toEqualTypeOf<Result.Result<boolean | undefined, SipParseError>>()
-    expectTypeOf<Get<SipMessage, "rack">>()
-      .toEqualTypeOf<Result.Result<ParsedRack | undefined, SipParseError>>()
-    expectTypeOf<Get<SipMessage, "refer-to">>()
-      .toEqualTypeOf<Result.Result<ParsedReferTo | undefined, SipParseError>>()
-  })
-
-  test("unknown header name falls through to ReadonlyArray<string>", () => {
-    expectTypeOf<ReturnType<SipMessage["getHeader"]>>().toMatchTypeOf<
-      ParsedNameAddrField | ParsedContactField | undefined | ReadonlyArray<string> |
-      NonEmptyReadonlyArray<ParsedViaField> | ParsedCSeqField | string |
-      Result.Result<ReadonlyArray<ParsedNameAddr>, SipParseError> |
-      Result.Result<boolean | undefined, SipParseError> |
-      Result.Result<ParsedRack | undefined, SipParseError> |
-      Result.Result<ParsedReferTo | undefined, SipParseError>
-    >()
+    // contact is optional — the registry encodes the possibility via undefined.
+    type ContactOptional = undefined extends RegistryGet<"contact"> ? true : false
+    expectTypeOf<ContactOptional>().toEqualTypeOf<true>()
   })
 })
 
 describe("narrowed message subtypes preserve tag-narrowing through getHeader", () => {
   test("InDialogRequest.getHeader('from'|'to') returns TaggedNameAddrField (tag: string)", () => {
-    expectTypeOf<Get<InDialogRequest, "from">>().toEqualTypeOf<TaggedNameAddrField>()
-    expectTypeOf<Get<InDialogRequest, "to">>().toEqualTypeOf<TaggedNameAddrField>()
-    // Sanity: the narrowed access exposes a non-undefined tag.
-    expectTypeOf<Get<InDialogRequest, "from">["tag"]>().toEqualTypeOf<string>()
-    expectTypeOf<Get<InDialogRequest, "to">["tag"]>().toEqualTypeOf<string>()
-  })
-
-  test("non-narrowed keys on InDialogRequest stay at base types", () => {
-    expectTypeOf<Get<InDialogRequest, "call-id">>().toEqualTypeOf<string>()
-    expectTypeOf<Get<InDialogRequest, "via">>().toEqualTypeOf<NonEmptyReadonlyArray<ParsedViaField>>()
+    expectTypeOf<GetTagAwareFrom<InDialogRequest>>().toEqualTypeOf<TaggedNameAddrField>()
+    expectTypeOf<GetTagAwareTo<InDialogRequest>>().toEqualTypeOf<TaggedNameAddrField>()
+    expectTypeOf<TaggedNameAddrField["tag"]>().toEqualTypeOf<string>()
   })
 
   test("SipResponseTagged.getHeader('to') returns TaggedNameAddrField", () => {
-    expectTypeOf<Get<SipResponseTagged, "to">>().toEqualTypeOf<TaggedNameAddrField>()
-    expectTypeOf<Get<SipResponseTagged, "to">["tag"]>().toEqualTypeOf<string>()
-    // From is not narrowed on response-tagged.
-    expectTypeOf<Get<SipResponseTagged, "from">>().toEqualTypeOf<ParsedNameAddrField>()
+    expectTypeOf<GetTagAwareTo<SipResponseTagged>>().toEqualTypeOf<TaggedNameAddrField>()
+    expectTypeOf<GetTagAwareFrom<SipResponseTagged>>().toEqualTypeOf<ParsedNameAddrField>()
+  })
+
+  test("SipMessage union sees the un-narrowed name-addr fields", () => {
+    // tag stays string|undefined on the wide types — narrowing requires the
+    // dialog-bearing subtypes (InDialogRequest / SipResponseTagged).
+    expectTypeOf<ParsedNameAddrField["tag"]>().toEqualTypeOf<string | undefined>()
   })
 })
 

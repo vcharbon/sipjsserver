@@ -97,11 +97,11 @@ export const buildChannelStream = <S, E, R>(
 // ---------------------------------------------------------------------------
 
 /**
- * Encode a typed `PullFrame` stream into NDJSON bytes. `encodeFrame`
- * already terminates each line with `\n`, so `Stream.encodeText`'s
- * default UTF-8 encoding is the only byte-level work that remains.
+ * Encode a typed `PullFrame` stream into length-prefixed-msgpack bytes.
+ * `encodeFrame` already returns a length-prefixed Buffer chunk — the
+ * stream layer just passes each chunk through as `Uint8Array`.
  */
 export const encodeFramesToBytes = <E, R>(
   frames: Stream.Stream<PullFrame, E, R>
 ): Stream.Stream<Uint8Array, E, R> =>
-  frames.pipe(Stream.map(encodeFrame), Stream.encodeText)
+  frames.pipe(Stream.map((frame): Uint8Array => encodeFrame(frame)))

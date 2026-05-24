@@ -23,6 +23,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { Duration, Effect, MutableHashMap } from "effect"
 import { TestClock } from "effect/testing"
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
+import { bodyBuf } from "../support/codecHelpers.js"
 import {
   KvBackend,
   type MemoryStoreEntry,
@@ -51,7 +52,7 @@ describe("T2 — primary-bounded-cost", () => {
             entryGen: channel.gen,
             partition: "pri",
             callRef: ref,
-            bodyValue: '{"name":"' + ref + '"}',
+            bodyValue: bodyBuf({ name: ref }),
             bodyTtlSec: 600,
             indexes: [],
           })
@@ -63,7 +64,6 @@ describe("T2 — primary-bounded-cost", () => {
         for (const ref of refs) {
           yield* channel.tombstone({
             entryGen: channel.gen,
-            callGen: 1,
             partition: "pri",
             callRef: ref,
             indexesToRemove: [],
@@ -88,7 +88,7 @@ describe("T2 — primary-bounded-cost", () => {
               entryGen: channel.gen,
               partition: "pri",
               callRef: ref,
-              bodyValue: '{"name":"' + ref + '","cycle":' + cycle + '}',
+              bodyValue: bodyBuf({ name: ref, cycle }),
               bodyTtlSec: 600,
               indexes: [],
             })
@@ -97,7 +97,6 @@ describe("T2 — primary-bounded-cost", () => {
           for (const ref of refs) {
             yield* channel.tombstone({
               entryGen: channel.gen,
-              callGen: 1,
               partition: "pri",
               callRef: ref,
               indexesToRemove: [],

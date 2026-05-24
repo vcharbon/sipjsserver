@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Fiber, Layer, Stream } from "effect"
+import { Effect, Fiber, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { TransactionLayer } from "../../src/sip/TransactionLayer.js"
 import { CallState } from "../../src/call/CallState.js"
@@ -157,6 +157,8 @@ describe("TransactionLayer.cancelTxnsForCall", () => {
       const call: Call = {
         callRef,
         aLeg,
+        aLegInvite: { uri: "sip:dest@example.com", headers: [], body: new Uint8Array() },
+        tagMap: [],
         bLegs: [],
         activePeer: null,
         limiterEntries: [],

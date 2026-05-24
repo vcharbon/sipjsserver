@@ -24,30 +24,29 @@ import {
   KvBackend,
   type MemoryStoreEntry,
 } from "../../src/storage/KvBackend.js"
+import { bodyBuf } from "../support/codecHelpers.js"
 
+// Length-prefixed-msgpack frame re-assembler (mirrors
+// `src/replication/NdjsonStream.ts:streamLengthPrefixedFrames`).
 const decodeStream = (
   stream: Stream.Stream<Uint8Array>,
   takeFrames: number
 ): Effect.Effect<ReadonlyArray<PullFrame>, never> =>
   Effect.gen(function* () {
-    const decoder = new TextDecoder()
-    let buffer = ""
+    let acc: Buffer = Buffer.alloc(0)
     const frames: Array<PullFrame> = []
     const chunks: ReadonlyArray<Uint8Array> = yield* Stream.runCollect(
       stream.pipe(Stream.take(takeFrames * 4))
     )
     for (const chunk of chunks) {
-      buffer += decoder.decode(chunk, { stream: true })
-      let nl = buffer.indexOf("\n")
-      while (nl !== -1) {
-        const line = buffer.slice(0, nl)
-        buffer = buffer.slice(nl + 1)
-        const frame = decodeFrame(line)
-        if (frame !== null) {
-          frames.push(frame)
-          if (frames.length >= takeFrames) return frames
-        }
-        nl = buffer.indexOf("\n")
+      acc = Buffer.concat([acc, Buffer.from(chunk)])
+      while (acc.length >= 4) {
+        const length = acc.readUInt32BE(0)
+        if (acc.length < 4 + length) break
+        const payload = acc.subarray(4, 4 + length)
+        acc = acc.subarray(4 + length)
+        frames.push(decodeFrame(payload))
+        if (frames.length >= takeFrames) return frames
       }
     }
     return frames
@@ -88,7 +87,7 @@ describe("NS9 — caught-up-noop signal", () => {
         entryGen: channel.gen,
         partition: "pri",
         callRef: "X",
-        bodyValue: '{"gen":1,"state":"active"}',
+        bodyValue: bodyBuf({ gen: 1, state: "active" }),
         bodyTtlSec: 60,
         indexes: [],
       })

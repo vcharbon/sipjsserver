@@ -34,6 +34,7 @@
 import { NodeHttpServer } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
 import {
+  Cause,
   Effect,
   Fiber,
   Layer,
@@ -58,6 +59,7 @@ import {
   makePullerOpenStream,
 } from "../../src/replication/PullerHttpTransport.js"
 import { streamNdjsonLines } from "../../src/replication/NdjsonStream.js"
+import { bodyBuf } from "../support/codecHelpers.js"
 import { PeerEndpointResolver } from "../../src/cache/PeerEndpointResolver.js"
 import { WorkerOrdinal } from "../../src/cache/PeerCachePort.js"
 import { KvBackend } from "../../src/storage/KvBackend.js"
@@ -96,6 +98,12 @@ const PREFIX_WITH_COLON = `${PREFIX}:`
  * Bring up RedisOps lazily inside an Effect so the test can self-skip
  * if Redis is unreachable. The ops live in a Scope; teardown deletes
  * every key under PREFIX.
+ *
+ * `makeRedisOps` converts connection failures into defects via
+ * `Effect.die`, so its public error channel is `never`. We deliberately
+ * use `catchCause` here to opt in to handling the defect — the medium
+ * tier is conditional on Redis being reachable and we want a quiet
+ * skip, not a crash, when it isn't.
  */
 const acquireRedis = (): Effect.Effect<
   RedisOps | null,
@@ -103,10 +111,10 @@ const acquireRedis = (): Effect.Effect<
   Scope.Scope
 > =>
   makeRedisOps(REDIS_URL, PREFIX, "medium-replication-test").pipe(
-    Effect.catchTag("RedisError", (err) =>
+    Effect.catchCause((cause) =>
       Effect.sync(() => {
         console.warn(
-          `[medium-replication] Redis unreachable at ${REDIS_URL}: ${err.reason} — skipping.`
+          `[medium-replication] Redis unreachable at ${REDIS_URL}: ${Cause.pretty(cause)} — skipping.`
         )
         return null
       })
@@ -120,8 +128,15 @@ const buildServerLayer = (redis: RedisOps) => {
     {
       // Bootstrap only needs `scanByPrefix` for the bak partition scan;
       // bodySet / bodyExpire are wired to the same Redis ops the rest
-      // of the kv backend uses.
-      bodySet: (key, value, ttlSec) =>
+      // of the kv backend uses. Post-msgpackr-migration the bodyOps
+      // split into `bodySetBuffer` (binary Call bodies) and
+      // `bodySetString` (UTF-8 index entries); both route to ioredis's
+      // overloaded `setex`.
+      bodySetBuffer: (key, value, ttlSec) =>
+        redis
+          .setexBuffer(key, ttlSec, value)
+          .pipe(Effect.mapError((e) => ({ _tag: "KvError", reason: e.reason }) as never)),
+      bodySetString: (key, value, ttlSec) =>
         redis
           .setex(key, ttlSec, value)
           .pipe(Effect.mapError((e) => ({ _tag: "KvError", reason: e.reason }) as never)),
@@ -144,7 +159,7 @@ const buildServerLayer = (redis: RedisOps) => {
                 if ((keys as ReadonlyArray<string>).length === 0) return []
                 const pipe = redis.raw.pipeline()
                 for (const k of keys as ReadonlyArray<string>) {
-                  pipe.get(k)
+                  pipe.getBuffer(k)
                   pipe.ttl(k)
                 }
                 const results = (await pipe.exec()) as Array<
@@ -152,7 +167,7 @@ const buildServerLayer = (redis: RedisOps) => {
                 >
                 const out: Array<{
                   readonly key: string
-                  readonly value: string
+                  readonly value: Buffer
                   readonly ttlSec: number
                 }> = []
                 const localKeys = (keys as ReadonlyArray<string>).map((k) =>
@@ -163,7 +178,7 @@ const buildServerLayer = (redis: RedisOps) => {
                 for (let i = 0; i < localKeys.length; i++) {
                   const [, value] = results[i * 2]!
                   const [, ttl] = results[i * 2 + 1]!
-                  if (typeof value !== "string") continue
+                  if (!Buffer.isBuffer(value)) continue
                   const ttlSec = typeof ttl === "number" && ttl > 0 ? ttl : 0
                   out.push({ key: localKeys[i]!, value, ttlSec })
                 }
@@ -258,9 +273,9 @@ describe.skipIf(!TIER_ENABLED)(
                 entryGen: GEN,
                 partition: "bak",
                 callRef: `call-${i}`,
-                bodyValue: JSON.stringify({
+                bodyValue: bodyBuf({
                   i,
-                  written_at_ms: Date.now(),
+                  __writtenAtMs: Date.now(),
                 }),
                 bodyTtlSec: 3600,
                 indexes: [],

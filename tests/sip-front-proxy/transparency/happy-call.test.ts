@@ -29,7 +29,7 @@ const parse = (raw: Buffer) => {
   return r.success
 }
 
-const buildInvite = (target: { host: string; port: number }) =>
+const buildInvite = (_target: { host: string; port: number }) =>
   Buffer.from(
     [
       `INVITE sip:bob@${BOB.host}:${BOB.port} SIP/2.0`,

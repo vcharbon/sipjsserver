@@ -39,10 +39,15 @@ import { makeRedisOps, type RedisOps } from "../../src/redis/RedisClient.js"
 const memberOf = KvBackend.memberOf
 const bodyKey = (callRef: string): string => `pri:self:call:${callRef}`
 
+// Bodies on the production hot path are msgpack bytes; the storage
+// primitive treats them as opaque. Wrap fixture strings as Buffers so
+// the parity assertions compare byte content via Buffer equality.
+const buf = (s: string): Buffer => Buffer.from(s)
+
 interface OpRecord {
   readonly tag: "U" | "D" | "PULL"
   readonly callRef?: string
-  readonly bodyValue?: string
+  readonly bodyValue?: Buffer
   readonly indexes?: ReadonlyArray<{ key: string; value: string; ttlSec: number }>
   readonly indexesToRemove?: ReadonlyArray<string>
   readonly sinceGen?: number
@@ -71,19 +76,19 @@ const PARITY_GEN = 7
  * a never-written callRef (graceful no-prior-state).
  */
 const SEQUENCE: ReadonlyArray<OpRecord> = [
-  { tag: "U", callRef: "alpha", bodyValue: '{"v":1}', indexes: [] },
+  { tag: "U", callRef: "alpha", bodyValue: buf('{"v":1}'), indexes: [] },
   {
     tag: "U",
     callRef: "beta",
-    bodyValue: '{"v":2}',
+    bodyValue: buf('{"v":2}'),
     indexes: [{ key: "idx:leg:CID-100", value: "beta", ttlSec: 60 }],
   },
   { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
-  { tag: "U", callRef: "alpha", bodyValue: '{"v":1.1}', indexes: [] },
+  { tag: "U", callRef: "alpha", bodyValue: buf('{"v":1.1}'), indexes: [] },
   {
     tag: "U",
     callRef: "gamma",
-    bodyValue: '{"v":3}',
+    bodyValue: buf('{"v":3}'),
     indexes: [
       { key: "idx:leg:CID-200", value: "gamma", ttlSec: 60 },
       { key: "idx:leg:CID-201", value: "gamma", ttlSec: 60 },
@@ -93,7 +98,7 @@ const SEQUENCE: ReadonlyArray<OpRecord> = [
   { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 2 },
   { tag: "D", callRef: "beta", indexesToRemove: ["idx:leg:CID-100"] },
   { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
-  { tag: "U", callRef: "delta", bodyValue: '{"v":4}', indexes: [] },
+  { tag: "U", callRef: "delta", bodyValue: buf('{"v":4}'), indexes: [] },
   { tag: "D", callRef: "never-written", indexesToRemove: [] },
   { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
 ]
@@ -104,7 +109,7 @@ const COUNTER = "seq:self->peerA"
 interface ApplyResult {
   readonly counters: ReadonlyArray<number>
   readonly pulls: ReadonlyArray<ChannelPullResult>
-  readonly finalBodies: ReadonlyArray<{ key: string; body: string | null }>
+  readonly finalBodies: ReadonlyArray<{ key: string; body: Buffer | null }>
 }
 
 const applySequence = (
@@ -117,7 +122,7 @@ const applySequence = (
       yield* runOp(kv, op, counters, pulls)
     }
     const touched = ["alpha", "beta", "gamma", "delta", "never-written"]
-    const finalBodies: Array<{ key: string; body: string | null }> = []
+    const finalBodies: Array<{ key: string; body: Buffer | null }> = []
     for (const ref of touched) {
       const body = yield* kv.bodyGet(bodyKey(ref)).pipe(Effect.orDie)
       finalBodies.push({ key: bodyKey(ref), body })
@@ -202,23 +207,23 @@ const runOp = (
 const MIRROR_GEN = 0
 const MULTI_BUCKET_SEQUENCE: ReadonlyArray<OpRecord> = [
   // Mirror write to bucket gen=0.
-  { tag: "U", callRef: "alpha", bodyValue: '{"v":1,"src":"mirror"}', entryGen: MIRROR_GEN },
+  { tag: "U", callRef: "alpha", bodyValue: buf('{"v":1,"src":"mirror"}'), entryGen: MIRROR_GEN },
   // Cold pull: returns the mirror entry. head=(0, 1).
   { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
   // Originating write to bucket gen=PARITY_GEN.
-  { tag: "U", callRef: "beta", bodyValue: '{"v":2,"src":"orig"}' },
+  { tag: "U", callRef: "beta", bodyValue: buf('{"v":2,"src":"orig"}') },
   // Cold pull: returns BOTH (gen=0 first, then gen=PARITY_GEN).
   { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
   // Warm pull from gen=PARITY_GEN bucket: skips the mirror.
   { tag: "PULL", sinceGen: PARITY_GEN, sinceCounter: 0, limit: 10 },
   // Same callRef in BOTH buckets — distinct entries.
-  { tag: "U", callRef: "alpha", bodyValue: '{"v":1,"src":"orig"}' }, // gen=PARITY_GEN
+  { tag: "U", callRef: "alpha", bodyValue: buf('{"v":1,"src":"orig"}') }, // gen=PARITY_GEN
   // Cold pull returns alpha-mirror + beta-orig + alpha-orig (3 entries).
   { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
   // Mirror tombstone in gen=0 bucket.
   { tag: "D", callRef: "alpha", entryGen: MIRROR_GEN, indexesToRemove: [] },
   // Re-write the mirror member (same callRef) — score bumps within gen=0 bucket.
-  { tag: "U", callRef: "alpha", bodyValue: '{"v":3,"src":"mirror2"}', entryGen: MIRROR_GEN },
+  { tag: "U", callRef: "alpha", bodyValue: buf('{"v":3,"src":"mirror2"}'), entryGen: MIRROR_GEN },
   // Final cold pull with limit=2: tests across-bucket cursor.
   { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 2 },
   // Final cold pull, full: head should be the max lex tuple across both buckets.
@@ -235,7 +240,7 @@ const applyMultiBucketSequence = (
       yield* runOp(kv, op, counters, pulls)
     }
     const touched = ["alpha", "beta"]
-    const finalBodies: Array<{ key: string; body: string | null }> = []
+    const finalBodies: Array<{ key: string; body: Buffer | null }> = []
     for (const ref of touched) {
       const body = yield* kv.bodyGet(bodyKey(ref)).pipe(Effect.orDie)
       finalBodies.push({ key: bodyKey(ref), body })
@@ -259,10 +264,10 @@ const GEN1 = 5
 const GEN2 = 8
 const CROSS_INCARNATION_SEQUENCE: ReadonlyArray<OpRecord> = [
   // Old incarnation writes one entry.
-  { tag: "U", callRef: "old", bodyValue: '{"v":"old"}', entryGen: GEN1 },
+  { tag: "U", callRef: "old", bodyValue: buf('{"v":"old"}'), entryGen: GEN1 },
   // New incarnation begins; some originating writes.
-  { tag: "U", callRef: "new1", bodyValue: '{"v":"n1"}', entryGen: GEN2 },
-  { tag: "U", callRef: "new2", bodyValue: '{"v":"n2"}', entryGen: GEN2 },
+  { tag: "U", callRef: "new1", bodyValue: buf('{"v":"n1"}'), entryGen: GEN2 },
+  { tag: "U", callRef: "new2", bodyValue: buf('{"v":"n2"}'), entryGen: GEN2 },
   // Cold pull walks both buckets in gen order: GEN1 first, then GEN2.
   { tag: "PULL", sinceGen: 0, sinceCounter: 0, limit: 10 },
   // A puller mid-incarnation (since=GEN1, counter=1): returns NOTHING from GEN1

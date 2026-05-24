@@ -13,6 +13,7 @@ import { createServer } from "node:http"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { writeHeapSnapshot } from "node:v8"
 import { CallState } from "../call/CallState.js"
+import { CODEC_MODE, getLegacyDecodeCount } from "../call/CallCodec.js"
 import { WorkerReadiness } from "../cache/WorkerReadiness.js"
 import { DrainingState } from "../b2bua/DrainingState.js"
 import { AppConfig } from "../config/AppConfig.js"
@@ -330,6 +331,28 @@ function renderPrometheus(
     m("b2bua_worker_event_queue_drops_total", tl.eventQueueDrops.timeout, { reason: "timeout" })
   }
 
+  // ── Fork-site live + cumulative counters (leak diagnostic) ─────────
+  if (reg.forkSites) {
+    const live = reg.forkSites.liveBySite()
+    const total = reg.forkSites.totalBySite()
+    if (live.size > 0) {
+      header(
+        "b2bua_fork_site_live",
+        "gauge",
+        "Live count of forked fibers per fork site (alive but not yet finalized).",
+      )
+      for (const [site, n] of live) m("b2bua_fork_site_live", n, { site })
+    }
+    if (total.size > 0) {
+      header(
+        "b2bua_fork_site_total",
+        "counter",
+        "Cumulative fork count per fork site (monotonic).",
+      )
+      for (const [site, n] of total) m("b2bua_fork_site_total", n, { site })
+    }
+  }
+
   // ── Active timer fibers (Slice 4) ──────────────────────────────────
   if (reg.timers) {
     header(
@@ -376,6 +399,20 @@ function renderPrometheus(
       const status = sep > 0 ? key.slice(sep + 1) : "0"
       m("b2bua_stale_response_dropped_total", stale[key] ?? 0, { method, status })
     }
+
+    header(
+      "b2bua_unroutable_log_suppressed_total",
+      "counter",
+      "Unroutable WARN log lines dropped by the per-Call-ID 1/sec event shedder. The 481 reject and OTel error span are unaffected; only the formatted pino record was suppressed.",
+    )
+    m("b2bua_unroutable_log_suppressed_total", r.unroutableSuppressedTotal())
+
+    header(
+      "b2bua_fast_reject_terminating_total",
+      "counter",
+      "In-dialog non-ACK/non-BYE requests 481'd by the synchronous fast-path because the owning call was already in `terminating`. Skips the rule chain and the per-leg safety-timer refresh.",
+    )
+    m("b2bua_fast_reject_terminating_total", r.fastRejectTerminatingTotal())
   }
 
   // ── Calls in 'terminating' state, bucketed by age (Slice 4 canary) ─
@@ -784,6 +821,20 @@ export const StatusServerLayer: Layer.Layer<
               timestamp: Date.now(),
             })
           }),
+        )
+
+        // ADR-0010 — active codec selector. Operators read this to
+        // confirm a fleet's effective codec mode before issuing a
+        // drain-flush-restart migration.
+        yield* router.add(
+          "GET",
+          "/debug/codec",
+          Effect.sync(() =>
+            HttpServerResponse.json({
+              codec: CODEC_MODE,
+              legacyJsonDecodes: getLegacyDecodeCount(),
+            }),
+          ).pipe(Effect.flatten),
         )
 
         yield* router.add(

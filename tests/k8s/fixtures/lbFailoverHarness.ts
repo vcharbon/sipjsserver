@@ -217,9 +217,10 @@ export const runLbFailoverScenario = (opts: LbFailoverHarnessOpts) =>
         .find((d) => d.method === "INVITE")?.tDecided
 
       let outcomes = new Map<string, CallOutcome>()
-      if (loadResult.tracePaths?.msgLog !== undefined) {
+      const tracePaths = "tracePaths" in loadResult ? loadResult.tracePaths : undefined
+      if (tracePaths?.msgLog !== undefined) {
         const msg = yield* Effect.tryPromise(() =>
-          fs.readFile(loadResult.tracePaths!.msgLog!, "utf8"),
+          fs.readFile(tracePaths.msgLog!, "utf8"),
         ).pipe(Effect.orDie)
         outcomes = parseSippMessageTrace(msg)
       }
@@ -269,9 +270,9 @@ export const runLbFailoverScenario = (opts: LbFailoverHarnessOpts) =>
         classifications,
         scenarioName: opts.scenarioName,
         killTimeline: {
-          tInviteFirst: tFirstInvite?.toISOString(),
+          ...(tFirstInvite !== undefined ? { tInviteFirst: tFirstInvite.toISOString() } : {}),
           tKillIssued: tKill.toISOString(),
-          tInviteLast: tLastInvite?.toISOString(),
+          ...(tLastInvite !== undefined ? { tInviteLast: tLastInvite.toISOString() } : {}),
           killedProxyPod,
           killMode: opts.killMode,
           proxyRecoveredMs: result.proxyRecoveredMs,

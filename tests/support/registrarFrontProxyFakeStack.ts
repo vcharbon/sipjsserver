@@ -102,7 +102,7 @@ export function registrarFrontProxyFakeStackLayer(
 
   const NetworkLayer = SignalingNetwork.simulated({
     transitDelayMs,
-    sendFault: opts.sendFault,
+    ...(opts.sendFault !== undefined ? { sendFault: opts.sendFault } : {}),
   })
 
   const BindCfgLayer = ProxyBindConfig.layer({

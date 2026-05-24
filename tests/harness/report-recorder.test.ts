@@ -75,6 +75,7 @@ describe("Recorder smoke (Slice 1)", () => {
 
       const sipEntry: RecordedSipEntry = {
         timestamp: 1000,
+        seq: 0,
         sentMs: 1000,
         receivedMs: 1005,
         fromAddr: { ip: "10.10.0.1", port: 5060 },

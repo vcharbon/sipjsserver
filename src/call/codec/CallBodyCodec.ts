@@ -34,7 +34,7 @@ export class CallBodyCodec extends ServiceMap.Service<CallBodyCodec, CallBodyCod
   "@sipjsserver/call/codec/CallBodyCodec",
 ) {}
 
-export type CodecMode = "MSGPACK" | "MSGPACK_RECORDS"
+export type CodecMode = "MSGPACK" | "MSGPACK_RECORDS" | "PROTOBUF"
 
 /**
  * Read `B2BUA_CODEC` once at module load. Same default as the legacy
@@ -43,6 +43,7 @@ export type CodecMode = "MSGPACK" | "MSGPACK_RECORDS"
 const readCodecMode = (): CodecMode => {
   const raw = process.env["B2BUA_CODEC"]
   if (raw === "MSGPACK_RECORDS") return "MSGPACK_RECORDS"
+  if (raw === "PROTOBUF") return "PROTOBUF"
   return "MSGPACK"
 }
 

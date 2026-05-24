@@ -105,6 +105,7 @@ const finalize = (
       }
       if (!existing.names.includes(name)) existing.names.push(name)
     }
+    let seq = 0
     for (const e of netEntries) {
       const msg = tryParse(e.raw)
       if (msg === undefined) continue
@@ -118,6 +119,7 @@ const finalize = (
       seeLane(e.dst.ip, e.dst.port, toLabel)
       trace.push({
         timestamp: e.deliveredMs,
+        seq: seq++,
         sentMs: e.sentMs,
         receivedMs: e.deliveredMs,
         from: fromLabel,
