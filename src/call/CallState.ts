@@ -168,7 +168,7 @@ export class CallState extends ServiceMap.Service<
     /** Get stats for the status endpoint. */
     readonly stats: () => Effect.Effect<{ concurrent: number; total: number }>
     /** Synchronous stats snapshot (for metrics interval — no Effect needed). */
-    readonly statsSync: () => { concurrent: number; total: number; sipIndexSize: number; semaphoresSize: number; removeInvocations: number; orphanSweepRecoveredCount: number }
+    readonly statsSync: () => { concurrent: number; total: number; sipIndexSize: number; semaphoresSize: number; removeInvocations: number; orphanSweepRecoveredCount: number; flushCacheSize: number; flushCacheBytes: number }
     /** Load all calls owned by a specific worker from the cache (for crash recovery). */
     readonly loadOwnedCalls: (workerIndex: number) => Effect.Effect<ReadonlyArray<Call>, RedisError>
     /** Flush all in-memory calls to the cache (for graceful shutdown). */
@@ -246,6 +246,13 @@ export class CallState extends ServiceMap.Service<
       // Diagnostic: count flushToRedis dedup hits + misses.
       let flushDedupHits = 0
       let flushDedupMisses = 0
+      // ADR 0012 sizing observation. encodeCount counts every encodeCall
+      // invocation; encodeBytesTotal sums the resulting Buffer sizes.
+      // replicationWritesTotal counts submits to the buffered terminate
+      // writer (== encodeCount + dedup re-submits).
+      let encodeCount = 0
+      let encodeBytesTotal = 0
+      let replicationWritesTotal = 0
       const totalRef = yield* Ref.make(0)
       // Plain mutable counter shadowing totalRef for sync reads (metrics interval).
       let totalSync = 0
@@ -608,6 +615,7 @@ export class CallState extends ServiceMap.Service<
             role, primary, callRef, cached.value.body, indexes, ttl, dedupCallGen,
             { peer: peerOpt, direction },
           )
+          replicationWritesTotal++
           yield* Effect.logDebug(`Flushed call ${callRef} to cache (dedup hit)`)
           return
         }
@@ -636,6 +644,8 @@ export class CallState extends ServiceMap.Service<
         // apply gate uses the wire frame's callGen, not a body-level
         // timestamp.
         const body = encodeCall(bumped)
+        encodeCount++
+        encodeBytesTotal += body.byteLength
         MutableHashMap.set(flushCache, callRef, { call: bumped, body })
         const { role, primary } = partitionOf(callRef)
         const indexes = callIndexKeys(bumped)
@@ -659,6 +669,7 @@ export class CallState extends ServiceMap.Service<
           role, primary, callRef, body, indexes, ttl, flushCallGen,
           { peer: peerOpt, direction },
         )
+        replicationWritesTotal++
 
         // Slice 6: replication is implicit in the Lua write above —
         // when `peerOpt` is set, the storage layer's atomic script
@@ -767,20 +778,12 @@ export class CallState extends ServiceMap.Service<
         // primary, so a single hop here gives us everything we need
         // for the subsequent `checkout` to derive the partition path.
         //
-        // CAVEAT — single-owner invariant interaction (spec §0):
-        // `idx:` keys today live only on the worker that wrote them.
-        // When this worker is acting as **backup** for a call (i.e.
-        // the call body is in `bak:{primary}:call:{ref}` on our
-        // sidecar after replication), the matching `idx:leg:…` entry
-        // is NOT replicated alongside, so this lookup returns
-        // undefined and SipRouter rejects the request 481. That is
-        // the exact failure mode tracked in
-        // `docs/replication/call-cache-backup.md` §0 corollary 1
-        // (refusing to serve while primary is down breaks the
-        // invariant) and the open fix is scoped in
-        // `docs/plan/bye-takeover-replicated-indexes-fix.md` §3.
-        // Until that ships, in-flight in-dialog requests that fail
-        // over to the backup will 481.
+        // EchoApply writes `idx:leg:*` alongside the `bak:` body on
+        // every replicated UPDATE frame, so the backup worker's Redis
+        // should have the index entries for any call whose body it
+        // holds. If this lookup still fails, check that scanByPrefix
+        // in PartitionedRelayStorageKvBacked correctly prefixes the
+        // SCAN pattern with the RedisClient key prefix.
         const ref = yield* storage
           .getIndex(legKey(callId, tag))
           .pipe(Effect.mapError(toRedisErr))
@@ -797,14 +800,20 @@ export class CallState extends ServiceMap.Service<
         return { concurrent: MutableHashMap.size(callsMap), total }
       })
 
-      const statsSync = (): { concurrent: number; total: number; sipIndexSize: number; semaphoresSize: number; removeInvocations: number; orphanSweepRecoveredCount: number } => ({
-        concurrent: MutableHashMap.size(callsMap),
-        total: totalSync,
-        sipIndexSize: MutableHashMap.size(sipIndex),
-        semaphoresSize: MutableHashMap.size(semaphores),
-        removeInvocations,
-        orphanSweepRecoveredCount,
-      })
+      const statsSync = (): { concurrent: number; total: number; sipIndexSize: number; semaphoresSize: number; removeInvocations: number; orphanSweepRecoveredCount: number; flushCacheSize: number; flushCacheBytes: number } => {
+        let flushCacheBytes = 0
+        for (const [, entry] of flushCache) flushCacheBytes += entry.body.byteLength
+        return {
+          concurrent: MutableHashMap.size(callsMap),
+          total: totalSync,
+          sipIndexSize: MutableHashMap.size(sipIndex),
+          semaphoresSize: MutableHashMap.size(semaphores),
+          removeInvocations,
+          orphanSweepRecoveredCount,
+          flushCacheSize: MutableHashMap.size(flushCache),
+          flushCacheBytes,
+        }
+      }
 
       // Bucket every call currently in `terminating` by how long it has
       // been in that state. The historical bug (see
@@ -833,9 +842,19 @@ export class CallState extends ServiceMap.Service<
         }
         return { lt10s, lt60s, lt300s, gte300s }
       }
+      const flushCacheBytesSync = (): number => {
+        let total = 0
+        for (const [, entry] of flushCache) total += entry.body.byteLength
+        return total
+      }
       registry.callState = {
         terminatingByBucket,
         concurrentCallsCount: () => MutableHashMap.size(callsMap),
+        flushCacheSize: () => MutableHashMap.size(flushCache),
+        flushCacheBytes: flushCacheBytesSync,
+        encodeCount: () => encodeCount,
+        encodeBytesTotal: () => encodeBytesTotal,
+        replicationWritesTotal: () => replicationWritesTotal,
       }
 
       const loadOwnedCalls = Effect.fnUntraced(function* (workerIndex: number) {

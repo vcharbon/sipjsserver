@@ -607,7 +607,8 @@ export const makeKvBackedMemoryApi = (
  */
 const makeRedisDirectOps = (
   redis: RedisOps,
-  scanBatch: number
+  scanBatch: number,
+  redisKeyPrefixWithColon: string
 ): {
   readonly bodySetBuffer: (
     key: string,
@@ -639,10 +640,13 @@ const makeRedisDirectOps = (
   const bodyExpire = (key: string, ttlSec: number) =>
     redis.expire(key, ttlSec).pipe(Effect.mapError(wrapErr))
 
+  // RedisClient.pk() prepends `${redisKeyPrefix}:` to every key, but
+  // ioredis's `keyPrefix` option is NOT set. `redis.raw.scan` bypasses
+  // pk(), so we must add the prefix ourselves to match stored keys.
   const scanByPrefix = (prefix: string) =>
     Stream.paginate("0", (cursor) =>
       Effect.gen(function* () {
-        const fullPattern = scanPatternWithGlobalPrefix(redis, `${prefix}*`)
+        const fullPattern = `${redisKeyPrefixWithColon}${prefix}*`
         const [nextCursor, keys] = yield* Effect.tryPromise({
           try: () => redis.raw.scan(cursor, "MATCH", fullPattern, "COUNT", scanBatch),
           catch: (err) =>
@@ -650,8 +654,12 @@ const makeRedisDirectOps = (
               reason: err instanceof Error ? err.message : String(err),
             }),
         })
-        const localKeys = (keys as ReadonlyArray<string>).map(stripGlobalPrefix(redis))
-        const entries = yield* fetchScanEntries(redis, localKeys)
+        const localKeys = (keys as ReadonlyArray<string>).map((k) =>
+          k.startsWith(redisKeyPrefixWithColon)
+            ? k.slice(redisKeyPrefixWithColon.length)
+            : k
+        )
+        const entries = yield* fetchScanEntries(redis, localKeys, redisKeyPrefixWithColon)
         yield* Effect.yieldNow
         const next: Option.Option<string> =
           nextCursor === "0" ? Option.none() : Option.some(nextCursor as string)
@@ -662,24 +670,11 @@ const makeRedisDirectOps = (
   return { bodySetBuffer, bodySetString, bodyExpire, scanByPrefix }
 }
 
-const scanPatternWithGlobalPrefix = (redis: RedisOps, pattern: string): string => {
-  const prefix = (redis.raw as { options?: { keyPrefix?: string } }).options?.keyPrefix
-  return prefix !== undefined && prefix.length > 0 ? `${prefix}${pattern}` : pattern
-}
-
-const stripGlobalPrefix =
-  (redis: RedisOps) =>
-  (key: string): string => {
-    const prefix = (redis.raw as { options?: { keyPrefix?: string } }).options?.keyPrefix
-    if (prefix !== undefined && prefix.length > 0 && key.startsWith(prefix)) {
-      return key.slice(prefix.length)
-    }
-    return key
-  }
 
 const fetchScanEntries = (
   redis: RedisOps,
-  localKeys: ReadonlyArray<string>
+  localKeys: ReadonlyArray<string>,
+  redisKeyPrefixWithColon: string
 ): Effect.Effect<
   ReadonlyArray<{ readonly key: string; readonly value: Buffer; readonly ttlSec: number }>,
   KvError
@@ -687,9 +682,7 @@ const fetchScanEntries = (
   Effect.tryPromise({
     try: async () => {
       if (localKeys.length === 0) return []
-      const prefix =
-        (redis.raw as { options?: { keyPrefix?: string } }).options?.keyPrefix ?? ""
-      const fullKeys = localKeys.map((k) => `${prefix}${k}`)
+      const fullKeys = localKeys.map((k) => `${redisKeyPrefixWithColon}${k}`)
       // mgetBuffer returns Buffer | null per key — required for msgpack
       // bodies (string-decoded path would mojibake binary bytes). ioredis
       // exposes this on the raw client; we cast through the same shape
@@ -744,7 +737,7 @@ export const kvBackedRedisLayer = (
       const appConfig = yield* AppConfig
       const prefixWithColon = `${appConfig.redisKeyPrefix}:`
       const kv = KvBackend.makeRedisUnsafe(redis, prefixWithColon)
-      const ops = makeRedisDirectOps(redis, PartitionedRelayStorage.DEFAULT_SCAN_BATCH)
+      const ops = makeRedisDirectOps(redis, PartitionedRelayStorage.DEFAULT_SCAN_BATCH, prefixWithColon)
       return makeKvBackedExplicit(kv, ops, config)
     })
   )

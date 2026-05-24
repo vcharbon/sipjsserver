@@ -421,5 +421,59 @@ describe.skipIf(!REDIS_PARITY_ENABLED)(
           }
         }).pipe(Effect.scoped)
     )
+
+    it.live(
+      "raw SCAN with pk() prefix finds keys written by applyReplicaUpdate",
+      () =>
+        Effect.gen(function* () {
+          const ops: RedisOps = yield* makeRedisOps(REDIS_URL, PARITY_PREFIX, "scan-prefix-test")
+          const prefixWithColon = `${PARITY_PREFIX}:`
+          const kv = KvBackend.makeRedisUnsafe(ops, prefixWithColon)
+
+          const bk = "bak:peer-A:call:scan-test-1"
+          const idxKey = "idx:leg:CID-scan|tag-scan"
+          const body = Buffer.from("scan-test-body")
+
+          yield* kv.applyReplicaUpdate({
+            bodyKey: bk,
+            bodyValue: body,
+            bodyTtlSec: 60,
+            callGen: 1,
+            indexes: [{ key: idxKey, value: "scan-test-1", ttlSec: 60 }],
+          })
+
+          // bodyGet goes through pk() — must find the key
+          const got = yield* kv.bodyGet(bk)
+          expect(got).not.toBeNull()
+          expect(got!.toString()).toBe("scan-test-body")
+
+          // SCAN without pk() prefix must NOT find the key — this is
+          // the exact bug that caused the 481 storm in the K8s chaos
+          // tests. If ioredis keyPrefix were set this would pass, but
+          // RedisClient uses manual pk() so the raw client is unaware.
+          const unprefixedKeys = yield* Effect.tryPromise({
+            try: () => ops.raw.scan("0", "MATCH", "bak:peer-A:call:*", "COUNT", 100),
+            catch: (e) => new Error(String(e)),
+          }).pipe(Effect.orDie)
+          expect((unprefixedKeys as [string, string[]])[1].length).toBe(0)
+
+          // SCAN with pk() prefix MUST find the key — the fixed
+          // makeRedisDirectOps.scanByPrefix now prepends this prefix.
+          const prefixedKeys = yield* Effect.tryPromise({
+            try: () => ops.raw.scan("0", "MATCH", `${prefixWithColon}bak:peer-A:call:*`, "COUNT", 100),
+            catch: (e) => new Error(String(e)),
+          }).pipe(Effect.orDie)
+          expect((prefixedKeys as [string, string[]])[1].length).toBeGreaterThan(0)
+
+          // Cleanup
+          yield* Effect.tryPromise({
+            try: async () => {
+              const allKeys = await ops.raw.keys(`${PARITY_PREFIX}:*`)
+              if (allKeys.length > 0) await ops.raw.del(...allKeys)
+            },
+            catch: (e) => new Error(`teardown failed: ${String(e)}`),
+          }).pipe(Effect.orDie)
+        }).pipe(Effect.scoped)
+    )
   }
 )

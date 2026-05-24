@@ -43,7 +43,7 @@
 
   <send>
     <![CDATA[
-      ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      ACK [next_url] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
       [routes]
       From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
@@ -60,7 +60,7 @@
 
   <send retrans="500">
     <![CDATA[
-      BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      BYE [next_url] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
       [routes]
       From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
