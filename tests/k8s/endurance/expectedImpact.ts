@@ -156,17 +156,103 @@ export const EXPECTED_IMPACT: Record<ChaosEventType, ExpectedImpact> = {
         bound: { kind: "lessThan", value: 0.01 },
         severity: "fail",
       },
+      /*
+       * REPLICATION-HANDOFF TRIPWIRE (intentionally tight).
+       *
+       * 2026-05-24 chaos run `no-abuse-40caps-worker-chaos-30m-retry-
+       * 2026-05-24t09-50` observed ~1047 calls fail in the recovery
+       * window after a single graceful worker kill (post-tRecovered,
+       * categorised as "after" in report.md per-event table). Per
+       * ADR-0008 + project_ha_backup_design memory, the dual-Redis
+       * backup partition MUST serve in-dialog traffic of the dying
+       * worker so confirmed dialogs survive transparently. ~1000 lost
+       * calls per kill ≈ 25 s of traffic at 40 caps = the equivalent
+       * of zero replication handoff happening at all.
+       *
+       * The bound below (≤ 1 % mid-dialog failure rate in the 30 s
+       * after tRecovered) is set to what the design SHOULD deliver
+       * once handoff works. A breach DOES NOT mean a new regression —
+       * it means the open replication-handoff investigation is still
+       * unresolved. Future readers: check whether the 2026-05-24 fix
+       * has landed before treating this as a fresh issue.
+       */
+      {
+        description:
+          "REPLICATION TRIPWIRE — post-recovery mid-dialog failure rate ≤ 1 %. Bound is intentionally tight to detect when dual-Redis backup handoff (ADR-0008) actually works. Current expected state: BREACH (replication handoff broken, ~1000 calls lost per worker kill at 40 caps — see 2026-05-24 run forensics). Do NOT downgrade this rule without fixing the underlying handoff.",
+        window: { anchor: "tRecovered", startOffsetMs: 0, durationMs: 30_000 },
+        metric: { kind: "midDialogFailureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.01 },
+        severity: "fail",
+      },
     ],
   },
   /**
    * Fast API-side delete: `kubectl delete --grace-period=0 --force`.
    * Bypasses the kubelet's graceful protocol entirely; SIGTERM is
    * followed immediately by SIGKILL. Models a node-lost-style failure
-   * routed through the control plane. Contract: a separate concern from
-   * the graceful path; ships with no bound until validated.
+   * routed through the control plane. Same contract as `worker-pod-kill9`
+   * below — see the replication-handoff tripwire note there.
    */
-  "worker-pod-api-delete-force": EMPTY,
-  "worker-pod-kill9": EMPTY,
+  "worker-pod-api-delete-force": {
+    description:
+      "API-side force delete — equivalent to kill -9 from the worker's perspective (no SIGTERM grace). Replication-handoff tripwire applies (see worker-pod-kill9). Bound is intentionally tight: dual-Redis backup MUST serve in-dialog traffic. Current state as of 2026-05-24: BREACH expected (handoff broken — under investigation, do not assume new regression).",
+    rules: [
+      {
+        description:
+          "REPLICATION TRIPWIRE — same intent as worker-pod-kill9. See that entry for the 2026-05-24 forensics rationale.",
+        window: { anchor: "tRecovered", startOffsetMs: 0, durationMs: 30_000 },
+        metric: { kind: "midDialogFailureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.01 },
+        severity: "fail",
+      },
+    ],
+  },
+  /**
+   * Abrupt kill via `kubectl exec -- kill -9 1`. The worker dies
+   * instantly with no SIGTERM, no drain, no chance to flush state.
+   * The surviving worker's backup partition (ADR-0008 dual-Redis
+   * design) is the ONLY thing that should keep confirmed dialogs
+   * alive; the proxy fail-detects via OPTIONS-probe miss + reroutes
+   * new INVITEs to the survivor.
+   *
+   * REPLICATION-HANDOFF TRIPWIRE (intentionally tight bound).
+   *
+   * 2026-05-24 chaos run `no-abuse-40caps-worker-chaos-30m-retry-
+   * 2026-05-24t09-50` observed ~1012 + ~1000 calls fail in the recovery
+   * windows after two consecutive kill-9 events (categorised "after"
+   * in report.md per-event table). At 40 caps that's ~25 s of traffic
+   * per event — the equivalent of zero handoff happening at all.
+   *
+   * The bound below (≤ 1 % mid-dialog failure rate in the 30 s after
+   * tRecovered) is what the dual-Redis design SHOULD deliver once
+   * handoff works. A breach DOES NOT mean a new regression — it means
+   * the open replication-handoff investigation is still unresolved.
+   * Future readers: check whether the 2026-05-24 fix has landed before
+   * treating this as a fresh issue. Do NOT downgrade this rule without
+   * fixing the underlying handoff.
+   */
+  "worker-pod-kill9": {
+    description:
+      "Abrupt kill -9 — no SIGTERM, no drain. Backup partition (ADR-0008) MUST serve confirmed dialogs of the dead worker. Bound is intentionally tight: this is a regression tripwire for the open replication-handoff investigation (2026-05-24). Current expected state: BREACH (handoff broken, ~1000 calls lost per event at 40 caps). Future runs that breach this should consult the 2026-05-24 forensics, NOT treat it as a new regression.",
+    rules: [
+      {
+        description:
+          "REPLICATION TRIPWIRE — post-recovery mid-dialog failure rate ≤ 1 %. Set to the post-fix expected state, not current observed (~10 %+). Read the file-level comment above before downgrading. The intent is that any future change which inadvertently re-breaks the (currently-broken) handoff path stays caught instead of being absorbed into a looser bound.",
+        window: { anchor: "tRecovered", startOffsetMs: 0, durationMs: 30_000 },
+        metric: { kind: "midDialogFailureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.01 },
+        severity: "fail",
+      },
+      {
+        description:
+          "REPLICATION TRIPWIRE — new-call (ESTABLISHING) failure rate ≤ 2 % in the 20 s after tRecovered. Proxy fail-detect via OPTIONS-probe + reroute SHOULD bring new-call success back to baseline within seconds. Current state (2026-05-24): ~9 % failure rate observed — proxy reroute path is slower than spec, treat together with the mid-dialog tripwire.",
+        window: { anchor: "tRecovered", startOffsetMs: 0, durationMs: 20_000 },
+        metric: { kind: "failureRate", stream: STREAM.short },
+        bound: { kind: "lessThan", value: 0.02 },
+        severity: "fail",
+      },
+    ],
+  },
   "proxy-pod-graceful": EMPTY,
   "proxy-pod-kill9": EMPTY,
   "proxy-cutoff-vrrp": EMPTY,
