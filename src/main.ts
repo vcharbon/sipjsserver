@@ -61,6 +61,7 @@ import { OverloadController } from "./b2bua/OverloadController.js"
 import { LoadSampler } from "./observability/LoadSampler.js"
 import { MetricsRegistry } from "./observability/MetricsRegistry.js"
 import { runRedisCallKeyCountScanner } from "./observability/RedisCallKeyCountScanner.js"
+import { runPropagateZsetSizeScanner } from "./observability/PropagateZsetSizeScanner.js"
 
 // ---------------------------------------------------------------------------
 // Environment-specific layers
@@ -566,6 +567,25 @@ const standaloneMain = Effect.gen(function* () {
         const redis = yield* RedisClient
         const metrics = yield* MetricsRegistry
         yield* runRedisCallKeyCountScanner({
+          redis,
+          self: resolveOrdinal(config),
+          registry: metrics,
+        })
+        return yield* Effect.never
+      }),
+    ).pipe(Effect.provide(RedisLayer)),
+  )
+
+  // Periodic SCAN+ZCARD over `propagate:{self}->{peer}:gen:*` so /metrics
+  // surfaces per-peer replication backlog in the local sidecar. A peer
+  // outage causes its ZSET to grow (puller stops draining); this gauge
+  // is the visibility for that, independent of B2BUA heap.
+  yield* Effect.forkDetach(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const redis = yield* RedisClient
+        const metrics = yield* MetricsRegistry
+        yield* runPropagateZsetSizeScanner({
           redis,
           self: resolveOrdinal(config),
           registry: metrics,

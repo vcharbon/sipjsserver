@@ -1,0 +1,322 @@
+{
+  "uid": "memory-sizing",
+  "title": "B2BUA — Memory Sizing (ADR 0012)",
+  "tags": ["sipjsserver", "memory", "sizing", "adr-0012"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(b2bua_process_memory_bytes, pod)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      },
+      {
+        "name": "node",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "vm" },
+        "query": "label_values(node_uname_info, instance)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Sizing model targets (ADR 0012)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "text",
+      "title": "ADR 0012 reference",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 1 },
+      "options": {
+        "mode": "markdown",
+        "content": "## Memory budget per worker (steady state)\n\n| Component | Target | Gauge | Escape valve |\n|---|---:|---|---|\n| BASE_NATIVE | 150 MB | derived | none |\n| V8 code space | 100 MB | `b2bua_v8_heap_space_bytes{space=\"code_space\"}` | none |\n| V8 old space (live calls) | 200 MB | `b2bua_v8_heap_space_bytes{space=\"old_space\"}` | `--max-old-space-size=800` |\n| flushCache | 100 MB | `b2bua_flush_cache_bytes` | `MAX_MESSAGES_PER_CALL` |\n| txnMap Buffers | 50 MB | `b2bua_worker_active_transactions × ~1.5 KB` | Tier-3 admission |\n| Allocator retention | 100 MB | `peak_malloced − malloced` | `MALLOC_ARENA_MAX=2` |\n| **TOTAL TARGET** | **~700 MB** | `b2bua_process_memory_bytes{kind=\"rss\"}` | container cap 2Gi |\n\n## Workload assumptions\n\n- Concurrent calls per worker ≤ **1000**\n- CPS per worker ≤ **50/s**\n- Avg inbound SIP msg ≤ **2 KB**\n- Avg encoded Call body ≤ **100 KB**\n- Replication writes ≤ **500/s/worker**"
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Node level (capacity model)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Node total / available memory",
+      "description": "node_exporter. Confirms the kind/k8s nodes have the capacity the sizing model assumes. If `MemAvailable` < (worker_count × 700 MB target), the cluster is oversubscribed.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "node_memory_MemTotal_bytes{instance=~\"$node\"}", "refId": "A", "legendFormat": "total {{instance}}" },
+        { "expr": "node_memory_MemAvailable_bytes{instance=~\"$node\"}", "refId": "B", "legendFormat": "available {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Node memory pressure %",
+      "description": "100 × (1 − MemAvailable / MemTotal). Stays below ~85% in healthy operation. Crossing the threshold means the kubelet may start evicting pods or the OOM-killer is approaching.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "100 * (1 - node_memory_MemAvailable_bytes{instance=~\"$node\"} / node_memory_MemTotal_bytes{instance=~\"$node\"})", "refId": "A", "legendFormat": "{{instance}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 85 } ] }
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Container level (worker pod vs cgroup limit)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Worker container working set vs limit",
+      "description": "cAdvisor `container_memory_working_set_bytes` is what the kubelet uses to decide OOM-kill. Cap line is `kube_pod_container_resource_limits{resource=\"memory\"}`. The current 2Gi cap is ~3× the 700 MB ADR 0012 target — headroom for diagnostic heap snapshots and admission overshoot.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "container_memory_working_set_bytes{namespace=\"sip-test\", pod=~\"$pod\", container=\"worker\"}", "refId": "A", "legendFormat": "{{pod}} working_set" },
+        { "expr": "kube_pod_container_resource_limits{namespace=\"sip-test\", pod=~\"$pod\", container=\"worker\", resource=\"memory\"}", "refId": "B", "legendFormat": "{{pod}} limit" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Process level — components vs ADR 0012 targets",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "RSS vs total target (700 MB)",
+      "description": "process_memory_bytes{kind='rss'}. The horizontal threshold at 700 MB is the ADR 0012 steady-state target sum. Crossing yellow (1 GB) means one or more components is over budget; crossing red (1.5 GB) is the abuse plateau (pre-ADR-0012 baseline).",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_process_memory_bytes{kind=\"rss\", pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} rss" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1000000000 },
+              { "color": "red", "value": 1500000000 }
+            ]
+          },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "flushCache bytes vs target (100 MB)",
+      "description": "ADR 0012: per-call encode dedup cache. Target ≤ 100 MB = (≤ 1000 calls × ≤ 100 KB avg body). Crossing means either (a) more concurrent calls than assumed, or (b) avg body size has grown — divide bytes by entries to see which.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_flush_cache_bytes{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} bytes" },
+        { "expr": "b2bua_flush_cache_entries{pod=~\"$pod\"}", "refId": "B", "legendFormat": "{{pod}} entries" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 100000000 } ] },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        },
+        "overrides": [
+          { "matcher": { "id": "byFrameRefID", "options": "B" }, "properties": [ { "id": "unit", "value": "short" }, { "id": "custom.axisPlacement", "value": "right" } ] }
+        ]
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Avg encoded Call body vs assumption (100 KB)",
+      "description": "ADR 0012 sizing assumption: avg encoded Call body ≤ 100 KB. Derived as flush_cache_bytes / flush_cache_entries. Drift means a schema change inflated the per-call payload — revisit the target.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_flush_cache_bytes{pod=~\"$pod\"} / clamp_min(b2bua_flush_cache_entries{pod=~\"$pod\"}, 1)", "refId": "A", "legendFormat": "{{pod}} avg" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 100000 } ] },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Active dialogs vs assumption (1000 / worker)",
+      "description": "ADR 0012 workload assumption: ≤ 1000 concurrent calls per worker. callsMap size is the authoritative source. Sustained crossing means the admission cap needs revisiting OR the average call duration has grown.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_active_dialogs{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1000 } ] },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "txnMap Buffer footprint estimate",
+      "description": "ADR 0012 target ≤ 50 MB. Estimate = total active server txns × ~1.5 KB (avg lastResponse + scalars). The 32 s Timer H/J holds completed txns; OPTIONS-completed under abuse is the dominant slice.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "1500 * sum by (pod) (b2bua_worker_active_transactions{role=\"server\", pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{pod}} bytes (est)" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 50000000 } ] },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      }
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Allocator retention — peak vs current malloced",
+      "description": "ADR 0012: the gap between peak_malloced_memory and malloced_memory is glibc holding onto memory after frees. MALLOC_ARENA_MAX=2 in worker NODE_OPTIONS clamps this. Target gap ≤ 100 MB.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 50 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_v8_heap_stats_bytes{kind=\"peak_malloced_memory\", pod=~\"$pod\"} - b2bua_v8_heap_stats_bytes{kind=\"malloced_memory\", pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} retention" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 100000000 } ] },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Workload assumption gauges",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 58 },
+      "panels": []
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Inbound SIP msg/s vs assumption (~50 CPS × ~20 msg/call = ~1000 msg/s)",
+      "description": "ADR 0012 assumption: inbound rate is bounded by Tier-3 admission. rate() of messages_total{direction='inbound'} is the actual TPS. Sustained well above bound = abuse or admission misconfig.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 59 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod) (rate(b2bua_messages_total{direction=\"inbound\", pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{pod}} inbound" },
+        { "expr": "sum by (pod) (rate(b2bua_messages_total{direction=\"outbound\", pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "{{pod}} outbound" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 } }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Avg SIP message size (assumption ≤ 2 KB)",
+      "description": "ADR 0012 assumption: avg inbound SIP message ≤ 2 KB. Derived as bytes/count. Growth = client-side SDP bloat or new headers — revisit budget.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 59 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "rate(b2bua_messages_bytes_total{direction=\"inbound\", pod=~\"$pod\"}[1m]) / clamp_min(rate(b2bua_messages_total{direction=\"inbound\", pod=~\"$pod\"}[1m]), 1)", "refId": "A", "legendFormat": "{{pod}} inbound avg" },
+        { "expr": "rate(b2bua_messages_bytes_total{direction=\"outbound\", pod=~\"$pod\"}[1m]) / clamp_min(rate(b2bua_messages_total{direction=\"outbound\", pod=~\"$pod\"}[1m]), 1)", "refId": "B", "legendFormat": "{{pod}} outbound avg" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 2000 } ] },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      }
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Replication writes/s vs assumption (~500/s/worker)",
+      "description": "ADR 0012 assumption: replication write rate is bounded by encode rate, which is bounded by inbound rate × per-call mutation factor. Sustained well above bound = encode hot-path or abuse re-INVITE flood.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 67 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod) (rate(b2bua_replication_writes_total{pod=~\"$pod\"}[1m]))", "refId": "A", "legendFormat": "{{pod}} writes" },
+        { "expr": "sum by (pod) (rate(b2bua_encode_count_total{pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "{{pod}} encodes" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 500 } ] },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      }
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "Avg encoded body per encode (sanity cross-check)",
+      "description": "Independent check on the avg encoded body size, derived from rate counters rather than the flushCache snapshot. Should track panel 33.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 67 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "rate(b2bua_encode_bytes_total{pod=~\"$pod\"}[1m]) / clamp_min(rate(b2bua_encode_count_total{pod=~\"$pod\"}[1m]), 1)", "refId": "A", "legendFormat": "{{pod}} avg/encode" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 100000 } ] },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      }
+    }
+  ]
+}

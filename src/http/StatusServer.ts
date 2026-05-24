@@ -10,8 +10,8 @@ import {
   HttpServerResponse,
 } from "effect/unstable/http"
 import { createServer } from "node:http"
-import { existsSync, mkdirSync, writeFileSync } from "node:fs"
-import { writeHeapSnapshot } from "node:v8"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { writeHeapSnapshot, getHeapStatistics, getHeapSpaceStatistics } from "node:v8"
 import { CallState } from "../call/CallState.js"
 import { CODEC_MODE, getLegacyDecodeCount } from "../call/CallCodec.js"
 import { WorkerReadiness } from "../cache/WorkerReadiness.js"
@@ -144,6 +144,95 @@ function renderPrometheus(
     lines.push(`# HELP ${name} ${help}`)
     lines.push(`# TYPE ${name} ${type}`)
   }
+
+  // ── Process memory composition (from process.memoryUsage()) ───────
+  // The canonical Node-level breakdown of where the process is keeping
+  // its memory: V8 heap reserved/used (JS objects), external Buffer
+  // backing bytes, and the residual RSS gap (libuv, JIT code, native
+  // stacks, allocator retention). Compare `arrayBuffers` against the
+  // workload — flushCache encoded bodies + txnMap retained Buffers are
+  // the two biggest ArrayBuffer holders.
+  {
+    const mu = process.memoryUsage()
+    header(
+      "b2bua_process_memory_bytes",
+      "gauge",
+      "Node process memory usage by kind (process.memoryUsage()). rss=total resident, heap_total=V8 heap reserved, heap_used=V8 heap actually used, external=native memory bound to JS objects, array_buffers=ArrayBuffer backing bytes (subset of external).",
+    )
+    m("b2bua_process_memory_bytes", mu.rss, { kind: "rss" })
+    m("b2bua_process_memory_bytes", mu.heapTotal, { kind: "heap_total" })
+    m("b2bua_process_memory_bytes", mu.heapUsed, { kind: "heap_used" })
+    m("b2bua_process_memory_bytes", mu.external, { kind: "external" })
+    m("b2bua_process_memory_bytes", mu.arrayBuffers, { kind: "array_buffers" })
+  }
+
+  // ── V8 heap statistics (what process.memoryUsage doesn't tell you) ──
+  // `heapTotal` excludes V8's code space (compiled JS, ICs, deoptimised
+  // code) and the trusted/shared/code-large-object spaces. Code space
+  // grows under varied workloads as the optimiser re-compiles for new
+  // shapes — under abuse traffic this is a measurable share of the
+  // RSS gap. `peak_malloced_memory` tracks the allocator high-water
+  // mark; if it stays much higher than the current heap, the residual
+  // is glibc malloc retention (no return-to-OS).
+  {
+    const hs = getHeapStatistics()
+    header(
+      "b2bua_v8_heap_stats_bytes",
+      "gauge",
+      "v8.getHeapStatistics() — total_heap_size, total_executable, used_heap_size, heap_limit, external_memory, peak_malloced_memory. total_heap_size_executable is the code-space slice not counted in process.memoryUsage().heapTotal.",
+    )
+    m("b2bua_v8_heap_stats_bytes", hs.total_heap_size, { kind: "total_heap_size" })
+    m("b2bua_v8_heap_stats_bytes", hs.total_heap_size_executable, { kind: "total_heap_size_executable" })
+    m("b2bua_v8_heap_stats_bytes", hs.total_physical_size, { kind: "total_physical_size" })
+    m("b2bua_v8_heap_stats_bytes", hs.total_available_size, { kind: "total_available_size" })
+    m("b2bua_v8_heap_stats_bytes", hs.used_heap_size, { kind: "used_heap_size" })
+    m("b2bua_v8_heap_stats_bytes", hs.heap_size_limit, { kind: "heap_size_limit" })
+    m("b2bua_v8_heap_stats_bytes", hs.malloced_memory, { kind: "malloced_memory" })
+    m("b2bua_v8_heap_stats_bytes", hs.peak_malloced_memory, { kind: "peak_malloced_memory" })
+    m("b2bua_v8_heap_stats_bytes", hs.external_memory, { kind: "external_memory" })
+    m("b2bua_v8_heap_stats_bytes", hs.number_of_native_contexts, { kind: "number_of_native_contexts" })
+    m("b2bua_v8_heap_stats_bytes", hs.number_of_detached_contexts, { kind: "number_of_detached_contexts" })
+
+    // Per-space breakdown — answers "which V8 space is growing?"
+    const spaces = getHeapSpaceStatistics()
+    header(
+      "b2bua_v8_heap_space_bytes",
+      "gauge",
+      "v8.getHeapSpaceStatistics() per-space breakdown. `code_space` + `code_large_object_space` = compiled code. `large_object_space` holds >512KB allocations. `old_space` is where long-lived JS lives.",
+    )
+    for (const s of spaces) {
+      m("b2bua_v8_heap_space_bytes", s.space_used_size, { space: s.space_name, kind: "used" })
+      m("b2bua_v8_heap_space_bytes", s.space_size, { space: s.space_name, kind: "committed" })
+    }
+  }
+
+  // ── Cgroup memory.stat composition (Linux container) ──────────────
+  // Kernel-side accounting that complements process.memoryUsage().
+  // `anon` is the dominant slice when memory grows under load (Node
+  // heap + Buffer pool slabs + V8 arenas). `file`/`kernel`/`slab` are
+  // small. Skipped when not running under cgroup v2.
+  try {
+    const stat = readFileSync("/sys/fs/cgroup/memory.stat", "utf-8")
+    const parsed: Record<string, number> = {}
+    for (const line of stat.split("\n")) {
+      const sp = line.indexOf(" ")
+      if (sp <= 0) continue
+      const k = line.slice(0, sp)
+      const v = Number(line.slice(sp + 1))
+      if (Number.isFinite(v)) parsed[k] = v
+    }
+    const keys = ["anon", "file", "kernel", "kernel_stack", "pagetables", "slab", "shmem"] as const
+    if (keys.some((k) => parsed[k] !== undefined)) {
+      header(
+        "b2bua_cgroup_memory_bytes",
+        "gauge",
+        "Cgroup v2 memory.stat breakdown. anon=anonymous (Node heap + native arenas + Buffer pool); the rest are usually small. Sum is close to but not exactly cgroup memory.current.",
+      )
+      for (const k of keys) {
+        if (parsed[k] !== undefined) m("b2bua_cgroup_memory_bytes", parsed[k]!, { kind: k })
+      }
+    }
+  } catch { /* not on linux / not in a container */ }
 
   // ── Dispatcher metrics ────────────────────────────────────────────
   if (reg.dispatcher) {
@@ -306,6 +395,20 @@ function renderPrometheus(
   if (reg.transactionLayer) {
     const tl = reg.transactionLayer
     header(
+      "b2bua_worker_active_transactions",
+      "gauge",
+      "Active transactions in txnMap by (method, role, state). role=server + state=completed are the txns pinned for the 32 s Timer H/J window — growth here under abuse drives txnMap-side memory.",
+    )
+    const breakdown = tl.transactionBreakdown()
+    if (breakdown.length === 0) {
+      m("b2bua_worker_active_transactions", 0, { method: "_none", role: "server", state: "trying" })
+    } else {
+      for (const b of breakdown) {
+        m("b2bua_worker_active_transactions", b.count, { method: b.method, role: b.role, state: b.state })
+      }
+    }
+
+    header(
       "b2bua_worker_event_queue_depth",
       "gauge",
       "Current depth of the inbound TransactionLayer event queue.",
@@ -329,6 +432,23 @@ function renderPrometheus(
     m("b2bua_worker_event_queue_drops_total", tl.eventQueueDrops.response, { reason: "response" })
     m("b2bua_worker_event_queue_drops_total", tl.eventQueueDrops.cancelled, { reason: "cancelled" })
     m("b2bua_worker_event_queue_drops_total", tl.eventQueueDrops.timeout, { reason: "timeout" })
+
+    // ── ADR 0012 sizing assumption observation ─────────────────────
+    header(
+      "b2bua_messages_total",
+      "counter",
+      "ADR 0012. Cumulative SIP message count, by direction. inbound=parsed packets received; outbound=Buffers sent via the transport.",
+    )
+    m("b2bua_messages_total", tl.messagesProcessed, { direction: "inbound" })
+    m("b2bua_messages_total", tl.outboundMessagesTotal, { direction: "outbound" })
+
+    header(
+      "b2bua_messages_bytes_total",
+      "counter",
+      "ADR 0012. Cumulative SIP message bytes, by direction. Divide by b2bua_messages_total to get avg message size (sizing assumption: ≤ 2 KB avg).",
+    )
+    m("b2bua_messages_bytes_total", tl.inboundMessageBytesTotal, { direction: "inbound" })
+    m("b2bua_messages_bytes_total", tl.outboundMessageBytesTotal, { direction: "outbound" })
   }
 
   // ── Fork-site live + cumulative counters (leak diagnostic) ─────────
@@ -434,6 +554,42 @@ function renderPrometheus(
       "Active dialogs on this worker — size of the in-memory callsMap (every call this worker currently owns as primary or holds as backup). Authoritative dialog count; not derived from the proxy LRU.",
     )
     m("b2bua_active_dialogs", reg.callState.concurrentCallsCount())
+
+    header(
+      "b2bua_flush_cache_entries",
+      "gauge",
+      "Per-call encode-dedup cache size. Bounded by active dialogs — one entry per live call holding its last encoded msgpack body.",
+    )
+    m("b2bua_flush_cache_entries", reg.callState.flushCacheSize())
+
+    header(
+      "b2bua_flush_cache_bytes",
+      "gauge",
+      "Total bytes of encoded Call bodies retained in flushCache. The msgpack body grows with the call's messageCount (up to MAX_MESSAGES_PER_CALL). Comparing against b2bua_process_memory_bytes{kind='array_buffers'} shows what share of external Buffer memory comes from the encoding path versus the txnMap.",
+    )
+    m("b2bua_flush_cache_bytes", reg.callState.flushCacheBytes())
+
+    // ── ADR 0012 sizing assumption observation ─────────────────────
+    header(
+      "b2bua_encode_count_total",
+      "counter",
+      "ADR 0012. Cumulative encodeCall invocations. Divide encode_bytes_total by this to get average encoded body size (sizing assumption: ≤ 100 KB).",
+    )
+    m("b2bua_encode_count_total", reg.callState.encodeCount())
+
+    header(
+      "b2bua_encode_bytes_total",
+      "counter",
+      "ADR 0012. Cumulative bytes produced by encodeCall.",
+    )
+    m("b2bua_encode_bytes_total", reg.callState.encodeBytesTotal())
+
+    header(
+      "b2bua_replication_writes_total",
+      "counter",
+      "ADR 0012. Cumulative submits to the local-sidecar terminate writer (one per flush, including dedup-hit re-submits). rate() of this is the replication write rate per worker (sizing assumption: ≤ 500/s).",
+    )
+    m("b2bua_replication_writes_total", reg.callState.replicationWritesTotal())
   }
 
   // ── PerCallDispatcher gauges + counters (ADR-0004) ────────────────
@@ -534,6 +690,49 @@ function renderPrometheus(
     m("b2bua_call_limiter_results_total", cl.timeoutTotal(), { result: "timeout" })
   }
 
+  // ── BufferedTerminateWriter (replication / terminate-path Redis I/O) ──
+  // Bounded queue between SipRouter and local-sidecar writes. Queue depth
+  // approaching capacity + non-zero fallthrough means the local sidecar
+  // is the bottleneck (peer health is decoupled by design — peer-bound
+  // backlog lives in the sidecar's `propagate:*` ZSETs, not this queue).
+  if (reg.storageBuffer) {
+    const sb = reg.storageBuffer
+    header(
+      "b2bua_storage_buffer_depth",
+      "gauge",
+      "Current depth of the BufferedTerminateWriter queue between SipRouter and local-sidecar writes.",
+    )
+    m("b2bua_storage_buffer_depth", sb.queueDepth())
+
+    header(
+      "b2bua_storage_buffer_capacity",
+      "gauge",
+      "Configured BufferedTerminateWriter queue capacity (storageBufferQueueMax).",
+    )
+    m("b2bua_storage_buffer_capacity", sb.queueCapacity)
+
+    header(
+      "b2bua_storage_buffer_drainers",
+      "gauge",
+      "Configured number of drainer fibers consuming the BufferedTerminateWriter queue.",
+    )
+    m("b2bua_storage_buffer_drainers", sb.drainerCount)
+
+    header(
+      "b2bua_storage_buffer_fallthrough_total",
+      "counter",
+      "Submits that bypassed the bounded queue because it was full and ran inline against local Redis (within storageDropFallbackMs).",
+    )
+    m("b2bua_storage_buffer_fallthrough_total", sb.fallthroughTotal())
+
+    header(
+      "b2bua_storage_buffer_fallthrough_errors_total",
+      "counter",
+      "Inline-fallthrough submits that timed out or failed against local Redis (non-zero means terminate-path writes are being lost / delayed).",
+    )
+    m("b2bua_storage_buffer_fallthrough_errors_total", sb.fallthroughErrorTotal())
+  }
+
   // ── Redis call-key counts (periodic SCAN snapshot) ─────────────────
   if (reg.redisCallKeyCounts) {
     const counts = reg.redisCallKeyCounts
@@ -554,6 +753,33 @@ function renderPrometheus(
       "Unix timestamp at which the call-key SCAN snapshot above was last refreshed. now() - this value is the scrape staleness.",
     )
     m("b2bua_redis_call_keys_scan_timestamp_seconds", counts.lastScanTimestampMs() / 1000)
+  }
+
+  // ── Propagate ZSET size (per-peer replication backlog in local sidecar) ──
+  // Observation-only. ZSETs grow when a peer's puller stops draining
+  // (peer dead/disconnected); they live entirely in local sidecar
+  // memory, NOT in B2BUA heap. Peer death must not throttle admission
+  // (HA contract) — this gauge is for visibility into how full the
+  // local sidecar is getting during a peer outage.
+  if (reg.propagateZset) {
+    const pz = reg.propagateZset
+    const sizes = pz.sizesByPeer()
+    if (Object.keys(sizes).length > 0) {
+      header(
+        "b2bua_propagate_zset_size",
+        "gauge",
+        "Total members across all gen buckets of propagate:{self}->{peer} ZSETs in the local sidecar. Grows when a peer's ReplPuller stops draining (peer dead/overloaded). Bounded only by sidecar maxmemory — not by B2BUA process heap.",
+      )
+      for (const [peer, size] of Object.entries(sizes)) {
+        m("b2bua_propagate_zset_size", size, { peer })
+      }
+    }
+    header(
+      "b2bua_propagate_zset_scan_timestamp_seconds",
+      "gauge",
+      "Unix timestamp at which the propagate-ZSET SCAN+ZCARD snapshot was last refreshed.",
+    )
+    m("b2bua_propagate_zset_scan_timestamp_seconds", pz.lastScanTimestampMs() / 1000)
   }
 
   // ── Peer-scan-bootstrap (echo-removal slice) ───────────────────────

@@ -189,6 +189,24 @@ export interface TerminatingCallsByBucket {
 export interface CallStateMetrics {
   readonly terminatingByBucket: () => TerminatingCallsByBucket
   readonly concurrentCallsCount: () => number
+  /** Number of entries in the per-call encode dedup cache. Bounded by concurrentCallsCount. */
+  readonly flushCacheSize: () => number
+  /** Total bytes of encoded Call bodies retained in flushCache. The msgpack body for each entry grows with the call's messageCount. */
+  readonly flushCacheBytes: () => number
+  /**
+   * ADR 0012 sizing assumption observation. Cumulative count of
+   * `encodeCall` invocations and cumulative encoded bytes. Operators
+   * derive `avg_encoded_body = encode_bytes_total / encode_count` to
+   * track the "≤ 100 KB avg" sizing assumption.
+   */
+  readonly encodeCount: () => number
+  readonly encodeBytesTotal: () => number
+  /**
+   * ADR 0012 sizing assumption observation. Replication-write count —
+   * one per terminate-path or hot-dialog flush submitted to the local
+   * sidecar. Equal to `encodeCount` minus dedup-hits.
+   */
+  readonly replicationWritesTotal: () => number
 }
 
 /**
@@ -337,6 +355,21 @@ export interface StorageBufferMetrics {
 }
 
 /**
+ * Propagate ZSET size snapshot — periodic SCAN over
+ * `propagate:{self}->{peer}:gen:*` keys. The ZSETs live entirely in the
+ * local sidecar; they accumulate when a peer is dead (peer's puller
+ * stops draining). Observation-only — no enforcement.
+ *
+ * `sizesByPeer` totals all gen buckets per directional label
+ * `{self}->{peer}`. `lastScanTimestampMs` is the wall-clock of the
+ * latest snapshot refresh (0 before the first scan).
+ */
+export interface PropagateZsetMetrics {
+  readonly sizesByPeer: () => Record<string, number>
+  readonly lastScanTimestampMs: () => number
+}
+
+/**
  * CallLimiter result counters. Bumped on every `checkAndIncrement` outcome
  * so operators can distinguish "limiter saturating naturally" (rejected) from
  * "limiter Redis fell over" (redis_error / timeout). See plan
@@ -398,6 +431,8 @@ export interface MetricsRegistryState {
   cdrBuffer: CdrBufferMetrics | undefined
   /** BufferedTerminateWriter queue depth + fallthrough counters (Phase 4). */
   storageBuffer: StorageBufferMetrics | undefined
+  /** Periodic-SCAN snapshot of propagate ZSET sizes (per-peer replication backlog in local sidecar). */
+  propagateZset: PropagateZsetMetrics | undefined
   /** PerCallDispatcher gauges + counters (ADR-0004). */
   dispatch: DispatchMetrics | undefined
   /** CallLimiter per-result counters (allowed / rejected / redis_error / timeout). */
@@ -430,6 +465,7 @@ export class MetricsRegistry extends ServiceMap.Service<MetricsRegistry, Metrics
     otelPipeline: undefined,
     cdrBuffer: undefined,
     storageBuffer: undefined,
+    propagateZset: undefined,
     dispatch: undefined,
     callLimiter: undefined,
     redisCallKeyCounts: undefined,

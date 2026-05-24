@@ -90,3 +90,4 @@ Load these only when the task touches the area:
 | Authoring multi-agent SIP scenarios (hybrid kind harness) | [docs/test-api-external.md](docs/test-api-external.md) |
 | Replication / call cache backup mechanism |        [docs/replication/call-cache-backup.md](../replication/call-cache-backup.md) |
 | Must-run effect categories + buffered IO contract | [docs/adr/0003-must-run-effects-under-interruption.md](docs/adr/0003-must-run-effects-under-interruption.md) |
+| Worker memory sizing model, assumptions, escape valves | [docs/adr/0012-b2bua-memory-sizing-model.md](docs/adr/0012-b2bua-memory-sizing-model.md) |

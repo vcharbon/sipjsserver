@@ -206,8 +206,14 @@ const main = async () => {
 
   console.log()
   console.log("## Per-stage mean time (drill-down)")
-  const stages = ["A", "B", "C", "D", "fullFlush", "FULL"]
-  const header = `${pad("variant", 22, false)}  ${stages.map((s) => pad(s === "FULL" ? "A+B+C+D" : s === "fullFlush" ? "A+B" : s, 12)).join("  ")}`
+  const stages = ["A", "B", "C", "D", "fullFlush", "fullFlushHeld", "fullFlushConcurrent", "FULL"]
+  const stageLabel = (s: string) =>
+    s === "FULL" ? "A+B+C+D"
+    : s === "fullFlush" ? "A+B"
+    : s === "fullFlushHeld" ? "A+B/held"
+    : s === "fullFlushConcurrent" ? "A+B/noise"
+    : s
+  const header = `${pad("variant", 22, false)}  ${stages.map((s) => pad(stageLabel(s), 12)).join("  ")}`
   console.log(header)
   console.log("─".repeat(header.length))
   for (const r of results) {
@@ -245,6 +251,28 @@ const main = async () => {
     const major = g.byKind["major"]?.count ?? 0
     console.log(
       `${pad(r.variant, 22, false)}  ${pad(g.count, 10)}  ${pad(g.totalMs.toFixed(1), 10)}  ${pad(g.pctOfWall.toFixed(1) + "%", 8)}  ${pad((g.perIterCount * 1000).toFixed(2), 11)}  ${pad(`${minor}:${major}`, 12)}`,
+    )
+  }
+
+  // Production-lifetime regimes — the existing FULL stage discards each
+  // encoded Buffer immediately; production keeps each one alive in
+  // flushCache + BufferedTerminateWriter queue + ioredis send queue for
+  // the lifetime of a flush. fullFlushHeld replays that lifetime;
+  // fullFlushConcurrent adds the other allocators (rule chain, parser,
+  // Effect Generator chain) competing for new-space. A codec that
+  // looks fine on FULL but spikes on these is the failure mode the
+  // 2026-05-24 protobuf endurance investigation surfaced.
+  console.log()
+  console.log("## GC pressure on production-lifetime regimes (held + concurrent)")
+  console.log(`${pad("variant", 22, false)}  ${pad("held % wall", 12)}  ${pad("held major", 11)}  ${pad("noise % wall", 13)}  ${pad("noise major", 12)}`)
+  console.log("─".repeat(82))
+  for (const r of results) {
+    const held = r.stages.fullFlushHeld!.gc
+    const noise = r.stages.fullFlushConcurrent!.gc
+    const heldMajor = held.byKind["major"]?.count ?? 0
+    const noiseMajor = noise.byKind["major"]?.count ?? 0
+    console.log(
+      `${pad(r.variant, 22, false)}  ${pad(held.pctOfWall.toFixed(1) + "%", 12)}  ${pad(heldMajor, 11)}  ${pad(noise.pctOfWall.toFixed(1) + "%", 13)}  ${pad(noiseMajor, 12)}`,
     )
   }
 

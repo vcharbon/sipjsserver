@@ -20,7 +20,7 @@
 
 import { PerformanceObserver, constants as perfConstants } from "node:perf_hooks"
 import * as v8 from "node:v8"
-import { sampleEnv, v1, v2, v3, v5, v5b, v6, makeV4, CasStore } from "./codec.js"
+import { sampleEnv, v1, v2, v3, v5, v5b, v6, v7, makeV4, CasStore } from "./codec.js"
 import { buildFixturePool, DEFAULT_MIX, tallyKinds } from "./fixtureMix.js"
 
 const variantName = process.argv[2]
@@ -38,6 +38,7 @@ const variants: Record<string, any> = {
   [v5.name]: v5,
   [v5b.name]: v5b,
   [v6.name]: v6,
+  [v7.name]: v7,
 }
 variants["v4-cas-outofband"] = makeV4(cas)
 
@@ -244,6 +245,76 @@ const main = async () => {
     variant.wireEncode(envs[j]!, body)
   }, fullFlushIter, Math.max(1, Math.min(WARMUP, 1000)))
 
+  // ── fullFlushHeld — Buffer-lifetime regime ─────────────────────────
+  // Production keeps each encoded Buffer alive in flushCache +
+  // BufferedTerminateWriter queue + ioredis send until the local Redis
+  // Lua ack returns (tens to hundreds of ms; through the queue can be
+  // multiple seconds under load). That lifetime promotes Buffers out
+  // of new-space into old-space and turns minor GCs into mark-compact
+  // pauses. The original `fullFlush` stage discards each Buffer
+  // immediately and never exercises that regime — protobuf-vs-msgpack-
+  // records sized-by-bytes ratios look similar there even though they
+  // differ a lot under production load. This stage replays the
+  // production lifetime by parking the last `RING_SIZE` outputs in a
+  // ring buffer. Sized to roughly mirror "active_dialogs × encode-
+  // per-call factor" under abuse traffic.
+  const RING_SIZE = 4096
+  const ringBodies: unknown[] = new Array(RING_SIZE)
+  const ringFrames: unknown[] = new Array(RING_SIZE)
+  let ringIdx = 0
+  const stageFullFlushHeld = await measure("fullFlushHeld", (i) => {
+    const j = pick(i)
+    const body = variant.encodeCall(fixturePool[j]!)
+    const frame = variant.wireEncode(envs[j]!, body)
+    // Evict the slot we're about to overwrite — match production where
+    // a flush completes (ack) and releases the Buffer reference.
+    ringBodies[ringIdx] = body
+    ringFrames[ringIdx] = frame
+    ringIdx = (ringIdx + 1) % RING_SIZE
+  }, fullFlushIter, Math.max(1, Math.min(WARMUP, 1000)))
+
+  // ── fullFlushConcurrent — system-coupling regime ────────────────────
+  // In production the encode shares new-space with at least five other
+  // allocation sources per SIP message: parsed SipRequest (header map +
+  // body Buffer), the immutable Call clone produced by the rule chain,
+  // HandlerResult + effects arrays, the outbound response Buffer, and
+  // Effect Generator/Context/Closure frames. With another producer
+  // filling new-space alongside the encode, allocations cross the
+  // promotion threshold sooner and major-GC frequency rises. This
+  // stage simulates that by allocating a small fixed batch of
+  // throwaway objects + Buffers per iteration. The numbers are
+  // calibrated to match the per-SIP-message allocation count observed
+  // via heap-snapshot retainer counts on worker-0 under abuse load
+  // (~25 objects, ~3 small Buffers).
+  //
+  // The allocations escape the iteration just long enough to ensure
+  // they touch new-space (i.e. the V8 optimiser can't dead-code-
+  // eliminate them) but die between scavenges, mirroring the
+  // production "short-lived but plentiful" workload.
+  const NOISE_OBJ_COUNT = 25
+  const NOISE_BUF_COUNT = 3
+  const NOISE_BUF_SIZE = 256
+  let noiseSink: unknown = null
+  const stageFullFlushConcurrent = await measure("fullFlushConcurrent", (i) => {
+    const j = pick(i)
+    const body = variant.encodeCall(fixturePool[j]!)
+    variant.wireEncode(envs[j]!, body)
+    // Concurrent-allocator imitation. Keep ONE reference alive via the
+    // module-level `noiseSink` so V8 can't elide the work. The rest
+    // become garbage immediately.
+    const objs: Array<{ id: number; tag: string; arr: number[] }> = new Array(NOISE_OBJ_COUNT)
+    for (let k = 0; k < NOISE_OBJ_COUNT; k++) {
+      objs[k] = { id: i + k, tag: `noise-${j}-${k}`, arr: [i, k, j] }
+    }
+    const bufs: Buffer[] = new Array(NOISE_BUF_COUNT)
+    for (let k = 0; k < NOISE_BUF_COUNT; k++) {
+      bufs[k] = Buffer.alloc(NOISE_BUF_SIZE, k)
+    }
+    noiseSink = { objs, bufs }
+  }, fullFlushIter, Math.max(1, Math.min(WARMUP, 1000)))
+  // Touch noiseSink so the optimiser doesn't elide the assignment.
+  if (noiseSink === undefined) console.error("unreachable")
+
   // Full round-trip — what the replication receiver pays. Includes
   // wire-decode + body-decode on top of the producer side.
   const stageFull = await measure("FULL.pipeline", (i) => {
@@ -269,6 +340,8 @@ const main = async () => {
       C: stageC,
       D: stageD,
       fullFlush: stageFullFlush,
+      fullFlushHeld: stageFullFlushHeld,
+      fullFlushConcurrent: stageFullFlushConcurrent,
       FULL: stageFull,
     },
     mem: {

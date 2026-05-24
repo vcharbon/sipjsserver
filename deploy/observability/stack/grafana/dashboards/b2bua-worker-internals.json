@@ -163,6 +163,161 @@
           }
         }
       }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Transaction layer (txnMap occupancy)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 },
+      "panels": []
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Active transactions by method (server-side, all states)",
+      "description": "txnMap occupancy summed over states, broken down by SIP method. A growing OPTIONS / re-INVITE / ghost-method line under abuse traffic is the txnMap-side signal of working-set inflation. Sum across methods = total active txns this worker is tracking.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 57 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod, method) (b2bua_worker_active_transactions{role=\"server\", pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{pod}} {{method}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Timer H/J occupants — completed server txns by method (32 s pin)",
+      "description": "Filters to role=server, state=completed — every entry here is pinned for the 32 s Timer H/J retransmit-absorb window after a final response was sent (RFC 3261 §17.2.1 / §17.2.2). High counts on OPTIONS / re-INVITE under abuse are the working-set retainer behind the 2026-05-23 RSS plateau finding.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 57 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod, method) (b2bua_worker_active_transactions{role=\"server\", state=\"completed\", pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{pod}} {{method}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Active transactions by state (server-side)",
+      "description": "Distribution across trying / proceeding / completed / terminated. `completed` is the long-lived bucket (32 s pin); the other three are short-lived. Healthy traffic shows mostly trying/proceeding with a small completed tail.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod, state) (b2bua_worker_active_transactions{role=\"server\", pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{pod}} {{state}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Client-side outbound transactions by method",
+      "description": "txnMap occupancy on the client side — outbound INVITE / BYE / re-INVITE legs we have in flight to upstream. Each one is bounded by Timer B/F (32 s) and is cleared immediately on final response. Sustained growth here means upstream is slow, not abuse.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod, method) (b2bua_worker_active_transactions{role=\"client\", pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{pod}} {{method}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Memory composition (process + cgroup + encode cache)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 73 },
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "process.memoryUsage() — stacked breakdown",
+      "description": "RSS broken into V8 heap reserved + V8 heap used + external (Buffer/ArrayBuffer backing) + residual. rss = heap_total + external + non-JS (libuv / JIT code / native stacks / allocator slack). The gap between heap_used and heap_total is V8 reserved slack — not actively used but not yet released.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 74 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_process_memory_bytes{kind=\"rss\", pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} rss" },
+        { "expr": "b2bua_process_memory_bytes{kind=\"heap_total\", pod=~\"$pod\"}", "refId": "B", "legendFormat": "{{pod}} heap_total" },
+        { "expr": "b2bua_process_memory_bytes{kind=\"heap_used\", pod=~\"$pod\"}", "refId": "C", "legendFormat": "{{pod}} heap_used" },
+        { "expr": "b2bua_process_memory_bytes{kind=\"external\", pod=~\"$pod\"}", "refId": "D", "legendFormat": "{{pod}} external" },
+        { "expr": "b2bua_process_memory_bytes{kind=\"array_buffers\", pod=~\"$pod\"}", "refId": "E", "legendFormat": "{{pod}} array_buffers" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Non-JS memory share — rss − (heap_total + external)",
+      "description": "What's in RSS but NOT accounted for by V8 heap or external Buffer backings. This is libuv internals, V8 JIT'd code, native thread stacks, and allocator (glibc malloc / jemalloc) retention. A growing 'other' line is usually allocator fragmentation rather than a JS leak.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 74 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_process_memory_bytes{kind=\"rss\", pod=~\"$pod\"} - b2bua_process_memory_bytes{kind=\"heap_total\", pod=~\"$pod\"} - b2bua_process_memory_bytes{kind=\"external\", pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} non-JS" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Cgroup memory.stat — anonymous vs file/kernel",
+      "description": "Kernel-side accounting. `anon` dominates and tracks RSS closely (it's Node's heap + V8 arenas + Buffer pool). `file`/`kernel`/`slab` are normally tiny — growth in those is a sign of file-mapped working set or kernel pressure.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 82 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_cgroup_memory_bytes{kind=\"anon\", pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} anon" },
+        { "expr": "b2bua_cgroup_memory_bytes{kind=\"file\", pod=~\"$pod\"}", "refId": "B", "legendFormat": "{{pod}} file" },
+        { "expr": "b2bua_cgroup_memory_bytes{kind=\"kernel\", pod=~\"$pod\"}", "refId": "C", "legendFormat": "{{pod}} kernel" },
+        { "expr": "b2bua_cgroup_memory_bytes{kind=\"slab\", pod=~\"$pod\"}", "refId": "D", "legendFormat": "{{pod}} slab" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "V8 heap per-space breakdown",
+      "description": "v8.getHeapSpaceStatistics() per-space committed size. `code_space` + `code_large_object_space` = compiled JS code (NOT counted in process.memoryUsage().heapTotal — grows under varied workloads as the optimiser re-compiles). `old_space` is where long-lived JS lives. `large_object_space` holds >512KB allocations (large Buffers, big arrays). `new_space` is the young generation (cheap to GC).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 90 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "sum by (pod, space) (b2bua_v8_heap_space_bytes{kind=\"committed\", pod=~\"$pod\"})", "refId": "A", "legendFormat": "{{pod}} {{space}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Allocator retention — peak_malloced vs current malloced",
+      "description": "v8.getHeapStatistics(). `malloced_memory` = V8's current internal C++ allocations; `peak_malloced_memory` = high-water mark. If peak stays much higher than current after a burst subsides, it confirms allocator retention (glibc not returning to OS). MALLOC_ARENA_MAX=2 in worker NODE_OPTIONS clamps this. Also: total_heap_size_executable shows the V8 code space NOT counted in process.memoryUsage().heapTotal.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 90 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_v8_heap_stats_bytes{kind=\"malloced_memory\", pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} malloced_now" },
+        { "expr": "b2bua_v8_heap_stats_bytes{kind=\"peak_malloced_memory\", pod=~\"$pod\"}", "refId": "B", "legendFormat": "{{pod}} malloced_peak" },
+        { "expr": "b2bua_v8_heap_stats_bytes{kind=\"total_heap_size_executable\", pod=~\"$pod\"}", "refId": "C", "legendFormat": "{{pod}} code_space" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0 } }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "flushCache — entries (left axis) + encoded bytes (right axis)",
+      "description": "Per-call encode-dedup cache. Entries = one per active call. Bytes = total retained msgpack-encoded Call bodies. Under abuse, each call's encoded body grows with messageCount (up to 100), so bytes scale roughly with active_dialogs × max-message-count. Compare against `array_buffers` to see what share of external memory the encoding path holds.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 82 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_flush_cache_entries{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} entries" },
+        { "expr": "b2bua_flush_cache_bytes{pod=~\"$pod\"}", "refId": "B", "legendFormat": "{{pod}} bytes" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": [
+          { "matcher": { "id": "byFrameRefID", "options": "B" }, "properties": [ { "id": "unit", "value": "bytes" }, { "id": "custom.axisPlacement", "value": "right" } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
     }
   ]
 }

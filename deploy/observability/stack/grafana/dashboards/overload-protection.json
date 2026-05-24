@@ -349,6 +349,52 @@
       "datasource": { "type": "prometheus", "uid": "vm" },
       "targets": [{ "expr": "b2bua_loop_lag_ms_p95{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}}" }],
       "fieldConfig": { "defaults": { "unit": "ms" } }
+    },
+    {
+      "id": 60,
+      "type": "row",
+      "title": "Replication backpressure (local-sidecar I/O)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 80 },
+      "panels": []
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "BufferedTerminateWriter queue depth vs capacity",
+      "description": "Bounded queue between SipRouter and local-sidecar Redis writes. Depth approaching capacity means the local sidecar is the bottleneck. NOTE: peer death does NOT show up here (peer-bound backlog lives in propagate:* ZSETs, see panel below).",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 81 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_storage_buffer_depth{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} depth" },
+        { "expr": "b2bua_storage_buffer_capacity{pod=~\"$pod\"}", "refId": "B", "legendFormat": "{{pod}} capacity" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 } }
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "Storage-buffer fallthrough rate (queue-full → inline write)",
+      "description": "Non-zero fallthrough = bounded queue saturated; submit ran inline against local Redis with storageDropFallbackMs ceiling. Non-zero fallthrough_errors_total = those inline writes timed out or failed — terminate-path state may be lost. Sustained non-zero is the local-sidecar overload signal.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 81 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "rate(b2bua_storage_buffer_fallthrough_total{pod=~\"$pod\"}[1m])", "refId": "A", "legendFormat": "{{pod}} fallthrough" },
+        { "expr": "rate(b2bua_storage_buffer_fallthrough_errors_total{pod=~\"$pod\"}[1m])", "refId": "B", "legendFormat": "{{pod}} errors" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 } }
+    },
+    {
+      "id": 63,
+      "type": "timeseries",
+      "title": "Propagate ZSET size per peer (replication backlog in local sidecar)",
+      "description": "Per-peer total members across all gen buckets of propagate:{self}->{peer}. Grows when a peer's ReplPuller stops draining (peer dead). Lives in local-sidecar memory only — NOT in B2BUA heap. Observation-only: by HA contract the surviving worker must keep serving; sidecar maxmemory is the bound.",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 88 },
+      "datasource": { "type": "prometheus", "uid": "vm" },
+      "targets": [
+        { "expr": "b2bua_propagate_zset_size{pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{pod}} {{peer}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
     }
   ]
 }

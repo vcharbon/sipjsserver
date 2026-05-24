@@ -2,6 +2,15 @@ syntax = "proto3";
 
 package bench;
 
+// MUST stay in sync with src/call/codec/call.proto. The two files diverged
+// once and the bench reported protobuf as ~22% smaller than it really is
+// in production (see /tmp/handoff-mTECIP.md follow-up + ADR 0011). When
+// you edit this file, mirror the same change in src/call/codec/call.proto
+// and regenerate BOTH .gen.cjs files. A future CI gate should diff the
+// message bodies of the two files and fail on drift.
+//
+// Bench-only additions live at the end (Frame).
+
 message RemoteInfo {
   string address = 1;
   int32 port = 2;
@@ -35,10 +44,14 @@ message StackDialog {
 }
 
 message B2buaDialogExt {
+  // `Schema.NullOr(Int)` — null carried via `remoteCSeqIsNull`.
   optional int32 remoteCSeq = 1;
-  repeated PendingRequest inboundPendingRequests = 2;
-  optional string ackBranch = 3;
-  optional bytes cachedSdp = 5;
+  optional bool remoteCSeqIsNull = 2;
+  repeated PendingRequest inboundPendingRequests = 3;
+  optional string ackBranch = 4;
+  // InviteTxnHandle carries `originalInvite: Schema.Unknown` (best-effort).
+  optional string pendingInviteTxnJson = 5;
+  optional bytes cachedSdp = 6;
 }
 
 message Dialog {
@@ -54,10 +67,12 @@ message Leg {
   string state = 5;
   string disposition = 6;
   repeated Dialog dialogs = 7;
-  optional string byeDisposition = 8;
-  optional string localUri = 9;
-  optional string remoteUri = 10;
-  optional string inviteRequestUri = 11;
+  optional double noAnswerTimeoutSec = 8;
+  optional string byeDisposition = 9;
+  optional string localUri = 10;
+  optional string remoteUri = 11;
+  optional string inviteRequestUri = 12;
+  optional string pendingInviteTxnJson = 13;
 }
 
 message ALegInvite {
@@ -102,13 +117,16 @@ message CallTopology {
 
 message ActiveRule {
   string id = 1;
-  optional string paramsJson = 2;
-  bool active = 3;
+  // `params: optional unknown` — absence vs presence preserved via paramsPresent.
+  bool paramsPresent = 2;
+  optional string paramsJson = 3;
+  bool active = 4;
 }
 
 message RuleStateEntry {
   string ruleId = 1;
-  optional string stateJson = 2;
+  bool statePresent = 2;
+  optional string stateJson = 3;
 }
 
 message ActivePeer {
@@ -120,33 +138,64 @@ message Call {
   string callRef = 1;
   Leg aLeg = 2;
   repeated Leg bLegs = 3;
+  // `Schema.NullOr(ActivePeer)` — null vs object distinguished by
+  // `activePeerIsNull` (always set so the field is explicit on the wire).
   optional ActivePeer activePeer = 4;
-  optional string callbackContext = 5;
-  optional string billingContext = 6;
-  ALegInvite aLegInvite = 7;
-  repeated CallLimiterState limiterEntries = 8;
-  repeated TimerEntry timers = 9;
-  repeated CdrEvent cdrEvents = 10;
-  string state = 11;
-  double createdAt = 12;
-  repeated string aLegPendingVias = 13;
-  optional int32 aLegPendingCSeq = 14;
-  repeated TagMapping tagMap = 15;
-  optional string traceId = 16;
-  optional string rootSpanId = 17;
-  optional bool sampled = 18;
-  optional int32 workerIndex = 19;
-  optional CallTopology topology = 20;
-  optional bool emergency = 21;
-  optional string featuresJson = 22;
-  optional string policyUpdateHeadersJson = 23;
-  optional bytes policyUpdateBody = 24;
-  repeated ActiveRule activeRules = 25;
-  repeated RuleStateEntry ruleState = 26;
-  optional string transferJson = 27;
-  optional string earlyPromoteJson = 28;
+  bool activePeerIsNull = 5;
+
+  optional string callbackContext = 6;
+  // `Schema.optional(Schema.NullOr(Schema.String))` — three states.
+  optional string billingContext = 7;
+  optional bool billingContextIsNull = 8;
+
+  ALegInvite aLegInvite = 9;
+  repeated CallLimiterState limiterEntries = 10;
+  repeated TimerEntry timers = 11;
+  repeated CdrEvent cdrEvents = 12;
+  string state = 13;
+  double createdAt = 14;
+
+  // `Schema.optional(Schema.Array(_))` — empty arrays survive via
+  // `aLegPendingViasPresent`. Without it, `[]` round-trips to `undefined`.
+  repeated string aLegPendingVias = 15;
+  bool aLegPendingViasPresent = 16;
+
+  optional int32 aLegPendingCSeq = 17;
+  repeated TagMapping tagMap = 18;
+  optional string traceId = 19;
+  optional string rootSpanId = 20;
+  optional bool sampled = 21;
+  optional int32 workerIndex = 22;
+  optional CallTopology topology = 23;
+  optional bool emergency = 24;
+
+  // Closed/open union side-channels (JSON-string).
+  optional string featuresJson = 25;
+  optional string policyUpdateHeadersJson = 26;
+  optional bytes policyUpdateBody = 27;
+  optional bool policyUpdateBodyIsNull = 28;
+
+  // Optional repeated fields — presence carried explicitly.
+  repeated ActiveRule activeRules = 29;
+  bool activeRulesPresent = 30;
+  repeated RuleStateEntry ruleState = 31;
+  bool ruleStatePresent = 32;
+
+  // `Schema.optional(Schema.NullOr(T))` — three states (absent/null/value).
+  optional string transferJson = 33;
+  optional bool transferIsNull = 34;
+  optional string earlyPromoteJson = 35;
+  optional bool earlyPromoteIsNull = 36;
+
+  optional int32 messageCount = 37;
+  repeated string terminatingRefreshLegs = 38;
+  bool terminatingRefreshLegsPresent = 39;
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Bench-only: envelope used to measure replication-frame encode/decode cost.
+// Not part of production wire format.
+// ──────────────────────────────────────────────────────────────────────────
 message Frame {
   int32 gen = 1;
   int32 counter = 2;

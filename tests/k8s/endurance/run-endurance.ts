@@ -382,7 +382,12 @@ const main = (argv: ReadonlyArray<string>) =>
     // after capture, so the volume's 2 GiB sizeLimit is no longer a
     // ticking eviction timer. Aggressive 60 s cadence belongs to active
     // leak hunts only — see docs/plan/2026-05-14-post-proxy-graceful-481-wave-investigation.md §6.4.1.
-    const WORKER_MEM_LIMIT_BYTES = 1024 * 1024 * 1024
+    // Must mirror tests/k8s/values/b2bua-worker.endurance.yaml
+    // `resources.limits.memory` (currently 2Gi). The recorder fires
+    // heap-snapshot triggers at 50% / 65% of this; mis-tuning to a
+    // smaller value (the prior 1 GiB) caused the recorder to OOM
+    // workers because v8.writeHeapSnapshot temporarily ~doubles RSS.
+    const WORKER_MEM_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
     const recorder = yield* startRecorder({
       namespace: NAMESPACE,
       artifactDir,

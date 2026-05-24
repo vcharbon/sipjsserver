@@ -88,6 +88,49 @@ extraEnv:
   # failures) and adding ~200 MB of off-heap sample buffer.
   - name: NODE_OPTIONS
     value: "--heapsnapshot-signal=SIGUSR2 --max-old-space-size=800 --heapsnapshot-near-heap-limit=2"
+  # glibc malloc retention tuning. Default arena count is 8 × nproc on
+  # multi-core nodes (kind workers have 4-16 cores → 32-128 arenas).
+  # Each arena keeps its own free-list and never releases to the OS
+  # except via the slow `M_TRIM_THRESHOLD` path. Under abuse traffic
+  # the high-water-mark allocation rate grows every arena, and the
+  # ~1 GB "non-JS gap" between V8 heap + external and RSS we observed
+  # in `gauges-verify-20caps-1abuse-30m-2026-05-24t11-21` is almost
+  # entirely this retention. `MALLOC_ARENA_MAX=2` clamps glibc to 2
+  # arenas — well-known Node-server tuning that significantly reduces
+  # RSS plateau at the cost of a tiny lock-contention increase (we
+  # have ~10 concurrent allocation sources, far below the contention
+  # threshold). The b2bua_v8_heap_stats_bytes{kind="peak_malloced_memory"}
+  # gauge vs b2bua_process_memory_bytes{kind="rss"} delta confirms the win.
+  - name: MALLOC_ARENA_MAX
+    value: "2"
+  # ADR 0012 — sizing assertions, made explicit at launch time. Each
+  # assertion is observable via /metrics; the Memory Sizing dashboard
+  # plots the gauge alongside its target. Drift trips the dashboard,
+  # not a production incident.
+  #
+  #   - MAX_MESSAGES_PER_CALL=100 caps flushCache body growth per call.
+  #     Combined with the steady-state target of ≤ 1000 concurrent
+  #     calls → flushCache stays under ~100 MB.
+  #     Observed via: b2bua_flush_cache_bytes,
+  #                   b2bua_active_dialogs,
+  #                   b2bua_encode_bytes_total / b2bua_encode_count_total.
+  #
+  #   - Tier-3 admission (ADR 0007) caps CPS at ≤ 50/s/worker.
+  #     Observed via: rate(b2bua_overload_admit_total).
+  #
+  #   - Tier-1 UDP brake bounds inbound message rate; the bounded
+  #     event queue is the second-stage backstop.
+  #     Observed via: rate(b2bua_messages_total{direction="inbound"}),
+  #                   b2bua_worker_event_queue_drops_total.
+  #
+  #   - Avg inbound SIP message size assumed ≤ 2 KB.
+  #     Observed via: rate(b2bua_messages_bytes_total{direction="inbound"})
+  #                 / rate(b2bua_messages_total{direction="inbound"}).
+  #
+  #   - Replication write rate per worker assumed ≤ 500/s.
+  #     Observed via: rate(b2bua_replication_writes_total).
+  - name: MAX_MESSAGES_PER_CALL
+    value: "100"
 
 # Cap worker app container memory so unreclaimable heap growth
 # becomes a deterministic OOMKilled at 2Gi instead of slow CPU

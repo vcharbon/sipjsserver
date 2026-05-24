@@ -1,4 +1,4 @@
-/*eslint-disable block-scoped-var, id-length, no-control-regex, no-magic-numbers, no-mixed-operators, no-prototype-builtins, no-redeclare, no-shadow, no-var, sort-vars, default-case, jsdoc/require-param*/
+/*eslint-disable block-scoped-var, id-length, no-control-regex, no-magic-numbers, no-prototype-builtins, no-redeclare, no-shadow, no-var, sort-vars*/
 "use strict";
 
 var $protobuf = require("protobufjs/minimal");
@@ -22,32 +22,19 @@ $root.bench = (function() {
 
         /**
          * Properties of a RemoteInfo.
-         * @typedef {Object} bench.RemoteInfo.$Properties
-         * @property {string|null} [address] RemoteInfo address
-         * @property {number|null} [port] RemoteInfo port
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a RemoteInfo.
          * @memberof bench
          * @interface IRemoteInfo
-         * @augments bench.RemoteInfo.$Properties
-         * @deprecated Use bench.RemoteInfo.$Properties instead.
-         */
-
-        /**
-         * Shape of a RemoteInfo.
-         * @typedef {bench.RemoteInfo.$Properties} bench.RemoteInfo.$Shape
+         * @property {string|null} [address] RemoteInfo address
+         * @property {number|null} [port] RemoteInfo port
          */
 
         /**
          * Constructs a new RemoteInfo.
          * @memberof bench
          * @classdesc Represents a RemoteInfo.
+         * @implements IRemoteInfo
          * @constructor
-         * @param {bench.RemoteInfo.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IRemoteInfo=} [properties] Properties to set
          */
         function RemoteInfo(properties) {
             if (properties)
@@ -77,12 +64,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.RemoteInfo
          * @static
-         * @param {bench.RemoteInfo.$Properties=} [properties] Properties to set
+         * @param {bench.IRemoteInfo=} [properties] Properties to set
          * @returns {bench.RemoteInfo} RemoteInfo instance
-         * @type {{
-         *   (properties: bench.RemoteInfo.$Shape): bench.RemoteInfo & bench.RemoteInfo.$Shape;
-         *   (properties?: bench.RemoteInfo.$Properties): bench.RemoteInfo;
-         * }}
          */
         RemoteInfo.create = function create(properties) {
             return new RemoteInfo(properties);
@@ -93,24 +76,21 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.RemoteInfo
          * @static
-         * @param {bench.RemoteInfo.$Properties} message RemoteInfo message or plain object to encode
+         * @param {bench.IRemoteInfo} message RemoteInfo message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        RemoteInfo.encode = function encode(message, writer, _depth) {
+        RemoteInfo.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.address != null && Object.hasOwnProperty.call(message, "address"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.address);
             if (message.port != null && Object.hasOwnProperty.call(message, "port"))
                 writer.uint32(/* id 2, wireType 0 =*/16).int32(message.port);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -119,12 +99,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.RemoteInfo
          * @static
-         * @param {bench.RemoteInfo.$Properties} message RemoteInfo message or plain object to encode
+         * @param {bench.IRemoteInfo} message RemoteInfo message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         RemoteInfo.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -134,52 +114,36 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.RemoteInfo & bench.RemoteInfo.$Shape} RemoteInfo
+         * @returns {bench.RemoteInfo} RemoteInfo
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        RemoteInfo.decode = function decode(reader, length, _end, _depth, _target) {
+        RemoteInfo.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.RemoteInfo(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.RemoteInfo();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.address = value;
-                        else
-                            delete message.address;
-                        continue;
+                        message.address = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.port = value;
-                        else
-                            delete message.port;
-                        continue;
+                        message.port = reader.int32();
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -189,7 +153,7 @@ $root.bench = (function() {
          * @memberof bench.RemoteInfo
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.RemoteInfo & bench.RemoteInfo.$Shape} RemoteInfo
+         * @returns {bench.RemoteInfo} RemoteInfo
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -207,13 +171,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        RemoteInfo.verify = function verify(message, _depth) {
+        RemoteInfo.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.address != null && message.hasOwnProperty("address"))
                 if (!$util.isString(message.address))
                     return "address: string expected";
@@ -231,20 +195,18 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.RemoteInfo} RemoteInfo
          */
-        RemoteInfo.fromObject = function fromObject(object, _depth) {
+        RemoteInfo.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.RemoteInfo)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.RemoteInfo();
             if (object.address != null)
-                if (typeof object.address !== "string" || object.address.length)
-                    message.address = String(object.address);
+                message.address = String(object.address);
             if (object.port != null)
-                if (Number(object.port) !== 0)
-                    message.port = object.port | 0;
+                message.port = object.port | 0;
             return message;
         };
 
@@ -257,12 +219,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        RemoteInfo.toObject = function toObject(message, options, _depth) {
+        RemoteInfo.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -288,17 +250,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for RemoteInfo
+         * Gets the default type url for RemoteInfo
          * @function getTypeUrl
          * @memberof bench.RemoteInfo
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        RemoteInfo.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.RemoteInfo";
+        RemoteInfo.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.RemoteInfo";
         };
 
         return RemoteInfo;
@@ -308,32 +271,19 @@ $root.bench = (function() {
 
         /**
          * Properties of a SipHeader.
-         * @typedef {Object} bench.SipHeader.$Properties
-         * @property {string|null} [name] SipHeader name
-         * @property {string|null} [value] SipHeader value
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a SipHeader.
          * @memberof bench
          * @interface ISipHeader
-         * @augments bench.SipHeader.$Properties
-         * @deprecated Use bench.SipHeader.$Properties instead.
-         */
-
-        /**
-         * Shape of a SipHeader.
-         * @typedef {bench.SipHeader.$Properties} bench.SipHeader.$Shape
+         * @property {string|null} [name] SipHeader name
+         * @property {string|null} [value] SipHeader value
          */
 
         /**
          * Constructs a new SipHeader.
          * @memberof bench
          * @classdesc Represents a SipHeader.
+         * @implements ISipHeader
          * @constructor
-         * @param {bench.SipHeader.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.ISipHeader=} [properties] Properties to set
          */
         function SipHeader(properties) {
             if (properties)
@@ -363,12 +313,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.SipHeader
          * @static
-         * @param {bench.SipHeader.$Properties=} [properties] Properties to set
+         * @param {bench.ISipHeader=} [properties] Properties to set
          * @returns {bench.SipHeader} SipHeader instance
-         * @type {{
-         *   (properties: bench.SipHeader.$Shape): bench.SipHeader & bench.SipHeader.$Shape;
-         *   (properties?: bench.SipHeader.$Properties): bench.SipHeader;
-         * }}
          */
         SipHeader.create = function create(properties) {
             return new SipHeader(properties);
@@ -379,24 +325,21 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.SipHeader
          * @static
-         * @param {bench.SipHeader.$Properties} message SipHeader message or plain object to encode
+         * @param {bench.ISipHeader} message SipHeader message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        SipHeader.encode = function encode(message, writer, _depth) {
+        SipHeader.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.name != null && Object.hasOwnProperty.call(message, "name"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.name);
             if (message.value != null && Object.hasOwnProperty.call(message, "value"))
                 writer.uint32(/* id 2, wireType 2 =*/18).string(message.value);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -405,12 +348,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.SipHeader
          * @static
-         * @param {bench.SipHeader.$Properties} message SipHeader message or plain object to encode
+         * @param {bench.ISipHeader} message SipHeader message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         SipHeader.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -420,52 +363,36 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.SipHeader & bench.SipHeader.$Shape} SipHeader
+         * @returns {bench.SipHeader} SipHeader
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        SipHeader.decode = function decode(reader, length, _end, _depth, _target) {
+        SipHeader.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.SipHeader(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.SipHeader();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.name = value;
-                        else
-                            delete message.name;
-                        continue;
+                        message.name = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.value = value;
-                        else
-                            delete message.value;
-                        continue;
+                        message.value = reader.string();
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -475,7 +402,7 @@ $root.bench = (function() {
          * @memberof bench.SipHeader
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.SipHeader & bench.SipHeader.$Shape} SipHeader
+         * @returns {bench.SipHeader} SipHeader
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -493,13 +420,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        SipHeader.verify = function verify(message, _depth) {
+        SipHeader.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.name != null && message.hasOwnProperty("name"))
                 if (!$util.isString(message.name))
                     return "name: string expected";
@@ -517,20 +444,18 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.SipHeader} SipHeader
          */
-        SipHeader.fromObject = function fromObject(object, _depth) {
+        SipHeader.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.SipHeader)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.SipHeader();
             if (object.name != null)
-                if (typeof object.name !== "string" || object.name.length)
-                    message.name = String(object.name);
+                message.name = String(object.name);
             if (object.value != null)
-                if (typeof object.value !== "string" || object.value.length)
-                    message.value = String(object.value);
+                message.value = String(object.value);
             return message;
         };
 
@@ -543,12 +468,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        SipHeader.toObject = function toObject(message, options, _depth) {
+        SipHeader.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -574,17 +499,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for SipHeader
+         * Gets the default type url for SipHeader
          * @function getTypeUrl
          * @memberof bench.SipHeader
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        SipHeader.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.SipHeader";
+        SipHeader.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.SipHeader";
         };
 
         return SipHeader;
@@ -594,7 +520,8 @@ $root.bench = (function() {
 
         /**
          * Properties of a PendingRequest.
-         * @typedef {Object} bench.PendingRequest.$Properties
+         * @memberof bench
+         * @interface IPendingRequest
          * @property {string|null} [method] PendingRequest method
          * @property {number|null} [outboundCSeq] PendingRequest outboundCSeq
          * @property {number|null} [inboundCSeq] PendingRequest inboundCSeq
@@ -603,29 +530,15 @@ $root.bench = (function() {
          * @property {string|null} [sourceFrom] PendingRequest sourceFrom
          * @property {string|null} [sourceTo] PendingRequest sourceTo
          * @property {string|null} [direction] PendingRequest direction
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a PendingRequest.
-         * @memberof bench
-         * @interface IPendingRequest
-         * @augments bench.PendingRequest.$Properties
-         * @deprecated Use bench.PendingRequest.$Properties instead.
-         */
-
-        /**
-         * Shape of a PendingRequest.
-         * @typedef {bench.PendingRequest.$Properties} bench.PendingRequest.$Shape
          */
 
         /**
          * Constructs a new PendingRequest.
          * @memberof bench
          * @classdesc Represents a PendingRequest.
+         * @implements IPendingRequest
          * @constructor
-         * @param {bench.PendingRequest.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IPendingRequest=} [properties] Properties to set
          */
         function PendingRequest(properties) {
             this.sourceVias = [];
@@ -704,12 +617,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.PendingRequest
          * @static
-         * @param {bench.PendingRequest.$Properties=} [properties] Properties to set
+         * @param {bench.IPendingRequest=} [properties] Properties to set
          * @returns {bench.PendingRequest} PendingRequest instance
-         * @type {{
-         *   (properties: bench.PendingRequest.$Shape): bench.PendingRequest & bench.PendingRequest.$Shape;
-         *   (properties?: bench.PendingRequest.$Properties): bench.PendingRequest;
-         * }}
          */
         PendingRequest.create = function create(properties) {
             return new PendingRequest(properties);
@@ -720,16 +629,16 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.PendingRequest
          * @static
-         * @param {bench.PendingRequest.$Properties} message PendingRequest message or plain object to encode
+         * @param {bench.IPendingRequest} message PendingRequest message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        PendingRequest.encode = function encode(message, writer, _depth) {
+        PendingRequest.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.method != null && Object.hasOwnProperty.call(message, "method"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.method);
@@ -748,9 +657,6 @@ $root.bench = (function() {
                 writer.uint32(/* id 7, wireType 2 =*/58).string(message.sourceTo);
             if (message.direction != null && Object.hasOwnProperty.call(message, "direction"))
                 writer.uint32(/* id 8, wireType 2 =*/66).string(message.direction);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -759,12 +665,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.PendingRequest
          * @static
-         * @param {bench.PendingRequest.$Properties} message PendingRequest message or plain object to encode
+         * @param {bench.IPendingRequest} message PendingRequest message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         PendingRequest.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -774,105 +680,62 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.PendingRequest & bench.PendingRequest.$Shape} PendingRequest
+         * @returns {bench.PendingRequest} PendingRequest
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        PendingRequest.decode = function decode(reader, length, _end, _depth, _target) {
+        PendingRequest.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.PendingRequest(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.PendingRequest();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.method = value;
-                        else
-                            delete message.method;
-                        continue;
+                        message.method = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.outboundCSeq = value;
-                        else
-                            delete message.outboundCSeq;
-                        continue;
+                        message.outboundCSeq = reader.int32();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.inboundCSeq = value;
-                        else
-                            delete message.inboundCSeq;
-                        continue;
+                        message.inboundCSeq = reader.int32();
+                        break;
                     }
                 case 4: {
-                        if (wireType !== 2)
-                            break;
                         if (!(message.sourceVias && message.sourceVias.length))
                             message.sourceVias = [];
                         message.sourceVias.push(reader.string());
-                        continue;
+                        break;
                     }
                 case 5: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.sourceCallId = value;
-                        else
-                            delete message.sourceCallId;
-                        continue;
+                        message.sourceCallId = reader.string();
+                        break;
                     }
                 case 6: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.sourceFrom = value;
-                        else
-                            delete message.sourceFrom;
-                        continue;
+                        message.sourceFrom = reader.string();
+                        break;
                     }
                 case 7: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.sourceTo = value;
-                        else
-                            delete message.sourceTo;
-                        continue;
+                        message.sourceTo = reader.string();
+                        break;
                     }
                 case 8: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.direction = value;
-                        else
-                            delete message.direction;
-                        continue;
+                        message.direction = reader.string();
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -882,7 +745,7 @@ $root.bench = (function() {
          * @memberof bench.PendingRequest
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.PendingRequest & bench.PendingRequest.$Shape} PendingRequest
+         * @returns {bench.PendingRequest} PendingRequest
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -900,13 +763,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        PendingRequest.verify = function verify(message, _depth) {
+        PendingRequest.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.method != null && message.hasOwnProperty("method"))
                 if (!$util.isString(message.method))
                     return "method: string expected";
@@ -946,42 +809,35 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.PendingRequest} PendingRequest
          */
-        PendingRequest.fromObject = function fromObject(object, _depth) {
+        PendingRequest.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.PendingRequest)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.PendingRequest();
             if (object.method != null)
-                if (typeof object.method !== "string" || object.method.length)
-                    message.method = String(object.method);
+                message.method = String(object.method);
             if (object.outboundCSeq != null)
-                if (Number(object.outboundCSeq) !== 0)
-                    message.outboundCSeq = object.outboundCSeq | 0;
+                message.outboundCSeq = object.outboundCSeq | 0;
             if (object.inboundCSeq != null)
-                if (Number(object.inboundCSeq) !== 0)
-                    message.inboundCSeq = object.inboundCSeq | 0;
+                message.inboundCSeq = object.inboundCSeq | 0;
             if (object.sourceVias) {
                 if (!Array.isArray(object.sourceVias))
                     throw TypeError(".bench.PendingRequest.sourceVias: array expected");
-                message.sourceVias = Array(object.sourceVias.length);
+                message.sourceVias = [];
                 for (var i = 0; i < object.sourceVias.length; ++i)
                     message.sourceVias[i] = String(object.sourceVias[i]);
             }
             if (object.sourceCallId != null)
-                if (typeof object.sourceCallId !== "string" || object.sourceCallId.length)
-                    message.sourceCallId = String(object.sourceCallId);
+                message.sourceCallId = String(object.sourceCallId);
             if (object.sourceFrom != null)
-                if (typeof object.sourceFrom !== "string" || object.sourceFrom.length)
-                    message.sourceFrom = String(object.sourceFrom);
+                message.sourceFrom = String(object.sourceFrom);
             if (object.sourceTo != null)
-                if (typeof object.sourceTo !== "string" || object.sourceTo.length)
-                    message.sourceTo = String(object.sourceTo);
+                message.sourceTo = String(object.sourceTo);
             if (object.direction != null)
-                if (typeof object.direction !== "string" || object.direction.length)
-                    message.direction = String(object.direction);
+                message.direction = String(object.direction);
             return message;
         };
 
@@ -994,12 +850,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        PendingRequest.toObject = function toObject(message, options, _depth) {
+        PendingRequest.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.arrays || options.defaults)
@@ -1020,7 +876,7 @@ $root.bench = (function() {
             if (message.inboundCSeq != null && message.hasOwnProperty("inboundCSeq"))
                 object.inboundCSeq = message.inboundCSeq;
             if (message.sourceVias && message.sourceVias.length) {
-                object.sourceVias = Array(message.sourceVias.length);
+                object.sourceVias = [];
                 for (var j = 0; j < message.sourceVias.length; ++j)
                     object.sourceVias[j] = message.sourceVias[j];
             }
@@ -1047,17 +903,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for PendingRequest
+         * Gets the default type url for PendingRequest
          * @function getTypeUrl
          * @memberof bench.PendingRequest
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        PendingRequest.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.PendingRequest";
+        PendingRequest.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.PendingRequest";
         };
 
         return PendingRequest;
@@ -1067,7 +924,8 @@ $root.bench = (function() {
 
         /**
          * Properties of a StackDialog.
-         * @typedef {Object} bench.StackDialog.$Properties
+         * @memberof bench
+         * @interface IStackDialog
          * @property {string|null} [callId] StackDialog callId
          * @property {string|null} [localTag] StackDialog localTag
          * @property {string|null} [remoteTag] StackDialog remoteTag
@@ -1076,29 +934,15 @@ $root.bench = (function() {
          * @property {string|null} [remoteTarget] StackDialog remoteTarget
          * @property {number|null} [localCSeq] StackDialog localCSeq
          * @property {Array.<string>|null} [routeSet] StackDialog routeSet
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a StackDialog.
-         * @memberof bench
-         * @interface IStackDialog
-         * @augments bench.StackDialog.$Properties
-         * @deprecated Use bench.StackDialog.$Properties instead.
-         */
-
-        /**
-         * Shape of a StackDialog.
-         * @typedef {bench.StackDialog.$Properties} bench.StackDialog.$Shape
          */
 
         /**
          * Constructs a new StackDialog.
          * @memberof bench
          * @classdesc Represents a StackDialog.
+         * @implements IStackDialog
          * @constructor
-         * @param {bench.StackDialog.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IStackDialog=} [properties] Properties to set
          */
         function StackDialog(properties) {
             this.routeSet = [];
@@ -1177,12 +1021,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.StackDialog
          * @static
-         * @param {bench.StackDialog.$Properties=} [properties] Properties to set
+         * @param {bench.IStackDialog=} [properties] Properties to set
          * @returns {bench.StackDialog} StackDialog instance
-         * @type {{
-         *   (properties: bench.StackDialog.$Shape): bench.StackDialog & bench.StackDialog.$Shape;
-         *   (properties?: bench.StackDialog.$Properties): bench.StackDialog;
-         * }}
          */
         StackDialog.create = function create(properties) {
             return new StackDialog(properties);
@@ -1193,16 +1033,16 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.StackDialog
          * @static
-         * @param {bench.StackDialog.$Properties} message StackDialog message or plain object to encode
+         * @param {bench.IStackDialog} message StackDialog message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        StackDialog.encode = function encode(message, writer, _depth) {
+        StackDialog.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.callId != null && Object.hasOwnProperty.call(message, "callId"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.callId);
@@ -1221,9 +1061,6 @@ $root.bench = (function() {
             if (message.routeSet != null && message.routeSet.length)
                 for (var i = 0; i < message.routeSet.length; ++i)
                     writer.uint32(/* id 8, wireType 2 =*/66).string(message.routeSet[i]);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -1232,12 +1069,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.StackDialog
          * @static
-         * @param {bench.StackDialog.$Properties} message StackDialog message or plain object to encode
+         * @param {bench.IStackDialog} message StackDialog message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         StackDialog.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -1247,105 +1084,62 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.StackDialog & bench.StackDialog.$Shape} StackDialog
+         * @returns {bench.StackDialog} StackDialog
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        StackDialog.decode = function decode(reader, length, _end, _depth, _target) {
+        StackDialog.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.StackDialog(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.StackDialog();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.callId = value;
-                        else
-                            delete message.callId;
-                        continue;
+                        message.callId = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.localTag = value;
-                        else
-                            delete message.localTag;
-                        continue;
+                        message.localTag = reader.string();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.remoteTag = value;
-                        else
-                            delete message.remoteTag;
-                        continue;
+                        message.remoteTag = reader.string();
+                        break;
                     }
                 case 4: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.localUri = value;
-                        else
-                            delete message.localUri;
-                        continue;
+                        message.localUri = reader.string();
+                        break;
                     }
                 case 5: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.remoteUri = value;
-                        else
-                            delete message.remoteUri;
-                        continue;
+                        message.remoteUri = reader.string();
+                        break;
                     }
                 case 6: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.remoteTarget = value;
-                        else
-                            delete message.remoteTarget;
-                        continue;
+                        message.remoteTarget = reader.string();
+                        break;
                     }
                 case 7: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.localCSeq = value;
-                        else
-                            delete message.localCSeq;
-                        continue;
+                        message.localCSeq = reader.int32();
+                        break;
                     }
                 case 8: {
-                        if (wireType !== 2)
-                            break;
                         if (!(message.routeSet && message.routeSet.length))
                             message.routeSet = [];
                         message.routeSet.push(reader.string());
-                        continue;
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -1355,7 +1149,7 @@ $root.bench = (function() {
          * @memberof bench.StackDialog
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.StackDialog & bench.StackDialog.$Shape} StackDialog
+         * @returns {bench.StackDialog} StackDialog
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -1373,13 +1167,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        StackDialog.verify = function verify(message, _depth) {
+        StackDialog.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.callId != null && message.hasOwnProperty("callId"))
                 if (!$util.isString(message.callId))
                     return "callId: string expected";
@@ -1419,39 +1213,32 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.StackDialog} StackDialog
          */
-        StackDialog.fromObject = function fromObject(object, _depth) {
+        StackDialog.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.StackDialog)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.StackDialog();
             if (object.callId != null)
-                if (typeof object.callId !== "string" || object.callId.length)
-                    message.callId = String(object.callId);
+                message.callId = String(object.callId);
             if (object.localTag != null)
-                if (typeof object.localTag !== "string" || object.localTag.length)
-                    message.localTag = String(object.localTag);
+                message.localTag = String(object.localTag);
             if (object.remoteTag != null)
-                if (typeof object.remoteTag !== "string" || object.remoteTag.length)
-                    message.remoteTag = String(object.remoteTag);
+                message.remoteTag = String(object.remoteTag);
             if (object.localUri != null)
-                if (typeof object.localUri !== "string" || object.localUri.length)
-                    message.localUri = String(object.localUri);
+                message.localUri = String(object.localUri);
             if (object.remoteUri != null)
-                if (typeof object.remoteUri !== "string" || object.remoteUri.length)
-                    message.remoteUri = String(object.remoteUri);
+                message.remoteUri = String(object.remoteUri);
             if (object.remoteTarget != null)
-                if (typeof object.remoteTarget !== "string" || object.remoteTarget.length)
-                    message.remoteTarget = String(object.remoteTarget);
+                message.remoteTarget = String(object.remoteTarget);
             if (object.localCSeq != null)
-                if (Number(object.localCSeq) !== 0)
-                    message.localCSeq = object.localCSeq | 0;
+                message.localCSeq = object.localCSeq | 0;
             if (object.routeSet) {
                 if (!Array.isArray(object.routeSet))
                     throw TypeError(".bench.StackDialog.routeSet: array expected");
-                message.routeSet = Array(object.routeSet.length);
+                message.routeSet = [];
                 for (var i = 0; i < object.routeSet.length; ++i)
                     message.routeSet[i] = String(object.routeSet[i]);
             }
@@ -1467,12 +1254,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        StackDialog.toObject = function toObject(message, options, _depth) {
+        StackDialog.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.arrays || options.defaults)
@@ -1501,7 +1288,7 @@ $root.bench = (function() {
             if (message.localCSeq != null && message.hasOwnProperty("localCSeq"))
                 object.localCSeq = message.localCSeq;
             if (message.routeSet && message.routeSet.length) {
-                object.routeSet = Array(message.routeSet.length);
+                object.routeSet = [];
                 for (var j = 0; j < message.routeSet.length; ++j)
                     object.routeSet[j] = message.routeSet[j];
             }
@@ -1520,17 +1307,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for StackDialog
+         * Gets the default type url for StackDialog
          * @function getTypeUrl
          * @memberof bench.StackDialog
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        StackDialog.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.StackDialog";
+        StackDialog.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.StackDialog";
         };
 
         return StackDialog;
@@ -1540,34 +1328,23 @@ $root.bench = (function() {
 
         /**
          * Properties of a B2buaDialogExt.
-         * @typedef {Object} bench.B2buaDialogExt.$Properties
-         * @property {number|null} [remoteCSeq] B2buaDialogExt remoteCSeq
-         * @property {Array.<bench.PendingRequest.$Properties>|null} [inboundPendingRequests] B2buaDialogExt inboundPendingRequests
-         * @property {string|null} [ackBranch] B2buaDialogExt ackBranch
-         * @property {Uint8Array|null} [cachedSdp] B2buaDialogExt cachedSdp
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a B2buaDialogExt.
          * @memberof bench
          * @interface IB2buaDialogExt
-         * @augments bench.B2buaDialogExt.$Properties
-         * @deprecated Use bench.B2buaDialogExt.$Properties instead.
-         */
-
-        /**
-         * Shape of a B2buaDialogExt.
-         * @typedef {bench.B2buaDialogExt.$Properties} bench.B2buaDialogExt.$Shape
+         * @property {number|null} [remoteCSeq] B2buaDialogExt remoteCSeq
+         * @property {boolean|null} [remoteCSeqIsNull] B2buaDialogExt remoteCSeqIsNull
+         * @property {Array.<bench.IPendingRequest>|null} [inboundPendingRequests] B2buaDialogExt inboundPendingRequests
+         * @property {string|null} [ackBranch] B2buaDialogExt ackBranch
+         * @property {string|null} [pendingInviteTxnJson] B2buaDialogExt pendingInviteTxnJson
+         * @property {Uint8Array|null} [cachedSdp] B2buaDialogExt cachedSdp
          */
 
         /**
          * Constructs a new B2buaDialogExt.
          * @memberof bench
          * @classdesc Represents a B2buaDialogExt.
+         * @implements IB2buaDialogExt
          * @constructor
-         * @param {bench.B2buaDialogExt.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IB2buaDialogExt=} [properties] Properties to set
          */
         function B2buaDialogExt(properties) {
             this.inboundPendingRequests = [];
@@ -1586,8 +1363,16 @@ $root.bench = (function() {
         B2buaDialogExt.prototype.remoteCSeq = null;
 
         /**
+         * B2buaDialogExt remoteCSeqIsNull.
+         * @member {boolean|null|undefined} remoteCSeqIsNull
+         * @memberof bench.B2buaDialogExt
+         * @instance
+         */
+        B2buaDialogExt.prototype.remoteCSeqIsNull = null;
+
+        /**
          * B2buaDialogExt inboundPendingRequests.
-         * @member {Array.<bench.PendingRequest.$Properties>} inboundPendingRequests
+         * @member {Array.<bench.IPendingRequest>} inboundPendingRequests
          * @memberof bench.B2buaDialogExt
          * @instance
          */
@@ -1602,6 +1387,14 @@ $root.bench = (function() {
         B2buaDialogExt.prototype.ackBranch = null;
 
         /**
+         * B2buaDialogExt pendingInviteTxnJson.
+         * @member {string|null|undefined} pendingInviteTxnJson
+         * @memberof bench.B2buaDialogExt
+         * @instance
+         */
+        B2buaDialogExt.prototype.pendingInviteTxnJson = null;
+
+        /**
          * B2buaDialogExt cachedSdp.
          * @member {Uint8Array|null|undefined} cachedSdp
          * @memberof bench.B2buaDialogExt
@@ -1612,19 +1405,56 @@ $root.bench = (function() {
         // OneOf field names bound to virtual getters and setters
         var $oneOfFields;
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * B2buaDialogExt _remoteCSeq.
+         * @member {"remoteCSeq"|undefined} _remoteCSeq
+         * @memberof bench.B2buaDialogExt
+         * @instance
+         */
         Object.defineProperty(B2buaDialogExt.prototype, "_remoteCSeq", {
             get: $util.oneOfGetter($oneOfFields = ["remoteCSeq"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * B2buaDialogExt _remoteCSeqIsNull.
+         * @member {"remoteCSeqIsNull"|undefined} _remoteCSeqIsNull
+         * @memberof bench.B2buaDialogExt
+         * @instance
+         */
+        Object.defineProperty(B2buaDialogExt.prototype, "_remoteCSeqIsNull", {
+            get: $util.oneOfGetter($oneOfFields = ["remoteCSeqIsNull"]),
+            set: $util.oneOfSetter($oneOfFields)
+        });
+
+        /**
+         * B2buaDialogExt _ackBranch.
+         * @member {"ackBranch"|undefined} _ackBranch
+         * @memberof bench.B2buaDialogExt
+         * @instance
+         */
         Object.defineProperty(B2buaDialogExt.prototype, "_ackBranch", {
             get: $util.oneOfGetter($oneOfFields = ["ackBranch"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * B2buaDialogExt _pendingInviteTxnJson.
+         * @member {"pendingInviteTxnJson"|undefined} _pendingInviteTxnJson
+         * @memberof bench.B2buaDialogExt
+         * @instance
+         */
+        Object.defineProperty(B2buaDialogExt.prototype, "_pendingInviteTxnJson", {
+            get: $util.oneOfGetter($oneOfFields = ["pendingInviteTxnJson"]),
+            set: $util.oneOfSetter($oneOfFields)
+        });
+
+        /**
+         * B2buaDialogExt _cachedSdp.
+         * @member {"cachedSdp"|undefined} _cachedSdp
+         * @memberof bench.B2buaDialogExt
+         * @instance
+         */
         Object.defineProperty(B2buaDialogExt.prototype, "_cachedSdp", {
             get: $util.oneOfGetter($oneOfFields = ["cachedSdp"]),
             set: $util.oneOfSetter($oneOfFields)
@@ -1635,12 +1465,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.B2buaDialogExt
          * @static
-         * @param {bench.B2buaDialogExt.$Properties=} [properties] Properties to set
+         * @param {bench.IB2buaDialogExt=} [properties] Properties to set
          * @returns {bench.B2buaDialogExt} B2buaDialogExt instance
-         * @type {{
-         *   (properties: bench.B2buaDialogExt.$Shape): bench.B2buaDialogExt & bench.B2buaDialogExt.$Shape;
-         *   (properties?: bench.B2buaDialogExt.$Properties): bench.B2buaDialogExt;
-         * }}
          */
         B2buaDialogExt.create = function create(properties) {
             return new B2buaDialogExt(properties);
@@ -1651,29 +1477,30 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.B2buaDialogExt
          * @static
-         * @param {bench.B2buaDialogExt.$Properties} message B2buaDialogExt message or plain object to encode
+         * @param {bench.IB2buaDialogExt} message B2buaDialogExt message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        B2buaDialogExt.encode = function encode(message, writer, _depth) {
+        B2buaDialogExt.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.remoteCSeq != null && Object.hasOwnProperty.call(message, "remoteCSeq"))
                 writer.uint32(/* id 1, wireType 0 =*/8).int32(message.remoteCSeq);
+            if (message.remoteCSeqIsNull != null && Object.hasOwnProperty.call(message, "remoteCSeqIsNull"))
+                writer.uint32(/* id 2, wireType 0 =*/16).bool(message.remoteCSeqIsNull);
             if (message.inboundPendingRequests != null && message.inboundPendingRequests.length)
                 for (var i = 0; i < message.inboundPendingRequests.length; ++i)
-                    $root.bench.PendingRequest.encode(message.inboundPendingRequests[i], writer.uint32(/* id 2, wireType 2 =*/18).fork(), _depth + 1).ldelim();
+                    $root.bench.PendingRequest.encode(message.inboundPendingRequests[i], writer.uint32(/* id 3, wireType 2 =*/26).fork(), q + 1).ldelim();
             if (message.ackBranch != null && Object.hasOwnProperty.call(message, "ackBranch"))
-                writer.uint32(/* id 3, wireType 2 =*/26).string(message.ackBranch);
+                writer.uint32(/* id 4, wireType 2 =*/34).string(message.ackBranch);
+            if (message.pendingInviteTxnJson != null && Object.hasOwnProperty.call(message, "pendingInviteTxnJson"))
+                writer.uint32(/* id 5, wireType 2 =*/42).string(message.pendingInviteTxnJson);
             if (message.cachedSdp != null && Object.hasOwnProperty.call(message, "cachedSdp"))
-                writer.uint32(/* id 5, wireType 2 =*/42).bytes(message.cachedSdp);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
+                writer.uint32(/* id 6, wireType 2 =*/50).bytes(message.cachedSdp);
             return writer;
         };
 
@@ -1682,12 +1509,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.B2buaDialogExt
          * @static
-         * @param {bench.B2buaDialogExt.$Properties} message B2buaDialogExt message or plain object to encode
+         * @param {bench.IB2buaDialogExt} message B2buaDialogExt message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         B2buaDialogExt.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -1697,63 +1524,54 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.B2buaDialogExt & bench.B2buaDialogExt.$Shape} B2buaDialogExt
+         * @returns {bench.B2buaDialogExt} B2buaDialogExt
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        B2buaDialogExt.decode = function decode(reader, length, _end, _depth, _target) {
+        B2buaDialogExt.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.B2buaDialogExt();
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.B2buaDialogExt();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 0)
-                            break;
                         message.remoteCSeq = reader.int32();
-                        message._remoteCSeq = "remoteCSeq";
-                        continue;
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        if (!(message.inboundPendingRequests && message.inboundPendingRequests.length))
-                            message.inboundPendingRequests = [];
-                        message.inboundPendingRequests.push($root.bench.PendingRequest.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        message.remoteCSeqIsNull = reader.bool();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 2)
-                            break;
+                        if (!(message.inboundPendingRequests && message.inboundPendingRequests.length))
+                            message.inboundPendingRequests = [];
+                        message.inboundPendingRequests.push($root.bench.PendingRequest.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
+                    }
+                case 4: {
                         message.ackBranch = reader.string();
-                        message._ackBranch = "ackBranch";
-                        continue;
+                        break;
                     }
                 case 5: {
-                        if (wireType !== 2)
-                            break;
-                        message.cachedSdp = reader.bytes();
-                        message._cachedSdp = "cachedSdp";
-                        continue;
+                        message.pendingInviteTxnJson = reader.string();
+                        break;
                     }
+                case 6: {
+                        message.cachedSdp = reader.bytes();
+                        break;
+                    }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -1763,7 +1581,7 @@ $root.bench = (function() {
          * @memberof bench.B2buaDialogExt
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.B2buaDialogExt & bench.B2buaDialogExt.$Shape} B2buaDialogExt
+         * @returns {bench.B2buaDialogExt} B2buaDialogExt
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -1781,24 +1599,29 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        B2buaDialogExt.verify = function verify(message, _depth) {
+        B2buaDialogExt.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             var properties = {};
             if (message.remoteCSeq != null && message.hasOwnProperty("remoteCSeq")) {
                 properties._remoteCSeq = 1;
                 if (!$util.isInteger(message.remoteCSeq))
                     return "remoteCSeq: integer expected";
             }
+            if (message.remoteCSeqIsNull != null && message.hasOwnProperty("remoteCSeqIsNull")) {
+                properties._remoteCSeqIsNull = 1;
+                if (typeof message.remoteCSeqIsNull !== "boolean")
+                    return "remoteCSeqIsNull: boolean expected";
+            }
             if (message.inboundPendingRequests != null && message.hasOwnProperty("inboundPendingRequests")) {
                 if (!Array.isArray(message.inboundPendingRequests))
                     return "inboundPendingRequests: array expected";
                 for (var i = 0; i < message.inboundPendingRequests.length; ++i) {
-                    var error = $root.bench.PendingRequest.verify(message.inboundPendingRequests[i], _depth + 1);
+                    var error = $root.bench.PendingRequest.verify(message.inboundPendingRequests[i], long + 1);
                     if (error)
                         return "inboundPendingRequests." + error;
                 }
@@ -1807,6 +1630,11 @@ $root.bench = (function() {
                 properties._ackBranch = 1;
                 if (!$util.isString(message.ackBranch))
                     return "ackBranch: string expected";
+            }
+            if (message.pendingInviteTxnJson != null && message.hasOwnProperty("pendingInviteTxnJson")) {
+                properties._pendingInviteTxnJson = 1;
+                if (!$util.isString(message.pendingInviteTxnJson))
+                    return "pendingInviteTxnJson: string expected";
             }
             if (message.cachedSdp != null && message.hasOwnProperty("cachedSdp")) {
                 properties._cachedSdp = 1;
@@ -1824,28 +1652,32 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.B2buaDialogExt} B2buaDialogExt
          */
-        B2buaDialogExt.fromObject = function fromObject(object, _depth) {
+        B2buaDialogExt.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.B2buaDialogExt)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.B2buaDialogExt();
             if (object.remoteCSeq != null)
                 message.remoteCSeq = object.remoteCSeq | 0;
+            if (object.remoteCSeqIsNull != null)
+                message.remoteCSeqIsNull = Boolean(object.remoteCSeqIsNull);
             if (object.inboundPendingRequests) {
                 if (!Array.isArray(object.inboundPendingRequests))
                     throw TypeError(".bench.B2buaDialogExt.inboundPendingRequests: array expected");
-                message.inboundPendingRequests = Array(object.inboundPendingRequests.length);
+                message.inboundPendingRequests = [];
                 for (var i = 0; i < object.inboundPendingRequests.length; ++i) {
                     if (typeof object.inboundPendingRequests[i] !== "object")
                         throw TypeError(".bench.B2buaDialogExt.inboundPendingRequests: object expected");
-                    message.inboundPendingRequests[i] = $root.bench.PendingRequest.fromObject(object.inboundPendingRequests[i], _depth + 1);
+                    message.inboundPendingRequests[i] = $root.bench.PendingRequest.fromObject(object.inboundPendingRequests[i], long + 1);
                 }
             }
             if (object.ackBranch != null)
                 message.ackBranch = String(object.ackBranch);
+            if (object.pendingInviteTxnJson != null)
+                message.pendingInviteTxnJson = String(object.pendingInviteTxnJson);
             if (object.cachedSdp != null)
                 if (typeof object.cachedSdp === "string")
                     $util.base64.decode(object.cachedSdp, message.cachedSdp = $util.newBuffer($util.base64.length(object.cachedSdp)), 0);
@@ -1863,27 +1695,46 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        B2buaDialogExt.toObject = function toObject(message, options, _depth) {
+        B2buaDialogExt.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.arrays || options.defaults)
                 object.inboundPendingRequests = [];
-            if (message.remoteCSeq != null && message.hasOwnProperty("remoteCSeq"))
+            if (message.remoteCSeq != null && message.hasOwnProperty("remoteCSeq")) {
                 object.remoteCSeq = message.remoteCSeq;
-            if (message.inboundPendingRequests && message.inboundPendingRequests.length) {
-                object.inboundPendingRequests = Array(message.inboundPendingRequests.length);
-                for (var j = 0; j < message.inboundPendingRequests.length; ++j)
-                    object.inboundPendingRequests[j] = $root.bench.PendingRequest.toObject(message.inboundPendingRequests[j], options, _depth + 1);
+                if (options.oneofs)
+                    object._remoteCSeq = "remoteCSeq";
             }
-            if (message.ackBranch != null && message.hasOwnProperty("ackBranch"))
+            if (message.remoteCSeqIsNull != null && message.hasOwnProperty("remoteCSeqIsNull")) {
+                object.remoteCSeqIsNull = message.remoteCSeqIsNull;
+                if (options.oneofs)
+                    object._remoteCSeqIsNull = "remoteCSeqIsNull";
+            }
+            if (message.inboundPendingRequests && message.inboundPendingRequests.length) {
+                object.inboundPendingRequests = [];
+                for (var j = 0; j < message.inboundPendingRequests.length; ++j)
+                    object.inboundPendingRequests[j] = $root.bench.PendingRequest.toObject(message.inboundPendingRequests[j], options, q + 1);
+            }
+            if (message.ackBranch != null && message.hasOwnProperty("ackBranch")) {
                 object.ackBranch = message.ackBranch;
-            if (message.cachedSdp != null && message.hasOwnProperty("cachedSdp"))
+                if (options.oneofs)
+                    object._ackBranch = "ackBranch";
+            }
+            if (message.pendingInviteTxnJson != null && message.hasOwnProperty("pendingInviteTxnJson")) {
+                object.pendingInviteTxnJson = message.pendingInviteTxnJson;
+                if (options.oneofs)
+                    object._pendingInviteTxnJson = "pendingInviteTxnJson";
+            }
+            if (message.cachedSdp != null && message.hasOwnProperty("cachedSdp")) {
                 object.cachedSdp = options.bytes === String ? $util.base64.encode(message.cachedSdp, 0, message.cachedSdp.length) : options.bytes === Array ? Array.prototype.slice.call(message.cachedSdp) : message.cachedSdp;
+                if (options.oneofs)
+                    object._cachedSdp = "cachedSdp";
+            }
             return object;
         };
 
@@ -1899,17 +1750,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for B2buaDialogExt
+         * Gets the default type url for B2buaDialogExt
          * @function getTypeUrl
          * @memberof bench.B2buaDialogExt
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        B2buaDialogExt.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.B2buaDialogExt";
+        B2buaDialogExt.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.B2buaDialogExt";
         };
 
         return B2buaDialogExt;
@@ -1919,32 +1771,19 @@ $root.bench = (function() {
 
         /**
          * Properties of a Dialog.
-         * @typedef {Object} bench.Dialog.$Properties
-         * @property {bench.StackDialog.$Properties|null} [sip] Dialog sip
-         * @property {bench.B2buaDialogExt.$Properties|null} [ext] Dialog ext
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a Dialog.
          * @memberof bench
          * @interface IDialog
-         * @augments bench.Dialog.$Properties
-         * @deprecated Use bench.Dialog.$Properties instead.
-         */
-
-        /**
-         * Shape of a Dialog.
-         * @typedef {bench.Dialog.$Properties} bench.Dialog.$Shape
+         * @property {bench.IStackDialog|null} [sip] Dialog sip
+         * @property {bench.IB2buaDialogExt|null} [ext] Dialog ext
          */
 
         /**
          * Constructs a new Dialog.
          * @memberof bench
          * @classdesc Represents a Dialog.
+         * @implements IDialog
          * @constructor
-         * @param {bench.Dialog.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IDialog=} [properties] Properties to set
          */
         function Dialog(properties) {
             if (properties)
@@ -1955,7 +1794,7 @@ $root.bench = (function() {
 
         /**
          * Dialog sip.
-         * @member {bench.StackDialog.$Properties|null|undefined} sip
+         * @member {bench.IStackDialog|null|undefined} sip
          * @memberof bench.Dialog
          * @instance
          */
@@ -1963,7 +1802,7 @@ $root.bench = (function() {
 
         /**
          * Dialog ext.
-         * @member {bench.B2buaDialogExt.$Properties|null|undefined} ext
+         * @member {bench.IB2buaDialogExt|null|undefined} ext
          * @memberof bench.Dialog
          * @instance
          */
@@ -1974,12 +1813,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.Dialog
          * @static
-         * @param {bench.Dialog.$Properties=} [properties] Properties to set
+         * @param {bench.IDialog=} [properties] Properties to set
          * @returns {bench.Dialog} Dialog instance
-         * @type {{
-         *   (properties: bench.Dialog.$Shape): bench.Dialog & bench.Dialog.$Shape;
-         *   (properties?: bench.Dialog.$Properties): bench.Dialog;
-         * }}
          */
         Dialog.create = function create(properties) {
             return new Dialog(properties);
@@ -1990,24 +1825,21 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.Dialog
          * @static
-         * @param {bench.Dialog.$Properties} message Dialog message or plain object to encode
+         * @param {bench.IDialog} message Dialog message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        Dialog.encode = function encode(message, writer, _depth) {
+        Dialog.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.sip != null && Object.hasOwnProperty.call(message, "sip"))
-                $root.bench.StackDialog.encode(message.sip, writer.uint32(/* id 1, wireType 2 =*/10).fork(), _depth + 1).ldelim();
+                $root.bench.StackDialog.encode(message.sip, writer.uint32(/* id 1, wireType 2 =*/10).fork(), q + 1).ldelim();
             if (message.ext != null && Object.hasOwnProperty.call(message, "ext"))
-                $root.bench.B2buaDialogExt.encode(message.ext, writer.uint32(/* id 2, wireType 2 =*/18).fork(), _depth + 1).ldelim();
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
+                $root.bench.B2buaDialogExt.encode(message.ext, writer.uint32(/* id 2, wireType 2 =*/18).fork(), q + 1).ldelim();
             return writer;
         };
 
@@ -2016,12 +1848,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.Dialog
          * @static
-         * @param {bench.Dialog.$Properties} message Dialog message or plain object to encode
+         * @param {bench.IDialog} message Dialog message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         Dialog.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -2031,46 +1863,36 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.Dialog & bench.Dialog.$Shape} Dialog
+         * @returns {bench.Dialog} Dialog
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        Dialog.decode = function decode(reader, length, _end, _depth, _target) {
+        Dialog.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.Dialog(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.Dialog();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        message.sip = $root.bench.StackDialog.decode(reader, reader.uint32(), undefined, _depth + 1, message.sip);
-                        continue;
+                        message.sip = $root.bench.StackDialog.decode(reader, reader.uint32(), undefined, long + 1);
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        message.ext = $root.bench.B2buaDialogExt.decode(reader, reader.uint32(), undefined, _depth + 1, message.ext);
-                        continue;
+                        message.ext = $root.bench.B2buaDialogExt.decode(reader, reader.uint32(), undefined, long + 1);
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -2080,7 +1902,7 @@ $root.bench = (function() {
          * @memberof bench.Dialog
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.Dialog & bench.Dialog.$Shape} Dialog
+         * @returns {bench.Dialog} Dialog
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -2098,20 +1920,20 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        Dialog.verify = function verify(message, _depth) {
+        Dialog.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.sip != null && message.hasOwnProperty("sip")) {
-                var error = $root.bench.StackDialog.verify(message.sip, _depth + 1);
+                var error = $root.bench.StackDialog.verify(message.sip, long + 1);
                 if (error)
                     return "sip." + error;
             }
             if (message.ext != null && message.hasOwnProperty("ext")) {
-                var error = $root.bench.B2buaDialogExt.verify(message.ext, _depth + 1);
+                var error = $root.bench.B2buaDialogExt.verify(message.ext, long + 1);
                 if (error)
                     return "ext." + error;
             }
@@ -2126,23 +1948,23 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.Dialog} Dialog
          */
-        Dialog.fromObject = function fromObject(object, _depth) {
+        Dialog.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.Dialog)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.Dialog();
             if (object.sip != null) {
                 if (typeof object.sip !== "object")
                     throw TypeError(".bench.Dialog.sip: object expected");
-                message.sip = $root.bench.StackDialog.fromObject(object.sip, _depth + 1);
+                message.sip = $root.bench.StackDialog.fromObject(object.sip, long + 1);
             }
             if (object.ext != null) {
                 if (typeof object.ext !== "object")
                     throw TypeError(".bench.Dialog.ext: object expected");
-                message.ext = $root.bench.B2buaDialogExt.fromObject(object.ext, _depth + 1);
+                message.ext = $root.bench.B2buaDialogExt.fromObject(object.ext, long + 1);
             }
             return message;
         };
@@ -2156,12 +1978,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        Dialog.toObject = function toObject(message, options, _depth) {
+        Dialog.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -2169,9 +1991,9 @@ $root.bench = (function() {
                 object.ext = null;
             }
             if (message.sip != null && message.hasOwnProperty("sip"))
-                object.sip = $root.bench.StackDialog.toObject(message.sip, options, _depth + 1);
+                object.sip = $root.bench.StackDialog.toObject(message.sip, options, q + 1);
             if (message.ext != null && message.hasOwnProperty("ext"))
-                object.ext = $root.bench.B2buaDialogExt.toObject(message.ext, options, _depth + 1);
+                object.ext = $root.bench.B2buaDialogExt.toObject(message.ext, options, q + 1);
             return object;
         };
 
@@ -2187,17 +2009,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for Dialog
+         * Gets the default type url for Dialog
          * @function getTypeUrl
          * @memberof bench.Dialog
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        Dialog.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.Dialog";
+        Dialog.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.Dialog";
         };
 
         return Dialog;
@@ -2207,41 +2030,30 @@ $root.bench = (function() {
 
         /**
          * Properties of a Leg.
-         * @typedef {Object} bench.Leg.$Properties
+         * @memberof bench
+         * @interface ILeg
          * @property {string|null} [legId] Leg legId
          * @property {string|null} [callId] Leg callId
          * @property {string|null} [fromTag] Leg fromTag
-         * @property {bench.RemoteInfo.$Properties|null} [source] Leg source
+         * @property {bench.IRemoteInfo|null} [source] Leg source
          * @property {string|null} [state] Leg state
          * @property {string|null} [disposition] Leg disposition
-         * @property {Array.<bench.Dialog.$Properties>|null} [dialogs] Leg dialogs
+         * @property {Array.<bench.IDialog>|null} [dialogs] Leg dialogs
+         * @property {number|null} [noAnswerTimeoutSec] Leg noAnswerTimeoutSec
          * @property {string|null} [byeDisposition] Leg byeDisposition
          * @property {string|null} [localUri] Leg localUri
          * @property {string|null} [remoteUri] Leg remoteUri
          * @property {string|null} [inviteRequestUri] Leg inviteRequestUri
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a Leg.
-         * @memberof bench
-         * @interface ILeg
-         * @augments bench.Leg.$Properties
-         * @deprecated Use bench.Leg.$Properties instead.
-         */
-
-        /**
-         * Shape of a Leg.
-         * @typedef {bench.Leg.$Properties} bench.Leg.$Shape
+         * @property {string|null} [pendingInviteTxnJson] Leg pendingInviteTxnJson
          */
 
         /**
          * Constructs a new Leg.
          * @memberof bench
          * @classdesc Represents a Leg.
+         * @implements ILeg
          * @constructor
-         * @param {bench.Leg.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.ILeg=} [properties] Properties to set
          */
         function Leg(properties) {
             this.dialogs = [];
@@ -2277,7 +2089,7 @@ $root.bench = (function() {
 
         /**
          * Leg source.
-         * @member {bench.RemoteInfo.$Properties|null|undefined} source
+         * @member {bench.IRemoteInfo|null|undefined} source
          * @memberof bench.Leg
          * @instance
          */
@@ -2301,11 +2113,19 @@ $root.bench = (function() {
 
         /**
          * Leg dialogs.
-         * @member {Array.<bench.Dialog.$Properties>} dialogs
+         * @member {Array.<bench.IDialog>} dialogs
          * @memberof bench.Leg
          * @instance
          */
         Leg.prototype.dialogs = $util.emptyArray;
+
+        /**
+         * Leg noAnswerTimeoutSec.
+         * @member {number|null|undefined} noAnswerTimeoutSec
+         * @memberof bench.Leg
+         * @instance
+         */
+        Leg.prototype.noAnswerTimeoutSec = null;
 
         /**
          * Leg byeDisposition.
@@ -2339,30 +2159,80 @@ $root.bench = (function() {
          */
         Leg.prototype.inviteRequestUri = null;
 
+        /**
+         * Leg pendingInviteTxnJson.
+         * @member {string|null|undefined} pendingInviteTxnJson
+         * @memberof bench.Leg
+         * @instance
+         */
+        Leg.prototype.pendingInviteTxnJson = null;
+
         // OneOf field names bound to virtual getters and setters
         var $oneOfFields;
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Leg _noAnswerTimeoutSec.
+         * @member {"noAnswerTimeoutSec"|undefined} _noAnswerTimeoutSec
+         * @memberof bench.Leg
+         * @instance
+         */
+        Object.defineProperty(Leg.prototype, "_noAnswerTimeoutSec", {
+            get: $util.oneOfGetter($oneOfFields = ["noAnswerTimeoutSec"]),
+            set: $util.oneOfSetter($oneOfFields)
+        });
+
+        /**
+         * Leg _byeDisposition.
+         * @member {"byeDisposition"|undefined} _byeDisposition
+         * @memberof bench.Leg
+         * @instance
+         */
         Object.defineProperty(Leg.prototype, "_byeDisposition", {
             get: $util.oneOfGetter($oneOfFields = ["byeDisposition"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Leg _localUri.
+         * @member {"localUri"|undefined} _localUri
+         * @memberof bench.Leg
+         * @instance
+         */
         Object.defineProperty(Leg.prototype, "_localUri", {
             get: $util.oneOfGetter($oneOfFields = ["localUri"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Leg _remoteUri.
+         * @member {"remoteUri"|undefined} _remoteUri
+         * @memberof bench.Leg
+         * @instance
+         */
         Object.defineProperty(Leg.prototype, "_remoteUri", {
             get: $util.oneOfGetter($oneOfFields = ["remoteUri"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Leg _inviteRequestUri.
+         * @member {"inviteRequestUri"|undefined} _inviteRequestUri
+         * @memberof bench.Leg
+         * @instance
+         */
         Object.defineProperty(Leg.prototype, "_inviteRequestUri", {
             get: $util.oneOfGetter($oneOfFields = ["inviteRequestUri"]),
+            set: $util.oneOfSetter($oneOfFields)
+        });
+
+        /**
+         * Leg _pendingInviteTxnJson.
+         * @member {"pendingInviteTxnJson"|undefined} _pendingInviteTxnJson
+         * @memberof bench.Leg
+         * @instance
+         */
+        Object.defineProperty(Leg.prototype, "_pendingInviteTxnJson", {
+            get: $util.oneOfGetter($oneOfFields = ["pendingInviteTxnJson"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
@@ -2371,12 +2241,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.Leg
          * @static
-         * @param {bench.Leg.$Properties=} [properties] Properties to set
+         * @param {bench.ILeg=} [properties] Properties to set
          * @returns {bench.Leg} Leg instance
-         * @type {{
-         *   (properties: bench.Leg.$Shape): bench.Leg & bench.Leg.$Shape;
-         *   (properties?: bench.Leg.$Properties): bench.Leg;
-         * }}
          */
         Leg.create = function create(properties) {
             return new Leg(properties);
@@ -2387,16 +2253,16 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.Leg
          * @static
-         * @param {bench.Leg.$Properties} message Leg message or plain object to encode
+         * @param {bench.ILeg} message Leg message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        Leg.encode = function encode(message, writer, _depth) {
+        Leg.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.legId != null && Object.hasOwnProperty.call(message, "legId"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.legId);
@@ -2405,25 +2271,26 @@ $root.bench = (function() {
             if (message.fromTag != null && Object.hasOwnProperty.call(message, "fromTag"))
                 writer.uint32(/* id 3, wireType 2 =*/26).string(message.fromTag);
             if (message.source != null && Object.hasOwnProperty.call(message, "source"))
-                $root.bench.RemoteInfo.encode(message.source, writer.uint32(/* id 4, wireType 2 =*/34).fork(), _depth + 1).ldelim();
+                $root.bench.RemoteInfo.encode(message.source, writer.uint32(/* id 4, wireType 2 =*/34).fork(), q + 1).ldelim();
             if (message.state != null && Object.hasOwnProperty.call(message, "state"))
                 writer.uint32(/* id 5, wireType 2 =*/42).string(message.state);
             if (message.disposition != null && Object.hasOwnProperty.call(message, "disposition"))
                 writer.uint32(/* id 6, wireType 2 =*/50).string(message.disposition);
             if (message.dialogs != null && message.dialogs.length)
                 for (var i = 0; i < message.dialogs.length; ++i)
-                    $root.bench.Dialog.encode(message.dialogs[i], writer.uint32(/* id 7, wireType 2 =*/58).fork(), _depth + 1).ldelim();
+                    $root.bench.Dialog.encode(message.dialogs[i], writer.uint32(/* id 7, wireType 2 =*/58).fork(), q + 1).ldelim();
+            if (message.noAnswerTimeoutSec != null && Object.hasOwnProperty.call(message, "noAnswerTimeoutSec"))
+                writer.uint32(/* id 8, wireType 1 =*/65).double(message.noAnswerTimeoutSec);
             if (message.byeDisposition != null && Object.hasOwnProperty.call(message, "byeDisposition"))
-                writer.uint32(/* id 8, wireType 2 =*/66).string(message.byeDisposition);
+                writer.uint32(/* id 9, wireType 2 =*/74).string(message.byeDisposition);
             if (message.localUri != null && Object.hasOwnProperty.call(message, "localUri"))
-                writer.uint32(/* id 9, wireType 2 =*/74).string(message.localUri);
+                writer.uint32(/* id 10, wireType 2 =*/82).string(message.localUri);
             if (message.remoteUri != null && Object.hasOwnProperty.call(message, "remoteUri"))
-                writer.uint32(/* id 10, wireType 2 =*/82).string(message.remoteUri);
+                writer.uint32(/* id 11, wireType 2 =*/90).string(message.remoteUri);
             if (message.inviteRequestUri != null && Object.hasOwnProperty.call(message, "inviteRequestUri"))
-                writer.uint32(/* id 11, wireType 2 =*/90).string(message.inviteRequestUri);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
+                writer.uint32(/* id 12, wireType 2 =*/98).string(message.inviteRequestUri);
+            if (message.pendingInviteTxnJson != null && Object.hasOwnProperty.call(message, "pendingInviteTxnJson"))
+                writer.uint32(/* id 13, wireType 2 =*/106).string(message.pendingInviteTxnJson);
             return writer;
         };
 
@@ -2432,12 +2299,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.Leg
          * @static
-         * @param {bench.Leg.$Properties} message Leg message or plain object to encode
+         * @param {bench.ILeg} message Leg message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         Leg.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -2447,121 +2314,82 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.Leg & bench.Leg.$Shape} Leg
+         * @returns {bench.Leg} Leg
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        Leg.decode = function decode(reader, length, _end, _depth, _target) {
+        Leg.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.Leg(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.Leg();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.legId = value;
-                        else
-                            delete message.legId;
-                        continue;
+                        message.legId = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.callId = value;
-                        else
-                            delete message.callId;
-                        continue;
+                        message.callId = reader.string();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.fromTag = value;
-                        else
-                            delete message.fromTag;
-                        continue;
+                        message.fromTag = reader.string();
+                        break;
                     }
                 case 4: {
-                        if (wireType !== 2)
-                            break;
-                        message.source = $root.bench.RemoteInfo.decode(reader, reader.uint32(), undefined, _depth + 1, message.source);
-                        continue;
+                        message.source = $root.bench.RemoteInfo.decode(reader, reader.uint32(), undefined, long + 1);
+                        break;
                     }
                 case 5: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.state = value;
-                        else
-                            delete message.state;
-                        continue;
+                        message.state = reader.string();
+                        break;
                     }
                 case 6: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.disposition = value;
-                        else
-                            delete message.disposition;
-                        continue;
+                        message.disposition = reader.string();
+                        break;
                     }
                 case 7: {
-                        if (wireType !== 2)
-                            break;
                         if (!(message.dialogs && message.dialogs.length))
                             message.dialogs = [];
-                        message.dialogs.push($root.bench.Dialog.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        message.dialogs.push($root.bench.Dialog.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
                     }
                 case 8: {
-                        if (wireType !== 2)
-                            break;
-                        message.byeDisposition = reader.string();
-                        message._byeDisposition = "byeDisposition";
-                        continue;
+                        message.noAnswerTimeoutSec = reader.double();
+                        break;
                     }
                 case 9: {
-                        if (wireType !== 2)
-                            break;
-                        message.localUri = reader.string();
-                        message._localUri = "localUri";
-                        continue;
+                        message.byeDisposition = reader.string();
+                        break;
                     }
                 case 10: {
-                        if (wireType !== 2)
-                            break;
-                        message.remoteUri = reader.string();
-                        message._remoteUri = "remoteUri";
-                        continue;
+                        message.localUri = reader.string();
+                        break;
                     }
                 case 11: {
-                        if (wireType !== 2)
-                            break;
-                        message.inviteRequestUri = reader.string();
-                        message._inviteRequestUri = "inviteRequestUri";
-                        continue;
+                        message.remoteUri = reader.string();
+                        break;
                     }
+                case 12: {
+                        message.inviteRequestUri = reader.string();
+                        break;
+                    }
+                case 13: {
+                        message.pendingInviteTxnJson = reader.string();
+                        break;
+                    }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -2571,7 +2399,7 @@ $root.bench = (function() {
          * @memberof bench.Leg
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.Leg & bench.Leg.$Shape} Leg
+         * @returns {bench.Leg} Leg
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -2589,13 +2417,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        Leg.verify = function verify(message, _depth) {
+        Leg.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             var properties = {};
             if (message.legId != null && message.hasOwnProperty("legId"))
                 if (!$util.isString(message.legId))
@@ -2607,7 +2435,7 @@ $root.bench = (function() {
                 if (!$util.isString(message.fromTag))
                     return "fromTag: string expected";
             if (message.source != null && message.hasOwnProperty("source")) {
-                var error = $root.bench.RemoteInfo.verify(message.source, _depth + 1);
+                var error = $root.bench.RemoteInfo.verify(message.source, long + 1);
                 if (error)
                     return "source." + error;
             }
@@ -2621,10 +2449,15 @@ $root.bench = (function() {
                 if (!Array.isArray(message.dialogs))
                     return "dialogs: array expected";
                 for (var i = 0; i < message.dialogs.length; ++i) {
-                    var error = $root.bench.Dialog.verify(message.dialogs[i], _depth + 1);
+                    var error = $root.bench.Dialog.verify(message.dialogs[i], long + 1);
                     if (error)
                         return "dialogs." + error;
                 }
+            }
+            if (message.noAnswerTimeoutSec != null && message.hasOwnProperty("noAnswerTimeoutSec")) {
+                properties._noAnswerTimeoutSec = 1;
+                if (typeof message.noAnswerTimeoutSec !== "number")
+                    return "noAnswerTimeoutSec: number expected";
             }
             if (message.byeDisposition != null && message.hasOwnProperty("byeDisposition")) {
                 properties._byeDisposition = 1;
@@ -2646,6 +2479,11 @@ $root.bench = (function() {
                 if (!$util.isString(message.inviteRequestUri))
                     return "inviteRequestUri: string expected";
             }
+            if (message.pendingInviteTxnJson != null && message.hasOwnProperty("pendingInviteTxnJson")) {
+                properties._pendingInviteTxnJson = 1;
+                if (!$util.isString(message.pendingInviteTxnJson))
+                    return "pendingInviteTxnJson: string expected";
+            }
             return null;
         };
 
@@ -2657,44 +2495,41 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.Leg} Leg
          */
-        Leg.fromObject = function fromObject(object, _depth) {
+        Leg.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.Leg)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.Leg();
             if (object.legId != null)
-                if (typeof object.legId !== "string" || object.legId.length)
-                    message.legId = String(object.legId);
+                message.legId = String(object.legId);
             if (object.callId != null)
-                if (typeof object.callId !== "string" || object.callId.length)
-                    message.callId = String(object.callId);
+                message.callId = String(object.callId);
             if (object.fromTag != null)
-                if (typeof object.fromTag !== "string" || object.fromTag.length)
-                    message.fromTag = String(object.fromTag);
+                message.fromTag = String(object.fromTag);
             if (object.source != null) {
                 if (typeof object.source !== "object")
                     throw TypeError(".bench.Leg.source: object expected");
-                message.source = $root.bench.RemoteInfo.fromObject(object.source, _depth + 1);
+                message.source = $root.bench.RemoteInfo.fromObject(object.source, long + 1);
             }
             if (object.state != null)
-                if (typeof object.state !== "string" || object.state.length)
-                    message.state = String(object.state);
+                message.state = String(object.state);
             if (object.disposition != null)
-                if (typeof object.disposition !== "string" || object.disposition.length)
-                    message.disposition = String(object.disposition);
+                message.disposition = String(object.disposition);
             if (object.dialogs) {
                 if (!Array.isArray(object.dialogs))
                     throw TypeError(".bench.Leg.dialogs: array expected");
-                message.dialogs = Array(object.dialogs.length);
+                message.dialogs = [];
                 for (var i = 0; i < object.dialogs.length; ++i) {
                     if (typeof object.dialogs[i] !== "object")
                         throw TypeError(".bench.Leg.dialogs: object expected");
-                    message.dialogs[i] = $root.bench.Dialog.fromObject(object.dialogs[i], _depth + 1);
+                    message.dialogs[i] = $root.bench.Dialog.fromObject(object.dialogs[i], long + 1);
                 }
             }
+            if (object.noAnswerTimeoutSec != null)
+                message.noAnswerTimeoutSec = Number(object.noAnswerTimeoutSec);
             if (object.byeDisposition != null)
                 message.byeDisposition = String(object.byeDisposition);
             if (object.localUri != null)
@@ -2703,6 +2538,8 @@ $root.bench = (function() {
                 message.remoteUri = String(object.remoteUri);
             if (object.inviteRequestUri != null)
                 message.inviteRequestUri = String(object.inviteRequestUri);
+            if (object.pendingInviteTxnJson != null)
+                message.pendingInviteTxnJson = String(object.pendingInviteTxnJson);
             return message;
         };
 
@@ -2715,12 +2552,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        Leg.toObject = function toObject(message, options, _depth) {
+        Leg.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.arrays || options.defaults)
@@ -2740,24 +2577,46 @@ $root.bench = (function() {
             if (message.fromTag != null && message.hasOwnProperty("fromTag"))
                 object.fromTag = message.fromTag;
             if (message.source != null && message.hasOwnProperty("source"))
-                object.source = $root.bench.RemoteInfo.toObject(message.source, options, _depth + 1);
+                object.source = $root.bench.RemoteInfo.toObject(message.source, options, q + 1);
             if (message.state != null && message.hasOwnProperty("state"))
                 object.state = message.state;
             if (message.disposition != null && message.hasOwnProperty("disposition"))
                 object.disposition = message.disposition;
             if (message.dialogs && message.dialogs.length) {
-                object.dialogs = Array(message.dialogs.length);
+                object.dialogs = [];
                 for (var j = 0; j < message.dialogs.length; ++j)
-                    object.dialogs[j] = $root.bench.Dialog.toObject(message.dialogs[j], options, _depth + 1);
+                    object.dialogs[j] = $root.bench.Dialog.toObject(message.dialogs[j], options, q + 1);
             }
-            if (message.byeDisposition != null && message.hasOwnProperty("byeDisposition"))
+            if (message.noAnswerTimeoutSec != null && message.hasOwnProperty("noAnswerTimeoutSec")) {
+                object.noAnswerTimeoutSec = options.json && !isFinite(message.noAnswerTimeoutSec) ? String(message.noAnswerTimeoutSec) : message.noAnswerTimeoutSec;
+                if (options.oneofs)
+                    object._noAnswerTimeoutSec = "noAnswerTimeoutSec";
+            }
+            if (message.byeDisposition != null && message.hasOwnProperty("byeDisposition")) {
                 object.byeDisposition = message.byeDisposition;
-            if (message.localUri != null && message.hasOwnProperty("localUri"))
+                if (options.oneofs)
+                    object._byeDisposition = "byeDisposition";
+            }
+            if (message.localUri != null && message.hasOwnProperty("localUri")) {
                 object.localUri = message.localUri;
-            if (message.remoteUri != null && message.hasOwnProperty("remoteUri"))
+                if (options.oneofs)
+                    object._localUri = "localUri";
+            }
+            if (message.remoteUri != null && message.hasOwnProperty("remoteUri")) {
                 object.remoteUri = message.remoteUri;
-            if (message.inviteRequestUri != null && message.hasOwnProperty("inviteRequestUri"))
+                if (options.oneofs)
+                    object._remoteUri = "remoteUri";
+            }
+            if (message.inviteRequestUri != null && message.hasOwnProperty("inviteRequestUri")) {
                 object.inviteRequestUri = message.inviteRequestUri;
+                if (options.oneofs)
+                    object._inviteRequestUri = "inviteRequestUri";
+            }
+            if (message.pendingInviteTxnJson != null && message.hasOwnProperty("pendingInviteTxnJson")) {
+                object.pendingInviteTxnJson = message.pendingInviteTxnJson;
+                if (options.oneofs)
+                    object._pendingInviteTxnJson = "pendingInviteTxnJson";
+            }
             return object;
         };
 
@@ -2773,17 +2632,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for Leg
+         * Gets the default type url for Leg
          * @function getTypeUrl
          * @memberof bench.Leg
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        Leg.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.Leg";
+        Leg.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.Leg";
         };
 
         return Leg;
@@ -2793,33 +2653,20 @@ $root.bench = (function() {
 
         /**
          * Properties of a ALegInvite.
-         * @typedef {Object} bench.ALegInvite.$Properties
-         * @property {string|null} [uri] ALegInvite uri
-         * @property {Array.<bench.SipHeader.$Properties>|null} [headers] ALegInvite headers
-         * @property {Uint8Array|null} [body] ALegInvite body
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a ALegInvite.
          * @memberof bench
          * @interface IALegInvite
-         * @augments bench.ALegInvite.$Properties
-         * @deprecated Use bench.ALegInvite.$Properties instead.
-         */
-
-        /**
-         * Shape of a ALegInvite.
-         * @typedef {bench.ALegInvite.$Properties} bench.ALegInvite.$Shape
+         * @property {string|null} [uri] ALegInvite uri
+         * @property {Array.<bench.ISipHeader>|null} [headers] ALegInvite headers
+         * @property {Uint8Array|null} [body] ALegInvite body
          */
 
         /**
          * Constructs a new ALegInvite.
          * @memberof bench
          * @classdesc Represents a ALegInvite.
+         * @implements IALegInvite
          * @constructor
-         * @param {bench.ALegInvite.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IALegInvite=} [properties] Properties to set
          */
         function ALegInvite(properties) {
             this.headers = [];
@@ -2839,7 +2686,7 @@ $root.bench = (function() {
 
         /**
          * ALegInvite headers.
-         * @member {Array.<bench.SipHeader.$Properties>} headers
+         * @member {Array.<bench.ISipHeader>} headers
          * @memberof bench.ALegInvite
          * @instance
          */
@@ -2858,12 +2705,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.ALegInvite
          * @static
-         * @param {bench.ALegInvite.$Properties=} [properties] Properties to set
+         * @param {bench.IALegInvite=} [properties] Properties to set
          * @returns {bench.ALegInvite} ALegInvite instance
-         * @type {{
-         *   (properties: bench.ALegInvite.$Shape): bench.ALegInvite & bench.ALegInvite.$Shape;
-         *   (properties?: bench.ALegInvite.$Properties): bench.ALegInvite;
-         * }}
          */
         ALegInvite.create = function create(properties) {
             return new ALegInvite(properties);
@@ -2874,27 +2717,24 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.ALegInvite
          * @static
-         * @param {bench.ALegInvite.$Properties} message ALegInvite message or plain object to encode
+         * @param {bench.IALegInvite} message ALegInvite message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        ALegInvite.encode = function encode(message, writer, _depth) {
+        ALegInvite.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.uri != null && Object.hasOwnProperty.call(message, "uri"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.uri);
             if (message.headers != null && message.headers.length)
                 for (var i = 0; i < message.headers.length; ++i)
-                    $root.bench.SipHeader.encode(message.headers[i], writer.uint32(/* id 2, wireType 2 =*/18).fork(), _depth + 1).ldelim();
+                    $root.bench.SipHeader.encode(message.headers[i], writer.uint32(/* id 2, wireType 2 =*/18).fork(), q + 1).ldelim();
             if (message.body != null && Object.hasOwnProperty.call(message, "body"))
                 writer.uint32(/* id 3, wireType 2 =*/26).bytes(message.body);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -2903,12 +2743,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.ALegInvite
          * @static
-         * @param {bench.ALegInvite.$Properties} message ALegInvite message or plain object to encode
+         * @param {bench.IALegInvite} message ALegInvite message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         ALegInvite.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -2918,60 +2758,42 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.ALegInvite & bench.ALegInvite.$Shape} ALegInvite
+         * @returns {bench.ALegInvite} ALegInvite
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        ALegInvite.decode = function decode(reader, length, _end, _depth, _target) {
+        ALegInvite.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.ALegInvite(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.ALegInvite();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.uri = value;
-                        else
-                            delete message.uri;
-                        continue;
+                        message.uri = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
                         if (!(message.headers && message.headers.length))
                             message.headers = [];
-                        message.headers.push($root.bench.SipHeader.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        message.headers.push($root.bench.SipHeader.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.bytes()).length)
-                            message.body = value;
-                        else
-                            delete message.body;
-                        continue;
+                        message.body = reader.bytes();
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -2981,7 +2803,7 @@ $root.bench = (function() {
          * @memberof bench.ALegInvite
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.ALegInvite & bench.ALegInvite.$Shape} ALegInvite
+         * @returns {bench.ALegInvite} ALegInvite
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -2999,13 +2821,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        ALegInvite.verify = function verify(message, _depth) {
+        ALegInvite.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.uri != null && message.hasOwnProperty("uri"))
                 if (!$util.isString(message.uri))
                     return "uri: string expected";
@@ -3013,7 +2835,7 @@ $root.bench = (function() {
                 if (!Array.isArray(message.headers))
                     return "headers: array expected";
                 for (var i = 0; i < message.headers.length; ++i) {
-                    var error = $root.bench.SipHeader.verify(message.headers[i], _depth + 1);
+                    var error = $root.bench.SipHeader.verify(message.headers[i], long + 1);
                     if (error)
                         return "headers." + error;
                 }
@@ -3032,33 +2854,31 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.ALegInvite} ALegInvite
          */
-        ALegInvite.fromObject = function fromObject(object, _depth) {
+        ALegInvite.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.ALegInvite)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.ALegInvite();
             if (object.uri != null)
-                if (typeof object.uri !== "string" || object.uri.length)
-                    message.uri = String(object.uri);
+                message.uri = String(object.uri);
             if (object.headers) {
                 if (!Array.isArray(object.headers))
                     throw TypeError(".bench.ALegInvite.headers: array expected");
-                message.headers = Array(object.headers.length);
+                message.headers = [];
                 for (var i = 0; i < object.headers.length; ++i) {
                     if (typeof object.headers[i] !== "object")
                         throw TypeError(".bench.ALegInvite.headers: object expected");
-                    message.headers[i] = $root.bench.SipHeader.fromObject(object.headers[i], _depth + 1);
+                    message.headers[i] = $root.bench.SipHeader.fromObject(object.headers[i], long + 1);
                 }
             }
             if (object.body != null)
-                if (object.body.length)
-                    if (typeof object.body === "string")
-                        $util.base64.decode(object.body, message.body = $util.newBuffer($util.base64.length(object.body)), 0);
-                    else if (object.body.length >= 0)
-                        message.body = object.body;
+                if (typeof object.body === "string")
+                    $util.base64.decode(object.body, message.body = $util.newBuffer($util.base64.length(object.body)), 0);
+                else if (object.body.length >= 0)
+                    message.body = object.body;
             return message;
         };
 
@@ -3071,12 +2891,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        ALegInvite.toObject = function toObject(message, options, _depth) {
+        ALegInvite.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.arrays || options.defaults)
@@ -3094,9 +2914,9 @@ $root.bench = (function() {
             if (message.uri != null && message.hasOwnProperty("uri"))
                 object.uri = message.uri;
             if (message.headers && message.headers.length) {
-                object.headers = Array(message.headers.length);
+                object.headers = [];
                 for (var j = 0; j < message.headers.length; ++j)
-                    object.headers[j] = $root.bench.SipHeader.toObject(message.headers[j], options, _depth + 1);
+                    object.headers[j] = $root.bench.SipHeader.toObject(message.headers[j], options, q + 1);
             }
             if (message.body != null && message.hasOwnProperty("body"))
                 object.body = options.bytes === String ? $util.base64.encode(message.body, 0, message.body.length) : options.bytes === Array ? Array.prototype.slice.call(message.body) : message.body;
@@ -3115,17 +2935,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for ALegInvite
+         * Gets the default type url for ALegInvite
          * @function getTypeUrl
          * @memberof bench.ALegInvite
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        ALegInvite.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.ALegInvite";
+        ALegInvite.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.ALegInvite";
         };
 
         return ALegInvite;
@@ -3135,33 +2956,20 @@ $root.bench = (function() {
 
         /**
          * Properties of a TagMapping.
-         * @typedef {Object} bench.TagMapping.$Properties
+         * @memberof bench
+         * @interface ITagMapping
          * @property {string|null} [aTag] TagMapping aTag
          * @property {string|null} [bLegId] TagMapping bLegId
          * @property {string|null} [bTag] TagMapping bTag
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a TagMapping.
-         * @memberof bench
-         * @interface ITagMapping
-         * @augments bench.TagMapping.$Properties
-         * @deprecated Use bench.TagMapping.$Properties instead.
-         */
-
-        /**
-         * Shape of a TagMapping.
-         * @typedef {bench.TagMapping.$Properties} bench.TagMapping.$Shape
          */
 
         /**
          * Constructs a new TagMapping.
          * @memberof bench
          * @classdesc Represents a TagMapping.
+         * @implements ITagMapping
          * @constructor
-         * @param {bench.TagMapping.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.ITagMapping=} [properties] Properties to set
          */
         function TagMapping(properties) {
             if (properties)
@@ -3199,12 +3007,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.TagMapping
          * @static
-         * @param {bench.TagMapping.$Properties=} [properties] Properties to set
+         * @param {bench.ITagMapping=} [properties] Properties to set
          * @returns {bench.TagMapping} TagMapping instance
-         * @type {{
-         *   (properties: bench.TagMapping.$Shape): bench.TagMapping & bench.TagMapping.$Shape;
-         *   (properties?: bench.TagMapping.$Properties): bench.TagMapping;
-         * }}
          */
         TagMapping.create = function create(properties) {
             return new TagMapping(properties);
@@ -3215,16 +3019,16 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.TagMapping
          * @static
-         * @param {bench.TagMapping.$Properties} message TagMapping message or plain object to encode
+         * @param {bench.ITagMapping} message TagMapping message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        TagMapping.encode = function encode(message, writer, _depth) {
+        TagMapping.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.aTag != null && Object.hasOwnProperty.call(message, "aTag"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.aTag);
@@ -3232,9 +3036,6 @@ $root.bench = (function() {
                 writer.uint32(/* id 2, wireType 2 =*/18).string(message.bLegId);
             if (message.bTag != null && Object.hasOwnProperty.call(message, "bTag"))
                 writer.uint32(/* id 3, wireType 2 =*/26).string(message.bTag);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -3243,12 +3044,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.TagMapping
          * @static
-         * @param {bench.TagMapping.$Properties} message TagMapping message or plain object to encode
+         * @param {bench.ITagMapping} message TagMapping message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         TagMapping.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -3258,61 +3059,40 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.TagMapping & bench.TagMapping.$Shape} TagMapping
+         * @returns {bench.TagMapping} TagMapping
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        TagMapping.decode = function decode(reader, length, _end, _depth, _target) {
+        TagMapping.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.TagMapping(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.TagMapping();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.aTag = value;
-                        else
-                            delete message.aTag;
-                        continue;
+                        message.aTag = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.bLegId = value;
-                        else
-                            delete message.bLegId;
-                        continue;
+                        message.bLegId = reader.string();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.bTag = value;
-                        else
-                            delete message.bTag;
-                        continue;
+                        message.bTag = reader.string();
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -3322,7 +3102,7 @@ $root.bench = (function() {
          * @memberof bench.TagMapping
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.TagMapping & bench.TagMapping.$Shape} TagMapping
+         * @returns {bench.TagMapping} TagMapping
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -3340,13 +3120,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        TagMapping.verify = function verify(message, _depth) {
+        TagMapping.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.aTag != null && message.hasOwnProperty("aTag"))
                 if (!$util.isString(message.aTag))
                     return "aTag: string expected";
@@ -3367,23 +3147,20 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.TagMapping} TagMapping
          */
-        TagMapping.fromObject = function fromObject(object, _depth) {
+        TagMapping.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.TagMapping)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.TagMapping();
             if (object.aTag != null)
-                if (typeof object.aTag !== "string" || object.aTag.length)
-                    message.aTag = String(object.aTag);
+                message.aTag = String(object.aTag);
             if (object.bLegId != null)
-                if (typeof object.bLegId !== "string" || object.bLegId.length)
-                    message.bLegId = String(object.bLegId);
+                message.bLegId = String(object.bLegId);
             if (object.bTag != null)
-                if (typeof object.bTag !== "string" || object.bTag.length)
-                    message.bTag = String(object.bTag);
+                message.bTag = String(object.bTag);
             return message;
         };
 
@@ -3396,12 +3173,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        TagMapping.toObject = function toObject(message, options, _depth) {
+        TagMapping.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -3430,17 +3207,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for TagMapping
+         * Gets the default type url for TagMapping
          * @function getTypeUrl
          * @memberof bench.TagMapping
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        TagMapping.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.TagMapping";
+        TagMapping.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.TagMapping";
         };
 
         return TagMapping;
@@ -3450,34 +3228,21 @@ $root.bench = (function() {
 
         /**
          * Properties of a CallLimiterState.
-         * @typedef {Object} bench.CallLimiterState.$Properties
+         * @memberof bench
+         * @interface ICallLimiterState
          * @property {string|null} [limiterId] CallLimiterState limiterId
          * @property {number|null} [limit] CallLimiterState limit
          * @property {number|null} [originWindow] CallLimiterState originWindow
          * @property {boolean|null} [incrementSucceeded] CallLimiterState incrementSucceeded
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a CallLimiterState.
-         * @memberof bench
-         * @interface ICallLimiterState
-         * @augments bench.CallLimiterState.$Properties
-         * @deprecated Use bench.CallLimiterState.$Properties instead.
-         */
-
-        /**
-         * Shape of a CallLimiterState.
-         * @typedef {bench.CallLimiterState.$Properties} bench.CallLimiterState.$Shape
          */
 
         /**
          * Constructs a new CallLimiterState.
          * @memberof bench
          * @classdesc Represents a CallLimiterState.
+         * @implements ICallLimiterState
          * @constructor
-         * @param {bench.CallLimiterState.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.ICallLimiterState=} [properties] Properties to set
          */
         function CallLimiterState(properties) {
             if (properties)
@@ -3521,7 +3286,12 @@ $root.bench = (function() {
         // OneOf field names bound to virtual getters and setters
         var $oneOfFields;
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * CallLimiterState _incrementSucceeded.
+         * @member {"incrementSucceeded"|undefined} _incrementSucceeded
+         * @memberof bench.CallLimiterState
+         * @instance
+         */
         Object.defineProperty(CallLimiterState.prototype, "_incrementSucceeded", {
             get: $util.oneOfGetter($oneOfFields = ["incrementSucceeded"]),
             set: $util.oneOfSetter($oneOfFields)
@@ -3532,12 +3302,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.CallLimiterState
          * @static
-         * @param {bench.CallLimiterState.$Properties=} [properties] Properties to set
+         * @param {bench.ICallLimiterState=} [properties] Properties to set
          * @returns {bench.CallLimiterState} CallLimiterState instance
-         * @type {{
-         *   (properties: bench.CallLimiterState.$Shape): bench.CallLimiterState & bench.CallLimiterState.$Shape;
-         *   (properties?: bench.CallLimiterState.$Properties): bench.CallLimiterState;
-         * }}
          */
         CallLimiterState.create = function create(properties) {
             return new CallLimiterState(properties);
@@ -3548,16 +3314,16 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.CallLimiterState
          * @static
-         * @param {bench.CallLimiterState.$Properties} message CallLimiterState message or plain object to encode
+         * @param {bench.ICallLimiterState} message CallLimiterState message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        CallLimiterState.encode = function encode(message, writer, _depth) {
+        CallLimiterState.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.limiterId != null && Object.hasOwnProperty.call(message, "limiterId"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.limiterId);
@@ -3567,9 +3333,6 @@ $root.bench = (function() {
                 writer.uint32(/* id 3, wireType 1 =*/25).double(message.originWindow);
             if (message.incrementSucceeded != null && Object.hasOwnProperty.call(message, "incrementSucceeded"))
                 writer.uint32(/* id 4, wireType 0 =*/32).bool(message.incrementSucceeded);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -3578,12 +3341,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.CallLimiterState
          * @static
-         * @param {bench.CallLimiterState.$Properties} message CallLimiterState message or plain object to encode
+         * @param {bench.ICallLimiterState} message CallLimiterState message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         CallLimiterState.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -3593,68 +3356,44 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.CallLimiterState & bench.CallLimiterState.$Shape} CallLimiterState
+         * @returns {bench.CallLimiterState} CallLimiterState
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        CallLimiterState.decode = function decode(reader, length, _end, _depth, _target) {
+        CallLimiterState.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.CallLimiterState(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.CallLimiterState();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.limiterId = value;
-                        else
-                            delete message.limiterId;
-                        continue;
+                        message.limiterId = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.limit = value;
-                        else
-                            delete message.limit;
-                        continue;
+                        message.limit = reader.int32();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 1)
-                            break;
-                        if ((value = reader.double()) !== 0)
-                            message.originWindow = value;
-                        else
-                            delete message.originWindow;
-                        continue;
+                        message.originWindow = reader.double();
+                        break;
                     }
                 case 4: {
-                        if (wireType !== 0)
-                            break;
                         message.incrementSucceeded = reader.bool();
-                        message._incrementSucceeded = "incrementSucceeded";
-                        continue;
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -3664,7 +3403,7 @@ $root.bench = (function() {
          * @memberof bench.CallLimiterState
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.CallLimiterState & bench.CallLimiterState.$Shape} CallLimiterState
+         * @returns {bench.CallLimiterState} CallLimiterState
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -3682,13 +3421,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        CallLimiterState.verify = function verify(message, _depth) {
+        CallLimiterState.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             var properties = {};
             if (message.limiterId != null && message.hasOwnProperty("limiterId"))
                 if (!$util.isString(message.limiterId))
@@ -3715,23 +3454,20 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.CallLimiterState} CallLimiterState
          */
-        CallLimiterState.fromObject = function fromObject(object, _depth) {
+        CallLimiterState.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.CallLimiterState)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.CallLimiterState();
             if (object.limiterId != null)
-                if (typeof object.limiterId !== "string" || object.limiterId.length)
-                    message.limiterId = String(object.limiterId);
+                message.limiterId = String(object.limiterId);
             if (object.limit != null)
-                if (Number(object.limit) !== 0)
-                    message.limit = object.limit | 0;
+                message.limit = object.limit | 0;
             if (object.originWindow != null)
-                if (Number(object.originWindow) !== 0)
-                    message.originWindow = Number(object.originWindow);
+                message.originWindow = Number(object.originWindow);
             if (object.incrementSucceeded != null)
                 message.incrementSucceeded = Boolean(object.incrementSucceeded);
             return message;
@@ -3746,12 +3482,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        CallLimiterState.toObject = function toObject(message, options, _depth) {
+        CallLimiterState.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -3765,8 +3501,11 @@ $root.bench = (function() {
                 object.limit = message.limit;
             if (message.originWindow != null && message.hasOwnProperty("originWindow"))
                 object.originWindow = options.json && !isFinite(message.originWindow) ? String(message.originWindow) : message.originWindow;
-            if (message.incrementSucceeded != null && message.hasOwnProperty("incrementSucceeded"))
+            if (message.incrementSucceeded != null && message.hasOwnProperty("incrementSucceeded")) {
                 object.incrementSucceeded = message.incrementSucceeded;
+                if (options.oneofs)
+                    object._incrementSucceeded = "incrementSucceeded";
+            }
             return object;
         };
 
@@ -3782,17 +3521,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for CallLimiterState
+         * Gets the default type url for CallLimiterState
          * @function getTypeUrl
          * @memberof bench.CallLimiterState
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        CallLimiterState.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.CallLimiterState";
+        CallLimiterState.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.CallLimiterState";
         };
 
         return CallLimiterState;
@@ -3802,34 +3542,21 @@ $root.bench = (function() {
 
         /**
          * Properties of a TimerEntry.
-         * @typedef {Object} bench.TimerEntry.$Properties
+         * @memberof bench
+         * @interface ITimerEntry
          * @property {string|null} [id] TimerEntry id
          * @property {string|null} [type] TimerEntry type
          * @property {number|null} [fireAt] TimerEntry fireAt
          * @property {string|null} [legId] TimerEntry legId
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a TimerEntry.
-         * @memberof bench
-         * @interface ITimerEntry
-         * @augments bench.TimerEntry.$Properties
-         * @deprecated Use bench.TimerEntry.$Properties instead.
-         */
-
-        /**
-         * Shape of a TimerEntry.
-         * @typedef {bench.TimerEntry.$Properties} bench.TimerEntry.$Shape
          */
 
         /**
          * Constructs a new TimerEntry.
          * @memberof bench
          * @classdesc Represents a TimerEntry.
+         * @implements ITimerEntry
          * @constructor
-         * @param {bench.TimerEntry.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.ITimerEntry=} [properties] Properties to set
          */
         function TimerEntry(properties) {
             if (properties)
@@ -3873,7 +3600,12 @@ $root.bench = (function() {
         // OneOf field names bound to virtual getters and setters
         var $oneOfFields;
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * TimerEntry _legId.
+         * @member {"legId"|undefined} _legId
+         * @memberof bench.TimerEntry
+         * @instance
+         */
         Object.defineProperty(TimerEntry.prototype, "_legId", {
             get: $util.oneOfGetter($oneOfFields = ["legId"]),
             set: $util.oneOfSetter($oneOfFields)
@@ -3884,12 +3616,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.TimerEntry
          * @static
-         * @param {bench.TimerEntry.$Properties=} [properties] Properties to set
+         * @param {bench.ITimerEntry=} [properties] Properties to set
          * @returns {bench.TimerEntry} TimerEntry instance
-         * @type {{
-         *   (properties: bench.TimerEntry.$Shape): bench.TimerEntry & bench.TimerEntry.$Shape;
-         *   (properties?: bench.TimerEntry.$Properties): bench.TimerEntry;
-         * }}
          */
         TimerEntry.create = function create(properties) {
             return new TimerEntry(properties);
@@ -3900,16 +3628,16 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.TimerEntry
          * @static
-         * @param {bench.TimerEntry.$Properties} message TimerEntry message or plain object to encode
+         * @param {bench.ITimerEntry} message TimerEntry message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        TimerEntry.encode = function encode(message, writer, _depth) {
+        TimerEntry.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.id != null && Object.hasOwnProperty.call(message, "id"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.id);
@@ -3919,9 +3647,6 @@ $root.bench = (function() {
                 writer.uint32(/* id 3, wireType 1 =*/25).double(message.fireAt);
             if (message.legId != null && Object.hasOwnProperty.call(message, "legId"))
                 writer.uint32(/* id 4, wireType 2 =*/34).string(message.legId);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -3930,12 +3655,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.TimerEntry
          * @static
-         * @param {bench.TimerEntry.$Properties} message TimerEntry message or plain object to encode
+         * @param {bench.ITimerEntry} message TimerEntry message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         TimerEntry.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -3945,68 +3670,44 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.TimerEntry & bench.TimerEntry.$Shape} TimerEntry
+         * @returns {bench.TimerEntry} TimerEntry
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        TimerEntry.decode = function decode(reader, length, _end, _depth, _target) {
+        TimerEntry.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.TimerEntry(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.TimerEntry();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.id = value;
-                        else
-                            delete message.id;
-                        continue;
+                        message.id = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.type = value;
-                        else
-                            delete message.type;
-                        continue;
+                        message.type = reader.string();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 1)
-                            break;
-                        if ((value = reader.double()) !== 0)
-                            message.fireAt = value;
-                        else
-                            delete message.fireAt;
-                        continue;
+                        message.fireAt = reader.double();
+                        break;
                     }
                 case 4: {
-                        if (wireType !== 2)
-                            break;
                         message.legId = reader.string();
-                        message._legId = "legId";
-                        continue;
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -4016,7 +3717,7 @@ $root.bench = (function() {
          * @memberof bench.TimerEntry
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.TimerEntry & bench.TimerEntry.$Shape} TimerEntry
+         * @returns {bench.TimerEntry} TimerEntry
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -4034,13 +3735,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        TimerEntry.verify = function verify(message, _depth) {
+        TimerEntry.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             var properties = {};
             if (message.id != null && message.hasOwnProperty("id"))
                 if (!$util.isString(message.id))
@@ -4067,23 +3768,20 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.TimerEntry} TimerEntry
          */
-        TimerEntry.fromObject = function fromObject(object, _depth) {
+        TimerEntry.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.TimerEntry)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.TimerEntry();
             if (object.id != null)
-                if (typeof object.id !== "string" || object.id.length)
-                    message.id = String(object.id);
+                message.id = String(object.id);
             if (object.type != null)
-                if (typeof object.type !== "string" || object.type.length)
-                    message.type = String(object.type);
+                message.type = String(object.type);
             if (object.fireAt != null)
-                if (Number(object.fireAt) !== 0)
-                    message.fireAt = Number(object.fireAt);
+                message.fireAt = Number(object.fireAt);
             if (object.legId != null)
                 message.legId = String(object.legId);
             return message;
@@ -4098,12 +3796,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        TimerEntry.toObject = function toObject(message, options, _depth) {
+        TimerEntry.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -4117,8 +3815,11 @@ $root.bench = (function() {
                 object.type = message.type;
             if (message.fireAt != null && message.hasOwnProperty("fireAt"))
                 object.fireAt = options.json && !isFinite(message.fireAt) ? String(message.fireAt) : message.fireAt;
-            if (message.legId != null && message.hasOwnProperty("legId"))
+            if (message.legId != null && message.hasOwnProperty("legId")) {
                 object.legId = message.legId;
+                if (options.oneofs)
+                    object._legId = "legId";
+            }
             return object;
         };
 
@@ -4134,17 +3835,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for TimerEntry
+         * Gets the default type url for TimerEntry
          * @function getTypeUrl
          * @memberof bench.TimerEntry
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        TimerEntry.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.TimerEntry";
+        TimerEntry.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.TimerEntry";
         };
 
         return TimerEntry;
@@ -4154,35 +3856,22 @@ $root.bench = (function() {
 
         /**
          * Properties of a CdrEvent.
-         * @typedef {Object} bench.CdrEvent.$Properties
+         * @memberof bench
+         * @interface ICdrEvent
          * @property {string|null} [type] CdrEvent type
          * @property {number|null} [timestamp] CdrEvent timestamp
          * @property {string|null} [legId] CdrEvent legId
          * @property {number|null} [statusCode] CdrEvent statusCode
          * @property {string|null} [reason] CdrEvent reason
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a CdrEvent.
-         * @memberof bench
-         * @interface ICdrEvent
-         * @augments bench.CdrEvent.$Properties
-         * @deprecated Use bench.CdrEvent.$Properties instead.
-         */
-
-        /**
-         * Shape of a CdrEvent.
-         * @typedef {bench.CdrEvent.$Properties} bench.CdrEvent.$Shape
          */
 
         /**
          * Constructs a new CdrEvent.
          * @memberof bench
          * @classdesc Represents a CdrEvent.
+         * @implements ICdrEvent
          * @constructor
-         * @param {bench.CdrEvent.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.ICdrEvent=} [properties] Properties to set
          */
         function CdrEvent(properties) {
             if (properties)
@@ -4234,13 +3923,23 @@ $root.bench = (function() {
         // OneOf field names bound to virtual getters and setters
         var $oneOfFields;
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * CdrEvent _statusCode.
+         * @member {"statusCode"|undefined} _statusCode
+         * @memberof bench.CdrEvent
+         * @instance
+         */
         Object.defineProperty(CdrEvent.prototype, "_statusCode", {
             get: $util.oneOfGetter($oneOfFields = ["statusCode"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * CdrEvent _reason.
+         * @member {"reason"|undefined} _reason
+         * @memberof bench.CdrEvent
+         * @instance
+         */
         Object.defineProperty(CdrEvent.prototype, "_reason", {
             get: $util.oneOfGetter($oneOfFields = ["reason"]),
             set: $util.oneOfSetter($oneOfFields)
@@ -4251,12 +3950,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.CdrEvent
          * @static
-         * @param {bench.CdrEvent.$Properties=} [properties] Properties to set
+         * @param {bench.ICdrEvent=} [properties] Properties to set
          * @returns {bench.CdrEvent} CdrEvent instance
-         * @type {{
-         *   (properties: bench.CdrEvent.$Shape): bench.CdrEvent & bench.CdrEvent.$Shape;
-         *   (properties?: bench.CdrEvent.$Properties): bench.CdrEvent;
-         * }}
          */
         CdrEvent.create = function create(properties) {
             return new CdrEvent(properties);
@@ -4267,16 +3962,16 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.CdrEvent
          * @static
-         * @param {bench.CdrEvent.$Properties} message CdrEvent message or plain object to encode
+         * @param {bench.ICdrEvent} message CdrEvent message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        CdrEvent.encode = function encode(message, writer, _depth) {
+        CdrEvent.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.type != null && Object.hasOwnProperty.call(message, "type"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.type);
@@ -4288,9 +3983,6 @@ $root.bench = (function() {
                 writer.uint32(/* id 4, wireType 0 =*/32).int32(message.statusCode);
             if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
                 writer.uint32(/* id 5, wireType 2 =*/42).string(message.reason);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -4299,12 +3991,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.CdrEvent
          * @static
-         * @param {bench.CdrEvent.$Properties} message CdrEvent message or plain object to encode
+         * @param {bench.ICdrEvent} message CdrEvent message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         CdrEvent.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -4314,75 +4006,48 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.CdrEvent & bench.CdrEvent.$Shape} CdrEvent
+         * @returns {bench.CdrEvent} CdrEvent
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        CdrEvent.decode = function decode(reader, length, _end, _depth, _target) {
+        CdrEvent.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.CdrEvent(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.CdrEvent();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.type = value;
-                        else
-                            delete message.type;
-                        continue;
+                        message.type = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 1)
-                            break;
-                        if ((value = reader.double()) !== 0)
-                            message.timestamp = value;
-                        else
-                            delete message.timestamp;
-                        continue;
+                        message.timestamp = reader.double();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.legId = value;
-                        else
-                            delete message.legId;
-                        continue;
+                        message.legId = reader.string();
+                        break;
                     }
                 case 4: {
-                        if (wireType !== 0)
-                            break;
                         message.statusCode = reader.int32();
-                        message._statusCode = "statusCode";
-                        continue;
+                        break;
                     }
                 case 5: {
-                        if (wireType !== 2)
-                            break;
                         message.reason = reader.string();
-                        message._reason = "reason";
-                        continue;
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -4392,7 +4057,7 @@ $root.bench = (function() {
          * @memberof bench.CdrEvent
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.CdrEvent & bench.CdrEvent.$Shape} CdrEvent
+         * @returns {bench.CdrEvent} CdrEvent
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -4410,13 +4075,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        CdrEvent.verify = function verify(message, _depth) {
+        CdrEvent.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             var properties = {};
             if (message.type != null && message.hasOwnProperty("type"))
                 if (!$util.isString(message.type))
@@ -4448,23 +4113,20 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.CdrEvent} CdrEvent
          */
-        CdrEvent.fromObject = function fromObject(object, _depth) {
+        CdrEvent.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.CdrEvent)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.CdrEvent();
             if (object.type != null)
-                if (typeof object.type !== "string" || object.type.length)
-                    message.type = String(object.type);
+                message.type = String(object.type);
             if (object.timestamp != null)
-                if (Number(object.timestamp) !== 0)
-                    message.timestamp = Number(object.timestamp);
+                message.timestamp = Number(object.timestamp);
             if (object.legId != null)
-                if (typeof object.legId !== "string" || object.legId.length)
-                    message.legId = String(object.legId);
+                message.legId = String(object.legId);
             if (object.statusCode != null)
                 message.statusCode = object.statusCode | 0;
             if (object.reason != null)
@@ -4481,12 +4143,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        CdrEvent.toObject = function toObject(message, options, _depth) {
+        CdrEvent.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -4500,10 +4162,16 @@ $root.bench = (function() {
                 object.timestamp = options.json && !isFinite(message.timestamp) ? String(message.timestamp) : message.timestamp;
             if (message.legId != null && message.hasOwnProperty("legId"))
                 object.legId = message.legId;
-            if (message.statusCode != null && message.hasOwnProperty("statusCode"))
+            if (message.statusCode != null && message.hasOwnProperty("statusCode")) {
                 object.statusCode = message.statusCode;
-            if (message.reason != null && message.hasOwnProperty("reason"))
+                if (options.oneofs)
+                    object._statusCode = "statusCode";
+            }
+            if (message.reason != null && message.hasOwnProperty("reason")) {
                 object.reason = message.reason;
+                if (options.oneofs)
+                    object._reason = "reason";
+            }
             return object;
         };
 
@@ -4519,17 +4187,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for CdrEvent
+         * Gets the default type url for CdrEvent
          * @function getTypeUrl
          * @memberof bench.CdrEvent
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        CdrEvent.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.CdrEvent";
+        CdrEvent.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.CdrEvent";
         };
 
         return CdrEvent;
@@ -4539,33 +4208,20 @@ $root.bench = (function() {
 
         /**
          * Properties of a CallTopology.
-         * @typedef {Object} bench.CallTopology.$Properties
+         * @memberof bench
+         * @interface ICallTopology
          * @property {string|null} [pri] CallTopology pri
          * @property {string|null} [bak] CallTopology bak
          * @property {number|null} [gen] CallTopology gen
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a CallTopology.
-         * @memberof bench
-         * @interface ICallTopology
-         * @augments bench.CallTopology.$Properties
-         * @deprecated Use bench.CallTopology.$Properties instead.
-         */
-
-        /**
-         * Shape of a CallTopology.
-         * @typedef {bench.CallTopology.$Properties} bench.CallTopology.$Shape
          */
 
         /**
          * Constructs a new CallTopology.
          * @memberof bench
          * @classdesc Represents a CallTopology.
+         * @implements ICallTopology
          * @constructor
-         * @param {bench.CallTopology.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.ICallTopology=} [properties] Properties to set
          */
         function CallTopology(properties) {
             if (properties)
@@ -4603,12 +4259,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.CallTopology
          * @static
-         * @param {bench.CallTopology.$Properties=} [properties] Properties to set
+         * @param {bench.ICallTopology=} [properties] Properties to set
          * @returns {bench.CallTopology} CallTopology instance
-         * @type {{
-         *   (properties: bench.CallTopology.$Shape): bench.CallTopology & bench.CallTopology.$Shape;
-         *   (properties?: bench.CallTopology.$Properties): bench.CallTopology;
-         * }}
          */
         CallTopology.create = function create(properties) {
             return new CallTopology(properties);
@@ -4619,16 +4271,16 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.CallTopology
          * @static
-         * @param {bench.CallTopology.$Properties} message CallTopology message or plain object to encode
+         * @param {bench.ICallTopology} message CallTopology message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        CallTopology.encode = function encode(message, writer, _depth) {
+        CallTopology.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.pri != null && Object.hasOwnProperty.call(message, "pri"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.pri);
@@ -4636,9 +4288,6 @@ $root.bench = (function() {
                 writer.uint32(/* id 2, wireType 2 =*/18).string(message.bak);
             if (message.gen != null && Object.hasOwnProperty.call(message, "gen"))
                 writer.uint32(/* id 3, wireType 0 =*/24).int32(message.gen);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -4647,12 +4296,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.CallTopology
          * @static
-         * @param {bench.CallTopology.$Properties} message CallTopology message or plain object to encode
+         * @param {bench.ICallTopology} message CallTopology message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         CallTopology.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -4662,61 +4311,40 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.CallTopology & bench.CallTopology.$Shape} CallTopology
+         * @returns {bench.CallTopology} CallTopology
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        CallTopology.decode = function decode(reader, length, _end, _depth, _target) {
+        CallTopology.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.CallTopology(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.CallTopology();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.pri = value;
-                        else
-                            delete message.pri;
-                        continue;
+                        message.pri = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.bak = value;
-                        else
-                            delete message.bak;
-                        continue;
+                        message.bak = reader.string();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.gen = value;
-                        else
-                            delete message.gen;
-                        continue;
+                        message.gen = reader.int32();
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -4726,7 +4354,7 @@ $root.bench = (function() {
          * @memberof bench.CallTopology
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.CallTopology & bench.CallTopology.$Shape} CallTopology
+         * @returns {bench.CallTopology} CallTopology
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -4744,13 +4372,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        CallTopology.verify = function verify(message, _depth) {
+        CallTopology.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.pri != null && message.hasOwnProperty("pri"))
                 if (!$util.isString(message.pri))
                     return "pri: string expected";
@@ -4771,23 +4399,20 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.CallTopology} CallTopology
          */
-        CallTopology.fromObject = function fromObject(object, _depth) {
+        CallTopology.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.CallTopology)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.CallTopology();
             if (object.pri != null)
-                if (typeof object.pri !== "string" || object.pri.length)
-                    message.pri = String(object.pri);
+                message.pri = String(object.pri);
             if (object.bak != null)
-                if (typeof object.bak !== "string" || object.bak.length)
-                    message.bak = String(object.bak);
+                message.bak = String(object.bak);
             if (object.gen != null)
-                if (Number(object.gen) !== 0)
-                    message.gen = object.gen | 0;
+                message.gen = object.gen | 0;
             return message;
         };
 
@@ -4800,12 +4425,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        CallTopology.toObject = function toObject(message, options, _depth) {
+        CallTopology.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -4834,17 +4459,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for CallTopology
+         * Gets the default type url for CallTopology
          * @function getTypeUrl
          * @memberof bench.CallTopology
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        CallTopology.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.CallTopology";
+        CallTopology.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.CallTopology";
         };
 
         return CallTopology;
@@ -4854,33 +4480,21 @@ $root.bench = (function() {
 
         /**
          * Properties of an ActiveRule.
-         * @typedef {Object} bench.ActiveRule.$Properties
-         * @property {string|null} [id] ActiveRule id
-         * @property {string|null} [paramsJson] ActiveRule paramsJson
-         * @property {boolean|null} [active] ActiveRule active
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of an ActiveRule.
          * @memberof bench
          * @interface IActiveRule
-         * @augments bench.ActiveRule.$Properties
-         * @deprecated Use bench.ActiveRule.$Properties instead.
-         */
-
-        /**
-         * Shape of an ActiveRule.
-         * @typedef {bench.ActiveRule.$Properties} bench.ActiveRule.$Shape
+         * @property {string|null} [id] ActiveRule id
+         * @property {boolean|null} [paramsPresent] ActiveRule paramsPresent
+         * @property {string|null} [paramsJson] ActiveRule paramsJson
+         * @property {boolean|null} [active] ActiveRule active
          */
 
         /**
          * Constructs a new ActiveRule.
          * @memberof bench
          * @classdesc Represents an ActiveRule.
+         * @implements IActiveRule
          * @constructor
-         * @param {bench.ActiveRule.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IActiveRule=} [properties] Properties to set
          */
         function ActiveRule(properties) {
             if (properties)
@@ -4896,6 +4510,14 @@ $root.bench = (function() {
          * @instance
          */
         ActiveRule.prototype.id = "";
+
+        /**
+         * ActiveRule paramsPresent.
+         * @member {boolean} paramsPresent
+         * @memberof bench.ActiveRule
+         * @instance
+         */
+        ActiveRule.prototype.paramsPresent = false;
 
         /**
          * ActiveRule paramsJson.
@@ -4916,7 +4538,12 @@ $root.bench = (function() {
         // OneOf field names bound to virtual getters and setters
         var $oneOfFields;
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * ActiveRule _paramsJson.
+         * @member {"paramsJson"|undefined} _paramsJson
+         * @memberof bench.ActiveRule
+         * @instance
+         */
         Object.defineProperty(ActiveRule.prototype, "_paramsJson", {
             get: $util.oneOfGetter($oneOfFields = ["paramsJson"]),
             set: $util.oneOfSetter($oneOfFields)
@@ -4927,12 +4554,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.ActiveRule
          * @static
-         * @param {bench.ActiveRule.$Properties=} [properties] Properties to set
+         * @param {bench.IActiveRule=} [properties] Properties to set
          * @returns {bench.ActiveRule} ActiveRule instance
-         * @type {{
-         *   (properties: bench.ActiveRule.$Shape): bench.ActiveRule & bench.ActiveRule.$Shape;
-         *   (properties?: bench.ActiveRule.$Properties): bench.ActiveRule;
-         * }}
          */
         ActiveRule.create = function create(properties) {
             return new ActiveRule(properties);
@@ -4943,26 +4566,25 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.ActiveRule
          * @static
-         * @param {bench.ActiveRule.$Properties} message ActiveRule message or plain object to encode
+         * @param {bench.IActiveRule} message ActiveRule message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        ActiveRule.encode = function encode(message, writer, _depth) {
+        ActiveRule.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.id != null && Object.hasOwnProperty.call(message, "id"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.id);
+            if (message.paramsPresent != null && Object.hasOwnProperty.call(message, "paramsPresent"))
+                writer.uint32(/* id 2, wireType 0 =*/16).bool(message.paramsPresent);
             if (message.paramsJson != null && Object.hasOwnProperty.call(message, "paramsJson"))
-                writer.uint32(/* id 2, wireType 2 =*/18).string(message.paramsJson);
+                writer.uint32(/* id 3, wireType 2 =*/26).string(message.paramsJson);
             if (message.active != null && Object.hasOwnProperty.call(message, "active"))
-                writer.uint32(/* id 3, wireType 0 =*/24).bool(message.active);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
+                writer.uint32(/* id 4, wireType 0 =*/32).bool(message.active);
             return writer;
         };
 
@@ -4971,12 +4593,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.ActiveRule
          * @static
-         * @param {bench.ActiveRule.$Properties} message ActiveRule message or plain object to encode
+         * @param {bench.IActiveRule} message ActiveRule message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         ActiveRule.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -4986,59 +4608,44 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.ActiveRule & bench.ActiveRule.$Shape} ActiveRule
+         * @returns {bench.ActiveRule} ActiveRule
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        ActiveRule.decode = function decode(reader, length, _end, _depth, _target) {
+        ActiveRule.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.ActiveRule(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.ActiveRule();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.id = value;
-                        else
-                            delete message.id;
-                        continue;
+                        message.id = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        message.paramsJson = reader.string();
-                        message._paramsJson = "paramsJson";
-                        continue;
+                        message.paramsPresent = reader.bool();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.bool())
-                            message.active = value;
-                        else
-                            delete message.active;
-                        continue;
+                        message.paramsJson = reader.string();
+                        break;
                     }
+                case 4: {
+                        message.active = reader.bool();
+                        break;
+                    }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -5048,7 +4655,7 @@ $root.bench = (function() {
          * @memberof bench.ActiveRule
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.ActiveRule & bench.ActiveRule.$Shape} ActiveRule
+         * @returns {bench.ActiveRule} ActiveRule
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -5066,17 +4673,20 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        ActiveRule.verify = function verify(message, _depth) {
+        ActiveRule.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             var properties = {};
             if (message.id != null && message.hasOwnProperty("id"))
                 if (!$util.isString(message.id))
                     return "id: string expected";
+            if (message.paramsPresent != null && message.hasOwnProperty("paramsPresent"))
+                if (typeof message.paramsPresent !== "boolean")
+                    return "paramsPresent: boolean expected";
             if (message.paramsJson != null && message.hasOwnProperty("paramsJson")) {
                 properties._paramsJson = 1;
                 if (!$util.isString(message.paramsJson))
@@ -5096,22 +4706,22 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.ActiveRule} ActiveRule
          */
-        ActiveRule.fromObject = function fromObject(object, _depth) {
+        ActiveRule.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.ActiveRule)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.ActiveRule();
             if (object.id != null)
-                if (typeof object.id !== "string" || object.id.length)
-                    message.id = String(object.id);
+                message.id = String(object.id);
+            if (object.paramsPresent != null)
+                message.paramsPresent = Boolean(object.paramsPresent);
             if (object.paramsJson != null)
                 message.paramsJson = String(object.paramsJson);
             if (object.active != null)
-                if (object.active)
-                    message.active = Boolean(object.active);
+                message.active = Boolean(object.active);
             return message;
         };
 
@@ -5124,22 +4734,28 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        ActiveRule.toObject = function toObject(message, options, _depth) {
+        ActiveRule.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
                 object.id = "";
+                object.paramsPresent = false;
                 object.active = false;
             }
             if (message.id != null && message.hasOwnProperty("id"))
                 object.id = message.id;
-            if (message.paramsJson != null && message.hasOwnProperty("paramsJson"))
+            if (message.paramsPresent != null && message.hasOwnProperty("paramsPresent"))
+                object.paramsPresent = message.paramsPresent;
+            if (message.paramsJson != null && message.hasOwnProperty("paramsJson")) {
                 object.paramsJson = message.paramsJson;
+                if (options.oneofs)
+                    object._paramsJson = "paramsJson";
+            }
             if (message.active != null && message.hasOwnProperty("active"))
                 object.active = message.active;
             return object;
@@ -5157,17 +4773,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for ActiveRule
+         * Gets the default type url for ActiveRule
          * @function getTypeUrl
          * @memberof bench.ActiveRule
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        ActiveRule.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.ActiveRule";
+        ActiveRule.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.ActiveRule";
         };
 
         return ActiveRule;
@@ -5177,32 +4794,20 @@ $root.bench = (function() {
 
         /**
          * Properties of a RuleStateEntry.
-         * @typedef {Object} bench.RuleStateEntry.$Properties
-         * @property {string|null} [ruleId] RuleStateEntry ruleId
-         * @property {string|null} [stateJson] RuleStateEntry stateJson
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a RuleStateEntry.
          * @memberof bench
          * @interface IRuleStateEntry
-         * @augments bench.RuleStateEntry.$Properties
-         * @deprecated Use bench.RuleStateEntry.$Properties instead.
-         */
-
-        /**
-         * Shape of a RuleStateEntry.
-         * @typedef {bench.RuleStateEntry.$Properties} bench.RuleStateEntry.$Shape
+         * @property {string|null} [ruleId] RuleStateEntry ruleId
+         * @property {boolean|null} [statePresent] RuleStateEntry statePresent
+         * @property {string|null} [stateJson] RuleStateEntry stateJson
          */
 
         /**
          * Constructs a new RuleStateEntry.
          * @memberof bench
          * @classdesc Represents a RuleStateEntry.
+         * @implements IRuleStateEntry
          * @constructor
-         * @param {bench.RuleStateEntry.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IRuleStateEntry=} [properties] Properties to set
          */
         function RuleStateEntry(properties) {
             if (properties)
@@ -5220,6 +4825,14 @@ $root.bench = (function() {
         RuleStateEntry.prototype.ruleId = "";
 
         /**
+         * RuleStateEntry statePresent.
+         * @member {boolean} statePresent
+         * @memberof bench.RuleStateEntry
+         * @instance
+         */
+        RuleStateEntry.prototype.statePresent = false;
+
+        /**
          * RuleStateEntry stateJson.
          * @member {string|null|undefined} stateJson
          * @memberof bench.RuleStateEntry
@@ -5230,7 +4843,12 @@ $root.bench = (function() {
         // OneOf field names bound to virtual getters and setters
         var $oneOfFields;
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * RuleStateEntry _stateJson.
+         * @member {"stateJson"|undefined} _stateJson
+         * @memberof bench.RuleStateEntry
+         * @instance
+         */
         Object.defineProperty(RuleStateEntry.prototype, "_stateJson", {
             get: $util.oneOfGetter($oneOfFields = ["stateJson"]),
             set: $util.oneOfSetter($oneOfFields)
@@ -5241,12 +4859,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.RuleStateEntry
          * @static
-         * @param {bench.RuleStateEntry.$Properties=} [properties] Properties to set
+         * @param {bench.IRuleStateEntry=} [properties] Properties to set
          * @returns {bench.RuleStateEntry} RuleStateEntry instance
-         * @type {{
-         *   (properties: bench.RuleStateEntry.$Shape): bench.RuleStateEntry & bench.RuleStateEntry.$Shape;
-         *   (properties?: bench.RuleStateEntry.$Properties): bench.RuleStateEntry;
-         * }}
          */
         RuleStateEntry.create = function create(properties) {
             return new RuleStateEntry(properties);
@@ -5257,24 +4871,23 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.RuleStateEntry
          * @static
-         * @param {bench.RuleStateEntry.$Properties} message RuleStateEntry message or plain object to encode
+         * @param {bench.IRuleStateEntry} message RuleStateEntry message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        RuleStateEntry.encode = function encode(message, writer, _depth) {
+        RuleStateEntry.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.ruleId != null && Object.hasOwnProperty.call(message, "ruleId"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.ruleId);
+            if (message.statePresent != null && Object.hasOwnProperty.call(message, "statePresent"))
+                writer.uint32(/* id 2, wireType 0 =*/16).bool(message.statePresent);
             if (message.stateJson != null && Object.hasOwnProperty.call(message, "stateJson"))
-                writer.uint32(/* id 2, wireType 2 =*/18).string(message.stateJson);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
+                writer.uint32(/* id 3, wireType 2 =*/26).string(message.stateJson);
             return writer;
         };
 
@@ -5283,12 +4896,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.RuleStateEntry
          * @static
-         * @param {bench.RuleStateEntry.$Properties} message RuleStateEntry message or plain object to encode
+         * @param {bench.IRuleStateEntry} message RuleStateEntry message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         RuleStateEntry.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -5298,50 +4911,40 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.RuleStateEntry & bench.RuleStateEntry.$Shape} RuleStateEntry
+         * @returns {bench.RuleStateEntry} RuleStateEntry
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        RuleStateEntry.decode = function decode(reader, length, _end, _depth, _target) {
+        RuleStateEntry.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.RuleStateEntry(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.RuleStateEntry();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.ruleId = value;
-                        else
-                            delete message.ruleId;
-                        continue;
+                        message.ruleId = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        message.stateJson = reader.string();
-                        message._stateJson = "stateJson";
-                        continue;
+                        message.statePresent = reader.bool();
+                        break;
                     }
+                case 3: {
+                        message.stateJson = reader.string();
+                        break;
+                    }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -5351,7 +4954,7 @@ $root.bench = (function() {
          * @memberof bench.RuleStateEntry
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.RuleStateEntry & bench.RuleStateEntry.$Shape} RuleStateEntry
+         * @returns {bench.RuleStateEntry} RuleStateEntry
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -5369,17 +4972,20 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        RuleStateEntry.verify = function verify(message, _depth) {
+        RuleStateEntry.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             var properties = {};
             if (message.ruleId != null && message.hasOwnProperty("ruleId"))
                 if (!$util.isString(message.ruleId))
                     return "ruleId: string expected";
+            if (message.statePresent != null && message.hasOwnProperty("statePresent"))
+                if (typeof message.statePresent !== "boolean")
+                    return "statePresent: boolean expected";
             if (message.stateJson != null && message.hasOwnProperty("stateJson")) {
                 properties._stateJson = 1;
                 if (!$util.isString(message.stateJson))
@@ -5396,17 +5002,18 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.RuleStateEntry} RuleStateEntry
          */
-        RuleStateEntry.fromObject = function fromObject(object, _depth) {
+        RuleStateEntry.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.RuleStateEntry)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.RuleStateEntry();
             if (object.ruleId != null)
-                if (typeof object.ruleId !== "string" || object.ruleId.length)
-                    message.ruleId = String(object.ruleId);
+                message.ruleId = String(object.ruleId);
+            if (object.statePresent != null)
+                message.statePresent = Boolean(object.statePresent);
             if (object.stateJson != null)
                 message.stateJson = String(object.stateJson);
             return message;
@@ -5421,20 +5028,27 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        RuleStateEntry.toObject = function toObject(message, options, _depth) {
+        RuleStateEntry.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
-            if (options.defaults)
+            if (options.defaults) {
                 object.ruleId = "";
+                object.statePresent = false;
+            }
             if (message.ruleId != null && message.hasOwnProperty("ruleId"))
                 object.ruleId = message.ruleId;
-            if (message.stateJson != null && message.hasOwnProperty("stateJson"))
+            if (message.statePresent != null && message.hasOwnProperty("statePresent"))
+                object.statePresent = message.statePresent;
+            if (message.stateJson != null && message.hasOwnProperty("stateJson")) {
                 object.stateJson = message.stateJson;
+                if (options.oneofs)
+                    object._stateJson = "stateJson";
+            }
             return object;
         };
 
@@ -5450,17 +5064,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for RuleStateEntry
+         * Gets the default type url for RuleStateEntry
          * @function getTypeUrl
          * @memberof bench.RuleStateEntry
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        RuleStateEntry.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.RuleStateEntry";
+        RuleStateEntry.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.RuleStateEntry";
         };
 
         return RuleStateEntry;
@@ -5470,32 +5085,19 @@ $root.bench = (function() {
 
         /**
          * Properties of an ActivePeer.
-         * @typedef {Object} bench.ActivePeer.$Properties
-         * @property {string|null} [legA] ActivePeer legA
-         * @property {string|null} [legB] ActivePeer legB
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of an ActivePeer.
          * @memberof bench
          * @interface IActivePeer
-         * @augments bench.ActivePeer.$Properties
-         * @deprecated Use bench.ActivePeer.$Properties instead.
-         */
-
-        /**
-         * Shape of an ActivePeer.
-         * @typedef {bench.ActivePeer.$Properties} bench.ActivePeer.$Shape
+         * @property {string|null} [legA] ActivePeer legA
+         * @property {string|null} [legB] ActivePeer legB
          */
 
         /**
          * Constructs a new ActivePeer.
          * @memberof bench
          * @classdesc Represents an ActivePeer.
+         * @implements IActivePeer
          * @constructor
-         * @param {bench.ActivePeer.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IActivePeer=} [properties] Properties to set
          */
         function ActivePeer(properties) {
             if (properties)
@@ -5525,12 +5127,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.ActivePeer
          * @static
-         * @param {bench.ActivePeer.$Properties=} [properties] Properties to set
+         * @param {bench.IActivePeer=} [properties] Properties to set
          * @returns {bench.ActivePeer} ActivePeer instance
-         * @type {{
-         *   (properties: bench.ActivePeer.$Shape): bench.ActivePeer & bench.ActivePeer.$Shape;
-         *   (properties?: bench.ActivePeer.$Properties): bench.ActivePeer;
-         * }}
          */
         ActivePeer.create = function create(properties) {
             return new ActivePeer(properties);
@@ -5541,24 +5139,21 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.ActivePeer
          * @static
-         * @param {bench.ActivePeer.$Properties} message ActivePeer message or plain object to encode
+         * @param {bench.IActivePeer} message ActivePeer message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        ActivePeer.encode = function encode(message, writer, _depth) {
+        ActivePeer.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.legA != null && Object.hasOwnProperty.call(message, "legA"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.legA);
             if (message.legB != null && Object.hasOwnProperty.call(message, "legB"))
                 writer.uint32(/* id 2, wireType 2 =*/18).string(message.legB);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -5567,12 +5162,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.ActivePeer
          * @static
-         * @param {bench.ActivePeer.$Properties} message ActivePeer message or plain object to encode
+         * @param {bench.IActivePeer} message ActivePeer message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         ActivePeer.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -5582,52 +5177,36 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.ActivePeer & bench.ActivePeer.$Shape} ActivePeer
+         * @returns {bench.ActivePeer} ActivePeer
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        ActivePeer.decode = function decode(reader, length, _end, _depth, _target) {
+        ActivePeer.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.ActivePeer(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.ActivePeer();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.legA = value;
-                        else
-                            delete message.legA;
-                        continue;
+                        message.legA = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.legB = value;
-                        else
-                            delete message.legB;
-                        continue;
+                        message.legB = reader.string();
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -5637,7 +5216,7 @@ $root.bench = (function() {
          * @memberof bench.ActivePeer
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.ActivePeer & bench.ActivePeer.$Shape} ActivePeer
+         * @returns {bench.ActivePeer} ActivePeer
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -5655,13 +5234,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        ActivePeer.verify = function verify(message, _depth) {
+        ActivePeer.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.legA != null && message.hasOwnProperty("legA"))
                 if (!$util.isString(message.legA))
                     return "legA: string expected";
@@ -5679,20 +5258,18 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.ActivePeer} ActivePeer
          */
-        ActivePeer.fromObject = function fromObject(object, _depth) {
+        ActivePeer.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.ActivePeer)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.ActivePeer();
             if (object.legA != null)
-                if (typeof object.legA !== "string" || object.legA.length)
-                    message.legA = String(object.legA);
+                message.legA = String(object.legA);
             if (object.legB != null)
-                if (typeof object.legB !== "string" || object.legB.length)
-                    message.legB = String(object.legB);
+                message.legB = String(object.legB);
             return message;
         };
 
@@ -5705,12 +5282,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        ActivePeer.toObject = function toObject(message, options, _depth) {
+        ActivePeer.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -5736,17 +5313,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for ActivePeer
+         * Gets the default type url for ActivePeer
          * @function getTypeUrl
          * @memberof bench.ActivePeer
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        ActivePeer.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.ActivePeer";
+        ActivePeer.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.ActivePeer";
         };
 
         return ActivePeer;
@@ -5756,58 +5334,56 @@ $root.bench = (function() {
 
         /**
          * Properties of a Call.
-         * @typedef {Object} bench.Call.$Properties
+         * @memberof bench
+         * @interface ICall
          * @property {string|null} [callRef] Call callRef
-         * @property {bench.Leg.$Properties|null} [aLeg] Call aLeg
-         * @property {Array.<bench.Leg.$Properties>|null} [bLegs] Call bLegs
-         * @property {bench.ActivePeer.$Properties|null} [activePeer] Call activePeer
+         * @property {bench.ILeg|null} [aLeg] Call aLeg
+         * @property {Array.<bench.ILeg>|null} [bLegs] Call bLegs
+         * @property {bench.IActivePeer|null} [activePeer] Call activePeer
+         * @property {boolean|null} [activePeerIsNull] Call activePeerIsNull
          * @property {string|null} [callbackContext] Call callbackContext
          * @property {string|null} [billingContext] Call billingContext
-         * @property {bench.ALegInvite.$Properties|null} [aLegInvite] Call aLegInvite
-         * @property {Array.<bench.CallLimiterState.$Properties>|null} [limiterEntries] Call limiterEntries
-         * @property {Array.<bench.TimerEntry.$Properties>|null} [timers] Call timers
-         * @property {Array.<bench.CdrEvent.$Properties>|null} [cdrEvents] Call cdrEvents
+         * @property {boolean|null} [billingContextIsNull] Call billingContextIsNull
+         * @property {bench.IALegInvite|null} [aLegInvite] Call aLegInvite
+         * @property {Array.<bench.ICallLimiterState>|null} [limiterEntries] Call limiterEntries
+         * @property {Array.<bench.ITimerEntry>|null} [timers] Call timers
+         * @property {Array.<bench.ICdrEvent>|null} [cdrEvents] Call cdrEvents
          * @property {string|null} [state] Call state
          * @property {number|null} [createdAt] Call createdAt
          * @property {Array.<string>|null} [aLegPendingVias] Call aLegPendingVias
+         * @property {boolean|null} [aLegPendingViasPresent] Call aLegPendingViasPresent
          * @property {number|null} [aLegPendingCSeq] Call aLegPendingCSeq
-         * @property {Array.<bench.TagMapping.$Properties>|null} [tagMap] Call tagMap
+         * @property {Array.<bench.ITagMapping>|null} [tagMap] Call tagMap
          * @property {string|null} [traceId] Call traceId
          * @property {string|null} [rootSpanId] Call rootSpanId
          * @property {boolean|null} [sampled] Call sampled
          * @property {number|null} [workerIndex] Call workerIndex
-         * @property {bench.CallTopology.$Properties|null} [topology] Call topology
+         * @property {bench.ICallTopology|null} [topology] Call topology
          * @property {boolean|null} [emergency] Call emergency
          * @property {string|null} [featuresJson] Call featuresJson
          * @property {string|null} [policyUpdateHeadersJson] Call policyUpdateHeadersJson
          * @property {Uint8Array|null} [policyUpdateBody] Call policyUpdateBody
-         * @property {Array.<bench.ActiveRule.$Properties>|null} [activeRules] Call activeRules
-         * @property {Array.<bench.RuleStateEntry.$Properties>|null} [ruleState] Call ruleState
+         * @property {boolean|null} [policyUpdateBodyIsNull] Call policyUpdateBodyIsNull
+         * @property {Array.<bench.IActiveRule>|null} [activeRules] Call activeRules
+         * @property {boolean|null} [activeRulesPresent] Call activeRulesPresent
+         * @property {Array.<bench.IRuleStateEntry>|null} [ruleState] Call ruleState
+         * @property {boolean|null} [ruleStatePresent] Call ruleStatePresent
          * @property {string|null} [transferJson] Call transferJson
+         * @property {boolean|null} [transferIsNull] Call transferIsNull
          * @property {string|null} [earlyPromoteJson] Call earlyPromoteJson
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a Call.
-         * @memberof bench
-         * @interface ICall
-         * @augments bench.Call.$Properties
-         * @deprecated Use bench.Call.$Properties instead.
-         */
-
-        /**
-         * Shape of a Call.
-         * @typedef {bench.Call.$Properties} bench.Call.$Shape
+         * @property {boolean|null} [earlyPromoteIsNull] Call earlyPromoteIsNull
+         * @property {number|null} [messageCount] Call messageCount
+         * @property {Array.<string>|null} [terminatingRefreshLegs] Call terminatingRefreshLegs
+         * @property {boolean|null} [terminatingRefreshLegsPresent] Call terminatingRefreshLegsPresent
          */
 
         /**
          * Constructs a new Call.
          * @memberof bench
          * @classdesc Represents a Call.
+         * @implements ICall
          * @constructor
-         * @param {bench.Call.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.ICall=} [properties] Properties to set
          */
         function Call(properties) {
             this.bLegs = [];
@@ -5818,6 +5394,7 @@ $root.bench = (function() {
             this.tagMap = [];
             this.activeRules = [];
             this.ruleState = [];
+            this.terminatingRefreshLegs = [];
             if (properties)
                 for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                     if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -5834,7 +5411,7 @@ $root.bench = (function() {
 
         /**
          * Call aLeg.
-         * @member {bench.Leg.$Properties|null|undefined} aLeg
+         * @member {bench.ILeg|null|undefined} aLeg
          * @memberof bench.Call
          * @instance
          */
@@ -5842,7 +5419,7 @@ $root.bench = (function() {
 
         /**
          * Call bLegs.
-         * @member {Array.<bench.Leg.$Properties>} bLegs
+         * @member {Array.<bench.ILeg>} bLegs
          * @memberof bench.Call
          * @instance
          */
@@ -5850,11 +5427,19 @@ $root.bench = (function() {
 
         /**
          * Call activePeer.
-         * @member {bench.ActivePeer.$Properties|null|undefined} activePeer
+         * @member {bench.IActivePeer|null|undefined} activePeer
          * @memberof bench.Call
          * @instance
          */
         Call.prototype.activePeer = null;
+
+        /**
+         * Call activePeerIsNull.
+         * @member {boolean} activePeerIsNull
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.activePeerIsNull = false;
 
         /**
          * Call callbackContext.
@@ -5873,8 +5458,16 @@ $root.bench = (function() {
         Call.prototype.billingContext = null;
 
         /**
+         * Call billingContextIsNull.
+         * @member {boolean|null|undefined} billingContextIsNull
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.billingContextIsNull = null;
+
+        /**
          * Call aLegInvite.
-         * @member {bench.ALegInvite.$Properties|null|undefined} aLegInvite
+         * @member {bench.IALegInvite|null|undefined} aLegInvite
          * @memberof bench.Call
          * @instance
          */
@@ -5882,7 +5475,7 @@ $root.bench = (function() {
 
         /**
          * Call limiterEntries.
-         * @member {Array.<bench.CallLimiterState.$Properties>} limiterEntries
+         * @member {Array.<bench.ICallLimiterState>} limiterEntries
          * @memberof bench.Call
          * @instance
          */
@@ -5890,7 +5483,7 @@ $root.bench = (function() {
 
         /**
          * Call timers.
-         * @member {Array.<bench.TimerEntry.$Properties>} timers
+         * @member {Array.<bench.ITimerEntry>} timers
          * @memberof bench.Call
          * @instance
          */
@@ -5898,7 +5491,7 @@ $root.bench = (function() {
 
         /**
          * Call cdrEvents.
-         * @member {Array.<bench.CdrEvent.$Properties>} cdrEvents
+         * @member {Array.<bench.ICdrEvent>} cdrEvents
          * @memberof bench.Call
          * @instance
          */
@@ -5929,6 +5522,14 @@ $root.bench = (function() {
         Call.prototype.aLegPendingVias = $util.emptyArray;
 
         /**
+         * Call aLegPendingViasPresent.
+         * @member {boolean} aLegPendingViasPresent
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.aLegPendingViasPresent = false;
+
+        /**
          * Call aLegPendingCSeq.
          * @member {number|null|undefined} aLegPendingCSeq
          * @memberof bench.Call
@@ -5938,7 +5539,7 @@ $root.bench = (function() {
 
         /**
          * Call tagMap.
-         * @member {Array.<bench.TagMapping.$Properties>} tagMap
+         * @member {Array.<bench.ITagMapping>} tagMap
          * @memberof bench.Call
          * @instance
          */
@@ -5978,7 +5579,7 @@ $root.bench = (function() {
 
         /**
          * Call topology.
-         * @member {bench.CallTopology.$Properties|null|undefined} topology
+         * @member {bench.ICallTopology|null|undefined} topology
          * @memberof bench.Call
          * @instance
          */
@@ -6017,20 +5618,44 @@ $root.bench = (function() {
         Call.prototype.policyUpdateBody = null;
 
         /**
+         * Call policyUpdateBodyIsNull.
+         * @member {boolean|null|undefined} policyUpdateBodyIsNull
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.policyUpdateBodyIsNull = null;
+
+        /**
          * Call activeRules.
-         * @member {Array.<bench.ActiveRule.$Properties>} activeRules
+         * @member {Array.<bench.IActiveRule>} activeRules
          * @memberof bench.Call
          * @instance
          */
         Call.prototype.activeRules = $util.emptyArray;
 
         /**
+         * Call activeRulesPresent.
+         * @member {boolean} activeRulesPresent
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.activeRulesPresent = false;
+
+        /**
          * Call ruleState.
-         * @member {Array.<bench.RuleStateEntry.$Properties>} ruleState
+         * @member {Array.<bench.IRuleStateEntry>} ruleState
          * @memberof bench.Call
          * @instance
          */
         Call.prototype.ruleState = $util.emptyArray;
+
+        /**
+         * Call ruleStatePresent.
+         * @member {boolean} ruleStatePresent
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.ruleStatePresent = false;
 
         /**
          * Call transferJson.
@@ -6041,6 +5666,14 @@ $root.bench = (function() {
         Call.prototype.transferJson = null;
 
         /**
+         * Call transferIsNull.
+         * @member {boolean|null|undefined} transferIsNull
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.transferIsNull = null;
+
+        /**
          * Call earlyPromoteJson.
          * @member {string|null|undefined} earlyPromoteJson
          * @memberof bench.Call
@@ -6048,96 +5681,258 @@ $root.bench = (function() {
          */
         Call.prototype.earlyPromoteJson = null;
 
+        /**
+         * Call earlyPromoteIsNull.
+         * @member {boolean|null|undefined} earlyPromoteIsNull
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.earlyPromoteIsNull = null;
+
+        /**
+         * Call messageCount.
+         * @member {number|null|undefined} messageCount
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.messageCount = null;
+
+        /**
+         * Call terminatingRefreshLegs.
+         * @member {Array.<string>} terminatingRefreshLegs
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.terminatingRefreshLegs = $util.emptyArray;
+
+        /**
+         * Call terminatingRefreshLegsPresent.
+         * @member {boolean} terminatingRefreshLegsPresent
+         * @memberof bench.Call
+         * @instance
+         */
+        Call.prototype.terminatingRefreshLegsPresent = false;
+
         // OneOf field names bound to virtual getters and setters
         var $oneOfFields;
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _activePeer.
+         * @member {"activePeer"|undefined} _activePeer
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_activePeer", {
             get: $util.oneOfGetter($oneOfFields = ["activePeer"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _callbackContext.
+         * @member {"callbackContext"|undefined} _callbackContext
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_callbackContext", {
             get: $util.oneOfGetter($oneOfFields = ["callbackContext"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _billingContext.
+         * @member {"billingContext"|undefined} _billingContext
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_billingContext", {
             get: $util.oneOfGetter($oneOfFields = ["billingContext"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _billingContextIsNull.
+         * @member {"billingContextIsNull"|undefined} _billingContextIsNull
+         * @memberof bench.Call
+         * @instance
+         */
+        Object.defineProperty(Call.prototype, "_billingContextIsNull", {
+            get: $util.oneOfGetter($oneOfFields = ["billingContextIsNull"]),
+            set: $util.oneOfSetter($oneOfFields)
+        });
+
+        /**
+         * Call _aLegPendingCSeq.
+         * @member {"aLegPendingCSeq"|undefined} _aLegPendingCSeq
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_aLegPendingCSeq", {
             get: $util.oneOfGetter($oneOfFields = ["aLegPendingCSeq"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _traceId.
+         * @member {"traceId"|undefined} _traceId
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_traceId", {
             get: $util.oneOfGetter($oneOfFields = ["traceId"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _rootSpanId.
+         * @member {"rootSpanId"|undefined} _rootSpanId
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_rootSpanId", {
             get: $util.oneOfGetter($oneOfFields = ["rootSpanId"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _sampled.
+         * @member {"sampled"|undefined} _sampled
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_sampled", {
             get: $util.oneOfGetter($oneOfFields = ["sampled"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _workerIndex.
+         * @member {"workerIndex"|undefined} _workerIndex
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_workerIndex", {
             get: $util.oneOfGetter($oneOfFields = ["workerIndex"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _topology.
+         * @member {"topology"|undefined} _topology
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_topology", {
             get: $util.oneOfGetter($oneOfFields = ["topology"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _emergency.
+         * @member {"emergency"|undefined} _emergency
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_emergency", {
             get: $util.oneOfGetter($oneOfFields = ["emergency"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _featuresJson.
+         * @member {"featuresJson"|undefined} _featuresJson
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_featuresJson", {
             get: $util.oneOfGetter($oneOfFields = ["featuresJson"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _policyUpdateHeadersJson.
+         * @member {"policyUpdateHeadersJson"|undefined} _policyUpdateHeadersJson
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_policyUpdateHeadersJson", {
             get: $util.oneOfGetter($oneOfFields = ["policyUpdateHeadersJson"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _policyUpdateBody.
+         * @member {"policyUpdateBody"|undefined} _policyUpdateBody
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_policyUpdateBody", {
             get: $util.oneOfGetter($oneOfFields = ["policyUpdateBody"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _policyUpdateBodyIsNull.
+         * @member {"policyUpdateBodyIsNull"|undefined} _policyUpdateBodyIsNull
+         * @memberof bench.Call
+         * @instance
+         */
+        Object.defineProperty(Call.prototype, "_policyUpdateBodyIsNull", {
+            get: $util.oneOfGetter($oneOfFields = ["policyUpdateBodyIsNull"]),
+            set: $util.oneOfSetter($oneOfFields)
+        });
+
+        /**
+         * Call _transferJson.
+         * @member {"transferJson"|undefined} _transferJson
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_transferJson", {
             get: $util.oneOfGetter($oneOfFields = ["transferJson"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
-        // Virtual OneOf for proto3 optional field
+        /**
+         * Call _transferIsNull.
+         * @member {"transferIsNull"|undefined} _transferIsNull
+         * @memberof bench.Call
+         * @instance
+         */
+        Object.defineProperty(Call.prototype, "_transferIsNull", {
+            get: $util.oneOfGetter($oneOfFields = ["transferIsNull"]),
+            set: $util.oneOfSetter($oneOfFields)
+        });
+
+        /**
+         * Call _earlyPromoteJson.
+         * @member {"earlyPromoteJson"|undefined} _earlyPromoteJson
+         * @memberof bench.Call
+         * @instance
+         */
         Object.defineProperty(Call.prototype, "_earlyPromoteJson", {
             get: $util.oneOfGetter($oneOfFields = ["earlyPromoteJson"]),
+            set: $util.oneOfSetter($oneOfFields)
+        });
+
+        /**
+         * Call _earlyPromoteIsNull.
+         * @member {"earlyPromoteIsNull"|undefined} _earlyPromoteIsNull
+         * @memberof bench.Call
+         * @instance
+         */
+        Object.defineProperty(Call.prototype, "_earlyPromoteIsNull", {
+            get: $util.oneOfGetter($oneOfFields = ["earlyPromoteIsNull"]),
+            set: $util.oneOfSetter($oneOfFields)
+        });
+
+        /**
+         * Call _messageCount.
+         * @member {"messageCount"|undefined} _messageCount
+         * @memberof bench.Call
+         * @instance
+         */
+        Object.defineProperty(Call.prototype, "_messageCount", {
+            get: $util.oneOfGetter($oneOfFields = ["messageCount"]),
             set: $util.oneOfSetter($oneOfFields)
         });
 
@@ -6146,12 +5941,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.Call
          * @static
-         * @param {bench.Call.$Properties=} [properties] Properties to set
+         * @param {bench.ICall=} [properties] Properties to set
          * @returns {bench.Call} Call instance
-         * @type {{
-         *   (properties: bench.Call.$Shape): bench.Call & bench.Call.$Shape;
-         *   (properties?: bench.Call.$Properties): bench.Call;
-         * }}
          */
         Call.create = function create(properties) {
             return new Call(properties);
@@ -6162,84 +5953,104 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.Call
          * @static
-         * @param {bench.Call.$Properties} message Call message or plain object to encode
+         * @param {bench.ICall} message Call message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        Call.encode = function encode(message, writer, _depth) {
+        Call.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.callRef != null && Object.hasOwnProperty.call(message, "callRef"))
                 writer.uint32(/* id 1, wireType 2 =*/10).string(message.callRef);
             if (message.aLeg != null && Object.hasOwnProperty.call(message, "aLeg"))
-                $root.bench.Leg.encode(message.aLeg, writer.uint32(/* id 2, wireType 2 =*/18).fork(), _depth + 1).ldelim();
+                $root.bench.Leg.encode(message.aLeg, writer.uint32(/* id 2, wireType 2 =*/18).fork(), q + 1).ldelim();
             if (message.bLegs != null && message.bLegs.length)
                 for (var i = 0; i < message.bLegs.length; ++i)
-                    $root.bench.Leg.encode(message.bLegs[i], writer.uint32(/* id 3, wireType 2 =*/26).fork(), _depth + 1).ldelim();
+                    $root.bench.Leg.encode(message.bLegs[i], writer.uint32(/* id 3, wireType 2 =*/26).fork(), q + 1).ldelim();
             if (message.activePeer != null && Object.hasOwnProperty.call(message, "activePeer"))
-                $root.bench.ActivePeer.encode(message.activePeer, writer.uint32(/* id 4, wireType 2 =*/34).fork(), _depth + 1).ldelim();
+                $root.bench.ActivePeer.encode(message.activePeer, writer.uint32(/* id 4, wireType 2 =*/34).fork(), q + 1).ldelim();
+            if (message.activePeerIsNull != null && Object.hasOwnProperty.call(message, "activePeerIsNull"))
+                writer.uint32(/* id 5, wireType 0 =*/40).bool(message.activePeerIsNull);
             if (message.callbackContext != null && Object.hasOwnProperty.call(message, "callbackContext"))
-                writer.uint32(/* id 5, wireType 2 =*/42).string(message.callbackContext);
+                writer.uint32(/* id 6, wireType 2 =*/50).string(message.callbackContext);
             if (message.billingContext != null && Object.hasOwnProperty.call(message, "billingContext"))
-                writer.uint32(/* id 6, wireType 2 =*/50).string(message.billingContext);
+                writer.uint32(/* id 7, wireType 2 =*/58).string(message.billingContext);
+            if (message.billingContextIsNull != null && Object.hasOwnProperty.call(message, "billingContextIsNull"))
+                writer.uint32(/* id 8, wireType 0 =*/64).bool(message.billingContextIsNull);
             if (message.aLegInvite != null && Object.hasOwnProperty.call(message, "aLegInvite"))
-                $root.bench.ALegInvite.encode(message.aLegInvite, writer.uint32(/* id 7, wireType 2 =*/58).fork(), _depth + 1).ldelim();
+                $root.bench.ALegInvite.encode(message.aLegInvite, writer.uint32(/* id 9, wireType 2 =*/74).fork(), q + 1).ldelim();
             if (message.limiterEntries != null && message.limiterEntries.length)
                 for (var i = 0; i < message.limiterEntries.length; ++i)
-                    $root.bench.CallLimiterState.encode(message.limiterEntries[i], writer.uint32(/* id 8, wireType 2 =*/66).fork(), _depth + 1).ldelim();
+                    $root.bench.CallLimiterState.encode(message.limiterEntries[i], writer.uint32(/* id 10, wireType 2 =*/82).fork(), q + 1).ldelim();
             if (message.timers != null && message.timers.length)
                 for (var i = 0; i < message.timers.length; ++i)
-                    $root.bench.TimerEntry.encode(message.timers[i], writer.uint32(/* id 9, wireType 2 =*/74).fork(), _depth + 1).ldelim();
+                    $root.bench.TimerEntry.encode(message.timers[i], writer.uint32(/* id 11, wireType 2 =*/90).fork(), q + 1).ldelim();
             if (message.cdrEvents != null && message.cdrEvents.length)
                 for (var i = 0; i < message.cdrEvents.length; ++i)
-                    $root.bench.CdrEvent.encode(message.cdrEvents[i], writer.uint32(/* id 10, wireType 2 =*/82).fork(), _depth + 1).ldelim();
+                    $root.bench.CdrEvent.encode(message.cdrEvents[i], writer.uint32(/* id 12, wireType 2 =*/98).fork(), q + 1).ldelim();
             if (message.state != null && Object.hasOwnProperty.call(message, "state"))
-                writer.uint32(/* id 11, wireType 2 =*/90).string(message.state);
+                writer.uint32(/* id 13, wireType 2 =*/106).string(message.state);
             if (message.createdAt != null && Object.hasOwnProperty.call(message, "createdAt"))
-                writer.uint32(/* id 12, wireType 1 =*/97).double(message.createdAt);
+                writer.uint32(/* id 14, wireType 1 =*/113).double(message.createdAt);
             if (message.aLegPendingVias != null && message.aLegPendingVias.length)
                 for (var i = 0; i < message.aLegPendingVias.length; ++i)
-                    writer.uint32(/* id 13, wireType 2 =*/106).string(message.aLegPendingVias[i]);
+                    writer.uint32(/* id 15, wireType 2 =*/122).string(message.aLegPendingVias[i]);
+            if (message.aLegPendingViasPresent != null && Object.hasOwnProperty.call(message, "aLegPendingViasPresent"))
+                writer.uint32(/* id 16, wireType 0 =*/128).bool(message.aLegPendingViasPresent);
             if (message.aLegPendingCSeq != null && Object.hasOwnProperty.call(message, "aLegPendingCSeq"))
-                writer.uint32(/* id 14, wireType 0 =*/112).int32(message.aLegPendingCSeq);
+                writer.uint32(/* id 17, wireType 0 =*/136).int32(message.aLegPendingCSeq);
             if (message.tagMap != null && message.tagMap.length)
                 for (var i = 0; i < message.tagMap.length; ++i)
-                    $root.bench.TagMapping.encode(message.tagMap[i], writer.uint32(/* id 15, wireType 2 =*/122).fork(), _depth + 1).ldelim();
+                    $root.bench.TagMapping.encode(message.tagMap[i], writer.uint32(/* id 18, wireType 2 =*/146).fork(), q + 1).ldelim();
             if (message.traceId != null && Object.hasOwnProperty.call(message, "traceId"))
-                writer.uint32(/* id 16, wireType 2 =*/130).string(message.traceId);
+                writer.uint32(/* id 19, wireType 2 =*/154).string(message.traceId);
             if (message.rootSpanId != null && Object.hasOwnProperty.call(message, "rootSpanId"))
-                writer.uint32(/* id 17, wireType 2 =*/138).string(message.rootSpanId);
+                writer.uint32(/* id 20, wireType 2 =*/162).string(message.rootSpanId);
             if (message.sampled != null && Object.hasOwnProperty.call(message, "sampled"))
-                writer.uint32(/* id 18, wireType 0 =*/144).bool(message.sampled);
+                writer.uint32(/* id 21, wireType 0 =*/168).bool(message.sampled);
             if (message.workerIndex != null && Object.hasOwnProperty.call(message, "workerIndex"))
-                writer.uint32(/* id 19, wireType 0 =*/152).int32(message.workerIndex);
+                writer.uint32(/* id 22, wireType 0 =*/176).int32(message.workerIndex);
             if (message.topology != null && Object.hasOwnProperty.call(message, "topology"))
-                $root.bench.CallTopology.encode(message.topology, writer.uint32(/* id 20, wireType 2 =*/162).fork(), _depth + 1).ldelim();
+                $root.bench.CallTopology.encode(message.topology, writer.uint32(/* id 23, wireType 2 =*/186).fork(), q + 1).ldelim();
             if (message.emergency != null && Object.hasOwnProperty.call(message, "emergency"))
-                writer.uint32(/* id 21, wireType 0 =*/168).bool(message.emergency);
+                writer.uint32(/* id 24, wireType 0 =*/192).bool(message.emergency);
             if (message.featuresJson != null && Object.hasOwnProperty.call(message, "featuresJson"))
-                writer.uint32(/* id 22, wireType 2 =*/178).string(message.featuresJson);
+                writer.uint32(/* id 25, wireType 2 =*/202).string(message.featuresJson);
             if (message.policyUpdateHeadersJson != null && Object.hasOwnProperty.call(message, "policyUpdateHeadersJson"))
-                writer.uint32(/* id 23, wireType 2 =*/186).string(message.policyUpdateHeadersJson);
+                writer.uint32(/* id 26, wireType 2 =*/210).string(message.policyUpdateHeadersJson);
             if (message.policyUpdateBody != null && Object.hasOwnProperty.call(message, "policyUpdateBody"))
-                writer.uint32(/* id 24, wireType 2 =*/194).bytes(message.policyUpdateBody);
+                writer.uint32(/* id 27, wireType 2 =*/218).bytes(message.policyUpdateBody);
+            if (message.policyUpdateBodyIsNull != null && Object.hasOwnProperty.call(message, "policyUpdateBodyIsNull"))
+                writer.uint32(/* id 28, wireType 0 =*/224).bool(message.policyUpdateBodyIsNull);
             if (message.activeRules != null && message.activeRules.length)
                 for (var i = 0; i < message.activeRules.length; ++i)
-                    $root.bench.ActiveRule.encode(message.activeRules[i], writer.uint32(/* id 25, wireType 2 =*/202).fork(), _depth + 1).ldelim();
+                    $root.bench.ActiveRule.encode(message.activeRules[i], writer.uint32(/* id 29, wireType 2 =*/234).fork(), q + 1).ldelim();
+            if (message.activeRulesPresent != null && Object.hasOwnProperty.call(message, "activeRulesPresent"))
+                writer.uint32(/* id 30, wireType 0 =*/240).bool(message.activeRulesPresent);
             if (message.ruleState != null && message.ruleState.length)
                 for (var i = 0; i < message.ruleState.length; ++i)
-                    $root.bench.RuleStateEntry.encode(message.ruleState[i], writer.uint32(/* id 26, wireType 2 =*/210).fork(), _depth + 1).ldelim();
+                    $root.bench.RuleStateEntry.encode(message.ruleState[i], writer.uint32(/* id 31, wireType 2 =*/250).fork(), q + 1).ldelim();
+            if (message.ruleStatePresent != null && Object.hasOwnProperty.call(message, "ruleStatePresent"))
+                writer.uint32(/* id 32, wireType 0 =*/256).bool(message.ruleStatePresent);
             if (message.transferJson != null && Object.hasOwnProperty.call(message, "transferJson"))
-                writer.uint32(/* id 27, wireType 2 =*/218).string(message.transferJson);
+                writer.uint32(/* id 33, wireType 2 =*/266).string(message.transferJson);
+            if (message.transferIsNull != null && Object.hasOwnProperty.call(message, "transferIsNull"))
+                writer.uint32(/* id 34, wireType 0 =*/272).bool(message.transferIsNull);
             if (message.earlyPromoteJson != null && Object.hasOwnProperty.call(message, "earlyPromoteJson"))
-                writer.uint32(/* id 28, wireType 2 =*/226).string(message.earlyPromoteJson);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
+                writer.uint32(/* id 35, wireType 2 =*/282).string(message.earlyPromoteJson);
+            if (message.earlyPromoteIsNull != null && Object.hasOwnProperty.call(message, "earlyPromoteIsNull"))
+                writer.uint32(/* id 36, wireType 0 =*/288).bool(message.earlyPromoteIsNull);
+            if (message.messageCount != null && Object.hasOwnProperty.call(message, "messageCount"))
+                writer.uint32(/* id 37, wireType 0 =*/296).int32(message.messageCount);
+            if (message.terminatingRefreshLegs != null && message.terminatingRefreshLegs.length)
+                for (var i = 0; i < message.terminatingRefreshLegs.length; ++i)
+                    writer.uint32(/* id 38, wireType 2 =*/306).string(message.terminatingRefreshLegs[i]);
+            if (message.terminatingRefreshLegsPresent != null && Object.hasOwnProperty.call(message, "terminatingRefreshLegsPresent"))
+                writer.uint32(/* id 39, wireType 0 =*/312).bool(message.terminatingRefreshLegsPresent);
             return writer;
         };
 
@@ -6248,12 +6059,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.Call
          * @static
-         * @param {bench.Call.$Properties} message Call message or plain object to encode
+         * @param {bench.ICall} message Call message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         Call.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -6263,242 +6074,202 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.Call & bench.Call.$Shape} Call
+         * @returns {bench.Call} Call
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        Call.decode = function decode(reader, length, _end, _depth, _target) {
+        Call.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.Call(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.Call();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.callRef = value;
-                        else
-                            delete message.callRef;
-                        continue;
+                        message.callRef = reader.string();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 2)
-                            break;
-                        message.aLeg = $root.bench.Leg.decode(reader, reader.uint32(), undefined, _depth + 1, message.aLeg);
-                        continue;
+                        message.aLeg = $root.bench.Leg.decode(reader, reader.uint32(), undefined, long + 1);
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 2)
-                            break;
                         if (!(message.bLegs && message.bLegs.length))
                             message.bLegs = [];
-                        message.bLegs.push($root.bench.Leg.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        message.bLegs.push($root.bench.Leg.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
                     }
                 case 4: {
-                        if (wireType !== 2)
-                            break;
-                        message.activePeer = $root.bench.ActivePeer.decode(reader, reader.uint32(), undefined, _depth + 1, message.activePeer);
-                        message._activePeer = "activePeer";
-                        continue;
+                        message.activePeer = $root.bench.ActivePeer.decode(reader, reader.uint32(), undefined, long + 1);
+                        break;
                     }
                 case 5: {
-                        if (wireType !== 2)
-                            break;
-                        message.callbackContext = reader.string();
-                        message._callbackContext = "callbackContext";
-                        continue;
+                        message.activePeerIsNull = reader.bool();
+                        break;
                     }
                 case 6: {
-                        if (wireType !== 2)
-                            break;
-                        message.billingContext = reader.string();
-                        message._billingContext = "billingContext";
-                        continue;
+                        message.callbackContext = reader.string();
+                        break;
                     }
                 case 7: {
-                        if (wireType !== 2)
-                            break;
-                        message.aLegInvite = $root.bench.ALegInvite.decode(reader, reader.uint32(), undefined, _depth + 1, message.aLegInvite);
-                        continue;
+                        message.billingContext = reader.string();
+                        break;
                     }
                 case 8: {
-                        if (wireType !== 2)
-                            break;
-                        if (!(message.limiterEntries && message.limiterEntries.length))
-                            message.limiterEntries = [];
-                        message.limiterEntries.push($root.bench.CallLimiterState.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        message.billingContextIsNull = reader.bool();
+                        break;
                     }
                 case 9: {
-                        if (wireType !== 2)
-                            break;
-                        if (!(message.timers && message.timers.length))
-                            message.timers = [];
-                        message.timers.push($root.bench.TimerEntry.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        message.aLegInvite = $root.bench.ALegInvite.decode(reader, reader.uint32(), undefined, long + 1);
+                        break;
                     }
                 case 10: {
-                        if (wireType !== 2)
-                            break;
-                        if (!(message.cdrEvents && message.cdrEvents.length))
-                            message.cdrEvents = [];
-                        message.cdrEvents.push($root.bench.CdrEvent.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        if (!(message.limiterEntries && message.limiterEntries.length))
+                            message.limiterEntries = [];
+                        message.limiterEntries.push($root.bench.CallLimiterState.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
                     }
                 case 11: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.state = value;
-                        else
-                            delete message.state;
-                        continue;
+                        if (!(message.timers && message.timers.length))
+                            message.timers = [];
+                        message.timers.push($root.bench.TimerEntry.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
                     }
                 case 12: {
-                        if (wireType !== 1)
-                            break;
-                        if ((value = reader.double()) !== 0)
-                            message.createdAt = value;
-                        else
-                            delete message.createdAt;
-                        continue;
+                        if (!(message.cdrEvents && message.cdrEvents.length))
+                            message.cdrEvents = [];
+                        message.cdrEvents.push($root.bench.CdrEvent.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
                     }
                 case 13: {
-                        if (wireType !== 2)
-                            break;
+                        message.state = reader.string();
+                        break;
+                    }
+                case 14: {
+                        message.createdAt = reader.double();
+                        break;
+                    }
+                case 15: {
                         if (!(message.aLegPendingVias && message.aLegPendingVias.length))
                             message.aLegPendingVias = [];
                         message.aLegPendingVias.push(reader.string());
-                        continue;
-                    }
-                case 14: {
-                        if (wireType !== 0)
-                            break;
-                        message.aLegPendingCSeq = reader.int32();
-                        message._aLegPendingCSeq = "aLegPendingCSeq";
-                        continue;
-                    }
-                case 15: {
-                        if (wireType !== 2)
-                            break;
-                        if (!(message.tagMap && message.tagMap.length))
-                            message.tagMap = [];
-                        message.tagMap.push($root.bench.TagMapping.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        break;
                     }
                 case 16: {
-                        if (wireType !== 2)
-                            break;
-                        message.traceId = reader.string();
-                        message._traceId = "traceId";
-                        continue;
+                        message.aLegPendingViasPresent = reader.bool();
+                        break;
                     }
                 case 17: {
-                        if (wireType !== 2)
-                            break;
-                        message.rootSpanId = reader.string();
-                        message._rootSpanId = "rootSpanId";
-                        continue;
+                        message.aLegPendingCSeq = reader.int32();
+                        break;
                     }
                 case 18: {
-                        if (wireType !== 0)
-                            break;
-                        message.sampled = reader.bool();
-                        message._sampled = "sampled";
-                        continue;
+                        if (!(message.tagMap && message.tagMap.length))
+                            message.tagMap = [];
+                        message.tagMap.push($root.bench.TagMapping.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
                     }
                 case 19: {
-                        if (wireType !== 0)
-                            break;
-                        message.workerIndex = reader.int32();
-                        message._workerIndex = "workerIndex";
-                        continue;
+                        message.traceId = reader.string();
+                        break;
                     }
                 case 20: {
-                        if (wireType !== 2)
-                            break;
-                        message.topology = $root.bench.CallTopology.decode(reader, reader.uint32(), undefined, _depth + 1, message.topology);
-                        message._topology = "topology";
-                        continue;
+                        message.rootSpanId = reader.string();
+                        break;
                     }
                 case 21: {
-                        if (wireType !== 0)
-                            break;
-                        message.emergency = reader.bool();
-                        message._emergency = "emergency";
-                        continue;
+                        message.sampled = reader.bool();
+                        break;
                     }
                 case 22: {
-                        if (wireType !== 2)
-                            break;
-                        message.featuresJson = reader.string();
-                        message._featuresJson = "featuresJson";
-                        continue;
+                        message.workerIndex = reader.int32();
+                        break;
                     }
                 case 23: {
-                        if (wireType !== 2)
-                            break;
-                        message.policyUpdateHeadersJson = reader.string();
-                        message._policyUpdateHeadersJson = "policyUpdateHeadersJson";
-                        continue;
+                        message.topology = $root.bench.CallTopology.decode(reader, reader.uint32(), undefined, long + 1);
+                        break;
                     }
                 case 24: {
-                        if (wireType !== 2)
-                            break;
-                        message.policyUpdateBody = reader.bytes();
-                        message._policyUpdateBody = "policyUpdateBody";
-                        continue;
+                        message.emergency = reader.bool();
+                        break;
                     }
                 case 25: {
-                        if (wireType !== 2)
-                            break;
-                        if (!(message.activeRules && message.activeRules.length))
-                            message.activeRules = [];
-                        message.activeRules.push($root.bench.ActiveRule.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        message.featuresJson = reader.string();
+                        break;
                     }
                 case 26: {
-                        if (wireType !== 2)
-                            break;
-                        if (!(message.ruleState && message.ruleState.length))
-                            message.ruleState = [];
-                        message.ruleState.push($root.bench.RuleStateEntry.decode(reader, reader.uint32(), undefined, _depth + 1));
-                        continue;
+                        message.policyUpdateHeadersJson = reader.string();
+                        break;
                     }
                 case 27: {
-                        if (wireType !== 2)
-                            break;
-                        message.transferJson = reader.string();
-                        message._transferJson = "transferJson";
-                        continue;
+                        message.policyUpdateBody = reader.bytes();
+                        break;
                     }
                 case 28: {
-                        if (wireType !== 2)
-                            break;
-                        message.earlyPromoteJson = reader.string();
-                        message._earlyPromoteJson = "earlyPromoteJson";
-                        continue;
+                        message.policyUpdateBodyIsNull = reader.bool();
+                        break;
                     }
+                case 29: {
+                        if (!(message.activeRules && message.activeRules.length))
+                            message.activeRules = [];
+                        message.activeRules.push($root.bench.ActiveRule.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
+                    }
+                case 30: {
+                        message.activeRulesPresent = reader.bool();
+                        break;
+                    }
+                case 31: {
+                        if (!(message.ruleState && message.ruleState.length))
+                            message.ruleState = [];
+                        message.ruleState.push($root.bench.RuleStateEntry.decode(reader, reader.uint32(), undefined, long + 1));
+                        break;
+                    }
+                case 32: {
+                        message.ruleStatePresent = reader.bool();
+                        break;
+                    }
+                case 33: {
+                        message.transferJson = reader.string();
+                        break;
+                    }
+                case 34: {
+                        message.transferIsNull = reader.bool();
+                        break;
+                    }
+                case 35: {
+                        message.earlyPromoteJson = reader.string();
+                        break;
+                    }
+                case 36: {
+                        message.earlyPromoteIsNull = reader.bool();
+                        break;
+                    }
+                case 37: {
+                        message.messageCount = reader.int32();
+                        break;
+                    }
+                case 38: {
+                        if (!(message.terminatingRefreshLegs && message.terminatingRefreshLegs.length))
+                            message.terminatingRefreshLegs = [];
+                        message.terminatingRefreshLegs.push(reader.string());
+                        break;
+                    }
+                case 39: {
+                        message.terminatingRefreshLegsPresent = reader.bool();
+                        break;
+                    }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -6508,7 +6279,7 @@ $root.bench = (function() {
          * @memberof bench.Call
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.Call & bench.Call.$Shape} Call
+         * @returns {bench.Call} Call
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -6526,19 +6297,19 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        Call.verify = function verify(message, _depth) {
+        Call.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             var properties = {};
             if (message.callRef != null && message.hasOwnProperty("callRef"))
                 if (!$util.isString(message.callRef))
                     return "callRef: string expected";
             if (message.aLeg != null && message.hasOwnProperty("aLeg")) {
-                var error = $root.bench.Leg.verify(message.aLeg, _depth + 1);
+                var error = $root.bench.Leg.verify(message.aLeg, long + 1);
                 if (error)
                     return "aLeg." + error;
             }
@@ -6546,7 +6317,7 @@ $root.bench = (function() {
                 if (!Array.isArray(message.bLegs))
                     return "bLegs: array expected";
                 for (var i = 0; i < message.bLegs.length; ++i) {
-                    var error = $root.bench.Leg.verify(message.bLegs[i], _depth + 1);
+                    var error = $root.bench.Leg.verify(message.bLegs[i], long + 1);
                     if (error)
                         return "bLegs." + error;
                 }
@@ -6554,11 +6325,14 @@ $root.bench = (function() {
             if (message.activePeer != null && message.hasOwnProperty("activePeer")) {
                 properties._activePeer = 1;
                 {
-                    var error = $root.bench.ActivePeer.verify(message.activePeer, _depth + 1);
+                    var error = $root.bench.ActivePeer.verify(message.activePeer, long + 1);
                     if (error)
                         return "activePeer." + error;
                 }
             }
+            if (message.activePeerIsNull != null && message.hasOwnProperty("activePeerIsNull"))
+                if (typeof message.activePeerIsNull !== "boolean")
+                    return "activePeerIsNull: boolean expected";
             if (message.callbackContext != null && message.hasOwnProperty("callbackContext")) {
                 properties._callbackContext = 1;
                 if (!$util.isString(message.callbackContext))
@@ -6569,8 +6343,13 @@ $root.bench = (function() {
                 if (!$util.isString(message.billingContext))
                     return "billingContext: string expected";
             }
+            if (message.billingContextIsNull != null && message.hasOwnProperty("billingContextIsNull")) {
+                properties._billingContextIsNull = 1;
+                if (typeof message.billingContextIsNull !== "boolean")
+                    return "billingContextIsNull: boolean expected";
+            }
             if (message.aLegInvite != null && message.hasOwnProperty("aLegInvite")) {
-                var error = $root.bench.ALegInvite.verify(message.aLegInvite, _depth + 1);
+                var error = $root.bench.ALegInvite.verify(message.aLegInvite, long + 1);
                 if (error)
                     return "aLegInvite." + error;
             }
@@ -6578,7 +6357,7 @@ $root.bench = (function() {
                 if (!Array.isArray(message.limiterEntries))
                     return "limiterEntries: array expected";
                 for (var i = 0; i < message.limiterEntries.length; ++i) {
-                    var error = $root.bench.CallLimiterState.verify(message.limiterEntries[i], _depth + 1);
+                    var error = $root.bench.CallLimiterState.verify(message.limiterEntries[i], long + 1);
                     if (error)
                         return "limiterEntries." + error;
                 }
@@ -6587,7 +6366,7 @@ $root.bench = (function() {
                 if (!Array.isArray(message.timers))
                     return "timers: array expected";
                 for (var i = 0; i < message.timers.length; ++i) {
-                    var error = $root.bench.TimerEntry.verify(message.timers[i], _depth + 1);
+                    var error = $root.bench.TimerEntry.verify(message.timers[i], long + 1);
                     if (error)
                         return "timers." + error;
                 }
@@ -6596,7 +6375,7 @@ $root.bench = (function() {
                 if (!Array.isArray(message.cdrEvents))
                     return "cdrEvents: array expected";
                 for (var i = 0; i < message.cdrEvents.length; ++i) {
-                    var error = $root.bench.CdrEvent.verify(message.cdrEvents[i], _depth + 1);
+                    var error = $root.bench.CdrEvent.verify(message.cdrEvents[i], long + 1);
                     if (error)
                         return "cdrEvents." + error;
                 }
@@ -6614,6 +6393,9 @@ $root.bench = (function() {
                     if (!$util.isString(message.aLegPendingVias[i]))
                         return "aLegPendingVias: string[] expected";
             }
+            if (message.aLegPendingViasPresent != null && message.hasOwnProperty("aLegPendingViasPresent"))
+                if (typeof message.aLegPendingViasPresent !== "boolean")
+                    return "aLegPendingViasPresent: boolean expected";
             if (message.aLegPendingCSeq != null && message.hasOwnProperty("aLegPendingCSeq")) {
                 properties._aLegPendingCSeq = 1;
                 if (!$util.isInteger(message.aLegPendingCSeq))
@@ -6623,7 +6405,7 @@ $root.bench = (function() {
                 if (!Array.isArray(message.tagMap))
                     return "tagMap: array expected";
                 for (var i = 0; i < message.tagMap.length; ++i) {
-                    var error = $root.bench.TagMapping.verify(message.tagMap[i], _depth + 1);
+                    var error = $root.bench.TagMapping.verify(message.tagMap[i], long + 1);
                     if (error)
                         return "tagMap." + error;
                 }
@@ -6651,7 +6433,7 @@ $root.bench = (function() {
             if (message.topology != null && message.hasOwnProperty("topology")) {
                 properties._topology = 1;
                 {
-                    var error = $root.bench.CallTopology.verify(message.topology, _depth + 1);
+                    var error = $root.bench.CallTopology.verify(message.topology, long + 1);
                     if (error)
                         return "topology." + error;
                 }
@@ -6676,34 +6458,70 @@ $root.bench = (function() {
                 if (!(message.policyUpdateBody && typeof message.policyUpdateBody.length === "number" || $util.isString(message.policyUpdateBody)))
                     return "policyUpdateBody: buffer expected";
             }
+            if (message.policyUpdateBodyIsNull != null && message.hasOwnProperty("policyUpdateBodyIsNull")) {
+                properties._policyUpdateBodyIsNull = 1;
+                if (typeof message.policyUpdateBodyIsNull !== "boolean")
+                    return "policyUpdateBodyIsNull: boolean expected";
+            }
             if (message.activeRules != null && message.hasOwnProperty("activeRules")) {
                 if (!Array.isArray(message.activeRules))
                     return "activeRules: array expected";
                 for (var i = 0; i < message.activeRules.length; ++i) {
-                    var error = $root.bench.ActiveRule.verify(message.activeRules[i], _depth + 1);
+                    var error = $root.bench.ActiveRule.verify(message.activeRules[i], long + 1);
                     if (error)
                         return "activeRules." + error;
                 }
             }
+            if (message.activeRulesPresent != null && message.hasOwnProperty("activeRulesPresent"))
+                if (typeof message.activeRulesPresent !== "boolean")
+                    return "activeRulesPresent: boolean expected";
             if (message.ruleState != null && message.hasOwnProperty("ruleState")) {
                 if (!Array.isArray(message.ruleState))
                     return "ruleState: array expected";
                 for (var i = 0; i < message.ruleState.length; ++i) {
-                    var error = $root.bench.RuleStateEntry.verify(message.ruleState[i], _depth + 1);
+                    var error = $root.bench.RuleStateEntry.verify(message.ruleState[i], long + 1);
                     if (error)
                         return "ruleState." + error;
                 }
             }
+            if (message.ruleStatePresent != null && message.hasOwnProperty("ruleStatePresent"))
+                if (typeof message.ruleStatePresent !== "boolean")
+                    return "ruleStatePresent: boolean expected";
             if (message.transferJson != null && message.hasOwnProperty("transferJson")) {
                 properties._transferJson = 1;
                 if (!$util.isString(message.transferJson))
                     return "transferJson: string expected";
+            }
+            if (message.transferIsNull != null && message.hasOwnProperty("transferIsNull")) {
+                properties._transferIsNull = 1;
+                if (typeof message.transferIsNull !== "boolean")
+                    return "transferIsNull: boolean expected";
             }
             if (message.earlyPromoteJson != null && message.hasOwnProperty("earlyPromoteJson")) {
                 properties._earlyPromoteJson = 1;
                 if (!$util.isString(message.earlyPromoteJson))
                     return "earlyPromoteJson: string expected";
             }
+            if (message.earlyPromoteIsNull != null && message.hasOwnProperty("earlyPromoteIsNull")) {
+                properties._earlyPromoteIsNull = 1;
+                if (typeof message.earlyPromoteIsNull !== "boolean")
+                    return "earlyPromoteIsNull: boolean expected";
+            }
+            if (message.messageCount != null && message.hasOwnProperty("messageCount")) {
+                properties._messageCount = 1;
+                if (!$util.isInteger(message.messageCount))
+                    return "messageCount: integer expected";
+            }
+            if (message.terminatingRefreshLegs != null && message.hasOwnProperty("terminatingRefreshLegs")) {
+                if (!Array.isArray(message.terminatingRefreshLegs))
+                    return "terminatingRefreshLegs: array expected";
+                for (var i = 0; i < message.terminatingRefreshLegs.length; ++i)
+                    if (!$util.isString(message.terminatingRefreshLegs[i]))
+                        return "terminatingRefreshLegs: string[] expected";
+            }
+            if (message.terminatingRefreshLegsPresent != null && message.hasOwnProperty("terminatingRefreshLegsPresent"))
+                if (typeof message.terminatingRefreshLegsPresent !== "boolean")
+                    return "terminatingRefreshLegsPresent: boolean expected";
             return null;
         };
 
@@ -6715,99 +6533,102 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.Call} Call
          */
-        Call.fromObject = function fromObject(object, _depth) {
+        Call.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.Call)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.Call();
             if (object.callRef != null)
-                if (typeof object.callRef !== "string" || object.callRef.length)
-                    message.callRef = String(object.callRef);
+                message.callRef = String(object.callRef);
             if (object.aLeg != null) {
                 if (typeof object.aLeg !== "object")
                     throw TypeError(".bench.Call.aLeg: object expected");
-                message.aLeg = $root.bench.Leg.fromObject(object.aLeg, _depth + 1);
+                message.aLeg = $root.bench.Leg.fromObject(object.aLeg, long + 1);
             }
             if (object.bLegs) {
                 if (!Array.isArray(object.bLegs))
                     throw TypeError(".bench.Call.bLegs: array expected");
-                message.bLegs = Array(object.bLegs.length);
+                message.bLegs = [];
                 for (var i = 0; i < object.bLegs.length; ++i) {
                     if (typeof object.bLegs[i] !== "object")
                         throw TypeError(".bench.Call.bLegs: object expected");
-                    message.bLegs[i] = $root.bench.Leg.fromObject(object.bLegs[i], _depth + 1);
+                    message.bLegs[i] = $root.bench.Leg.fromObject(object.bLegs[i], long + 1);
                 }
             }
             if (object.activePeer != null) {
                 if (typeof object.activePeer !== "object")
                     throw TypeError(".bench.Call.activePeer: object expected");
-                message.activePeer = $root.bench.ActivePeer.fromObject(object.activePeer, _depth + 1);
+                message.activePeer = $root.bench.ActivePeer.fromObject(object.activePeer, long + 1);
             }
+            if (object.activePeerIsNull != null)
+                message.activePeerIsNull = Boolean(object.activePeerIsNull);
             if (object.callbackContext != null)
                 message.callbackContext = String(object.callbackContext);
             if (object.billingContext != null)
                 message.billingContext = String(object.billingContext);
+            if (object.billingContextIsNull != null)
+                message.billingContextIsNull = Boolean(object.billingContextIsNull);
             if (object.aLegInvite != null) {
                 if (typeof object.aLegInvite !== "object")
                     throw TypeError(".bench.Call.aLegInvite: object expected");
-                message.aLegInvite = $root.bench.ALegInvite.fromObject(object.aLegInvite, _depth + 1);
+                message.aLegInvite = $root.bench.ALegInvite.fromObject(object.aLegInvite, long + 1);
             }
             if (object.limiterEntries) {
                 if (!Array.isArray(object.limiterEntries))
                     throw TypeError(".bench.Call.limiterEntries: array expected");
-                message.limiterEntries = Array(object.limiterEntries.length);
+                message.limiterEntries = [];
                 for (var i = 0; i < object.limiterEntries.length; ++i) {
                     if (typeof object.limiterEntries[i] !== "object")
                         throw TypeError(".bench.Call.limiterEntries: object expected");
-                    message.limiterEntries[i] = $root.bench.CallLimiterState.fromObject(object.limiterEntries[i], _depth + 1);
+                    message.limiterEntries[i] = $root.bench.CallLimiterState.fromObject(object.limiterEntries[i], long + 1);
                 }
             }
             if (object.timers) {
                 if (!Array.isArray(object.timers))
                     throw TypeError(".bench.Call.timers: array expected");
-                message.timers = Array(object.timers.length);
+                message.timers = [];
                 for (var i = 0; i < object.timers.length; ++i) {
                     if (typeof object.timers[i] !== "object")
                         throw TypeError(".bench.Call.timers: object expected");
-                    message.timers[i] = $root.bench.TimerEntry.fromObject(object.timers[i], _depth + 1);
+                    message.timers[i] = $root.bench.TimerEntry.fromObject(object.timers[i], long + 1);
                 }
             }
             if (object.cdrEvents) {
                 if (!Array.isArray(object.cdrEvents))
                     throw TypeError(".bench.Call.cdrEvents: array expected");
-                message.cdrEvents = Array(object.cdrEvents.length);
+                message.cdrEvents = [];
                 for (var i = 0; i < object.cdrEvents.length; ++i) {
                     if (typeof object.cdrEvents[i] !== "object")
                         throw TypeError(".bench.Call.cdrEvents: object expected");
-                    message.cdrEvents[i] = $root.bench.CdrEvent.fromObject(object.cdrEvents[i], _depth + 1);
+                    message.cdrEvents[i] = $root.bench.CdrEvent.fromObject(object.cdrEvents[i], long + 1);
                 }
             }
             if (object.state != null)
-                if (typeof object.state !== "string" || object.state.length)
-                    message.state = String(object.state);
+                message.state = String(object.state);
             if (object.createdAt != null)
-                if (Number(object.createdAt) !== 0)
-                    message.createdAt = Number(object.createdAt);
+                message.createdAt = Number(object.createdAt);
             if (object.aLegPendingVias) {
                 if (!Array.isArray(object.aLegPendingVias))
                     throw TypeError(".bench.Call.aLegPendingVias: array expected");
-                message.aLegPendingVias = Array(object.aLegPendingVias.length);
+                message.aLegPendingVias = [];
                 for (var i = 0; i < object.aLegPendingVias.length; ++i)
                     message.aLegPendingVias[i] = String(object.aLegPendingVias[i]);
             }
+            if (object.aLegPendingViasPresent != null)
+                message.aLegPendingViasPresent = Boolean(object.aLegPendingViasPresent);
             if (object.aLegPendingCSeq != null)
                 message.aLegPendingCSeq = object.aLegPendingCSeq | 0;
             if (object.tagMap) {
                 if (!Array.isArray(object.tagMap))
                     throw TypeError(".bench.Call.tagMap: array expected");
-                message.tagMap = Array(object.tagMap.length);
+                message.tagMap = [];
                 for (var i = 0; i < object.tagMap.length; ++i) {
                     if (typeof object.tagMap[i] !== "object")
                         throw TypeError(".bench.Call.tagMap: object expected");
-                    message.tagMap[i] = $root.bench.TagMapping.fromObject(object.tagMap[i], _depth + 1);
+                    message.tagMap[i] = $root.bench.TagMapping.fromObject(object.tagMap[i], long + 1);
                 }
             }
             if (object.traceId != null)
@@ -6821,7 +6642,7 @@ $root.bench = (function() {
             if (object.topology != null) {
                 if (typeof object.topology !== "object")
                     throw TypeError(".bench.Call.topology: object expected");
-                message.topology = $root.bench.CallTopology.fromObject(object.topology, _depth + 1);
+                message.topology = $root.bench.CallTopology.fromObject(object.topology, long + 1);
             }
             if (object.emergency != null)
                 message.emergency = Boolean(object.emergency);
@@ -6834,30 +6655,51 @@ $root.bench = (function() {
                     $util.base64.decode(object.policyUpdateBody, message.policyUpdateBody = $util.newBuffer($util.base64.length(object.policyUpdateBody)), 0);
                 else if (object.policyUpdateBody.length >= 0)
                     message.policyUpdateBody = object.policyUpdateBody;
+            if (object.policyUpdateBodyIsNull != null)
+                message.policyUpdateBodyIsNull = Boolean(object.policyUpdateBodyIsNull);
             if (object.activeRules) {
                 if (!Array.isArray(object.activeRules))
                     throw TypeError(".bench.Call.activeRules: array expected");
-                message.activeRules = Array(object.activeRules.length);
+                message.activeRules = [];
                 for (var i = 0; i < object.activeRules.length; ++i) {
                     if (typeof object.activeRules[i] !== "object")
                         throw TypeError(".bench.Call.activeRules: object expected");
-                    message.activeRules[i] = $root.bench.ActiveRule.fromObject(object.activeRules[i], _depth + 1);
+                    message.activeRules[i] = $root.bench.ActiveRule.fromObject(object.activeRules[i], long + 1);
                 }
             }
+            if (object.activeRulesPresent != null)
+                message.activeRulesPresent = Boolean(object.activeRulesPresent);
             if (object.ruleState) {
                 if (!Array.isArray(object.ruleState))
                     throw TypeError(".bench.Call.ruleState: array expected");
-                message.ruleState = Array(object.ruleState.length);
+                message.ruleState = [];
                 for (var i = 0; i < object.ruleState.length; ++i) {
                     if (typeof object.ruleState[i] !== "object")
                         throw TypeError(".bench.Call.ruleState: object expected");
-                    message.ruleState[i] = $root.bench.RuleStateEntry.fromObject(object.ruleState[i], _depth + 1);
+                    message.ruleState[i] = $root.bench.RuleStateEntry.fromObject(object.ruleState[i], long + 1);
                 }
             }
+            if (object.ruleStatePresent != null)
+                message.ruleStatePresent = Boolean(object.ruleStatePresent);
             if (object.transferJson != null)
                 message.transferJson = String(object.transferJson);
+            if (object.transferIsNull != null)
+                message.transferIsNull = Boolean(object.transferIsNull);
             if (object.earlyPromoteJson != null)
                 message.earlyPromoteJson = String(object.earlyPromoteJson);
+            if (object.earlyPromoteIsNull != null)
+                message.earlyPromoteIsNull = Boolean(object.earlyPromoteIsNull);
+            if (object.messageCount != null)
+                message.messageCount = object.messageCount | 0;
+            if (object.terminatingRefreshLegs) {
+                if (!Array.isArray(object.terminatingRefreshLegs))
+                    throw TypeError(".bench.Call.terminatingRefreshLegs: array expected");
+                message.terminatingRefreshLegs = [];
+                for (var i = 0; i < object.terminatingRefreshLegs.length; ++i)
+                    message.terminatingRefreshLegs[i] = String(object.terminatingRefreshLegs[i]);
+            }
+            if (object.terminatingRefreshLegsPresent != null)
+                message.terminatingRefreshLegsPresent = Boolean(object.terminatingRefreshLegsPresent);
             return message;
         };
 
@@ -6870,12 +6712,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        Call.toObject = function toObject(message, options, _depth) {
+        Call.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.arrays || options.defaults) {
@@ -6887,94 +6729,185 @@ $root.bench = (function() {
                 object.tagMap = [];
                 object.activeRules = [];
                 object.ruleState = [];
+                object.terminatingRefreshLegs = [];
             }
             if (options.defaults) {
                 object.callRef = "";
                 object.aLeg = null;
+                object.activePeerIsNull = false;
                 object.aLegInvite = null;
                 object.state = "";
                 object.createdAt = 0;
+                object.aLegPendingViasPresent = false;
+                object.activeRulesPresent = false;
+                object.ruleStatePresent = false;
+                object.terminatingRefreshLegsPresent = false;
             }
             if (message.callRef != null && message.hasOwnProperty("callRef"))
                 object.callRef = message.callRef;
             if (message.aLeg != null && message.hasOwnProperty("aLeg"))
-                object.aLeg = $root.bench.Leg.toObject(message.aLeg, options, _depth + 1);
+                object.aLeg = $root.bench.Leg.toObject(message.aLeg, options, q + 1);
             if (message.bLegs && message.bLegs.length) {
-                object.bLegs = Array(message.bLegs.length);
+                object.bLegs = [];
                 for (var j = 0; j < message.bLegs.length; ++j)
-                    object.bLegs[j] = $root.bench.Leg.toObject(message.bLegs[j], options, _depth + 1);
+                    object.bLegs[j] = $root.bench.Leg.toObject(message.bLegs[j], options, q + 1);
             }
-            if (message.activePeer != null && message.hasOwnProperty("activePeer"))
-                object.activePeer = $root.bench.ActivePeer.toObject(message.activePeer, options, _depth + 1);
-            if (message.callbackContext != null && message.hasOwnProperty("callbackContext"))
+            if (message.activePeer != null && message.hasOwnProperty("activePeer")) {
+                object.activePeer = $root.bench.ActivePeer.toObject(message.activePeer, options, q + 1);
+                if (options.oneofs)
+                    object._activePeer = "activePeer";
+            }
+            if (message.activePeerIsNull != null && message.hasOwnProperty("activePeerIsNull"))
+                object.activePeerIsNull = message.activePeerIsNull;
+            if (message.callbackContext != null && message.hasOwnProperty("callbackContext")) {
                 object.callbackContext = message.callbackContext;
-            if (message.billingContext != null && message.hasOwnProperty("billingContext"))
+                if (options.oneofs)
+                    object._callbackContext = "callbackContext";
+            }
+            if (message.billingContext != null && message.hasOwnProperty("billingContext")) {
                 object.billingContext = message.billingContext;
+                if (options.oneofs)
+                    object._billingContext = "billingContext";
+            }
+            if (message.billingContextIsNull != null && message.hasOwnProperty("billingContextIsNull")) {
+                object.billingContextIsNull = message.billingContextIsNull;
+                if (options.oneofs)
+                    object._billingContextIsNull = "billingContextIsNull";
+            }
             if (message.aLegInvite != null && message.hasOwnProperty("aLegInvite"))
-                object.aLegInvite = $root.bench.ALegInvite.toObject(message.aLegInvite, options, _depth + 1);
+                object.aLegInvite = $root.bench.ALegInvite.toObject(message.aLegInvite, options, q + 1);
             if (message.limiterEntries && message.limiterEntries.length) {
-                object.limiterEntries = Array(message.limiterEntries.length);
+                object.limiterEntries = [];
                 for (var j = 0; j < message.limiterEntries.length; ++j)
-                    object.limiterEntries[j] = $root.bench.CallLimiterState.toObject(message.limiterEntries[j], options, _depth + 1);
+                    object.limiterEntries[j] = $root.bench.CallLimiterState.toObject(message.limiterEntries[j], options, q + 1);
             }
             if (message.timers && message.timers.length) {
-                object.timers = Array(message.timers.length);
+                object.timers = [];
                 for (var j = 0; j < message.timers.length; ++j)
-                    object.timers[j] = $root.bench.TimerEntry.toObject(message.timers[j], options, _depth + 1);
+                    object.timers[j] = $root.bench.TimerEntry.toObject(message.timers[j], options, q + 1);
             }
             if (message.cdrEvents && message.cdrEvents.length) {
-                object.cdrEvents = Array(message.cdrEvents.length);
+                object.cdrEvents = [];
                 for (var j = 0; j < message.cdrEvents.length; ++j)
-                    object.cdrEvents[j] = $root.bench.CdrEvent.toObject(message.cdrEvents[j], options, _depth + 1);
+                    object.cdrEvents[j] = $root.bench.CdrEvent.toObject(message.cdrEvents[j], options, q + 1);
             }
             if (message.state != null && message.hasOwnProperty("state"))
                 object.state = message.state;
             if (message.createdAt != null && message.hasOwnProperty("createdAt"))
                 object.createdAt = options.json && !isFinite(message.createdAt) ? String(message.createdAt) : message.createdAt;
             if (message.aLegPendingVias && message.aLegPendingVias.length) {
-                object.aLegPendingVias = Array(message.aLegPendingVias.length);
+                object.aLegPendingVias = [];
                 for (var j = 0; j < message.aLegPendingVias.length; ++j)
                     object.aLegPendingVias[j] = message.aLegPendingVias[j];
             }
-            if (message.aLegPendingCSeq != null && message.hasOwnProperty("aLegPendingCSeq"))
+            if (message.aLegPendingViasPresent != null && message.hasOwnProperty("aLegPendingViasPresent"))
+                object.aLegPendingViasPresent = message.aLegPendingViasPresent;
+            if (message.aLegPendingCSeq != null && message.hasOwnProperty("aLegPendingCSeq")) {
                 object.aLegPendingCSeq = message.aLegPendingCSeq;
+                if (options.oneofs)
+                    object._aLegPendingCSeq = "aLegPendingCSeq";
+            }
             if (message.tagMap && message.tagMap.length) {
-                object.tagMap = Array(message.tagMap.length);
+                object.tagMap = [];
                 for (var j = 0; j < message.tagMap.length; ++j)
-                    object.tagMap[j] = $root.bench.TagMapping.toObject(message.tagMap[j], options, _depth + 1);
+                    object.tagMap[j] = $root.bench.TagMapping.toObject(message.tagMap[j], options, q + 1);
             }
-            if (message.traceId != null && message.hasOwnProperty("traceId"))
+            if (message.traceId != null && message.hasOwnProperty("traceId")) {
                 object.traceId = message.traceId;
-            if (message.rootSpanId != null && message.hasOwnProperty("rootSpanId"))
+                if (options.oneofs)
+                    object._traceId = "traceId";
+            }
+            if (message.rootSpanId != null && message.hasOwnProperty("rootSpanId")) {
                 object.rootSpanId = message.rootSpanId;
-            if (message.sampled != null && message.hasOwnProperty("sampled"))
+                if (options.oneofs)
+                    object._rootSpanId = "rootSpanId";
+            }
+            if (message.sampled != null && message.hasOwnProperty("sampled")) {
                 object.sampled = message.sampled;
-            if (message.workerIndex != null && message.hasOwnProperty("workerIndex"))
+                if (options.oneofs)
+                    object._sampled = "sampled";
+            }
+            if (message.workerIndex != null && message.hasOwnProperty("workerIndex")) {
                 object.workerIndex = message.workerIndex;
-            if (message.topology != null && message.hasOwnProperty("topology"))
-                object.topology = $root.bench.CallTopology.toObject(message.topology, options, _depth + 1);
-            if (message.emergency != null && message.hasOwnProperty("emergency"))
+                if (options.oneofs)
+                    object._workerIndex = "workerIndex";
+            }
+            if (message.topology != null && message.hasOwnProperty("topology")) {
+                object.topology = $root.bench.CallTopology.toObject(message.topology, options, q + 1);
+                if (options.oneofs)
+                    object._topology = "topology";
+            }
+            if (message.emergency != null && message.hasOwnProperty("emergency")) {
                 object.emergency = message.emergency;
-            if (message.featuresJson != null && message.hasOwnProperty("featuresJson"))
+                if (options.oneofs)
+                    object._emergency = "emergency";
+            }
+            if (message.featuresJson != null && message.hasOwnProperty("featuresJson")) {
                 object.featuresJson = message.featuresJson;
-            if (message.policyUpdateHeadersJson != null && message.hasOwnProperty("policyUpdateHeadersJson"))
+                if (options.oneofs)
+                    object._featuresJson = "featuresJson";
+            }
+            if (message.policyUpdateHeadersJson != null && message.hasOwnProperty("policyUpdateHeadersJson")) {
                 object.policyUpdateHeadersJson = message.policyUpdateHeadersJson;
-            if (message.policyUpdateBody != null && message.hasOwnProperty("policyUpdateBody"))
+                if (options.oneofs)
+                    object._policyUpdateHeadersJson = "policyUpdateHeadersJson";
+            }
+            if (message.policyUpdateBody != null && message.hasOwnProperty("policyUpdateBody")) {
                 object.policyUpdateBody = options.bytes === String ? $util.base64.encode(message.policyUpdateBody, 0, message.policyUpdateBody.length) : options.bytes === Array ? Array.prototype.slice.call(message.policyUpdateBody) : message.policyUpdateBody;
+                if (options.oneofs)
+                    object._policyUpdateBody = "policyUpdateBody";
+            }
+            if (message.policyUpdateBodyIsNull != null && message.hasOwnProperty("policyUpdateBodyIsNull")) {
+                object.policyUpdateBodyIsNull = message.policyUpdateBodyIsNull;
+                if (options.oneofs)
+                    object._policyUpdateBodyIsNull = "policyUpdateBodyIsNull";
+            }
             if (message.activeRules && message.activeRules.length) {
-                object.activeRules = Array(message.activeRules.length);
+                object.activeRules = [];
                 for (var j = 0; j < message.activeRules.length; ++j)
-                    object.activeRules[j] = $root.bench.ActiveRule.toObject(message.activeRules[j], options, _depth + 1);
+                    object.activeRules[j] = $root.bench.ActiveRule.toObject(message.activeRules[j], options, q + 1);
             }
+            if (message.activeRulesPresent != null && message.hasOwnProperty("activeRulesPresent"))
+                object.activeRulesPresent = message.activeRulesPresent;
             if (message.ruleState && message.ruleState.length) {
-                object.ruleState = Array(message.ruleState.length);
+                object.ruleState = [];
                 for (var j = 0; j < message.ruleState.length; ++j)
-                    object.ruleState[j] = $root.bench.RuleStateEntry.toObject(message.ruleState[j], options, _depth + 1);
+                    object.ruleState[j] = $root.bench.RuleStateEntry.toObject(message.ruleState[j], options, q + 1);
             }
-            if (message.transferJson != null && message.hasOwnProperty("transferJson"))
+            if (message.ruleStatePresent != null && message.hasOwnProperty("ruleStatePresent"))
+                object.ruleStatePresent = message.ruleStatePresent;
+            if (message.transferJson != null && message.hasOwnProperty("transferJson")) {
                 object.transferJson = message.transferJson;
-            if (message.earlyPromoteJson != null && message.hasOwnProperty("earlyPromoteJson"))
+                if (options.oneofs)
+                    object._transferJson = "transferJson";
+            }
+            if (message.transferIsNull != null && message.hasOwnProperty("transferIsNull")) {
+                object.transferIsNull = message.transferIsNull;
+                if (options.oneofs)
+                    object._transferIsNull = "transferIsNull";
+            }
+            if (message.earlyPromoteJson != null && message.hasOwnProperty("earlyPromoteJson")) {
                 object.earlyPromoteJson = message.earlyPromoteJson;
+                if (options.oneofs)
+                    object._earlyPromoteJson = "earlyPromoteJson";
+            }
+            if (message.earlyPromoteIsNull != null && message.hasOwnProperty("earlyPromoteIsNull")) {
+                object.earlyPromoteIsNull = message.earlyPromoteIsNull;
+                if (options.oneofs)
+                    object._earlyPromoteIsNull = "earlyPromoteIsNull";
+            }
+            if (message.messageCount != null && message.hasOwnProperty("messageCount")) {
+                object.messageCount = message.messageCount;
+                if (options.oneofs)
+                    object._messageCount = "messageCount";
+            }
+            if (message.terminatingRefreshLegs && message.terminatingRefreshLegs.length) {
+                object.terminatingRefreshLegs = [];
+                for (var j = 0; j < message.terminatingRefreshLegs.length; ++j)
+                    object.terminatingRefreshLegs[j] = message.terminatingRefreshLegs[j];
+            }
+            if (message.terminatingRefreshLegsPresent != null && message.hasOwnProperty("terminatingRefreshLegsPresent"))
+                object.terminatingRefreshLegsPresent = message.terminatingRefreshLegsPresent;
             return object;
         };
 
@@ -6990,17 +6923,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for Call
+         * Gets the default type url for Call
          * @function getTypeUrl
          * @memberof bench.Call
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        Call.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.Call";
+        Call.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.Call";
         };
 
         return Call;
@@ -7010,7 +6944,8 @@ $root.bench = (function() {
 
         /**
          * Properties of a Frame.
-         * @typedef {Object} bench.Frame.$Properties
+         * @memberof bench
+         * @interface IFrame
          * @property {number|null} [gen] Frame gen
          * @property {number|null} [counter] Frame counter
          * @property {string|null} [op] Frame op
@@ -7019,29 +6954,15 @@ $root.bench = (function() {
          * @property {Uint8Array|null} [body] Frame body
          * @property {number|null} [bodyTtlRemainingSec] Frame bodyTtlRemainingSec
          * @property {number|null} [latencyMs] Frame latencyMs
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
-         */
-
-        /**
-         * Properties of a Frame.
-         * @memberof bench
-         * @interface IFrame
-         * @augments bench.Frame.$Properties
-         * @deprecated Use bench.Frame.$Properties instead.
-         */
-
-        /**
-         * Shape of a Frame.
-         * @typedef {bench.Frame.$Properties} bench.Frame.$Shape
          */
 
         /**
          * Constructs a new Frame.
          * @memberof bench
          * @classdesc Represents a Frame.
+         * @implements IFrame
          * @constructor
-         * @param {bench.Frame.$Properties=} [properties] Properties to set
-         * @property {Array.<Uint8Array>} [$unknowns] Unknown fields preserved while decoding
+         * @param {bench.IFrame=} [properties] Properties to set
          */
         function Frame(properties) {
             if (properties)
@@ -7119,12 +7040,8 @@ $root.bench = (function() {
          * @function create
          * @memberof bench.Frame
          * @static
-         * @param {bench.Frame.$Properties=} [properties] Properties to set
+         * @param {bench.IFrame=} [properties] Properties to set
          * @returns {bench.Frame} Frame instance
-         * @type {{
-         *   (properties: bench.Frame.$Shape): bench.Frame & bench.Frame.$Shape;
-         *   (properties?: bench.Frame.$Properties): bench.Frame;
-         * }}
          */
         Frame.create = function create(properties) {
             return new Frame(properties);
@@ -7135,16 +7052,16 @@ $root.bench = (function() {
          * @function encode
          * @memberof bench.Frame
          * @static
-         * @param {bench.Frame.$Properties} message Frame message or plain object to encode
+         * @param {bench.IFrame} message Frame message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
-        Frame.encode = function encode(message, writer, _depth) {
+        Frame.encode = function encode(message, writer, q) {
             if (!writer)
                 writer = $Writer.create();
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             if (message.gen != null && Object.hasOwnProperty.call(message, "gen"))
                 writer.uint32(/* id 1, wireType 0 =*/8).int32(message.gen);
@@ -7162,9 +7079,6 @@ $root.bench = (function() {
                 writer.uint32(/* id 7, wireType 0 =*/56).int32(message.bodyTtlRemainingSec);
             if (message.latencyMs != null && Object.hasOwnProperty.call(message, "latencyMs"))
                 writer.uint32(/* id 8, wireType 0 =*/64).int32(message.latencyMs);
-            if (message.$unknowns != null && Object.hasOwnProperty.call(message, "$unknowns"))
-                for (var i = 0; i < message.$unknowns.length; ++i)
-                    writer.raw(message.$unknowns[i]);
             return writer;
         };
 
@@ -7173,12 +7087,12 @@ $root.bench = (function() {
          * @function encodeDelimited
          * @memberof bench.Frame
          * @static
-         * @param {bench.Frame.$Properties} message Frame message or plain object to encode
+         * @param {bench.IFrame} message Frame message or plain object to encode
          * @param {$protobuf.Writer} [writer] Writer to encode to
          * @returns {$protobuf.Writer} Writer
          */
         Frame.encodeDelimited = function encodeDelimited(message, writer) {
-            return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            return this.encode(message, writer).ldelim();
         };
 
         /**
@@ -7188,106 +7102,60 @@ $root.bench = (function() {
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
          * @param {number} [length] Message length if known beforehand
-         * @returns {bench.Frame & bench.Frame.$Shape} Frame
+         * @returns {bench.Frame} Frame
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
-        Frame.decode = function decode(reader, length, _end, _depth, _target) {
+        Frame.decode = function decode(reader, length, error, long) {
             if (!(reader instanceof $Reader))
                 reader = $Reader.create(reader);
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $Reader.recursionLimit)
-                throw Error("max depth exceeded");
-            var end = length === undefined ? reader.len : reader.pos + length, message = _target || new $root.bench.Frame(), value;
+            if (long === undefined)
+                long = 0;
+            if (long > $Reader.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
+            var end = length === undefined ? reader.len : reader.pos + length, message = new $root.bench.Frame();
             while (reader.pos < end) {
-                var start = reader.pos;
                 var tag = reader.uint32();
-                if (tag === _end) {
-                    _end = undefined;
+                if (tag === error)
                     break;
-                }
-                var wireType = tag & 7;
-                switch (tag >>>= 3) {
+                switch (tag >>> 3) {
                 case 1: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.gen = value;
-                        else
-                            delete message.gen;
-                        continue;
+                        message.gen = reader.int32();
+                        break;
                     }
                 case 2: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.counter = value;
-                        else
-                            delete message.counter;
-                        continue;
+                        message.counter = reader.int32();
+                        break;
                     }
                 case 3: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.op = value;
-                        else
-                            delete message.op;
-                        continue;
+                        message.op = reader.string();
+                        break;
                     }
                 case 4: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.partition = value;
-                        else
-                            delete message.partition;
-                        continue;
+                        message.partition = reader.string();
+                        break;
                     }
                 case 5: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.string()).length)
-                            message.callRef = value;
-                        else
-                            delete message.callRef;
-                        continue;
+                        message.callRef = reader.string();
+                        break;
                     }
                 case 6: {
-                        if (wireType !== 2)
-                            break;
-                        if ((value = reader.bytes()).length)
-                            message.body = value;
-                        else
-                            delete message.body;
-                        continue;
+                        message.body = reader.bytes();
+                        break;
                     }
                 case 7: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.bodyTtlRemainingSec = value;
-                        else
-                            delete message.bodyTtlRemainingSec;
-                        continue;
+                        message.bodyTtlRemainingSec = reader.int32();
+                        break;
                     }
                 case 8: {
-                        if (wireType !== 0)
-                            break;
-                        if (value = reader.int32())
-                            message.latencyMs = value;
-                        else
-                            delete message.latencyMs;
-                        continue;
+                        message.latencyMs = reader.int32();
+                        break;
                     }
+                default:
+                    reader.skipType(tag & 7, long);
+                    break;
                 }
-                reader.skipType(wireType, _depth, tag);
-                $util.makeProp(message, "$unknowns", false);
-                (message.$unknowns || (message.$unknowns = [])).push(reader.raw(start, reader.pos));
             }
-            if (_end !== undefined)
-                throw Error("missing end group");
             return message;
         };
 
@@ -7297,7 +7165,7 @@ $root.bench = (function() {
          * @memberof bench.Frame
          * @static
          * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
-         * @returns {bench.Frame & bench.Frame.$Shape} Frame
+         * @returns {bench.Frame} Frame
          * @throws {Error} If the payload is not a reader or valid buffer
          * @throws {$protobuf.util.ProtocolError} If required fields are missing
          */
@@ -7315,13 +7183,13 @@ $root.bench = (function() {
          * @param {Object.<string,*>} message Plain object to verify
          * @returns {string|null} `null` if valid, otherwise the reason why it is not
          */
-        Frame.verify = function verify(message, _depth) {
+        Frame.verify = function verify(message, long) {
             if (typeof message !== "object" || message === null)
                 return "object expected";
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                return "max depth exceeded";
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                return "maximum nesting depth exceeded";
             if (message.gen != null && message.hasOwnProperty("gen"))
                 if (!$util.isInteger(message.gen))
                     return "gen: integer expected";
@@ -7357,41 +7225,33 @@ $root.bench = (function() {
          * @param {Object.<string,*>} object Plain object
          * @returns {bench.Frame} Frame
          */
-        Frame.fromObject = function fromObject(object, _depth) {
+        Frame.fromObject = function fromObject(object, long) {
             if (object instanceof $root.bench.Frame)
                 return object;
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
-                throw Error("max depth exceeded");
+            if (long === undefined)
+                long = 0;
+            if (long > $util.recursionLimit)
+                throw Error("maximum nesting depth exceeded");
             var message = new $root.bench.Frame();
             if (object.gen != null)
-                if (Number(object.gen) !== 0)
-                    message.gen = object.gen | 0;
+                message.gen = object.gen | 0;
             if (object.counter != null)
-                if (Number(object.counter) !== 0)
-                    message.counter = object.counter | 0;
+                message.counter = object.counter | 0;
             if (object.op != null)
-                if (typeof object.op !== "string" || object.op.length)
-                    message.op = String(object.op);
+                message.op = String(object.op);
             if (object.partition != null)
-                if (typeof object.partition !== "string" || object.partition.length)
-                    message.partition = String(object.partition);
+                message.partition = String(object.partition);
             if (object.callRef != null)
-                if (typeof object.callRef !== "string" || object.callRef.length)
-                    message.callRef = String(object.callRef);
+                message.callRef = String(object.callRef);
             if (object.body != null)
-                if (object.body.length)
-                    if (typeof object.body === "string")
-                        $util.base64.decode(object.body, message.body = $util.newBuffer($util.base64.length(object.body)), 0);
-                    else if (object.body.length >= 0)
-                        message.body = object.body;
+                if (typeof object.body === "string")
+                    $util.base64.decode(object.body, message.body = $util.newBuffer($util.base64.length(object.body)), 0);
+                else if (object.body.length >= 0)
+                    message.body = object.body;
             if (object.bodyTtlRemainingSec != null)
-                if (Number(object.bodyTtlRemainingSec) !== 0)
-                    message.bodyTtlRemainingSec = object.bodyTtlRemainingSec | 0;
+                message.bodyTtlRemainingSec = object.bodyTtlRemainingSec | 0;
             if (object.latencyMs != null)
-                if (Number(object.latencyMs) !== 0)
-                    message.latencyMs = object.latencyMs | 0;
+                message.latencyMs = object.latencyMs | 0;
             return message;
         };
 
@@ -7404,12 +7264,12 @@ $root.bench = (function() {
          * @param {$protobuf.IConversionOptions} [options] Conversion options
          * @returns {Object.<string,*>} Plain object
          */
-        Frame.toObject = function toObject(message, options, _depth) {
+        Frame.toObject = function toObject(message, options, q) {
             if (!options)
                 options = {};
-            if (_depth === undefined)
-                _depth = 0;
-            if (_depth > $util.recursionLimit)
+            if (q === undefined)
+                q = 0;
+            if (q > $util.recursionLimit)
                 throw Error("max depth exceeded");
             var object = {};
             if (options.defaults) {
@@ -7459,17 +7319,18 @@ $root.bench = (function() {
         };
 
         /**
-         * Gets the type url for Frame
+         * Gets the default type url for Frame
          * @function getTypeUrl
          * @memberof bench.Frame
          * @static
-         * @param {string} [prefix] Custom type url prefix, defaults to `"type.googleapis.com"`
-         * @returns {string} The type url
+         * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+         * @returns {string} The default type url
          */
-        Frame.getTypeUrl = function getTypeUrl(prefix) {
-            if (prefix === undefined)
-                prefix = "type.googleapis.com";
-            return prefix + "/bench.Frame";
+        Frame.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+            if (typeUrlPrefix === undefined) {
+                typeUrlPrefix = "type.googleapis.com";
+            }
+            return typeUrlPrefix + "/bench.Frame";
         };
 
         return Frame;

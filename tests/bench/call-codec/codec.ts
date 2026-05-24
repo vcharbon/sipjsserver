@@ -615,7 +615,9 @@ export const v5b = {
 }
 
 // ---------------------------------------------------------------------------
-// V6 — msgpackr (bonus: binary, schemaless, no codegen).
+// V6 — msgpackr generic (binary, schemaless, no codegen). Same as the
+// production `B2BUA_CODEC=MSGPACK` mode. Useful as the "schemaless
+// baseline" — v7 below adds the production records-mode dictionary.
 // ---------------------------------------------------------------------------
 
 export const v6 = {
@@ -633,5 +635,51 @@ export const v6 = {
   },
   decodeCall(body: Buffer): unknown {
     return mpUnpack(body)
+  },
+}
+
+// ---------------------------------------------------------------------------
+// V7 — msgpackr records-mode with the PRODUCTION shared-structures
+// dictionary (`B2BUA_CODEC=MSGPACK_RECORDS`). Mirrors the production
+// encoder configuration field-for-field — same Encoder constructor
+// args, same hardcoded structures, same options. This is the codec we
+// actually deploy; v6 (generic msgpackr) is NOT.
+//
+// The earlier bench omission of this variant is half of why the
+// protobuf-vs-msgpack comparison reported in /tmp/handoff-mTECIP.md
+// inverted in production: bench compared v5b vs v6 (generic) and
+// concluded protobuf was smaller; production used records-mode which
+// is materially smaller than v6 for this schema.
+// ---------------------------------------------------------------------------
+
+import { Encoder as MpEncoder } from "msgpackr"
+import { CALL_STRUCTURES_HARDCODED } from "../../../src/call/codec/msgpack.js"
+
+const v7Encoder = new MpEncoder({
+  useRecords: true,
+  structures: CALL_STRUCTURES_HARDCODED.map((s) => s.slice()),
+  maxSharedStructures: CALL_STRUCTURES_HARDCODED.length,
+  copyBuffers: true,
+  encodeUndefinedAsNil: false,
+})
+
+export const v7 = {
+  name: "v7-msgpackr-records",
+  encodeCall(call: unknown): Buffer {
+    return v7Encoder.pack(stampWrittenAt(call)) as Buffer
+  },
+  wireEncode(env: FrameEnv, body: Buffer): Buffer {
+    // Envelope uses the same encoder for fairness vs v6 — but the
+    // envelope has no shape overlap with Call structures so records
+    // mode is a no-op here.
+    return v7Encoder.pack({ ...env, body })
+  },
+  wireDecode(frameBytes: Buffer): { env: FrameEnv; body: Buffer } {
+    const obj = v7Encoder.unpack(frameBytes) as any
+    const { body, ...env } = obj
+    return { env: env as FrameEnv, body: body as Buffer }
+  },
+  decodeCall(body: Buffer): unknown {
+    return v7Encoder.unpack(body)
   },
 }

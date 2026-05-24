@@ -88,6 +88,14 @@ interface Transaction {
   readonly branch: string
   readonly role: TxnRole
   readonly kind: TxnKind
+  /**
+   * SIP request method this transaction was created for (e.g. "INVITE",
+   * "OPTIONS", "BYE"). Always populated at creation and preserved
+   * across state mutations — survives the `originalRequest` clear-on-
+   * complete so the breakdown gauge can still attribute completed txns
+   * (Timer H/J occupants) to the method that created them.
+   */
+  readonly method: string
   readonly callId: string
   readonly fromTag: string
   readonly originalRequest: SipRequest | undefined
@@ -187,11 +195,42 @@ export type EventQueueDropReason =
   | "cancelled"
   | "timeout"
 
+/**
+ * Single bucket of the active-transaction breakdown gauge. One entry
+ * per (method, role, state) triple currently present in `txnMap`.
+ *
+ * Operators care most about `role="server", state="completed"`: these
+ * are the txns pinned for the 32 s Timer H/J window after a final
+ * response. A growing count on abuse-prone methods (OPTIONS, re-INVITE,
+ * etc.) is the txnMap-side signal of the working-set inflation we saw
+ * in the 2026-05-23 endurance run.
+ */
+export interface TransactionBreakdownBucket {
+  readonly method: string
+  readonly role: TxnRole
+  readonly state: "trying" | "proceeding" | "completed" | "terminated"
+  readonly count: number
+}
+
 export interface TransactionLayerMetrics {
   /** Current number of active transactions (gauge). */
   readonly activeTransactions: () => number
+  /**
+   * Per-(method, role, state) breakdown of active transactions. Walks
+   * `txnMap` on call — cheap relative to scrape cadence (1× per scrape).
+   */
+  readonly transactionBreakdown: () => ReadonlyArray<TransactionBreakdownBucket>
   /** Total messages processed since start (counter). */
   messagesProcessed: number
+  /**
+   * Sizing assumption observation (ADR 0012). Cumulative byte counts
+   * for inbound parsed messages and outbound serialised sends. Operators
+   * derive `avg_msg_bytes = bytes_total / count_total` to validate the
+   * "≤ 2 KB avg" sizing assumption in the dashboard threshold line.
+   */
+  inboundMessageBytesTotal: number
+  outboundMessageBytesTotal: number
+  outboundMessagesTotal: number
   /** Current depth of the inbound event queue (gauge). */
   readonly eventQueueDepth: () => number
   /** Static capacity of the inbound event queue (informational). */
@@ -335,9 +374,33 @@ export class TransactionLayer extends ServiceMap.Service<
       }
       let totalDrops = 0
 
+      // Walk txnMap inline on each scrape — txnMap is bounded by the
+      // 32 s Timer H/J window and worst-case admission, so even at the
+      // observed abuse peaks (~30 k entries) this is microseconds. A
+      // per-bucket counter table would have to be invalidated on every
+      // ...spread mutation, which the existing setTxn/MutableHashMap.set
+      // call sites would need to be aware of. Trade simplicity here.
+      const transactionBreakdown = (): ReadonlyArray<TransactionBreakdownBucket> => {
+        const buckets = new Map<string, { method: string; role: TxnRole; state: Transaction["state"]; count: number }>()
+        for (const [, txn] of txnMap) {
+          const key = `${txn.method}|${txn.role}|${txn.state}`
+          const existing = buckets.get(key)
+          if (existing !== undefined) {
+            existing.count++
+          } else {
+            buckets.set(key, { method: txn.method, role: txn.role, state: txn.state, count: 1 })
+          }
+        }
+        return Array.from(buckets.values())
+      }
+
       const txnMetrics: TransactionLayerMetrics = {
         activeTransactions: () => MutableHashMap.size(txnMap),
+        transactionBreakdown,
         messagesProcessed: 0,
+        inboundMessageBytesTotal: 0,
+        outboundMessageBytesTotal: 0,
+        outboundMessagesTotal: 0,
         eventQueueDepth: () => Queue.sizeUnsafe(eventQueue),
         eventQueueCapacity,
         eventQueueDrops,
@@ -356,10 +419,17 @@ export class TransactionLayer extends ServiceMap.Service<
       const deleteTxn = (branch: string): Effect.Effect<void> =>
         Effect.sync(() => { MutableHashMap.remove(txnMap, branch) })
 
-      const sendBuffer = (buf: Buffer, dest: { host: string; port: number }): Effect.Effect<void> =>
-        transport.send(buf, dest.port, dest.host).pipe(
+      const sendBuffer = (buf: Buffer, dest: { host: string; port: number }): Effect.Effect<void> => {
+        // ADR 0012 sizing observation: count bytes + messages on every
+        // outbound send. Covers responses, requests, retransmits, ACK,
+        // CANCEL, and Tier-3 stateless rejects — i.e. the single chokepoint
+        // for what leaves this worker as SIP.
+        txnMetrics.outboundMessageBytesTotal += buf.byteLength
+        txnMetrics.outboundMessagesTotal++
+        return transport.send(buf, dest.port, dest.host).pipe(
           Effect.catchCause((cause) => Effect.logError(`TransactionLayer send error`, cause))
         )
+      }
 
       const dropReasonOf = (event: TransactionEvent): EventQueueDropReason => {
         switch (event.type) {
@@ -650,6 +720,7 @@ export class TransactionLayer extends ServiceMap.Service<
             branch,
             role: "server",
             kind,
+            method: req.method,
             callId,
             fromTag,
             originalRequest: req,
@@ -809,6 +880,8 @@ export class TransactionLayer extends ServiceMap.Service<
 
             if (maybeSip === undefined) return
             txnMetrics.messagesProcessed++
+            // ADR 0012 sizing observation: inbound bytes by raw packet length.
+            txnMetrics.inboundMessageBytesTotal += packet.raw.byteLength
 
             if (maybeSip.type === "request") {
               yield* handleInboundRequest(maybeSip, packet.rinfo)
@@ -895,6 +968,7 @@ export class TransactionLayer extends ServiceMap.Service<
             branch,
             role: "client",
             kind: txnType,
+            method: msg.method,
             callId,
             fromTag,
             // Store original INVITE for ACK generation on non-2xx (RFC 3261 §17.1.1.3)
