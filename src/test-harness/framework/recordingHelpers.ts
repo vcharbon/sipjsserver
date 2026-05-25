@@ -103,6 +103,34 @@ export const recordEffectCall = <E, R, A, EE>(
     return yield* Effect.failCause(cause)
   })
 
+/**
+ * Simpler variant of `recordEffectCall`: collapses interrupt and defects
+ * into a single `"fail"` outcome and exposes only the success value to
+ * `buildAfter`. Use when the caller does not need to distinguish
+ * interrupt or capture the typed error in the recorded event — most
+ * cache / storage / limiter recorders fall into this bucket.
+ *
+ * Behaviour: emit `beforeEvent` on entry, run `inner`, emit
+ * `buildAfter("ok", value)` on Success or `buildAfter("fail", null)` on
+ * any non-Success Exit. The original `Cause` is re-raised unchanged.
+ */
+export const recordEffectCallSimple = <E, R, A, EE>(
+  channel: TaggedChannel<E>,
+  beforeEvent: E,
+  buildAfter: (outcome: "ok" | "fail", value: A | null) => E,
+  inner: Effect.Effect<A, EE, R>,
+): Effect.Effect<A, EE, R> =>
+  Effect.gen(function* () {
+    yield* channel.record(beforeEvent)
+    const exit = yield* Effect.exit(inner)
+    if (exit._tag === "Success") {
+      yield* channel.record(buildAfter("ok", exit.value))
+      return exit.value
+    }
+    yield* channel.record(buildAfter("fail", null))
+    return yield* Effect.failCause(exit.cause)
+  })
+
 // ---------------------------------------------------------------------------
 // recordScopedAcquire
 // ---------------------------------------------------------------------------

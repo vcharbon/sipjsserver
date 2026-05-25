@@ -74,6 +74,7 @@ import {
   withCanonicalContracts,
   type CanonicalContractsOptions,
 } from "../test-harness/framework/effectLayerTest.js"
+import { recordEffectCallSimple } from "../test-harness/framework/recordingHelpers.js"
 import {
   PartitionedRelayStorage,
   StorageError,
@@ -706,29 +707,6 @@ export const scopedAudit = (
         })
       }
 
-      const recordEffect =
-        <A, EE>(
-          beforeEvent: PartitionedRelayStorageEvent,
-          buildAfter: (
-            outcome: "ok" | "fail" | "interrupt",
-            value: A | null,
-          ) => PartitionedRelayStorageEvent,
-          op: Effect.Effect<A, EE>,
-        ): Effect.Effect<A, EE> =>
-          Effect.gen(function* () {
-            yield* channel.record(beforeEvent)
-            const exit = yield* Effect.exit(op)
-            if (exit._tag === "Success") {
-              yield* channel.record(buildAfter("ok", exit.value))
-              return exit.value
-            }
-            // Defects + interrupts surface through `exit.cause`; we
-            // collapse them into "fail" for the recorded outcome and
-            // re-raise the Cause unchanged.
-            yield* channel.record(buildAfter("fail", null))
-            return yield* Effect.failCause(exit.cause)
-          })
-
       const refKey = (
         role: PartitionRole,
         owner: string,
@@ -740,7 +718,13 @@ export const scopedAudit = (
         owner,
         callRef,
       ) =>
-        recordEffect<Buffer | null, StorageError>(
+        recordEffectCallSimple<
+          PartitionedRelayStorageEvent,
+          never,
+          Buffer | null,
+          StorageError
+        >(
+          channel,
           { tag: "getCall.called", role, owner, callRef },
           (outcome, value) => ({
             tag: "getCall.result",
@@ -756,7 +740,13 @@ export const scopedAudit = (
         )
 
       const getIndex: PartitionedRelayStorageApi["getIndex"] = (indexKey) =>
-        recordEffect<string | null, StorageError>(
+        recordEffectCallSimple<
+          PartitionedRelayStorageEvent,
+          never,
+          string | null,
+          StorageError
+        >(
+          channel,
           { tag: "getIndex.called", indexKey },
           (outcome, value) => ({
             tag: "getIndex.result",
