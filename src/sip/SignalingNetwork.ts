@@ -145,6 +145,16 @@ export interface SignalingNetworkApi {
     readonly bindKey: { readonly ip: string; readonly port: number }
     readonly depth: number
   }>
+  /**
+   * Simulated-only quiescence wait: detached transit fibers run on
+   * `Effect.sleep(transitDelayMs)`, so the layer-close finalizer can
+   * race with mid-sleep transit and observe a transient non-zero
+   * `inFlight`. A bounded poll lets in-flight transit drain before the
+   * structural audit reads. Returns once `inFlight === 0` or the
+   * timeout elapses (whichever first). Stubbed `Effect.void` on
+   * real/realTracing/Native (no in-memory transit to drain).
+   */
+  readonly awaitInFlight: (timeoutMs: number) => Effect.Effect<void>
 }
 
 export class SignalingNetwork extends ServiceMap.Service<

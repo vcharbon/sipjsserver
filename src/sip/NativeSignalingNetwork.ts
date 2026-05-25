@@ -307,6 +307,7 @@ function makeNativeImpl(): SignalingNetworkApi {
     inFlight: () => 0,
     bumpInFlight: (_: number) => undefined,
     queueDepths: () => [],
+    awaitInFlight: () => Effect.void,
   }
 }
 

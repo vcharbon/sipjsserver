@@ -286,6 +286,24 @@ export const simulatedLayer = (opts: {
         return out
       }
 
+      // Wall-clock deadline (not Effect's Clock) — must work under
+      // TestClock too, where `Effect.sleep` would block on virtual
+      // time advancement no one is driving inside a layer-close
+      // finalizer. `setTimeout` always fires on real wall-clock.
+      const sleepRealMs = (ms: number): Effect.Effect<void> =>
+        Effect.callback<void>((resume) => {
+          const id = setTimeout(() => resume(Effect.void), ms)
+          return Effect.sync(() => clearTimeout(id))
+        })
+      const awaitInFlight = (timeoutMs: number): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          const deadline = Date.now() + timeoutMs
+          while (inFlightCount > 0) {
+            if (Date.now() >= deadline) return
+            yield* sleepRealMs(5)
+          }
+        })
+
       return {
         bindUdp,
         drainUndeliverable,
@@ -294,6 +312,7 @@ export const simulatedLayer = (opts: {
         inFlight: () => inFlightCount,
         bumpInFlight: (delta: number) => { inFlightCount += delta },
         queueDepths,
+        awaitInFlight,
       }
     })
   )

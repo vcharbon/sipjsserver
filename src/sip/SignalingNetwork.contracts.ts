@@ -424,23 +424,28 @@ export const scopedAudit = (
       yield* Effect.addFinalizer(() =>
         Effect.gen(function* () {
           if (isSimulated) {
+            // Bounded quiescence: simulated transit is `forkDetach`ed
+            // so it can be mid-`Effect.sleep(transitDelayMs)` at this
+            // finalizer's wall-clock moment. The poll lets transit
+            // drain before the structural checks read; under fake-clock
+            // the interpreter's settle already drove inFlight to 0, so
+            // the loop exits on iter 1 without sleeping.
+            yield* innerApi.awaitInFlight(200)
+
             const atMs = yield* Clock.currentTimeMillis
 
             const inFlight = innerApi.inFlight()
             if (inFlight !== 0) {
-              // Forced advisory: the simulated fabric uses
-              // `Effect.forkDetach` for transit fibers (so send returns
-              // immediately). Detached fibers outlive the layer scope by
-              // design, so a non-zero `inFlight` at scope close is
-              // routine — it only means transit hasn't completed. A
-              // genuine leak would require the test to assert
-              // post-`settle()` here, not at the layer-close moment.
+              // Non-zero after awaitInFlight(200ms) → genuine transit
+              // leak (a fork that never completed within 4× transit
+              // delay) or a bug in the test that left send-fibers
+              // running without expecting them to drain.
               layerAnomalies.push({
                 kind: "inFlightImbalance",
                 inFlight,
                 atMs,
                 seq: allocAnomalySeq(),
-                severity: "advisory",
+                severity: "deferred-fail",
               })
             }
 

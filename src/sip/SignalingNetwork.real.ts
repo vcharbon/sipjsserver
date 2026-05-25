@@ -197,6 +197,7 @@ export function makeRealImpl({
     // the layer-close finalizer skips queue-leak checks for the real
     // impl by detecting `transitDelayMs === undefined`.
     queueDepths: () => [],
+    awaitInFlight: () => Effect.void,
   }
 }
 
