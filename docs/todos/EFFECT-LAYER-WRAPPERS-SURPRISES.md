@@ -4,6 +4,8 @@ Session: 15-slice rollout of typed Recorder + per-Tag wrapper contracts across S
 
 The work landed, but several recurring patterns burned subagent cycles or sent investigations on the wrong path. This is the friction log.
 
+**Wrapper-initiative validation (added 2026-05-25).** Promoting four signaling audits from `advisory` to `deferred-fail` surfaced three real B2BUA defects that were hidden under advisory: REFER-realign re-INVITE missing `Allow`/`Supported`, response builder not stamping `received=`/`rport=` per RFC 3581 §4, and the test message builder adding `Contact` on every BYE. Commits `cb8b570d`, `92207401`, `b9ae0ec6`. This is the headline justification for the initiative.
+
 ---
 
 ## HIGH — affects every future Tag/impl split
@@ -36,18 +38,15 @@ The work landed, but several recurring patterns burned subagent cycles or sent i
 
 ---
 
-### T3. `Effect.forkDetach` in SignalingNetwork.simulated guarantees scope-close anomalies
+### T3. `Effect.forkDetach` in SignalingNetwork.simulated guarantees scope-close anomalies — RESOLVED 2026-05-25
 
-**Surprise:** Slice 4 designed layer-close invariants (counter balance / queue drain / undelivered drain). When activated at `deferred-fail`, **135 false-positive failures** across the fake-stack suite. Root cause: [src/sip/SignalingNetwork.simulated.ts](../../src/sip/SignalingNetwork.simulated.ts) uses `Effect.forkDetach` for transit-delay fibers — they outlive layer scope by design. Every scope close therefore reports `inFlightImbalance` even when the scenario was clean.
+**Surprise:** Slice 4 designed layer-close invariants (counter balance / queue drain / undelivered drain). When activated at `deferred-fail`, **135 false-positive failures** across the fake-stack suite. Root cause: [src/sip/SignalingNetwork.simulated.ts](../../src/sip/SignalingNetwork.simulated.ts) uses `Effect.forkDetach` for transit-delay fibers — they outlive layer scope by design.
 
-**Time wasted:** Slice 4 had to downgrade all three new anomalies to `advisory`, which means the layer-close enforcement is effectively log-only. The actual invariants are NOT being enforced today. Wrapper landed, contract is hollow.
+**Resolution (commits `3f0bdc38`, `0343c416`, `814217c1`):** Did *not* touch `Effect.forkDetach`. Instead added a bounded `awaitInFlight(200)` quiescence wait in the scopedAudit finalizer ([SignalingNetwork.simulated.ts](../../src/sip/SignalingNetwork.simulated.ts) + [SignalingNetwork.contracts.ts](../../src/sip/SignalingNetwork.contracts.ts)). All three anomalies (`inFlightImbalance`, `queueLeak`, `undeliverable`) now run at `deferred-fail`.
 
-**Action:**
-- Convert transit fibers from `forkDetach` to scope-bound (probably `Effect.forkScoped` inside the `bindUdp` scope, or a settle-bound wait in the layer-close finalizer that gives transit fibers their `transitDelayMs` to drain before judging counters).
-- Then promote the three anomalies to `deferred-fail`.
-- See followup handoff doc at `/tmp/handoff-B7rWuJ.md` for full reproducer recipe.
+**Lesson:** When transit fibers are "fire and forget" by design, fix the *observer's* readiness window, not the producer's lifetime. The proposed `forkScoped` refactor remains a defensible hygiene pass for the future but is no longer load-bearing for the invariants.
 
-**Priority:** HIGH — the wrapper that was supposed to be the headline win is currently not enforcing.
+**Watch out:** The `awaitInFlight` impl uses `Effect.callback` + raw `setTimeout` (not `Effect.sleep`) — see T14 for why. Don't "simplify" it back to `Effect.sleep`.
 
 ---
 
@@ -174,21 +173,99 @@ The work landed, but several recurring patterns burned subagent cycles or sent i
 
 ---
 
+## Added 2026-05-25 — surfaced during the advisory→deferred-fail promotion pass
+
+### T13. `skipFinalSweep` conflates "skip verifyCleanState" with "skip settle"
+
+**Surprise:** `runDriveOnly` in [tests/harness/runner.ts](../../tests/harness/runner.ts) sets `skipFinalSweep: true` via `toDriveOnly` to bypass `verifyCleanState` (cleanup-style assertions moved to call-shape rules). The interpreter's `if (!scenario.skipFinalSweep && transport.settle !== undefined)` short-circuits on the *same* flag — so transit drain is also skipped. Parallel sub-scenarios with in-flight BYE-decrements at the last `expect()` trip `lim.A1_counterBackToZero` as false positives.
+
+**Time wasted:** Investigation looked like a B2BUA defect at first (Unroutable ACK warning in the log was a red herring). Real fix: one-line `transport.settle()` call in `runDriveOnly` after `executeScenario`.
+
+**Action:**
+- Either split the interpreter flag into `skipVerifyCleanState` + `skipSettle`, or document the dual meaning at its definition site so the conflation can't recur.
+- Add to skill: "a single boolean named after one of two intents almost always burns the other one."
+
+**Priority:** HIGH — flag conflation is a class of bug that recurs whenever someone adds a third opt-out.
+
+---
+
+### T14. `Effect.sleep` hangs inside layer-close finalizers under fake-clock
+
+**Surprise:** First pass at T3's bounded drain used `Effect.sleep("5 millis")`. Under fake-clock (TestClock), no fiber drives the virtual clock during a layer-close finalizer, so the sleep blocks forever. Ten REFER scenarios timed out at 30–60s before the cause was identified.
+
+**Fix:** Switched to `Effect.callback` + raw `setTimeout` — always fires on real wall-clock regardless of the Effect Clock service in scope. Works correctly under realClock AND fake-clock (under fake-clock the loop exits on iter 1 because the interpreter's settle already drove `inFlightCount` to 0).
+
+**Action:**
+- Add to [docs/typescript-effect.md](../typescript-effect.md): a "Wall-clock waits in finalizers, never `Effect.sleep`" cheat-sheet entry with the `Effect.callback` + `setTimeout` template.
+- Consider factoring `sleepRealMs` into a shared helper (e.g. in a `src/sip/runtime` module) so the next caller doesn't reinvent it.
+
+**Priority:** HIGH — silent infinite hang is the worst failure mode.
+
+---
+
+### T15. `Effect.async` is a v3→v4 rename trap that typechecks but fails at runtime
+
+**Surprise:** Working on T14 above, the natural first reach was `Effect.async<void>(...)`. Symbol still exists in v4, typechecks fine, but runtime throws `TypeError: yield* (intermediate value) is not iterable`. v4 renamed `Effect.async` → `Effect.callback`.
+
+**Time wasted:** One extra iteration of the test cycle to identify the runtime failure mode.
+
+**Action:**
+- Add to the v3→v4 cheat sheet in [docs/typescript-effect.md](../typescript-effect.md): `Effect.async` → `Effect.callback`. Mention the deceptive typecheck.
+
+**Priority:** MEDIUM — easy to hit; the typecheck deception is what makes it dangerous.
+
+---
+
+### T16. Wrong ADR cite propagated through 5 source lines + 3 plan files + handoff
+
+**Surprise:** `CallLimiter.contracts.ts` originally cited "ADR-0007 peer-takeover" in 5 places (one in the file header, one in scopedAudit options doc, two in audit comments, one in the audit's anomaly detail message). The cited semantics — phantom INCRs left by dead workers, peer's OPTIONS-driven takeover decrement — actually live in **ADR-0004**. ADR-0007 is `strict-sip-parser-as-security-boundary` (an unrelated security ADR).
+
+The wrong cite propagated to `slice-12.md`, `slice-13.md`, the master plan row 12, and the followup handoff at `/tmp/handoff-B7rWuJ.md`. The handoff author flagged uncertainty ("verify exact ADR-0007 path") but did not actually verify before propagating.
+
+**Fix (commit `ec69098f`):** All 5 source cites and 3 doc cites updated to ADR-0004.
+
+**Action:**
+- Add to skill: "ADR cites by *number* (not title) require opening the file at least once before propagating. A misnumbered cite tends to recur in every downstream doc that cargo-cults the original."
+- For agents: when reviewing a doc that cites `ADR-NNNN`, the first verification step is `head -1 docs/adr/NNNN-*.md` to confirm the title matches the semantics being described.
+
+**Priority:** MEDIUM — cite drift erodes the document's value as a navigation aid.
+
+---
+
+### T17. Documented-but-unimplemented invariants ("doc vapor")
+
+**Surprise:** Investigating PartitionedRelayStorage A3 per the followup handoff (which listed `A3_replicationFrameLeak` as a live advisory needing promotion): the rule is documented in [PartitionedRelayStorage.contracts.ts:619-622](../../src/cache/PartitionedRelayStorage.contracts.ts#L619-L622)'s docstring but **the finalizer body only checks A1 and A2**. A3 was never wired in. The handoff treated it as a live audit because it appeared in the docstring; the actual check site shows otherwise.
+
+**Time wasted:** A subagent could have spent significant time investigating "why doesn't A3 ever fire?" before noticing it isn't wired. We caught it within minutes by skimming the finalizer body, but the trap is set for the next agent.
+
+**Action:**
+- When designing or auditing a scope-close audit, cross-reference the docstring's listed invariants against the actual `push(...)` call sites in the finalizer body. Gaps are bugs, not features.
+- Decide for A3 specifically: implement it or remove the docstring mention. Today it's pure vapor.
+
+**Priority:** MEDIUM — false confidence in coverage is worse than known uncovered.
+
+---
+
 ## Summary table
 
-| # | Issue | Priority | Fix locus |
-|---|---|---|---|
-| T1 | `Layer.suspend` TDZ workaround undocumented | HIGH | SKILL.md + typescript-effect.md |
-| T2 | Recorder+RunContext production footgun | HIGH | SKILL.md + contracts.ts JSDoc |
-| T3 | `forkDetach` makes Slice 4 invariants hollow | HIGH | `SignalingNetwork.simulated.ts` refactor |
-| T4 | rfcRules count was wrong in plan | MEDIUM | SKILL.md planning checklist |
-| T5 | `registerProjector` API is narrower than it looks | MEDIUM | Recorder.ts JSDoc |
-| T6 | RuleEngine deletion scope too narrow | MEDIUM | Planning convention |
-| T7 | CallStateCache has no production consumer | MEDIUM | Codebase hygiene (delete or ADR) |
-| T8 | CallLimiter `refresh` shape divergence | MEDIUM | Tag interface tightening |
-| T9 | recording.ts consumer set wider than plan | MEDIUM | Planning convention (same as T6) |
-| T10 | testLayers convention buried in CLAUDE.md | LOW | CLAUDE.md emphasis |
-| T11 | Per-Tag anomaly buffer pattern was relitigated | LOW | SKILL.md guidance |
-| T12 | Silent external plan edits | LOW | Workflow note |
+| # | Issue | Status | Priority | Fix locus |
+|---|---|---|---|---|
+| T1 | `Layer.suspend` TDZ workaround undocumented | open | HIGH | SKILL.md + typescript-effect.md (consider also a `lazyEffect` helper) |
+| T2 | Recorder+RunContext production footgun | open | HIGH | SKILL.md + contracts.ts JSDoc |
+| T3 | `forkDetach` makes Slice 4 invariants hollow | **RESOLVED 2026-05-25** (commits `3f0bdc38`, `0343c416`, `814217c1`) | — | See entry |
+| T4 | rfcRules count was wrong in plan | open | MEDIUM | SKILL.md planning checklist |
+| T5 | `registerProjector` API is narrower than it looks | open | MEDIUM | Recorder.ts JSDoc |
+| T6 | RuleEngine deletion scope too narrow | open | MEDIUM | Planning convention |
+| T7 | CallStateCache has no production consumer | open | MEDIUM | Codebase hygiene (delete or ADR) |
+| T8 | CallLimiter `refresh` shape divergence | open | MEDIUM | Tag interface tightening |
+| T9 | recording.ts consumer set wider than plan | open | MEDIUM | Planning convention (same as T6) |
+| T10 | testLayers convention buried in CLAUDE.md | open | LOW | CLAUDE.md emphasis |
+| T11 | Per-Tag anomaly buffer pattern was relitigated | open | LOW | SKILL.md guidance |
+| T12 | Silent external plan edits | open | LOW | Workflow note |
+| T13 | `skipFinalSweep` conflates two intents | open | HIGH | interpreter flag split or doc at definition site |
+| T14 | `Effect.sleep` hangs inside layer-close finalizers under fake-clock | open | HIGH | typescript-effect.md + optional shared `sleepRealMs` helper |
+| T15 | `Effect.async` → `Effect.callback` v4 rename trap | open | MEDIUM | typescript-effect.md v3→v4 cheat sheet |
+| T16 | Wrong ADR cite propagated through code + plans + handoff | **RESOLVED 2026-05-25** (commit `ec69098f`) | — | See entry |
+| T17 | Documented-but-unimplemented invariants ("doc vapor") | open | MEDIUM | SKILL.md audit-design rule + decide A3 |
 
-Three HIGH-priority items (T1, T2, T3) are the load-bearing fixes. T3 specifically means the wrapper initiative's headline goal — "silent enforcement at scope close" — is currently not delivered because the rules had to be downgraded to advisory. Without fixing T3, much of Slice 4's value is theoretical.
+**HIGH-priority items still open: T1, T2, T13, T14.** T3 (the original headline blocker) is resolved — the wrapper initiative is now delivering enforcement; promotion of four signaling audits surfaced three real B2BUA defects (see top of doc), validating the design. T13 and T14 are direct lessons from the resolution path: a flag-conflation pattern and a fake-clock finalizer trap that would catch the next agent without a doc fix.
