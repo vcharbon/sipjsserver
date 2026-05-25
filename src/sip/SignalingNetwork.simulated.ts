@@ -36,6 +36,7 @@ import {
   type UndeliveredPacket,
 } from "./SignalingNetwork.js"
 import type { RemoteInfo } from "./types.js"
+import { sleepRealMs } from "../runtime/sleepRealMs.js"
 
 function currentConnectivityGate(): ConnectivityGateApi {
   const fiber = Fiber.getCurrent()
@@ -289,12 +290,7 @@ export const simulatedLayer = (opts: {
       // Wall-clock deadline (not Effect's Clock) — must work under
       // TestClock too, where `Effect.sleep` would block on virtual
       // time advancement no one is driving inside a layer-close
-      // finalizer. `setTimeout` always fires on real wall-clock.
-      const sleepRealMs = (ms: number): Effect.Effect<void> =>
-        Effect.callback<void>((resume) => {
-          const id = setTimeout(() => resume(Effect.void), ms)
-          return Effect.sync(() => clearTimeout(id))
-        })
+      // finalizer. See `src/runtime/sleepRealMs.ts` for the rationale.
       const awaitInFlight = (timeoutMs: number): Effect.Effect<void> =>
         Effect.gen(function* () {
           const deadline = Date.now() + timeoutMs

@@ -70,6 +70,27 @@ src/<area>/MyService.contracts.ts  # the 4 wrappers + supporting types
 
 The Tag class exposes the wrappers as static methods that thin-forward to `contracts.ts`. Consumers import only from `MyService.ts`.
 
+**Tag/impl split: use `lazyEffect`, not raw `Layer.suspend`.** When `MyService.<impl>.ts` exports `Layer.effect(MyService, ...)`, the impl module evaluates before the Tag's class statics — a raw `Layer.effect(MyService, ...)` resolves to `undefined` and throws `Cannot read properties of undefined (reading 'key')` at the first `Layer.build`. The repo-local helper [src/runtime/lazyEffect.ts](../../../src/runtime/lazyEffect.ts) takes BOTH the Tag and the effect as thunks — both are needed because JavaScript evaluates function args eagerly, so `lazyEffect(MyService, ...)` (one thunk) still captures `undefined`. See SURPRISES T1.
+
+```ts
+// ❌ Bad — Layer.effect call eager + Tag eager
+export const memoryLayer = Layer.effect(MyService, Effect.gen(...))
+// ❌ Bad — defers the Layer.effect call but Tag still captured eagerly
+export const memoryLayer = lazyEffect(MyService, () => Effect.gen(...))
+// ✅ Good — both deferred
+export const memoryLayer = lazyEffect(() => MyService, () => Effect.gen(...))
+```
+
+### Rule 6 — Wrappers are TEST-ONLY. Never apply them in production.
+
+Every wrapper requires `Recorder | RunContext` in its dependency channel. If `withAllContracts(...)` (or any individual wrapper) is composed into `src/main.ts`'s layer tree, Effect will refuse to build the layer — but only at startup, not at typecheck. There is no automated guard today.
+
+When designing a new wrapped Tag, add a top-of-file JSDoc to `MyService.contracts.ts` reading: "TEST-ONLY exports. Production composition uses the bare `MyService.<impl>.ts` layer; this file's wrappers add `Recorder | RunContext` requirements that production cannot satisfy." Pull-request reviewers grep for `withAllContracts` / `propertyTest` / `paranoidInputs` / `scopedAudit` / `parity` imports in `src/main.ts` and reject anything outside `tests/` and `src/test-harness/`. See SURPRISES T2.
+
+### Rule 7 — Single-flag-two-intents is a recurring trap; document the consequence set at the gate.
+
+When an interpreter / runner flag short-circuits multiple downstream operations (e.g. `skipFinalSweep` skips transit drain AND timer sweep AND `verifyCleanState`), reusing the flag for any *one* of those intents implicitly opts out of the others. Document the full consequence set at the gate's `if (...)` site AND at the flag's setter, and surface the explicit escape hatch (drive the skipped op manually, like `runDriveOnly` does for `transport.settle()`). See SURPRISES T13.
+
 ## Canonical composition: `withCanonicalContracts` + per-Tag forwarder
 
 The composition order matters and is fixed: **`propertyTest(paranoidInputs(scopedAudit(impl)))`**. Centralised in [src/test-harness/framework/effectLayerTest.ts](../../../src/test-harness/framework/effectLayerTest.ts):

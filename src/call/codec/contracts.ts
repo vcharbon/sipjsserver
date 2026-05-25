@@ -1,4 +1,12 @@
 /**
+ * **TEST-ONLY exports.** Production composition uses the bare
+ * `CallBodyCodec.{MsgpackLayer,MsgpackRecordsLayer}` directly. Every
+ * wrapper here adds `Recorder | RunContext` to the dependency
+ * channel — services production does not provide, so applying any
+ * wrapper inside `src/main.ts` will refuse to build the layer at
+ * startup. No automated guard; reviewers must reject any import of
+ * these symbols from `src/main.ts` / `bin/*`. See SURPRISES T2.
+ *
  * Codec contract wrappers — each wraps a `CallBodyCodec` Layer with
  * additional checks that fire on every encode/decode call. The wrapped
  * Layer keeps the same `CallBodyCodec` tag, so consumers are unaware

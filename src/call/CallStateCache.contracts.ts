@@ -1,4 +1,12 @@
 /**
+ * **TEST-ONLY exports.** Production composition (if any) uses the
+ * bare `CallStateCache.{memoryLayer,redisLayer}` directly. Every
+ * wrapper here adds `Recorder | RunContext` to the dependency
+ * channel — services production does not provide, so applying any
+ * wrapper inside `src/main.ts` will refuse to build the layer at
+ * startup. No automated guard; reviewers must reject any import of
+ * these symbols from `src/main.ts` / `bin/*`. See SURPRISES T2.
+ *
  * CallStateCache contract wrappers — extend a cache Layer with
  * typed-channel recording, caller-side precondition checks, property
  * invariants, and scope-close audit invariants.

@@ -24,17 +24,11 @@ The work landed, but several recurring patterns burned subagent cycles or sent i
 
 ---
 
-### T2. Wrappers' Recorder + RunContext requirement is a production footgun
+### T2. Wrappers' Recorder + RunContext requirement is a production footgun — RESOLVED 2026-05-25
 
-**Surprise:** After Slice 8, `CallBodyCodec.propertyTest/paranoidInputs/parity/scopedAudit` all require `Recorder | RunContext` in their R channel. If anyone applies `withAllContracts(...)` in `src/main.ts` (production), Effect refuses to build the layer without those services. Today nothing in production composes wrappers — verified during Slice 8 — but there is no type-level or doc-level signal preventing a future hand from doing it.
+**Surprise:** After Slice 8, `CallBodyCodec.propertyTest/paranoidInputs/parity/scopedAudit` all require `Recorder | RunContext` in their R channel. If anyone applies `withAllContracts(...)` in `src/main.ts` (production), Effect refuses to build the layer without those services. Today nothing in production composes wrappers — verified — but there was no type-level or doc-level signal preventing a future hand from doing it.
 
-**Time wasted:** Slice 8 had to manually grep production consumers of `CallBodyCodec.{propertyTest,paranoidInputs,parity,scopedAudit}` to confirm wrappers don't escape into prod. That check is now needed for every new wrapped layer.
-
-**Action:**
-- Pick ONE: (a) make wrappers gracefully no-op when Recorder is absent (probably wrong — recording is the whole point), or (b) add a "wrappers are test-only" rule to [.claude/skills/effect-layer-test/SKILL.md](../../.claude/skills/effect-layer-test/SKILL.md) AND a top-level comment in each `contracts.ts` saying so, or (c) name the wrappers' static methods with a `test*` prefix (e.g., `CallBodyCodec.testWithAllContracts`) so the intent is in the name.
-- Recommendation: (b) — the skill rule is enough; renaming is heavy.
-
-**Priority:** HIGH — silent prod breakage waiting to happen.
+**Resolution:** Went with proposal (b). Top-of-file JSDoc warning added to all five `*.contracts.ts` files ([SignalingNetwork](../../src/sip/SignalingNetwork.contracts.ts), [CallLimiter](../../src/call/CallLimiter.contracts.ts), [CallStateCache](../../src/call/CallStateCache.contracts.ts), [PartitionedRelayStorage](../../src/cache/PartitionedRelayStorage.contracts.ts), [codec](../../src/call/codec/contracts.ts)) — each opens with "**TEST-ONLY exports**" and a reviewer-guidance line. Added SKILL.md Rule 6 codifying the convention. No type-level guard or rename; defense is doc + review.
 
 ---
 
@@ -175,44 +169,31 @@ The work landed, but several recurring patterns burned subagent cycles or sent i
 
 ## Added 2026-05-25 — surfaced during the advisory→deferred-fail promotion pass
 
-### T13. `skipFinalSweep` conflates "skip verifyCleanState" with "skip settle"
+### T13. `skipFinalSweep` conflates "skip verifyCleanState" with "skip settle" — RESOLVED 2026-05-25
 
 **Surprise:** `runDriveOnly` in [tests/harness/runner.ts](../../tests/harness/runner.ts) sets `skipFinalSweep: true` via `toDriveOnly` to bypass `verifyCleanState` (cleanup-style assertions moved to call-shape rules). The interpreter's `if (!scenario.skipFinalSweep && transport.settle !== undefined)` short-circuits on the *same* flag — so transit drain is also skipped. Parallel sub-scenarios with in-flight BYE-decrements at the last `expect()` trip `lim.A1_counterBackToZero` as false positives.
 
-**Time wasted:** Investigation looked like a B2BUA defect at first (Unroutable ACK warning in the log was a red herring). Real fix: one-line `transport.settle()` call in `runDriveOnly` after `executeScenario`.
+**Resolution:** Doc-only. Considered a phase split of `settle()` (drainTransit vs runFinalSweep) but rejected — the existing 16+ `.skipFinalSweep()` callers in chaos/failover tests would have brittle semantics on transit-drain timing, and `runDriveOnly`'s explicit `transport.settle()` already covers the audit case (it needs the CallState termination poll, which is ~2s — longer than what `awaitInFlight`'s 200ms drain can cover).
 
-**Action:**
-- Either split the interpreter flag into `skipVerifyCleanState` + `skipSettle`, or document the dual meaning at its definition site so the conflation can't recur.
-- Add to skill: "a single boolean named after one of two intents almost always burns the other one."
-
-**Priority:** HIGH — flag conflation is a class of bug that recurs whenever someone adds a third opt-out.
+Doc updates landed in three places: ([interpreter.ts gate comment](../../src/test-harness/framework/interpreter.ts) — three-consequence enumeration), ([dsl.ts `.skipFinalSweep()` method](../../src/test-harness/framework/dsl.ts) — cross-ref to interpreter), and SKILL.md Rule 7 ("Single-flag-two-intents is a recurring trap"). The runDriveOnly explicit settle is now documented as the canonical "finer split" escape hatch.
 
 ---
 
-### T14. `Effect.sleep` hangs inside layer-close finalizers under fake-clock
+### T14. `Effect.sleep` hangs inside layer-close finalizers under fake-clock — RESOLVED 2026-05-25
 
 **Surprise:** First pass at T3's bounded drain used `Effect.sleep("5 millis")`. Under fake-clock (TestClock), no fiber drives the virtual clock during a layer-close finalizer, so the sleep blocks forever. Ten REFER scenarios timed out at 30–60s before the cause was identified.
 
-**Fix:** Switched to `Effect.callback` + raw `setTimeout` — always fires on real wall-clock regardless of the Effect Clock service in scope. Works correctly under realClock AND fake-clock (under fake-clock the loop exits on iter 1 because the interpreter's settle already drove `inFlightCount` to 0).
+**Fix in T3:** Switched to `Effect.callback` + raw `setTimeout` — always fires on real wall-clock regardless of the Effect Clock service in scope.
 
-**Action:**
-- Add to [docs/typescript-effect.md](../typescript-effect.md): a "Wall-clock waits in finalizers, never `Effect.sleep`" cheat-sheet entry with the `Effect.callback` + `setTimeout` template.
-- Consider factoring `sleepRealMs` into a shared helper (e.g. in a `src/sip/runtime` module) so the next caller doesn't reinvent it.
-
-**Priority:** HIGH — silent infinite hang is the worst failure mode.
+**Resolution (T14-specific):** Factored the pattern into [src/runtime/sleepRealMs.ts](../../src/runtime/sleepRealMs.ts) as a reusable helper (cleanup-safe via `clearTimeout` on interrupt). Migrated the inline definition in `SignalingNetwork.simulated.ts` to import it. Added a "Wall-clock waits in finalizers — never `Effect.sleep`" subsection to [docs/typescript-effect.md](../typescript-effect.md), placed under "Two clocks under one test" where the conceptual context is established. Also amplified the `Effect.async` → `Effect.callback` rename entry to call out the deceptive typecheck failure mode (subsumes T15).
 
 ---
 
-### T15. `Effect.async` is a v3→v4 rename trap that typechecks but fails at runtime
+### T15. `Effect.async` is a v3→v4 rename trap that typechecks but fails at runtime — RESOLVED 2026-05-25
 
 **Surprise:** Working on T14 above, the natural first reach was `Effect.async<void>(...)`. Symbol still exists in v4, typechecks fine, but runtime throws `TypeError: yield* (intermediate value) is not iterable`. v4 renamed `Effect.async` → `Effect.callback`.
 
-**Time wasted:** One extra iteration of the test cycle to identify the runtime failure mode.
-
-**Action:**
-- Add to the v3→v4 cheat sheet in [docs/typescript-effect.md](../typescript-effect.md): `Effect.async` → `Effect.callback`. Mention the deceptive typecheck.
-
-**Priority:** MEDIUM — easy to hit; the typecheck deception is what makes it dangerous.
+**Resolution:** Amplified the existing rename entry in [docs/typescript-effect.md](../typescript-effect.md) to call out the deceptive typecheck + the exact runtime error string.
 
 ---
 
@@ -251,7 +232,7 @@ The wrong cite propagated to `slice-12.md`, `slice-13.md`, the master plan row 1
 | # | Issue | Status | Priority | Fix locus |
 |---|---|---|---|---|
 | T1 | `Layer.suspend` TDZ workaround undocumented | **RESOLVED 2026-05-25** (helper landed; doc updates outstanding) | — | See entry |
-| T2 | Recorder+RunContext production footgun | open | HIGH | SKILL.md + contracts.ts JSDoc |
+| T2 | Recorder+RunContext production footgun | **RESOLVED 2026-05-25** | — | See entry |
 | T3 | `forkDetach` makes Slice 4 invariants hollow | **RESOLVED 2026-05-25** (commits `3f0bdc38`, `0343c416`, `814217c1`) | — | See entry |
 | T4 | rfcRules count was wrong in plan | open | MEDIUM | SKILL.md planning checklist |
 | T5 | `registerProjector` API is narrower than it looks | open | MEDIUM | Recorder.ts JSDoc |
@@ -262,10 +243,12 @@ The wrong cite propagated to `slice-12.md`, `slice-13.md`, the master plan row 1
 | T10 | testLayers convention buried in CLAUDE.md | open | LOW | CLAUDE.md emphasis |
 | T11 | Per-Tag anomaly buffer pattern was relitigated | open | LOW | SKILL.md guidance |
 | T12 | Silent external plan edits | open | LOW | Workflow note |
-| T13 | `skipFinalSweep` conflates two intents | open | HIGH | interpreter flag split or doc at definition site |
-| T14 | `Effect.sleep` hangs inside layer-close finalizers under fake-clock | open | HIGH | typescript-effect.md + optional shared `sleepRealMs` helper |
-| T15 | `Effect.async` → `Effect.callback` v4 rename trap | open | MEDIUM | typescript-effect.md v3→v4 cheat sheet |
+| T13 | `skipFinalSweep` conflates two intents | **RESOLVED 2026-05-25** (doc-only; phase split rejected as over-engineering) | — | See entry |
+| T14 | `Effect.sleep` hangs inside layer-close finalizers under fake-clock | **RESOLVED 2026-05-25** | — | See entry |
+| T15 | `Effect.async` → `Effect.callback` v4 rename trap | **RESOLVED 2026-05-25** | — | See entry |
 | T16 | Wrong ADR cite propagated through code + plans + handoff | **RESOLVED 2026-05-25** (commit `ec69098f`) | — | See entry |
 | T17 | Documented-but-unimplemented invariants ("doc vapor") | open | MEDIUM | SKILL.md audit-design rule + decide A3 |
 
-**HIGH-priority items still open: T2, T13, T14.** T1 and T3 (original headline blockers) are both resolved; T16 too. The wrapper initiative is now delivering enforcement — promoting four signaling audits surfaced three real B2BUA defects (see top of doc), validating the design. T13 and T14 are direct lessons from the resolution path: a flag-conflation pattern and a fake-clock finalizer trap that would catch the next agent without a doc fix.
+**All HIGH-priority items now RESOLVED.** Initiative delivered: original blockers T1/T2/T3 closed; session-discovered T13/T14/T15/T16 closed; T17 documented and pending an A3 decision. The wrapper initiative is now delivering enforcement — promoting four signaling audits surfaced three real B2BUA defects (see top of doc), validating the design.
+
+Remaining MEDIUM-priority items (T4, T5, T6, T7, T8, T9, T11, T17) are doc-only or codebase-hygiene tasks with no immediate blocker. LOW items (T10, T12) are workflow polish.

@@ -332,9 +332,19 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
   // "terminating" drop, and limiter window migration fires before
   // drain-for-unexpected and verifyCleanState observe the stack.
   //
-  // Scenarios marked `skipFinalSweep` opt out of both the sweep and
-  // verifyCleanState — used when the scenario deliberately leaves
-  // CallState dirty (no BYE) as part of its shape.
+  // `skipFinalSweep` opts out of THREE things (see SURPRISES T13):
+  //   1. simulated transit drain (`settle` Phase A) — needed by the
+  //      Slice-4 signaling audits at scope close;
+  //   2. final timer sweep (`settle` Phase B / 24h advance) — needed
+  //      by scenarios that want every deadline fired before the audit;
+  //   3. `verifyCleanState` — the legacy CallState/timer leak detector.
+  //
+  // Scenarios that deliberately leave CallState dirty (chaos /
+  // failover / mid-call inspection) want all three skipped. Callers
+  // that want a finer split (e.g., `runDriveOnly` needs transit drain
+  // even with `skipFinalSweep`) MUST drive `transport.settle()`
+  // explicitly outside the interpreter — see `tests/harness/runner.ts`
+  // for the canonical pattern.
   yield* Effect.yieldNow
   if (!scenario.skipFinalSweep && transport.settle !== undefined) {
     yield* transport.settle()

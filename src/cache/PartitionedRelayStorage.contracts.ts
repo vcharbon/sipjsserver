@@ -1,4 +1,13 @@
 /**
+ * **TEST-ONLY exports.** Production composition uses the bare
+ * `PartitionedRelayStorage.{memoryLayer,redisLayer}` (or the
+ * `kvBackedMemoryLayer` factory) directly. Every wrapper here adds
+ * `Recorder | RunContext` to the dependency channel — services
+ * production does not provide, so applying any wrapper inside
+ * `src/main.ts` will refuse to build the layer at startup. No
+ * automated guard; reviewers must reject any import of these symbols
+ * from `src/main.ts` / `bin/*`. See SURPRISES T2.
+ *
  * PartitionedRelayStorage contract wrappers — extend a storage Layer with
  * typed-channel recording, caller-side precondition checks, scope-close
  * audit invariants, and optional memory-vs-redis parity.

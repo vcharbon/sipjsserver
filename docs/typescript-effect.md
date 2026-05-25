@@ -21,7 +21,7 @@ The LLM's Effect priors come from v3 examples. v4 renamed or removed enough surf
 
 - `Effect.fork` → `Effect.forkChild` (or `forkScoped` / `forkDetach` per scope). The bare `fork` is gone; the language service tags it `outdatedApi`.
 - `Layer.scoped` → `Layer.effect`, `Layer.scopedDiscard` → `Layer.effectDiscard`, `Layer.scopedContext` doesn't exist (use `Layer.effectServices`).
-- `Effect.async` → `Effect.callback`.
+- `Effect.async` → `Effect.callback`. The v3 name still exports and typechecks (the shim is loose); the runtime failure mode is `TypeError: yield* (intermediate value) is not iterable`. Always reach for `Effect.callback`.
 - `Effect.clock` → `Clock.currentTimeMillis` (direct module access — no service-fetching helper).
 - `TimeoutException` → `TimeoutError` (the catch tag for `Effect.timeout`).
 - `Duration.DurationInput` → `Duration.Input`.
@@ -208,6 +208,29 @@ There are conceptually two clocks in a fake-clock test, but Effect lets the harn
 Code that lives entirely under one of those clocks is fine. The hazard is **producer/consumer pairs split across the two**: a producer registering work that the consumer will pick up via the **real** scheduler (the Queue.take wake-up uses setImmediate via `scheduleReleaseTaker`), while the test fiber's pacing is on the **virtual** clock. The two clocks have independent notions of "ready" — and `pumpAll`'s quiescence model only knows about the virtual side.
 
 `TestPace` is the bridge. Any code that crosses the boundary — virtual-clock-driven offer → real-scheduler-driven dequeue → virtual-clock-driven completion (via outbound transit, internal sleep, …) — should funnel its "pending" state through this single service so the harness has a unified ready-signal.
+
+### Wall-clock waits in finalizers — never `Effect.sleep`
+
+Layer-close finalizers and other scope-cleanup paths run AFTER the test body. Under fake-clock, that's a moment where no fiber is driving `TestClock.adjust`, so `Effect.sleep("5 millis")` parks on virtual time and never wakes. Symptom: the test times out (30s / 60s vitest default), often misattributed to "scenario didn't finish."
+
+Use a wall-clock primitive instead. The repo provides [src/runtime/sleepRealMs.ts](../src/runtime/sleepRealMs.ts):
+
+```ts
+import { sleepRealMs } from "../../src/runtime/sleepRealMs.js"
+
+// Bounded poll inside a finalizer — works under realClock AND fake-clock
+yield* Effect.gen(function* () {
+  const deadline = Date.now() + 200
+  while (notReady()) {
+    if (Date.now() >= deadline) return
+    yield* sleepRealMs(5)
+  }
+})
+```
+
+`sleepRealMs` is `Effect.callback` + `setTimeout`, so it always fires on real wall-clock regardless of the `Clock` service in scope. Use the same pattern for any bounded poll of external state (file presence, RSS, queue depths) where virtual time is meaningless.
+
+Trap variant: `Effect.async<void>(...)` typechecks but throws `TypeError: yield* (intermediate value) is not iterable` at runtime — the v3 name still exports, but the v4 implementation is `Effect.callback`. See the renames table above.
 
 ## Layer combinator direction
 

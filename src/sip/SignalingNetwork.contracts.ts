@@ -1,4 +1,15 @@
 /**
+ * **TEST-ONLY exports.** Production composition uses the bare
+ * `SignalingNetwork.{real,realTracing,simulated,Native}` layers
+ * directly. Every wrapper in this file (`scopedAudit`,
+ * `withCanonicalContracts`, `withAllContracts`) adds `Recorder |
+ * RunContext` to the dependency channel — services that production
+ * does not provide, so applying any wrapper inside `src/main.ts` or
+ * the equivalent process entrypoint will refuse to build the layer at
+ * startup. There is no automated guard; reviewers must reject any
+ * import of these symbols from `src/main.ts` / `bin/*`. See
+ * SURPRISES T2.
+ *
  * SignalingNetwork contract wrappers — extend a `SignalingNetwork`
  * implementation Layer with typed-event recording and per-bindUdp
  * RFC-rule checks.

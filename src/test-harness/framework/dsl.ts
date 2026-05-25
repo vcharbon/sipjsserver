@@ -162,11 +162,18 @@ export class ComposableScenario {
   }
 
   /**
-   * Opt out of the 24h TestClock sweep + verifyCleanState at scenario
-   * end. Use only for scenarios that deliberately leave CallState or
-   * TimerService dirty (e.g. simulating a caller walking off mid-call
-   * with no BYE). Normal scenarios that "forgot" to hang up should add
-   * `.bye()` instead.
+   * Opt out of `settle()` (transit drain + 24h TestClock sweep) AND
+   * `verifyCleanState` at scenario end. Use only for scenarios that
+   * deliberately leave CallState or TimerService dirty (e.g. simulating
+   * a caller walking off mid-call with no BYE). Normal scenarios that
+   * "forgot" to hang up should add `.bye()` instead.
+   *
+   * One flag, three consequences — see SURPRISES T13 and the
+   * interpreter's gate comment. Callers that need fine-grained control
+   * (e.g. "skip verifyCleanState but still drain transit so the audit
+   * sees quiescence") drive `transport.settle()` explicitly outside
+   * the interpreter; see `tests/harness/runner.ts` for the canonical
+   * `runDriveOnly` pattern.
    */
   skipFinalSweep(): ComposableScenario {
     return new ComposableScenario(
