@@ -10,17 +10,17 @@ The work landed, but several recurring patterns burned subagent cycles or sent i
 
 ## HIGH — affects every future Tag/impl split
 
-### T1. `Layer.suspend` is a load-bearing workaround nobody documents
+### T1. `Layer.suspend` is a load-bearing workaround nobody documents — RESOLVED 2026-05-25
 
-**Surprise:** Slices 1, 11, 12 each independently hit a TDZ crash on the first test run. Error shape: `Cannot read properties of undefined (reading 'key')` from `ServiceMap.ts:582`. Root cause: when a `Tag` class lives in one file and its `Layer.effect(Tag, …)` is exported from a sibling impl file (the standard split pattern this initiative imposes), the impl module evaluates before the Tag's class statics are initialized. `Layer.suspend(() => Layer.effect(Tag, …))` is the workaround.
+**Surprise:** Slices 1, 11, 12 each independently hit a TDZ crash on the first test run. Error shape: `Cannot read properties of undefined (reading 'key')` from `ServiceMap.ts:582`. Root cause: when a `Tag` class lives in one file and its `Layer.effect(Tag, …)` is exported from a sibling impl file, the impl module evaluates before the Tag's class statics are initialized. `Layer.suspend(() => Layer.effect(Tag, …))` is the workaround.
 
-**Time wasted:** Each subagent rediscovered it from first principles. Slice 1's report mentioned it as a footnote; Slices 11 and 12 hit it again because nothing in the skill or CLAUDE.md warns about it. Easily 30–45 minutes of head-scratching per slice.
+**Resolution:** Added [src/runtime/lazyEffect.ts](../../src/runtime/lazyEffect.ts) — `lazyEffect(() => Tag, () => Effect.gen(...))`. Both arguments are thunks. Migrated six TDZ-affected call sites: CallStateCache memory/redis, CallLimiter memory/redis (×2 layers in memory), ProxyCore Default. SignalingNetwork.real.ts uses `Layer.sync` (different shape) and was left alone.
 
-**Action:**
-- Add a section to [.claude/skills/effect-layer-test/SKILL.md](../../.claude/skills/effect-layer-test/SKILL.md) called "Splitting Tag from impl: the Layer.suspend rule." One paragraph + the exact error signature + the fix template.
-- Also add to [docs/typescript-effect.md](../typescript-effect.md) since it's an Effect v4 pattern.
+**Watch out:** Both arguments MUST be thunks. The initial helper draft passed `Tag` directly and broke 186 tests with the same TDZ error — JavaScript evaluates function arguments eagerly, so `lazyEffect(CallLimiter, ...)` captures `undefined` at module-eval just as eagerly as `Layer.effect(CallLimiter, ...)` did. The original `Layer.suspend(() => Layer.effect(CallLimiter, ...))` idiom worked because the inner lambda re-resolves `CallLimiter` from the closure at execution time; the helper has to preserve that property explicitly via `() => Tag`. See helper docstring for the long form.
 
-**Priority:** HIGH — recurs every split slice; trivial doc fix.
+**Outstanding doc work (still valid):**
+- Add to [.claude/skills/effect-layer-test/SKILL.md](../../.claude/skills/effect-layer-test/SKILL.md): "Tag/impl splits: use `lazyEffect` from `src/runtime/lazyEffect.ts`. Both thunks required." Reference this T1 entry.
+- Add to [docs/typescript-effect.md](../typescript-effect.md): the error signature + the `lazyEffect` pointer, since it's a generic Effect v4 trap.
 
 ---
 
@@ -250,7 +250,7 @@ The wrong cite propagated to `slice-12.md`, `slice-13.md`, the master plan row 1
 
 | # | Issue | Status | Priority | Fix locus |
 |---|---|---|---|---|
-| T1 | `Layer.suspend` TDZ workaround undocumented | open | HIGH | SKILL.md + typescript-effect.md (consider also a `lazyEffect` helper) |
+| T1 | `Layer.suspend` TDZ workaround undocumented | **RESOLVED 2026-05-25** (helper landed; doc updates outstanding) | — | See entry |
 | T2 | Recorder+RunContext production footgun | open | HIGH | SKILL.md + contracts.ts JSDoc |
 | T3 | `forkDetach` makes Slice 4 invariants hollow | **RESOLVED 2026-05-25** (commits `3f0bdc38`, `0343c416`, `814217c1`) | — | See entry |
 | T4 | rfcRules count was wrong in plan | open | MEDIUM | SKILL.md planning checklist |
@@ -268,4 +268,4 @@ The wrong cite propagated to `slice-12.md`, `slice-13.md`, the master plan row 1
 | T16 | Wrong ADR cite propagated through code + plans + handoff | **RESOLVED 2026-05-25** (commit `ec69098f`) | — | See entry |
 | T17 | Documented-but-unimplemented invariants ("doc vapor") | open | MEDIUM | SKILL.md audit-design rule + decide A3 |
 
-**HIGH-priority items still open: T1, T2, T13, T14.** T3 (the original headline blocker) is resolved — the wrapper initiative is now delivering enforcement; promotion of four signaling audits surfaced three real B2BUA defects (see top of doc), validating the design. T13 and T14 are direct lessons from the resolution path: a flag-conflation pattern and a fake-clock finalizer trap that would catch the next agent without a doc fix.
+**HIGH-priority items still open: T2, T13, T14.** T1 and T3 (original headline blockers) are both resolved; T16 too. The wrapper initiative is now delivering enforcement — promoting four signaling audits surfaced three real B2BUA defects (see top of doc), validating the design. T13 and T14 are direct lessons from the resolution path: a flag-conflation pattern and a fake-clock finalizer trap that would catch the next agent without a doc fix.

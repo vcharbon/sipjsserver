@@ -13,16 +13,11 @@
 
 import { Clock, Effect, Layer, MutableHashMap, Option } from "effect"
 import { CallStateCache } from "./CallStateCache.js"
+import { lazyEffect } from "../runtime/lazyEffect.js"
 
-// `Layer.suspend` defers the `Layer.effect(CallStateCache, ...)` call
-// past this module's evaluation phase, so when the parent
-// `CallStateCache.ts` imports us before its own class-static
-// initialiser runs, the `CallStateCache` reference is non-undefined by
-// the time the Layer is actually built.
-export const memoryLayer: Layer.Layer<CallStateCache> = Layer.suspend(() =>
-  Layer.effect(
-    CallStateCache,
-    Effect.gen(function* () {
+export const memoryLayer: Layer.Layer<CallStateCache> = lazyEffect(
+  () => CallStateCache,
+  () => Effect.gen(function* () {
     interface Entry {
       value: string
       expiresAtMs: number
@@ -153,6 +148,5 @@ export const memoryLayer: Layer.Layer<CallStateCache> = Layer.suspend(() =>
       deleteIndex,
       scanCallRefs
     }
-    })
-  )
+  }),
 )

@@ -21,6 +21,7 @@ import {
   type LimiterBackendError,
   type LimiterDecision,
 } from "./CallLimiter.js"
+import { lazyEffect } from "../runtime/lazyEffect.js"
 
 /**
  * Outer Effect-level timeout for `checkAndIncrement`. Defense-in-depth
@@ -85,10 +86,8 @@ export const redisLayer: Layer.Layer<
   CallLimiter,
   never,
   AppConfig | LimiterRedisClient | MetricsRegistry
-> = Layer.suspend(() =>
-  Layer.effect(
-    CallLimiter,
-    Effect.gen(function* () {
+> = lazyEffect(() => CallLimiter, () =>
+  Effect.gen(function* () {
       const config = yield* AppConfig
       const redis = yield* LimiterRedisClient
       const registry = yield* MetricsRegistry
@@ -188,12 +187,11 @@ export const redisLayer: Layer.Layer<
         return currentWin
       })
 
-      return {
-        checkAndIncrement,
-        decrement,
-        refresh,
-        currentWindow: Effect.map(currentEpochSec, computeWindow),
-      }
-    }),
-  ),
+    return {
+      checkAndIncrement,
+      decrement,
+      refresh,
+      currentWindow: Effect.map(currentEpochSec, computeWindow),
+    }
+  }),
 )

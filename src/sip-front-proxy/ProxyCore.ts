@@ -37,6 +37,7 @@
  */
 
 import { Clock, Effect, Layer, Option, type Scope, ServiceMap, Stream } from "effect"
+import { lazyEffect } from "../runtime/lazyEffect.js"
 import {
   getHeader,
   getHeaders,
@@ -170,24 +171,21 @@ export class ProxyCore extends ServiceMap.Service<ProxyCore, ProxyCoreApi>()(
     | ProxySelfGate
     | RegisterStrategy
     | CoreToExtRoutingStrategy
-    // `Layer.suspend` defers `makeProxyCore` resolution past this class
-    // body — the const is declared further down the file (~L215), so an
-    // eager `Layer.effect(ProxyCore, makeProxyCore)` would TDZ at module
-    // init. Keep the suspend wrapper.
-  > = Layer.suspend(() =>
-    Layer.effect(
-      ProxyCore,
-      makeProxyCore.pipe(
-        // Observability layers have no own deps and can be instantiated
-        // process-wide; bundling them with `SipParser.layer` keeps every
-        // call site a 1-line update without forcing fixtures to re-wire.
-        Effect.provide(
-          Layer.mergeAll(
-            SipParser.layer,
-            ProxyMetrics.Default,
-            ProxyTracing.Default,
-            ProxyLogger.Default
-          )
+  > = lazyEffect(() => ProxyCore, () =>
+    // `lazyEffect` defers both the Tag and `makeProxyCore` resolution
+    // past this class body — `makeProxyCore` is declared further down
+    // the file (~L215), so an eager `Layer.effect(ProxyCore,
+    // makeProxyCore)` would TDZ at module init.
+    makeProxyCore.pipe(
+      // Observability layers have no own deps and can be instantiated
+      // process-wide; bundling them with `SipParser.layer` keeps every
+      // call site a 1-line update without forcing fixtures to re-wire.
+      Effect.provide(
+        Layer.mergeAll(
+          SipParser.layer,
+          ProxyMetrics.Default,
+          ProxyTracing.Default,
+          ProxyLogger.Default
         )
       )
     )

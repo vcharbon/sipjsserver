@@ -8,13 +8,11 @@
 import { Effect, Layer } from "effect"
 import { RedisClient } from "../redis/RedisClient.js"
 import { CallStateCache } from "./CallStateCache.js"
+import { lazyEffect } from "../runtime/lazyEffect.js"
 
-// `Layer.suspend` — see CallStateCache.memory.ts for rationale.
 export const redisLayer: Layer.Layer<CallStateCache, never, RedisClient> =
-  Layer.suspend(() =>
-    Layer.effect(
-      CallStateCache,
-      Effect.gen(function* () {
+  lazyEffect(() => CallStateCache, () =>
+    Effect.gen(function* () {
     const redis = yield* RedisClient
 
     const callKey = (callRef: string) => `call:${callRef}`
@@ -70,17 +68,16 @@ export const redisLayer: Layer.Layer<CallStateCache, never, RedisClient> =
       return keys.map((k) => k.slice("call:".length))
     })
 
-    return {
-      putCall,
-      getCall,
-      expireCall,
-      deleteCall,
-      putIndex,
-      getIndex,
-      expireIndex,
-      deleteIndex,
-      scanCallRefs
-    }
-      })
-    )
+      return {
+        putCall,
+        getCall,
+        expireCall,
+        deleteCall,
+        putIndex,
+        getIndex,
+        expireIndex,
+        deleteIndex,
+        scanCallRefs
+      }
+    }),
   )

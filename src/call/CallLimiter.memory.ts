@@ -22,6 +22,7 @@
 import { Clock, Effect, Layer, MutableHashMap, Option } from "effect"
 import { AppConfig } from "../config/AppConfig.js"
 import { CallLimiter, type LimiterDecision } from "./CallLimiter.js"
+import { lazyEffect } from "../runtime/lazyEffect.js"
 
 export interface LimiterMemoryEntry {
   count: number
@@ -138,14 +139,12 @@ export const buildMemoryLimiterImpl = (
 }
 
 /** Per-instance memory layer (single-worker tests). */
-export const memoryLayer: Layer.Layer<CallLimiter, never, AppConfig> = Layer.suspend(() =>
-  Layer.effect(
-    CallLimiter,
-    Effect.gen(function* () {
-      const config = yield* AppConfig
-      return buildMemoryLimiterImpl(config, makeLimiterMemoryStore())
-    }),
-  ),
+export const memoryLayer: Layer.Layer<CallLimiter, never, AppConfig> = lazyEffect(
+  () => CallLimiter,
+  () => Effect.gen(function* () {
+    const config = yield* AppConfig
+    return buildMemoryLimiterImpl(config, makeLimiterMemoryStore())
+  }),
 )
 
 /**
@@ -157,12 +156,9 @@ export const memoryLayer: Layer.Layer<CallLimiter, never, AppConfig> = Layer.sus
 export const sharedMemoryLayer = (
   store: LimiterMemoryStore,
 ): Layer.Layer<CallLimiter, never, AppConfig> =>
-  Layer.suspend(() =>
-    Layer.effect(
-      CallLimiter,
-      Effect.gen(function* () {
-        const config = yield* AppConfig
-        return buildMemoryLimiterImpl(config, store)
-      }),
-    ),
+  lazyEffect(() => CallLimiter, () =>
+    Effect.gen(function* () {
+      const config = yield* AppConfig
+      return buildMemoryLimiterImpl(config, store)
+    }),
   )
