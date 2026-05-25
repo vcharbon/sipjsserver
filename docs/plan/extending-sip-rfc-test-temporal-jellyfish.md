@@ -95,6 +95,16 @@ accept/reject the exclusions before any rule code is written.
   B2BUA-as-UAS/UAC, MUST-ID, RFC exception ledger; 10 new unit tests
   cover subject dispatch / severity override / per-test exceptions /
   DUT-name refusal. Full test:fake green (1510 passed, 4 skipped).
+- 2026-05-25: **Phase 1 slice 2 landed**: `docs/rfc/RFC3264.md`
+  inventory (56 entries — 18 `will-implement`, 2
+  `already-implemented` via existing `rfc.sdpOriginContinuity`, 35
+  `justified-not-implemented`, 1 `restatement`). RuleManifest grows
+  to 11 new RFC 3264 planned rules, including `rfc.sdpBodyParseable`
+  (peer rule covering SDP grammar MUSTs in line with the user's
+  scope decision: SDP content + offer/answer model in scope,
+  RTP/RTCP-plane out of scope). `rfc.sdpOriginContinuity` manifest
+  row updated with MUST-IDs covered. Inventory for RFC 3261
+  remains pending.
 - 2026-05-25: **Phase 1 slice 1 landed** (process doc + raw MUST
   snapshots + manifest skeleton + RFC 3262 inventory).
   `docs/RFC_Verification.md` (lifecycle, justification taxonomy,

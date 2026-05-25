@@ -72,7 +72,7 @@ Source: [tests/harness/rules/rfc/cross-message-rules.ts](../../tests/harness/rul
 |-----------|---------|------|--------|------------------|----------------|-------|
 | `rfc.midDialogFromUri` | all | cross | shipped | (pending inventory) | `_dialog-model.ts` | In-dialog From/To URI stability per RFC 3261 §12.2.1.1. |
 | `rfc.midDialogRoute` | all | cross | shipped | (pending inventory) | `_dialog-model.ts` | Route set application per §12.2.1.1 + §16.12 (loose + strict). |
-| `rfc.sdpOriginContinuity` | all | cross | advisory | (pending inventory) | `_dialog-model.ts` (`parseSdpOrigin`) | RFC 4566 §5.2 / RFC 3264 §8. Advisory: transfer fixtures emit fresh `o=` per side. Phase 2 narrows subject or models origin replication. |
+| `rfc.sdpOriginContinuity` | all | cross | advisory | RFC3264-MUST-039, RFC3264-MUST-040 | `_dialog-model.ts` (`parseSdpOrigin`) | RFC 4566 §5.2 / RFC 3264 §8. Advisory: transfer fixtures emit fresh `o=` per side. Phase 2 narrows subject or models origin replication. |
 | `rfc.recordRoutePlacement` | all | cross | shipped | (pending inventory) | `_dialog-model.ts` | 100 Trying must not carry Record-Route; responses to in-dialog requests must not Record-Route per §12.2.2. |
 | `rfc.rportEcho` | all | cross | advisory | (pending inventory) | `_dialog-model.ts` (`readRport`) | RFC 3581 §4. Advisory: loopback never NATs, so the response correctly omits `rport=`. Phase 2 narrows subject to `{proxy}` or models loopback. |
 | `rfc.allowSupportedOnInvite` | all | cross | shipped | (pending inventory) | `_dialog-model.ts` | Allow / Supported on re-INVITE + 2xx INVITE. SHOULD-level (3261 §13.2.1, §20.37). |
@@ -132,7 +132,24 @@ Sixteen planned rules cover 21 `will-implement` MUSTs. Inventory:
 
 ### RFC 3264
 
-_(empty — populated when [RFC3264.md](RFC3264.md) lands)_
+Eleven planned rules cover 18 `will-implement` MUSTs. Inventory:
+[RFC3264.md](RFC3264.md). Two more `already-implemented` MUSTs
+(RFC3264-MUST-039 / -040) are covered by the existing
+`rfc.sdpOriginContinuity` (advisory).
+
+| rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
+|-----------|---------|------|--------|------------------|----------------|-------|
+| `rfc.noNewOfferWhileOfferPending` | uac, uas | cross | planned | RFC3264-MUST-001, RFC3264-MUST-002 | planned `_offer-answer.ts` | Glare prevention: outbound offer forbidden while own prior offer is unanswered OR while a received offer is unanswered. Positive fixture: Bob sends UPDATE-with-SDP while INVITE offer is still pending. |
+| `rfc.sdpBodyParseable` | uac, uas | peer | planned | RFC3264-MUST-003, RFC3264-MUST-004, RFC3264-MUST-005, RFC3264-MUST-006, RFC3264-MUST-012, RFC3264-MUST-027 | — | Peer rule that strict-parses every sent SDP body: valid RFC 4566 + 3264 SDP, exactly one session description, o= session-id and version fit signed-int64, initial version < 2^62-1, ptime > 0, c=/port present. Positive fixture: peer overrides SDP builder to emit ptime=0. |
+| `rfc.answerMLineCountMatchesOffer` | uas | cross | planned | RFC3264-MUST-018 | planned `_offer-answer.ts` | First answer's m= count equals offer's m= count. Positive fixture: Bob's 200 OK drops an offered video stream from the m= list. |
+| `rfc.answerTLineEqualsOffer` | uas | cross | planned | RFC3264-MUST-019 | planned `_offer-answer.ts` | Answer's t= line bytes equal the offer's t= bytes. Positive fixture: Bob emits `t=0 60` against offer `t=0 0`. |
+| `rfc.answerMediaTypeMatchesOffer` | uas | cross | planned | RFC3264-MUST-022 | planned `_offer-answer.ts` | Per-stream-index pairing: the answer's m= media type matches the offer's m= media type (audio↔audio, video↔video); unicast/multicast preserved. Positive fixture: Bob's answer swaps audio/video order. |
+| `rfc.directionPairValid` | uas | cross | planned | RFC3264-MUST-023 | planned `_offer-answer.ts` | sendonly→{recvonly, inactive}; recvonly→{sendonly, inactive}; inactive→inactive. Positive fixture: Bob answers a `sendonly` stream with `sendonly`. |
+| `rfc.rejectedStreamMinimalAnswer` | uas | cross | planned | RFC3264-MUST-021 | planned `_offer-answer.ts` | Rejected stream slot has port=0 + at least one media format listed. Positive fixture: Bob's answer for a rejected stream omits all media format tokens. |
+| `rfc.reOfferMLineCountMonotonic` | uac | cross | planned | RFC3264-MUST-042, RFC3264-MUST-043 | planned `_offer-answer.ts` | Across same-session re-offers: m= count never decreases; deleted streams keep their slot (port=0, not removed); new m= lines appear *below* existing ones. Positive fixture: re-INVITE removes one m= line entirely. |
+| `rfc.zeroPortPropagation` | uas | cross | planned | RFC3264-MUST-044 | planned `_offer-answer.ts` | If offer's m= line has port=0, answer's corresponding m= line MUST have port=0. Positive fixture: Bob's answer assigns a non-zero port to a disabled offered stream. |
+| `rfc.payloadTypeMappingStable` | uac, uas | cross | planned | RFC3264-MUST-047 | planned `_offer-answer.ts`, planned `_sdp-parsing.ts` | Dynamic payload-type → codec mapping (via `a=rtpmap`) MUST NOT change across SDP versions in the same session. Positive fixture: re-offer rebinds payload type 100 from `opus/48000` to `G722/8000`. |
+| `rfc.c0PortNonZero` | uac | peer | planned | RFC3264-MUST-051 | — | Narrow legacy hold idiom: an SDP whose `c=` is `0.0.0.0` MUST NOT also have `m=… 0 …`. Positive fixture: fixture builder produces `c=0.0.0.0` + `m=audio 0 …`. |
 
 ## Helpers
 
