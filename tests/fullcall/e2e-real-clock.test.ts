@@ -47,7 +47,7 @@ import {
 afterAll(() => flushIndexReport(OUTPUT_DIR))
 
 // ---------------------------------------------------------------------------
-// Tier gating — see vitest.config.live.ts for the tier rank semantics.
+// Tier gating — see vitest.config.ts (TEST_MODE=live branch) for the tier rank semantics.
 // ---------------------------------------------------------------------------
 
 const tierRank: Record<ScenarioTier, number> = { short: 0, medium: 1, long: 2 }

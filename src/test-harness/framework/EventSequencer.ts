@@ -12,9 +12,10 @@
  * recording layers is not the temporal order they were captured in.
  *
  * Every recording layer (interpreter step trace, SignalingNetwork
- * NetworkTraceEntry, ReplicationTraceRecorder, the Slice 1 Recorder
- * service) allocates a `seq` at the moment of capture from this single
- * shared counter. Renderers tiebreak `(timestamp, seq)`.
+ * NetworkTraceEntry, the unified Recorder service's typed channels
+ * including `PartitionedRelayStorage`'s replication-frame channel)
+ * allocates a `seq` at the moment of capture from this single shared
+ * counter. Renderers tiebreak `(timestamp, seq)`.
  *
  * Sync vs Effect API: most capture sites live inside `Effect.gen` and
  * can `yield* sequencer.next`. The `realTracing` UDP recv handler is a

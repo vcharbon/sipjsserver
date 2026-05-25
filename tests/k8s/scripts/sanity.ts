@@ -45,12 +45,10 @@ const runE2eOnce = Effect.gen(function* () {
     [
       "vitest",
       "run",
-      "-c",
-      "vitest.config.live.ts",
       "tests/fullcall/e2e-register-fakeExt-realCore.test.ts",
     ],
     {
-      env: { E2E_KIND: "1", E2E_KIND_PROXY_HOST: VIP },
+      env: { E2E_KIND: "1", E2E_KIND_PROXY_HOST: VIP, TEST_MODE: "live" },
       timeoutMs: E2E_PER_ATTEMPT_TIMEOUT_MS,
     },
   )

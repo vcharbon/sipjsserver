@@ -98,8 +98,8 @@ consider the following call, in the capture dont consider alice, bob, the B2BUA 
 To run just basic-call on both SUTs:
 
 
-npx vitest run -c vitest.config.fake.ts -t "basic call"
+TEST_MODE=fake npx vitest run -t "basic call"
 To run only the proxy+b2b variant:
 
 
-npx vitest run -c vitest.config.fake.ts -t "proxy\\+b2b" basic call"
+TEST_MODE=fake npx vitest run -t "proxy\\+b2b" basic call"

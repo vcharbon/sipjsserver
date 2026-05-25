@@ -440,6 +440,68 @@ export type RecordedAnomaly =
       readonly kind: "orphanReplPod"
       readonly pod: string
     }
+  | {
+      readonly kind: "signalingAudit"
+      readonly check: string
+      readonly detail: string
+      readonly bindKey?: LaneKey
+      /**
+       * `deferred-fail` surfaces at scope close via the wrapper's
+       * `Data.TaggedError`; `advisory` is recorded silently. `fatal`
+       * never makes it here — fatal violations short-circuit before
+       * the anomaly is appended.
+       */
+      readonly severity: "deferred-fail" | "advisory"
+    }
+  | {
+      readonly kind: "undeliverable"
+      readonly src: { readonly ip: string; readonly port: number }
+      readonly dst: { readonly ip: string; readonly port: number }
+      readonly atMs: number
+      readonly seq: number
+      readonly severity: "deferred-fail" | "advisory"
+    }
+  | {
+      readonly kind: "queueLeak"
+      readonly bindKey: LaneKey
+      readonly queueDepth: number
+      readonly atMs: number
+      readonly seq: number
+      readonly severity: "deferred-fail" | "advisory"
+    }
+  | {
+      readonly kind: "inFlightImbalance"
+      readonly inFlight: number
+      readonly atMs: number
+      readonly seq: number
+      readonly severity: "deferred-fail" | "advisory"
+    }
+  | {
+      readonly kind: "codecPropertyViolation"
+      readonly propertyId: string
+      readonly detail: string
+      readonly callRef?: string
+      readonly severity: "fatal" | "deferred-fail" | "advisory"
+    }
+  | {
+      readonly kind: "codecParanoidInput"
+      readonly check: string
+      readonly detail: string
+      readonly severity: "fatal" | "deferred-fail" | "advisory"
+    }
+  | {
+      readonly kind: "codecParity"
+      readonly side: "blue-vs-input" | "green-vs-input" | "blue-vs-green"
+      readonly detail: string
+      readonly callRef?: string
+      readonly severity: "fatal" | "deferred-fail" | "advisory"
+    }
+  | {
+      readonly kind: "codecAudit"
+      readonly check: string
+      readonly detail: string
+      readonly severity: "fatal" | "deferred-fail" | "advisory"
+    }
 
 // ---------------------------------------------------------------------------
 // Agent configuration
@@ -825,19 +887,20 @@ export interface TestTransport {
   /**
    * Optional: drain the simulated replication-HTTP trace at the end of
    * the scenario. Non-empty only for SUTs that wire per-worker pullers
-   * through the simulated `/replog` transport (currently `sipproxyHA`
-   * via `proxyB2bFakeStack.makeReplicationTraceRecorder`). Each event
-   * is one decoded NDJSON frame the consumer received from the source
-   * peer; the renderer emits these as a separate replication lane in
-   * the HTML report alongside the SIP timeline.
+   * through the simulated `/replog` transport (currently `sipproxyHA` /
+   * `k8sFailover`, fed by the `PartitionedRelayStorage` typed channel's
+   * `repl.frameReceived` projector). Each event is one decoded Data
+   * frame the consumer received from the source peer; the renderer
+   * emits these as a separate replication lane in the HTML report
+   * alongside the SIP timeline.
    */
   readonly drainReplicationTrace?: () => ReadonlyArray<ReplicationTraceEntry>
   /**
    * Optional shared monotonic sequencer used by the interpreter to stamp
    * `seq` on every `TraceEntry` it pushes (send/receive step events). The
-   * same instance is given to the underlying SignalingNetwork(s) and the
-   * ReplicationTraceRecorder so all recording layers contribute to a
-   * single ordering — the renderers tiebreak `(timestamp, seq)`.
+   * same instance is given to the underlying SignalingNetwork(s) so all
+   * recording layers contribute to a single ordering — the renderers
+   * tiebreak `(timestamp, seq)`.
    *
    * When `undefined`, the interpreter falls back to `seq: 0`. This is
    * acceptable for transports that don't render reports (e.g. transports

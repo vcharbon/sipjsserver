@@ -26,7 +26,7 @@
 process.env["B2BUA_PARANOID"] = "1"
 
 import { describe, it, expect } from "@effect/vitest"
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 import {
   CallBodyCodec,
   MsgpackLayer,
@@ -35,9 +35,16 @@ import {
   PropertyViolation,
   ParanoidInputViolation,
 } from "../../src/call/codec/index.js"
+import { Recorder } from "../../src/test-harness/framework/report-recorder/Recorder.js"
+import { RunContext } from "../../src/test-harness/framework/RunContext.js"
 import { representativeCall } from "../bench/call-codec/fixture.js"
 import { buildFixturePool, DEFAULT_MIX } from "../bench/call-codec/fixtureMix.js"
 import type { Call } from "../../src/call/CallModel.js"
+
+// Codec wrappers now require Recorder + RunContext for typed-channel
+// recording. Tests provide the fake variants — recording is structurally
+// in scope but the values aren't asserted here (separate test).
+const RecorderEnv = Layer.mergeAll(Recorder.fake, RunContext.testWithRecorder)
 
 const CODEC_LAYERS = [
   { name: "MsgpackLayer", layer: MsgpackLayer },
@@ -54,7 +61,7 @@ describe("CallBodyCodec contracts — property-based", () => {
     // assertions fire on every encode/decode.
     const stacked = CallBodyCodec.propertyTest(
       CallBodyCodec.paranoidInputs(layer),
-    )
+    ).pipe(Layer.provide(RecorderEnv))
 
     describe(name, () => {
       it.effect("P1 round-trip preserves the representative fixture", () =>
@@ -123,7 +130,11 @@ describe("CallBodyCodec contracts — property-based", () => {
           ParanoidInputViolation,
         )
       }).pipe(
-        Effect.provide(CallBodyCodec.paranoidInputs(MsgpackLayer)),
+        Effect.provide(
+          CallBodyCodec.paranoidInputs(MsgpackLayer).pipe(
+            Layer.provide(RecorderEnv),
+          ),
+        ),
       ),
     )
 
@@ -134,7 +145,11 @@ describe("CallBodyCodec contracts — property-based", () => {
           ParanoidInputViolation,
         )
       }).pipe(
-        Effect.provide(CallBodyCodec.paranoidInputs(ProtobufLayer)),
+        Effect.provide(
+          CallBodyCodec.paranoidInputs(ProtobufLayer).pipe(
+            Layer.provide(RecorderEnv),
+          ),
+        ),
       ),
     )
 
@@ -144,7 +159,11 @@ describe("CallBodyCodec contracts — property-based", () => {
         const malformed = { ...representativeCall, callRef: 42 as unknown as string }
         expect(() => codec.encode(malformed)).toThrow(ParanoidInputViolation)
       }).pipe(
-        Effect.provide(CallBodyCodec.paranoidInputs(ProtobufLayer)),
+        Effect.provide(
+          CallBodyCodec.paranoidInputs(ProtobufLayer).pipe(
+            Layer.provide(RecorderEnv),
+          ),
+        ),
       ),
     )
   })
@@ -158,7 +177,11 @@ describe("CallBodyCodec contracts — property-based", () => {
         const decoded = codec.decode(bytes)
         expect(decoded.callRef).toBe(representativeCall.callRef)
       }).pipe(
-        Effect.provide(CallBodyCodec.parity(MsgpackLayer, MsgpackRecordsLayer)),
+        Effect.provide(
+          CallBodyCodec.parity(MsgpackLayer, MsgpackRecordsLayer).pipe(
+            Layer.provide(RecorderEnv),
+          ),
+        ),
       ),
     )
 
@@ -170,7 +193,11 @@ describe("CallBodyCodec contracts — property-based", () => {
         const decoded = codec.decode(bytes)
         expect(decoded.callRef).toBe(representativeCall.callRef)
       }).pipe(
-        Effect.provide(CallBodyCodec.parity(MsgpackLayer, ProtobufLayer)),
+        Effect.provide(
+          CallBodyCodec.parity(MsgpackLayer, ProtobufLayer).pipe(
+            Layer.provide(RecorderEnv),
+          ),
+        ),
       ),
     )
   })

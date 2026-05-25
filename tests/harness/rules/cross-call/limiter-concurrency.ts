@@ -16,8 +16,12 @@
  * holds the slot and is excluded.
  */
 
-import type { CrossCallRule, RuleViolation } from "../types.js"
-import type { CallRecording, RecordedMessage } from "../../recording.js"
+import type {
+  CrossCallRule,
+  RuleTrace,
+  RuleTraceMessage,
+  RuleViolation,
+} from "../types.js"
 
 interface Hold {
   callId: string
@@ -61,7 +65,7 @@ function getHeaderRaw(raw: string, name: string): string | null {
   return m?.[1]?.trim() ?? null
 }
 
-function aliceInvite(rec: CallRecording): RecordedMessage | null {
+function aliceInvite(rec: RuleTrace): RuleTraceMessage | null {
   for (const e of rec.entries) {
     if (e.kind !== "message") continue
     if (e.direction !== "sent") continue
@@ -71,7 +75,7 @@ function aliceInvite(rec: CallRecording): RecordedMessage | null {
   return null
 }
 
-function aliceFirst2xx(rec: CallRecording): RecordedMessage | null {
+function aliceFirst2xx(rec: RuleTrace): RuleTraceMessage | null {
   for (const e of rec.entries) {
     if (e.kind !== "message") continue
     if (e.direction !== "received") continue
@@ -84,7 +88,7 @@ function aliceFirst2xx(rec: CallRecording): RecordedMessage | null {
   return null
 }
 
-function lastEntryMs(rec: CallRecording): number {
+function lastEntryMs(rec: RuleTrace): number {
   let last = rec.startMs
   for (const e of rec.entries) {
     if (e.kind === "message") last = Math.max(last, e.receivedMs)

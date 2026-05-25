@@ -62,7 +62,10 @@ import { b2buaWorkerStackLayer, proxyStackLayer } from "./networkLeaves.js"
 import { CdrWriter, makeCdrRecordsBuffer } from "../../src/cdr/CdrWriter.js"
 import { CallLimiter, type LimiterMemoryStore, makeLimiterMemoryStore } from "../../src/call/CallLimiter.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
-import type { ReplicationTraceRecorder } from "./ReplicationTraceRecorder.js"
+import {
+  recordReplFrameReceived,
+  type PartitionedRelayStorageChannel,
+} from "../../src/cache/PartitionedRelayStorage.contracts.js"
 
 /** Default simulated transit delay — same as `fakeStack`'s. */
 export const DEFAULT_TRANSIT_DELAY_MS = 15
@@ -229,12 +232,14 @@ export interface SipproxyHAFakeStackOpts {
    */
   readonly simulateMissingOutboundProxy?: boolean
   /**
-   * Optional replication-frame trace recorder. When provided, every
-   * NDJSON frame the simulated `/replog` HTTP transport emits between
-   * the two workers is decoded and pushed onto the recorder so the
-   * harness can render it alongside the SIP trace.
+   * Optional typed-channel handle on
+   * `Recorder.forTag(PartitionedRelayStorage)`. When provided, every
+   * Data frame the simulated `/replog` HTTP transport emits between the
+   * two workers is decoded and pushed onto the channel so the harness
+   * can render it alongside the SIP trace via the typed channel's
+   * projector.
    */
-  readonly replicationTraceRecorder?: ReplicationTraceRecorder
+  readonly replicationTraceChannel?: PartitionedRelayStorageChannel
 }
 
 /**
@@ -453,15 +458,16 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
   // writes the source emits onto its propagate channel are never
   // consumed and the receiver's `bak:{primary}:` partition stays empty.
   //
-  // When `replicationTraceRecorder` is provided, the simulated stream
-  // is tee'd through `Stream.tap` that decodes each NDJSON frame and
-  // appends it to the recorder — that's the choke point the HTML
-  // report renders as cross-worker arrows.
-  const recorder = opts.replicationTraceRecorder
+  // When `replicationTraceChannel` is provided, the simulated stream
+  // is tee'd through `Stream.mapEffect` that decodes each frame and
+  // pushes it onto the typed channel — that's the choke point the HTML
+  // report renders as cross-worker arrows (via the projector registered
+  // by `PartitionedRelayStorage.contracts`).
+  const channel = opts.replicationTraceChannel
   const Pullers = makeHaPullerLayer(
     [{ ord: w1Ord, addr: w1Addr }, { ord: w2Ord, addr: w2Addr }],
     fabricBuilt.fabric,
-    recorder,
+    channel,
   )
 
   // Slice 5: re-expose the fabric services outward so scenarios can
@@ -489,7 +495,7 @@ export function sipproxyHAFakeStackLayer(opts: SipproxyHAFakeStackOpts) {
 const makeHaPullerLayer = (
   workers: ReadonlyArray<{ readonly ord: WorkerOrdinal; readonly addr: SocketAddr }>,
   fabric: ReturnType<typeof PeerFabric.simulatedBuilt>["fabric"],
-  recorder: ReplicationTraceRecorder | undefined,
+  channel: PartitionedRelayStorageChannel | undefined,
 ): Layer.Layer<never, never, never> =>
   Layer.effectDiscard(
     Effect.gen(function* () {
@@ -575,7 +581,7 @@ const makeHaPullerLayer = (
               chunkSize: args.chunkSize,
               noopIntervalMs: HA_REPL_PULL_RECONNECT_GAP_MS,
             })
-            if (recorder === undefined) return base
+            if (channel === undefined) return base
             // Post-msgpackr wire format is `[4-byte BE length][msgpack
             // payload]`; one chunk may carry partial frames or several
             // frames, so accumulate across chunks. Only Data frames are
@@ -584,7 +590,7 @@ const makeHaPullerLayer = (
             // virtual time over 15-min pauses → thousands per scenario)
             // and would flood the SVG. Decode failures are swallowed —
             // the report is observability, not correctness.
-            const traceRecorder = recorder
+            const traceChannel = channel
             return Stream.suspend(() => {
               let accumulator: Buffer = Buffer.alloc(0)
               return Stream.mapEffect(base, (bytes) =>
@@ -599,7 +605,7 @@ const makeHaPullerLayer = (
                     try {
                       const frame = decodeFrame(payload)
                       if (frame._tag !== "Data") continue
-                      traceRecorder.record({
+                      yield* recordReplFrameReceived(traceChannel, {
                         timestamp: now,
                         from: peerOrdStr,
                         to: selfOrdStr,
@@ -635,9 +641,6 @@ const makeHaPullerLayer = (
       }
     }),
   )
-
-export { makeReplicationTraceRecorder } from "./ReplicationTraceRecorder.js"
-export type { ReplicationTraceRecorder, ReplicationTraceEvent } from "./ReplicationTraceRecorder.js"
 
 /**
  * Pump the simulated fabric: yield once, advance virtual time enough for

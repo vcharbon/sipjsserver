@@ -190,6 +190,6 @@ The behaviours above are exercised by:
   — topology-parameterized transparency: behaviour identical with /
   without the proxy.
 
-Each test runs under `vitest.config.fake.ts` (TestClock + simulated
-UDP). PR5 will add `kind`-based integration tests against a real
-cluster.
+Each test runs under the unified `vitest.config.ts` in fake mode
+(`TEST_MODE=fake`, TestClock + simulated UDP). PR5 will add
+`kind`-based integration tests against a real cluster.

@@ -2,10 +2,10 @@
  * cross-call: unique-call-id — sanity check that every recording in
  * a multi-call run was bucketed under a distinct logical Call-ID.
  *
- * Multi-call runs rely on Call-ID demux (see recording-extractor.ts):
- * if two calls collide on Call-ID the recordings would merge silently
- * and other rules would behave strangely. This rule fires when that
- * happens.
+ * Multi-call runs rely on Call-ID demux performed by the drive-only
+ * runner: if two calls collide on Call-ID the per-call traces would
+ * merge silently and other rules would behave strangely. This rule
+ * fires when that happens.
  */
 
 import type { CrossCallRule, RuleViolation } from "../types.js"

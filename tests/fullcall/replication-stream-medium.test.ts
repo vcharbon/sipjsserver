@@ -19,7 +19,7 @@
  * actually run enough ticks for a leak to show.
  *
  * Gates:
- *   - `TEST_TIER` must be `medium` or `long` (cf. vitest.config.live.ts).
+ *   - `TEST_TIER` must be `medium` or `long` (cf. vitest.config.ts, TEST_MODE=live branch).
  *   - `REDIS_URL` must point at a reachable Redis (default
  *     `redis://localhost:6379`); test self-skips if connect fails.
  *   - `global.gc` must be available — invoke with `node --expose-gc`

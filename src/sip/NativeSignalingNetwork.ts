@@ -306,6 +306,7 @@ function makeNativeImpl(): SignalingNetworkApi {
     transitDelayMs: undefined,
     inFlight: () => 0,
     bumpInFlight: (_: number) => undefined,
+    queueDepths: () => [],
   }
 }
 

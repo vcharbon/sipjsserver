@@ -131,10 +131,14 @@ export function writeScenarioReport(
         <div class="anomalies-header">Data anomalies — ${result.anomalies.length} item${result.anomalies.length === 1 ? "" : "s"}</div>
         <ul class="anomalies-list">
           ${result.anomalies.map((a) => {
-            if (a.kind === "nameConflict") {
-              return `<li><span class="anomalies-kind">name conflict</span> <code>${escapeHtml(a.laneKey)}</code> → ${escapeHtml(a.names.join(", "))}</li>`
+            switch (a.kind) {
+              case "nameConflict":
+                return `<li><span class="anomalies-kind">name conflict</span> <code>${escapeHtml(a.laneKey)}</code> → ${escapeHtml(a.names.join(", "))}</li>`
+              case "orphanReplPod":
+                return `<li><span class="anomalies-kind">orphan repl pod</span> <code>${escapeHtml(a.pod)}</code></li>`
+              case "signalingAudit":
+                return `<li><span class="anomalies-kind">signaling audit (${escapeHtml(a.severity)})</span> <code>${escapeHtml(a.check)}</code>${a.bindKey !== undefined ? ` @ <code>${escapeHtml(a.bindKey)}</code>` : ""} — ${escapeHtml(a.detail)}</li>`
             }
-            return `<li><span class="anomalies-kind">orphan repl pod</span> <code>${escapeHtml(a.pod)}</code></li>`
           }).join("")}
         </ul>
       </div>`

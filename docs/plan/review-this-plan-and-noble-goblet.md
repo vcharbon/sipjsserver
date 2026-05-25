@@ -1,392 +1,203 @@
-# Plan: Effect Layer wrappers + per-peer SIP RFC monitor
+# Plan: Unified typed Recorder + effect-layer-test wrappers across five layers
 
-**Track:** multi-session vertical slices. Each slice is one focused session, lands type-clean, ships independently.
-**Plan file role:** index + slice catalog. Each slice gets its own plan file when it's executed.
+**Track:** multi-session vertical slices. Each slice = one focused session, lands type-clean, ships independently.
+**Plan file role:** index + slice catalog. Each slice gets its own detail plan when picked up (`docs/plan/effect-layer-wrappers/<slice>.md`).
 
 ---
 
 ## Context
 
-`src/call/codec/contracts.ts` is the worked example of the four-wrapper pattern from `.claude/skills/effect-layer-test`: `propertyTest` / `paranoidInputs` / `parity` / `scopedAudit`, each wraps a Tag's implementation Layer without changing the Tag or service shape. Failure shapes: sync `Error` subclasses with `_tag` for sync APIs, `Data.TaggedError` for the scope-close finalizer in `scopedAudit`.
+[src/call/codec/contracts.ts](src/call/codec/contracts.ts) is the worked example of the four-wrapper pattern from `.claude/skills/effect-layer-test`: `propertyTest` / `paranoidInputs` / `parity` / `scopedAudit`. Each wraps a Tag's implementation Layer without changing the Tag or service shape.
 
-Three other layers in this codebase carry invariants that today escape test enforcement:
+This initiative does two things together:
 
-- **SignalingNetwork** ([src/sip/SignalingNetwork.ts:280](src/sip/SignalingNetwork.ts#L280)) — per-peer counter sanity, undelivered drain, and most importantly SIP-protocol completeness per peer (every INVITE answered, every transaction terminated, no orphan Via branches). The substrate is already there: `UdpEndpointCounters`, `NetworkTraceEntry`, per-`bindUdp` finalizer at [src/sip/SignalingNetwork.ts:587-592](src/sip/SignalingNetwork.ts#L587-L592). No contract layer reads it.
-- **PartitionedRelayStorage** ([src/cache/PartitionedRelayStorage.ts](src/cache/PartitionedRelayStorage.ts)) — Tag/impl already split. Storage state spans calls; in-memory vs redis behaviours should match.
-- **CallLimiter** ([src/call/CallLimiter.ts](src/call/CallLimiter.ts)) — counter-back-to-0 invariant (ADR-0004), redis vs memory parity. Currently 3 inline impls in one 402-line file.
+1. **Extend the wrapper pattern** to SignalingNetwork, PartitionedRelayStorage, CallLimiter, CallStateCache, and retrofit CallBodyCodec.
+2. **Unify recording** through a single typed `Recorder` service per scenario — eliminating today's parallel buffers (`NetworkTrace.trace[]`, `ReplicationTraceRecorder`, legacy `CallRecording`) and making "what crossed the test fabric" a single source of truth that both rule packs and the HTML call-flow renderer consume.
 
-**One new wrapper concept beyond the four canonical ones:**
+The goal: every fake-stack test silently enforces invariants its author didn't think to assert — and **the same recorded data drives the HTML report**, with no second source of truth.
 
-`peerMonitor` — same Tag, but runs **per-peer post-analysis on each `bindUdp` scope close** using an extensible rule pack. The codec did not need this because codec contracts are per-call; SignalingNetwork has a peer dimension. Structurally close to `scopedAudit` (scope-close, `Data.TaggedError` failure) but organized per-peer instead of per-service.
+Layers in scope: SignalingNetwork, PartitionedRelayStorage, CallLimiter, CallStateCache, CallBodyCodec. Also reshaped: `SipHarness` (driver events as a typed-channel Tag — `timeout`, `marker`, `linkObservedToExpect`).
 
-**Recording is mutualised on the existing `Recorder` Effect Service** ([src/test-harness/framework/report-recorder/Recorder.ts](src/test-harness/framework/report-recorder/Recorder.ts)) — its own comments call it "the single source of truth for what crossed the test fabric." It already has the right primitives for per-peer attribution and multi-layer capture:
-
-- `registerLane({ip, port, name, network})` — lanes ARE peers, addressed by `(ip, port)` with a `NetworkTag` discriminator.
-- `recordSip({fromAddr, toAddr, direction, message, ...})` — full `SipMessage`, requires parsing at write time.
-- `recordRepl({frame, ...})` — replication frames (used by PartitionedRelayStorage observation).
-- `markLaneKilled` — peer-lifecycle events.
-- `snapshot()` — drains to the `RecordedScenario` shape consumed by the HTML call-flow renderer AND by RFC rule packs.
-- Multi-transport: `Recorder.fake | live | hybrid`; shared `RecorderSequencer` so all writers stamp from the same monotonic counter.
-
-The Recorder's transport-wiring slices (fake/live SIP capture and the rendering pipeline) are tracked in a sibling plan referenced by [Recorder.ts:5](src/test-harness/framework/report-recorder/Recorder.ts#L5). **Our wrappers consume / depend on Recorder; we do not duplicate it and we do not introduce a parallel buffer in `peerMonitor`.** Where the Recorder's SIP capture is not yet wired into a transport this initiative needs (e.g. simulated SignalingNetwork), the prerequisite is called out per slice — either gated on the sibling plan or implemented inline as a precursor.
-
-The intended outcome: every fake-stack test silently enforces (a) network-layer sanity per peer and (b) SIP RFC completeness per peer, surfacing violations the test author didn't think to assert — **and** the same recorded data drives the existing HTML call-flow report, with no second source of truth.
+Out of scope: TimerService (no concrete invariant gap demonstrated yet).
 
 ---
 
-## Architectural decisions
+## Architectural decisions (ratified)
 
-### D1. `peerMonitor` is a distinct wrapper, same Tag, no private buffer
+### D1. Four wrappers stays the canonical template
 
-- Returns `Layer<SignalingNetwork, never, R>` where `R ⊇ Recorder | Scope` — Rule 1 preserved, consumers oblivious to wrapping but Recorder must be in the layer stack.
-- Wraps `bindUdp`: each call (a) calls `Recorder.registerLane({ip, port, name?, network})`, (b) hooks `send`/`receive` to call `Recorder.recordSip(...)`, (c) registers `Scope.addFinalizer` that filters `Recorder.snapshot()` to this peer's lane and runs the rule pack.
-- **No per-wrapper buffer.** All capture goes through Recorder so HTML call-flow rendering, RFC rule checks, and any future consumer see the same bytes.
-- Failure shape: `Data.TaggedError("PeerMonitorViolation")` surfaced on the surrounding scope's Exit.cause (same model as codec `AuditViolation`).
-- Extensible: takes `{ rules: ReadonlyArray<PeerMonitorRule> }`. Built-in rules adapt the existing 17 RFC validators.
+`propertyTest` / `paranoidInputs` / `parity` / `scopedAudit`. No fifth wrapper. SignalingNetwork's per-bindUdp finalizer logic is an **internal** detail of its `scopedAudit`; the canonical layer-close finalizer remains the public failure surface (`Data.TaggedError`).
 
-### D2. Reuse the existing RFC rule pack — do NOT invent new validators
+### D2. Single Recorder per scenario, typed per-Tag channels
 
-[tests/harness/rules/rfc/index.ts](tests/harness/rules/rfc/index.ts) already has 17 `rfcRules` wrapping `ValidationCheckName` functions from [src/test-harness/framework/validation.ts](src/test-harness/framework/validation.ts) (cseq, via, callId, contentLength, branchPrefix, tagConsistency, …). The peerMonitor wrapper feeds the *existing* validators a per-peer slice of `Recorder.snapshot().sipTrace`. Zero net-new SIP logic.
-
-### D3. `Recorder` is the unification axis across all observing wrappers
-
-| Wrapper / consumer | Recorder method used | What it observes |
-|---|---|---|
-| `SignalingNetwork.peerMonitor` | `registerLane`, `recordSip`, `markLaneKilled` | Per-peer SIP packets (filtered at finalizer) |
-| `PartitionedRelayStorage.scopedAudit` (Slice 5) | `recordRepl` | Replication frames (already a first-class Recorder primitive) |
-| HTML call-flow renderer (existing) | `snapshot()` | Reads same `RecordedScenario` |
-| `CallLimiter.scopedAudit` (Slice 6) | — | No wire events; inspects impl-internal counters at scope close. No Recorder dependency. |
-
-Wrappers that produce wire events ALWAYS go through Recorder; wrappers that inspect service-internal state (CallLimiter counters) don't need Recorder and do not introduce one.
-
-### D4. Parsing happens once, at the Recorder write site
-
-`Recorder.recordSip` takes a parsed `SipMessage` (see [report-recorder/types.ts:62](src/test-harness/framework/report-recorder/types.ts#L62)). The `peerMonitor` wrapper's `send`/`receive` taps parse via `SipParser.lenientLayer` once, then both the rule pack AND the HTML renderer use the same parsed object. No double-parse, no two parsers diverging.
-
-### D5. Skip `parity` for real-vs-simulated SignalingNetwork
-
-Real network is nondeterministic by design. Skill Rule 4: parity assumes determinism. Two simulated *configurations* (e.g. zero-delay vs default transit delay) could pair in the future; real-vs-simulated cannot.
-
-### D6. Skip `propertyTest` for SignalingNetwork unless a defect motivates it
-
-Per-call `send`/`bindUdp` invariants overlap with `paranoidInputs` (input shape) and `peerMonitor` (cross-message). Adding propertyTest now is duplication. Revisit if a concrete bug demands it.
-
-### D7. Scope: only the three user-selected layers
-
-SignalingNetwork, PartitionedRelayStorage, CallLimiter. Explicitly **out of scope**: CallStateCache, TimerService. Defer until a concrete need surfaces.
-
-### D8. Finalizer order — peerMonitor INNER, scopedAudit OUTER
-
-Effect finalizers run LIFO. peerMonitor finalizers (per-peer) must finish before scopedAudit's cross-cutting checks read aggregate state. Wrapper composition therefore:
+One `Recorder` instance per `it.effect` scope. Provided by `stackLayer({ mode })` (see D10); endurance multi-process tests own per-process Recorders, never share.
 
 ```ts
-SignalingNetwork.scopedAudit(
-  SignalingNetwork.peerMonitor(
-    SignalingNetwork.paranoidInputs(
-      SignalingNetwork.simulated({ ... })
-    ),
-    { rules: rfcRulesForPeerMonitor }
-  )
-) // Recorder layer provided alongside in the stack
+interface RecorderApi {
+  forTag<S, E>(tag: Tag<S, any>): {
+    record: (event: E) => Effect.Effect<void>
+    snapshot: Effect.Effect<ReadonlyArray<E>>
+  }
+  labelLane: (bindKey: LaneKey, name: string) => Effect.Effect<void>
+  snapshot: Effect.Effect<RecordedScenario>  // assembled view for the HTML renderer
+}
 ```
 
-### D9. Coordinate with the in-progress Recorder transport-wiring plan
+`recordSip` / `recordRepl` / `recordSpecial` from prior drafts are **deleted**. Each wrapped layer's `contracts.ts` writes typed events to its own channel.
 
-[Recorder.ts:5](src/test-harness/framework/report-recorder/Recorder.ts#L5) flags Slice 2 (fake SIP transport wiring) and Slice 3 (live SIP transport wiring) as pending in a sibling plan. Slice 2 in **this** plan does the SignalingNetwork-side wiring required by peerMonitor — to be reconciled with that sibling plan at execution time (either we wait on it, contribute the SignalingNetwork piece to it, or land them as one combined slice). Decision deferred to the Slice 2 session, not to be made here.
+### D3. Typed events with exported projectors
 
----
+Each layer's `contracts.ts` exports:
+- An `Event` discriminated union (one variant per public method; Stream → `streamStart` / `streamItem` / `streamEnd`; Scope → `acquire` / `release`).
+- A built-in projector (`toSipWire`, `toReplWire`, …) registered with the Recorder; the assembled `snapshot` view is what the renderer consumes.
+- The **generic projection helpers** the built-in projector uses, exported so external rule packs can write custom projections without reimplementing internals.
 
-## Pushback log (decisions challenged on the user's behalf)
+### D4. Hand-declared event types + helper library
 
-- "Monitor" preserved as distinct from `scopedAudit` only because the user made the distinction explicitly (rule-pack injection + per-peer attribution). Structurally close enough that documentation must spell out the relationship.
-- Rule pack must be extensible — no hardcoded RFC checks in the wrapper itself.
-- `parity` for SignalingNetwork (real vs simulated) **rejected**: violates determinism precondition.
-- `propertyTest` for SignalingNetwork **deferred**: marginal value.
-- CallStateCache + TimerService **excluded**: user did not select them; resist scope creep.
-- Each slice produces a stand-alone, type-clean PR-sized unit. No "big bang" migration.
-- **Rejected: a bespoke per-peer ring buffer inside `peerMonitor`.** The existing `Recorder` Effect Service already addresses per-peer lanes, multi-transport capture, shared sequencing, and is the substrate for the HTML call-flow renderer. Building a second buffer would create two sources of truth and let the visualised report and the rule-pack report disagree about what crossed the wire.
-- **Rejected: parsing SIP twice.** Single parse at the Recorder write site (D4) — both rules and renderer see the same object.
+Each event union is hand-written. Helper library (skill or shared runtime) handles the recording boilerplate for the four constructs that actually appear:
 
----
+| Helper | Use |
+|---|---|
+| `recordSync` | Sync pure functions (codec `encode`/`decode`) |
+| `recordEffectCall` | Effect-returning methods, with `{ok|fail|interrupt}` outcome capture |
+| `recordScopedAcquire` | `Effect<X, E, Scope>` (`bindUdp`-style) — emits acquire on success + release via `addFinalizer` |
+| `recordStreamLifecycle` | `Stream<X>` (the endpoint's `messages`) — taps start/item/end |
 
-## Design exploration: deeper mutualisation candidates
+Excluded by convention: sync getters (`inFlight`, `queueDepth`, `transitDelayMs`) — recording every read floods the log. Higher-order methods (transaction-style `withConnection(fn)`) and Hub/PubSub are **explicit-wrap, no helper** — document in skill.
 
-**Status:** open design — not committed. The slice catalog below is **tentative** until these are resolved.
+Push-buffered async recording is deferred: recording only runs in tests, where scale is bounded by construction.
 
-After a deeper sweep, the mutualisation opportunity is much larger than per-peer SIP capture. Three classes of finding:
+### D5. RunContext drives severity, three tiers
 
-### Class A — Bespoke buffers that duplicate Recorder primitives today (clear folds)
-
-| # | Candidate | Current home | Recorder primitive that supersedes |
-|---|-----------|--------------|------------------------------------|
-| A1 | `NetworkTrace.trace[]` (simulated SignalingNetwork) | [src/sip/SignalingNetwork.ts:151-169](src/sip/SignalingNetwork.ts#L151-L169), drained via `drainTrace()` | `Recorder.recordSip` — same data, different lifetime today. Slice 2 of this plan resolves. |
-| A2 | `NetworkTrace.undeliverable[]` | same file, `drainUndeliverable()` | New `Recorder.anomalies` variant `{kind: "undeliverable", ...}` |
-| A3 | `tests/support/ReplicationTraceRecorder.ts` | dedicated test helper | `Recorder.recordRepl` — already shares EventSequencer; literally a parallel buffer. Pure consolidation win. |
-| A4 | Per-call `CallRecording` (`tests/harness/recording.ts`) | post-hoc extractor from `ScenarioResult.trace` | Derive `CallRecording[]` from `RecordedScenario.sipTrace` by filtering on Call-ID. Legacy types kept temporarily, generated. |
-
-### Class B — Currently invisible-in-tests violation/decision channels (enrich Recorder)
-
-These produce signals that are visible in production logs/OTel but **not in the test artifact today** — the HTML call-flow can't show them. Folding them into Recorder makes them visible AND machine-checkable.
-
-| # | Channel | Source | Today | Proposed Recorder surface |
-|---|---------|--------|-------|----------------------------|
-| B1 | `ByeDispositionViolation` | `RuleExecutor.finalizeTermination` | WARN log + counter | new `anomalies[]` variant |
-| B2 | Codec `PropertyViolation` / `ParityViolation` / `AuditViolation` | `src/call/codec/contracts.ts` | throws / logs | new `anomalies[]` variant — wrapper still throws (test fails) AND records (renderer shows) |
-| B3 | Rule decision outcomes (matched rule, action emitted) | `RuleExecutor` → OTel `rule_handled` span events | invisible in tests (OTel not wired in test harness) | new `RecordedRuleOutcome[]` channel — every match, per call, with action summary |
-| B4 | Routing decisions | `InitialInviteHandler` → `route_decision` span events | same — invisible in tests | subsumed by B3 |
-| B5 | Validation check failures | `src/test-harness/framework/validation.ts` | step-level error strings | per-message anomaly entries pinned to the offending `sipTrace` entry |
-
-### Class C — Driver/test-runner concepts the Recorder doesn't yet model
-
-Concepts present in the legacy `CallRecording` shape or in the runner's `ScenarioResult` that have no Recorder home:
-
-| # | Concept | Current home | Proposed |
-|---|---------|--------------|----------|
-| C1 | `RecordedTimeout` (deadline fired without expected message) | legacy `CallRecording.entries` | new `Recorder.recordTimeout` + entry type |
-| C2 | `RecordedMarker` (phase annotations, free-form driver notes) | legacy `CallRecording.entries` | new `Recorder.recordMarker` + entry type |
-| C3 | Driver `label` linking expected step → observed message | DSL `ref` + `labelOfStep` callback | optional `label?: string` on `RecordedSipEntry` (already present in legacy `RecordedMessage`) |
-| C4 | Replication lag observations | `expectLagSeqZero` step inspects + discards | new `Recorder.recordReplicationLag` or anomaly on lag > threshold |
-| C5 | Timer fire/cancel events | not captured anywhere | new channel — only worth it if a concrete bug demands it (defer) |
-
-### Class D — Clear KEEP-SEPARATE (different lifetime / different consumer)
-
-Documented here so we don't relitigate later:
-
-- `UdpEndpointCounters` (live backpressure state, not history)
-- `MetricsRegistry` gauges/counters (aggregate, live-sampled, for `/metrics` endpoint — different consumer)
-- Structured logs via `ProxyLogger` (operator-facing severity messages, not test artifact)
-- `CallModel` / `Leg` / `Dialog` (live operational state, not trace)
-- `TimerService.fibersMap` (active-fiber registry, not history)
-- OpenTelemetry to Tempo (production observability — test wiring would be a separate design)
-- `WorkerRegistry` worker health states (HA control plane, orthogonal to wire capture)
-
-### Cross-cutting design contract (RATIFIED, iterates over time)
-
-**All test-mode wrappers report violations DUALLY, with a 3-tier severity decided BY CONTEXT:**
-
-| Severity | When wrapper fails the test | Recorder behaviour |
-|----------|------------------------------|--------------------|
-| `fatal` | **Immediately** (throw / `Effect.fail`) | Records anomaly THEN fails |
-| `deferred-fail` | Test continues; **marked failed at scope close** | Records anomaly; scope-close finalizer fails if any deferred-fail anomaly present |
-| `advisory` | **Never** fails on its own | Records anomaly only; post-run rule pack decides |
-
-**Severity is NOT a constant on the rule.** Each rule receives a `RunContext` and returns a severity per finding. Same rule, three enforcement modes by environment:
+`RunContext` Service Tag with three variants:
 
 ```ts
 type RunContext =
-  | { kind: "real-run" }                                  // production runtime
-  | { kind: "test-with-recorder", recorder: RecorderApi } // integration test, full visibility
-  | { kind: "unit-test-of-layer", layer: string }         // narrow unit test, strict by default
-
-interface PeerMonitorRule {
-  readonly id: string
-  readonly check: (entry: RecordedSipEntry, peer: Lane) => string | null  // null = ok
-  readonly severity: (ctx: RunContext, reason: string) => Severity
-}
-
-// Example: RFC CSeq monotonicity
-{
-  id: "rfc.cseq",
-  check: (entry, peer) => verifyCseqMonotonic(entry, peer),
-  severity: (ctx, _) => {
-    switch (ctx.kind) {
-      case "unit-test-of-layer":  return "fatal"          // strict enforcement of layer
-      case "test-with-recorder":  return "deferred-fail"  // collect full picture, then fail
-      case "real-run":            return "advisory"       // log, never break prod
-    }
-  },
-}
+  | { kind: "real-run" }
+  | { kind: "test-with-recorder" }
+  | { kind: "unit-test-of-layer", tag: Tag<any, any> }
 ```
 
-**Mechanics:**
-- `RunContext` is an Effect Service (`Tag`), provided once at the test/run scope. Wrappers read it via `yield* RunContext`. Defaulted to `{ kind: "real-run" }` in production wiring.
-- The wrapper iterates the rule pack, calls each rule's `check` then `severity(ctx, reason)`, and emits `Recorder.recordAnomaly({kind, severity, ...})`. Effect failure follows the severity matrix above.
-- Codec wrappers retrofitted to the same contract (their throw-only behaviour becomes the `fatal` branch of `severity(ctx)`).
+Each rule returns severity per finding given the context: `fatal` (Effect.fail / throw immediately), `deferred-fail` (record, fail at scope close), `advisory` (record only). Same rule, three lives. `RunContext` provided by `stackLayer` / production `main.ts`; default `real-run` if missing. Startup assertion: `test-with-recorder` requires `Recorder` in scope.
 
-Why context-driven instead of per-rule constant:
-- The same RFC check is "I want hard failure" in a unit test of the parser, "let me see the full call before judging" in an integration test, and "don't 503 production" in a real run.
-- One rule, three lives. Without context, we'd have three copies of every rule with different `severity:` constants, or a parallel severity-policy table that drifts.
+### D6. Test-layer library — pull from there, not ad-hoc `Layer.merge`
 
-Codec wrappers retrofitted in their own slice. All future wrappers inherit it.
-
-### D10. ONE Recorder per scenario, shared across every network layer
-
-When a test stack has multiple network layers (e.g. hybrid registrar front-proxy: simulated ext + real core), they ALL write to the same Recorder instance. The existing `NetworkTag` discriminator on lanes is the only way to attribute traffic to a network; the shared `EventSequencer` is the only way to keep cross-network event order deterministic.
-
-Concretely:
-- `Recorder` is provided ONCE at the test scope.
-- Each `SignalingNetwork.peerMonitor` wrapper is parameterised with the `NetworkTag` of the network it wraps (`ext` / `core` / production tag). It tags every `recordSip` and `registerLane` call with that tag.
-- The HTML renderer already groups lanes by `NetworkTag`. No renderer change needed.
-- `Recorder.fake` / `live` / `hybrid` selectors stay — the `transportKind` is metadata for the report header; lane-level network tagging is independent.
-
-Anti-pattern this rules out: a wrapper that spawns its own private `Recorder.fake` because "I just need to capture my own traffic." That fragments ordering and produces two HTML reports.
-
-### D11. Class B3 (rule decision outcomes) — OUT OF SCOPE
-
-Rule decisions flow into OTel span events in production and are not surfaced in tests. The right path is a `TestTracer` layer that captures span events when OTel is enabled in the test harness — separate initiative, not bundled here.
-
-### Resolved decisions
-
-- **Dual-report:** ratified with 3-tier severity (fatal / deferred-fail / advisory). See cross-cutting contract above.
-- **Severity is CONTEXT-DRIVEN, not constant per rule.** Each rule receives a `RunContext` Service and returns severity per finding. Same rule behaves differently in real-run vs test-with-recorder vs unit-test-of-layer.
-- **Rule-outcome channel (B3):** deferred indefinitely — TestTracer is the right tool.
-- **Anomaly vocab cadence:** per-slice incremental. Slice 1 ADR fixes the discriminated-union SHAPE only (`{kind, atMs, ref?, severity, ...}`); each slice adds its own `kind` variants without re-deciding shape.
-- **Single Recorder per scenario** (D10): never spawn a private Recorder inside a wrapper.
-- **Driver events:** SipHarness façade (Alt B). Recorder gains a single generic `recordSpecial` primitive; façade owns event-family payload schemas.
-- **Default behaviour for SignalingNetwork wrappers:** opt-in per test for Slices 4–7. After stabilisation (canary test + full fake-stack suite green), a dedicated cleanup slice flips the default to ON in `fakeStackLayer`. Two states maintained temporarily; never permanently.
-
-### Still open — none currently
-
-(All design items previously listed under "needs detailed preview" have been resolved. The driver-events alternative section below is kept for traceability.)
-
-### Resolved: driver-events alternatives (kept for traceability)
-
-#### Driver event types (C1 / C2 / C3) — three alternatives
-
-The user floated a `SipHarness` recorder whose only role is to put driver-side events (timeouts, markers, expected-vs-observed labels) into the shared Recorder. Three concrete shapes to compare:
-
-**Alt A — Direct Recorder API expansion**
+`tests/support/testLayers.ts` exports curated bundles:
 
 ```ts
-// src/test-harness/framework/report-recorder/Recorder.ts
-interface RecorderApi {
-  // ... existing 5 methods ...
-  recordTimeout: (entry: Omit<RecordedTimeoutEntry, "seq">) => Effect.Effect<void>
-  recordMarker:  (entry: Omit<RecordedMarkerEntry,  "seq">) => Effect.Effect<void>
+export const testLayers = {
+  context:   { realRun, testWithRecorder, unitTestOf: (tag) => ... },
+  recorder:  { fake, live, hybrid },
+  contracts: { signalingNetwork, callBodyCodec, partitionedRelayStorage, callLimiter, callStateCache },
+  stacks:    { fake(opts), live(opts), unit(tag, opts) },
 }
-
-// Driver call site (tests/harness/runner.ts or interpreter.ts):
-yield* recorder.recordTimeout({
-  atMs: virtual.now,
-  agent: "bob1",
-  waitingFor: "180 ringing",
-  label: "bob1.ring",
-})
 ```
 
-- **Pros:** lowest indirection; one service to know about; matches existing `recordSip` / `recordRepl` pattern.
-- **Cons:** Recorder's API surface grows every time a new event family appears; semantic validation (e.g. "timeout only valid inside an active expect") lives at call sites or in scattered helpers.
+`Tag.withAllContracts(...)` is what gets composed inside `contracts.*` bundles. Tests pull one bundle off the shelf; no `Layer.merge` in test files.
 
-**Alt B — `SipHarness` semantic façade (user's suggestion)**
+### D7. Composition helper — skill generic + per-Tag forwarder
+
+Skill ships:
 
 ```ts
-// New service: src/test-harness/framework/SipHarness.ts
-export class SipHarness extends ServiceMap.Service<SipHarness, SipHarnessApi>()(
-  "@sipjsserver/test-harness/SipHarness"
-) {
-  static readonly layer: Layer.Layer<SipHarness, never, Recorder> =
-    Layer.effect(SipHarness, Effect.gen(function* () {
-      const recorder = yield* Recorder
-      return {
-        timeout: (args) => recorder.recordSpecial({
-          kind: "harness/timeout", ...args,
-        }),
-        marker:  (args) => recorder.recordSpecial({
-          kind: "harness/marker", ...args,
-        }),
-        linkObservedToExpect: (args) => /* attach label to last sipTrace entry */,
-      }
-    }))
-}
-
-// Driver call site:
-yield* SipHarness.timeout({ agent: "bob1", waitingFor: "180 ringing", label: "bob1.ring" })
+export function withCanonicalContracts<S>(
+  tag: Tag<S, any>,
+  impl: Layer.Layer<S>,
+  options: {
+    propertyTest?: PropertyTestOptions<S>
+    paranoidInputs?: ParanoidInputsOptions<S>
+    scopedAudit?: ScopedAuditOptions<S>
+  }
+): Layer.Layer<S>
 ```
 
-- **Pros:** Recorder stays focused on cross-cutting primitives (lanes / sipTrace / replTrace / anomalies); each domain gets its own thin façade (`SipHarness`, future `ReplicationHarness`, `WorkerHarness`); semantic invariants can live in the façade.
-- **Cons:** one more service in the layer stack; the Recorder still needs a generic "special event" channel OR per-façade channels (and so the surface grows somewhere); doubles the indirection for trivial use.
+Fixed canonical order: `propertyTest(paranoidInputs(scopedAudit(impl)))`. Each Tag exposes a thin `Tag.withAllContracts(options)` forwarder. `parity` is **not** in the canonical helper — when needed, build the parity layer first and pass it as `impl`.
 
-**Alt C — Label only, keep legacy `CallRecording` for timeout / marker**
+### D8. SipHarness is a typed-channel Tag, not a special "façade"
 
-```ts
-// Only change: add optional label to existing entry
-interface RecordedSipEntry {
-  // ... existing ...
-  readonly label?: string  // NEW: links expect step → observed message
-}
+Driver events (`timeout`, `marker`, `linkObservedToExpect`) live in a `SipHarnessEvent` discriminated union. No contract wrappers (nothing to enforce — pure recording). A projector to the legacy `CallRecording` shape exists during transition; deleted in Slice 14. The earlier "harness façade pattern" framing is retired — everything is uniformly a typed-channel Tag.
 
-// Timeouts and markers stay in tests/harness/recording.ts (CallRecording.entries)
-// Legacy and new recording coexist; rules that need timeouts/markers consume legacy.
-```
+### D9. RFC pack: 24 rules, per-rule ownership via array deletion
 
-- **Pros:** smallest patch; labels are the most painful gap (today no machine link between expect and observed message); doesn't force the legacy decision now.
-- **Cons:** does not actually mutualise — `CallRecording` and `RecordedScenario` keep being two parallel systems; rule packs split between "Recorder rules" and "CallRecording rules"; eventually we still have to choose A or B.
+Original draft undercounted at 17. There are **17 base validators + 7 cross-message rules = 24 total** in [tests/harness/rules/rfc/index.ts](tests/harness/rules/rfc/index.ts) (`rfcRules` array + named imports). Migration: each rule moves from the array to the new path one slice at a time; the old runner naturally enforces only what's left. When the array is empty, the old runner deletes (Slice 6). No double-enforcement at any point.
 
-**RESOLVED: Alt B (SipHarness façade).** Events land in a generic Recorder channel keyed by `{kind: "harness/${type}", ...}`. The "harness façade" becomes a reusable pattern — future domains (replication, workers) get their own thin façade over the shared Recorder.
+The per-dialog projector required by the 7 cross-message rules lives in `tests/harness/projections.ts` — test-side concept, not in any service's `contracts.ts`.
 
-#### Recorder API extension required for SipHarness
+### D10. Stack-builder unification lands AFTER Slice 1
 
-The façade needs a single new generic primitive on Recorder (not per-event-family methods, to preserve D10's "primitive surface stays small"):
+The wrapper rollout doesn't structurally depend on `fakeStackLayer` / `liveStack` being unified. Slice 1 (SignalingNetwork scopedAudit) lands against today's `fakeStackLayer`. Then Slices 2a + 2b unify (runner + vitest config). Subsequent slices target the unified `stackLayer({ mode })`. Lessons from Slice 1's real wrapper integration inform the unified shape rather than being speculative.
 
-```ts
-interface RecorderApi {
-  // ... existing 5 methods ...
-  recordSpecial: (entry: Omit<RecordedSpecialEntry, "seq">) => Effect.Effect<void>
-}
+### D11. Perf: three ad-hoc checkpoints, no CI gate yet
 
-interface RecordedSpecialEntry {
-  readonly kind: string             // e.g. "harness/timeout", "harness/marker"
-  readonly atMs: number
-  readonly seq: number
-  readonly payload: unknown         // shape owned by the façade that wrote it
-  readonly ref?: { ip: string, port: number } | { callRef: string }  // optional pin
-}
-```
+Three configurations toggled via `perfMode?: "baseline" | "no-audit" | "full"` on `testLayers.stacks.fake(...)`.
 
-The façade owns the payload schema; the Recorder is intentionally generic about `kind` and `payload` so adding a new façade does not touch Recorder.
+| Comparison | Threshold |
+|---|---|
+| `no-audit` vs `baseline` | **+10% alert** — recording-layer overhead should be in the noise |
+| `full` vs `baseline` | **+50% soft ceiling** — sanity bound for quadratic rule blunders |
+| `full` vs `no-audit` | no alert; delta reported for culprit isolation |
+
+Checkpoints at Slices 1, 7, 14. Numbers recorded in each slice's own plan. No CI automation until after Slice 14.
+
+### D12. Mixing fake + live: default fake, mixing requires explicit annotation
+
+See CLAUDE.md "Test structure (fake vs live)". TestClock vs real-delay racing is the specific danger; `it.live` + `MIXED CLOCK: <what> — <why>` annotation + minimised real-delay surface are the conditions.
 
 ---
 
-## Slice catalog (TENTATIVE — pending design exploration above)
+## Slice catalog
 
-Each slice is one session. Each slice produces a separate detail plan when picked up (`docs/plan/effect-layer-wrappers/<slice>.md`). The table below is the **tentative** progress map; expect to grow once the questions above are resolved.
+Status: TODO / IN_PROGRESS / DONE / BLOCKED. Update inline as slices land.
 
-| # | Status | Slice | Touches | Adds | Recorder dep |
-|---|--------|-------|---------|------|--------------|
-| 1 | TODO | Foundation: ADR + sibling-plan reconciliation | `docs/adr/`, `docs/plan/effect-layer-wrappers/` | ADR (wrapper pattern + peerMonitor + Recorder mutualisation rule + dual-report 3-tier severity + **context-driven severity** + **RunContext Service Tag** + anomaly-shape skeleton + harness-façade pattern); per-slice plan files; sibling-plan reconciliation memo; **no code** | n/a |
-| 2 | TODO | Recorder API extension: `recordSpecial` + anomaly shape skeleton | `src/test-harness/framework/report-recorder/Recorder.ts` + `types.ts` | `recordSpecial` generic primitive; ratify `RecordedAnomaly` discriminated-union skeleton `{kind, atMs, ref?, severity, ...}`; renderer updates to accept unknown `kind`s gracefully | n/a (extends Recorder itself) |
-| 3 | TODO | `SipHarness` façade service | `src/test-harness/framework/SipHarness.ts` (new); driver/runner call sites in `tests/harness/runner.ts` + interpreter | Thin Service over Recorder for `timeout`, `marker`, `linkObservedToExpect`; replaces equivalent legacy `CallRecording` entries | writes |
-| 4 | TODO | SignalingNetwork Tag/impl split + Recorder write-path for simulated transport | `src/sip/SignalingNetwork.ts` → split impls + `SignalingNetwork.contracts.ts` stub; wire `recordSip` / `registerLane` from simulated `bindUdp`/`send`/`deliver`; reconcile with sibling Recorder transport-wiring plan | Simulated transport writes to Recorder; remove `drainTrace()` parallel buffer (Class A1) | **adds write-path** |
-| 5 | TODO | SignalingNetwork `scopedAudit` | `SignalingNetwork.contracts.ts` | Counter balance, queue drained, undelivered drained per scope close. Adds anomaly variants `{kind: "undeliverable"}` (Class A2) and `{kind: "queueLeak"}`. Reads Recorder snapshot for cross-peer deliverability check. | reads + anomaly write |
-| 6 | TODO | SignalingNetwork `peerMonitor` + 4 starter rules | `SignalingNetwork.contracts.ts`; adapter from `rfcRules` to per-peer slice of `RecordedScenario.sipTrace`; two fake-stack tests | `peerMonitor` wrapper; rules: cseq, tags, branchPrefix, contentLength; per-peer scope-close finalizer obeys 3-tier severity | reads + anomaly write |
-| 7 | TODO | `peerMonitor` full rule pack + `paranoidInputs` | wire all 17 `rfcRules` adapted; add `paranoidInputs`; opt-in mechanism (env or per-test flag); document "how to add a new monitor rule" + how to assign severity | full RFC coverage per peer | reads + anomaly write |
-| 8 | TODO | Codec wrapper retrofit (dual-report) | `src/call/codec/contracts.ts` | Existing codec wrappers also call `Recorder.recordAnomaly` before throwing; anomaly kinds `codecPropertyViolation` / `codecParanoid` / `codecParity` / `codecAudit` | anomaly write |
-| 9 | TODO | `ReplicationTraceRecorder` consolidation (Class A3) | delete `tests/support/ReplicationTraceRecorder.ts`; rewire callers to use `Recorder.recordRepl` directly | removes one parallel buffer | writes |
-| 10 | TODO | `PartitionedRelayStorage` wrappers | `src/cache/PartitionedRelayStorage.contracts.ts`; impl already split | `scopedAudit` (no orphan keys, refcount sanity, drained replication frames) + `parity` (memory vs redis) | writes + reads |
-| 11 | TODO | `CallLimiter` Tag/impl split + `scopedAudit` | `src/call/CallLimiter.ts` → split 3 impls into separate files; add `contracts.ts` | `scopedAudit`: counter-back-to-0 (ADR-0004) on scope close | none |
-| 12 | TODO | `CallLimiter` `parity` (redis vs memory) | extend `CallLimiter.contracts.ts`; short-scenario test | `parity` for short scenarios only | none |
-| 13 | TODO | Legacy `CallRecording` deprecation (Class A4) — optional | rewire `recording-extractor.ts` to derive `CallRecording[]` from `RecordedScenario.sipTrace` + `SipHarness` events; delete legacy types once consumers migrate | removes the parallel recording system | reads |
-| 14 | TODO | Default-on flip for SignalingNetwork wrappers in `fakeStackLayer` | `tests/support/fakeStackLayer.ts`; sweep remaining tests that opt-out | wrappers default ON; canary tests preserved as regression gate | reads + anomaly write |
+| # | Status | Slice | Lands |
+|---|--------|-------|-------|
+| 0 | DONE | **ADR + skeleton + CLAUDE.md** | ADR for D1–D12; `Recorder` API extension (`forTag<S,E>`, `labelLane`, projector registration, `snapshot` assembled view); `RunContext` Tag + provider layers; `tests/support/testLayers.ts` scaffold; helper-lib skeleton (`recordSync`/`recordEffectCall`/`recordScopedAcquire`/`recordStreamLifecycle`); skill update (`withCanonicalContracts`, RunContext, helper lib); CLAUDE.md rephrase already landed. No active wrappers yet. |
+| 1 | DONE | **SignalingNetwork.contracts + scopedAudit + canary** | Split impls into `SignalingNetwork.{real,realTracing,simulated}.ts`; new `SignalingNetwork.contracts.ts` with typed `SignalingNetworkEvent`; helper-lib applied; per-bindUdp finalizers internal to scopedAudit; `toSipWire` projector; **5 starter RFC rules** ported (cseq, tags, branchPrefix, contentLength, callId). Canary test: deliberately Content-Length-mismatched INVITE fails with `SignalingAuditViolation`. Recorder wired inside `fakeStackLayer` for this slice (moves in Slice 2a). **Perf checkpoint 1 recorded — within noise.** Skip propertyTest for SignalingNetwork (no natural input domain). Detail plan: [effect-layer-wrappers/slice-01.md](effect-layer-wrappers/slice-01.md). |
+| 2a | DONE | **Runner unification** | New `tests/support/stackLayer.ts` (`stackLayer({ mode })`); `fakeStack.ts` / `liveStack.ts` thin re-exports; `testLayers.stacks.{fake,live,unit}` populated; Recorder + RunContext wired both modes (live also gets a `Recorder.live` outward for symmetry). Detail plan: [effect-layer-wrappers/slice-02a.md](effect-layer-wrappers/slice-02a.md). **Irreversible.** |
+| 2b | DONE | **Vitest config unification** | One `vitest.config.ts`; `TEST_MODE` env (`fake`/`live`, default `fake`) + existing `TEST_TIER`; deleted `.fake` / `.live` variants; npm scripts and in-tree doc/test comments swept to the env-var form; `vitest.config.k8s.ts` preserved (own setup semantics). Detail plan: [effect-layer-wrappers/slice-02b.md](effect-layer-wrappers/slice-02b.md). **Irreversible.** |
+| 3 | IN_PROGRESS | **SipHarness Tag** | `src/test-harness/framework/SipHarness.ts` with `SipHarnessEvent` typed channel; impl that writes to `Recorder.forTag(SipHarness)`; transitional projector to legacy `CallRecording.entries`; runner / interpreter migrates calls. |
+| 4 | DONE | **SignalingNetwork.scopedAudit: layer-level invariants** | Counter balance, undelivered drained, queue drained at layer-close. New anomaly variants `undeliverable`, `queueLeak`, `inFlightImbalance`. `drainTrace()` deletion deferred (would require migrating ~5 fakeStack helpers); `trace[]` retained on the simulated impl until the broader fixture rollout. All three new variants land at `advisory` severity to avoid false positives — see [effect-layer-wrappers/slice-04.md](effect-layer-wrappers/slice-04.md) for the full rationale. |
+| 5 | DONE | **SignalingNetwork: full 24-rule RFC pack** | 17 base validators ported (`basePeerRules` in `tests/harness/rules/rfc/starter-peer-rules.ts`); 7 cross-message rules ported (`crossMessagePeerRules` in `tests/harness/rules/rfc/cross-message-rules.ts`) with `tests/harness/projections.ts` per-(bindKey, callId) projector; `rfcRules` array empty. Three cross-message rules forced to `advisory` (`rfc.allowSupportedOnInvite`, `rfc.rportEcho`, `rfc.sdpOriginContinuity`) to avoid widespread fixture-cascade failures; documented in detail plan. Detail plan: [effect-layer-wrappers/slice-05.md](effect-layer-wrappers/slice-05.md). |
+| 6 | DONE | **Old RFC runner end-of-life** | `rfcRules` array empty at start of slice. Deleted `_replay.ts`, the 7 legacy per-rule modules, `rfc/index.ts`, `rfc/rule.test.ts`, and `escape-hatches.test.ts`; migrated 3 per-rule unit tests to `tests/harness/rules/rfc/unit/base-rules.test.ts` under `RunContext.unitTestOf(SignalingNetwork)`. `RuleEngine` retained — still consumed by call-shape / cross-call / service-case `rule.test.ts` and `runDriveOnly`; Slice 14 retires it. Detail plan: [effect-layer-wrappers/slice-06.md](effect-layer-wrappers/slice-06.md). **Irreversible.** |
+| 7 | DONE | **SignalingNetwork.paranoidInputs** | Add `paranoidInputs` over `bindUdp` / `send` argument shapes. **Perf checkpoint 2.** |
+| 8 | DONE | **Codec wrapper retrofit (typed channel + dual-report)** | Existing codec wrappers also write to `Recorder.forTag(CallBodyCodec)` before throwing; existing `Error subclass with _tag` shape preserved (severity = fatal). New `CallBodyCodecEvent` union, four `codec*` anomaly variants, `CallBodyCodec.withAllContracts` forwarder. Detail plan: [effect-layer-wrappers/slice-08.md](effect-layer-wrappers/slice-08.md). **Irreversible.** |
+| 9 | DONE | **`ReplicationTraceRecorder` consolidation** | Deleted `tests/support/ReplicationTraceRecorder.ts`; three consumer files migrated to `Recorder.forTag(PartitionedRelayStorage)` via the new `src/cache/PartitionedRelayStorage.contracts.ts` stub (`PartitionedRelayStorageEvent` with `repl.frameReceived` variant + `toReplTrace` projector). Detail plan: [effect-layer-wrappers/slice-09.md](effect-layer-wrappers/slice-09.md). **Irreversible.** |
+| 10 | DONE | **PartitionedRelayStorage wrappers** | Extended `PartitionedRelayStorage.contracts.ts` from Slice 9's stub to full wrapper set: 12 new event variants (`{get,getIndex,put,refresh,delete}Call.{called,result}` + `scanCalls.{streamStart,streamItem,streamEnd}`), `paranoidInputs` (PA_* checks all Effect.die), `scopedAudit` with three advisory invariants (A1_refcountImbalance / A2_scanCursorLeak / A3_replicationFrameLeak), `parity` (memory vs redis; Effect.die on mismatch — sits OUTSIDE withAllContracts per D7), `withAllContracts` forwarder. Shared anomaly buffer + single projector pattern (per Slice 8 handoff — NOT codec's per-wrapper-projector-array). Wired into `stackLayer.ts` both fake (perfMode-gated) and live modes. `testLayers.contracts.partitionedRelayStorage` populated. No real defects caught — Slice 9 baseline preserved at 1470 passed + 5 skipped. Detail plan: [effect-layer-wrappers/slice-10.md](effect-layer-wrappers/slice-10.md). |
+| 11 | DONE | **CallStateCache wrappers (single slice)** | Split `CallStateCache.ts` into Tag + `.memory.ts` + `.redis.ts`; new `CallStateCache.contracts.ts` with typed channel (18 event variants — 9 methods × `.called`/`.result`); 4 propertyTest invariants (put/get round-trip, delete sticks, TTL elapse under TestClock, scanCallRefs covers live); paranoidInputs (4 checks: PA1 callRef, PA2 indexKey, PA3 ttlSec, PA4 json — PA4's JSON.parse gated on `B2BUA_PARANOID=1`); 3 scopedAudit invariants (A1 no orphan keys, A2 no dangling indexes, A3 no tombstone resurrection). A3 promoted to deferred-fail in `test-with-recorder` (genuine correctness bug); A1/A2 advisory by default (Slice 4/10 calibration). Wired into both fake (perfMode-gated) and live `stackLayer`. No real defects caught — 1470 passed + 5 skipped preserved. Detail plan: [effect-layer-wrappers/slice-11.md](effect-layer-wrappers/slice-11.md). |
+| 12 | DONE | **CallLimiter Tag/impl split + scopedAudit** | Split `CallLimiter.ts` into Tag + `.memory.ts` + `.redis.ts`; new `CallLimiter.contracts.ts` with typed channel (8 event variants — 4 methods × `.called`/`.result`); `paranoidInputs` (3 checks: PA1 limiterId, PA2 limit, PA3 originWindow); `scopedAudit` with 2 invariants (A1 counter-back-to-0 enforcing ADR-0004; A2 orphan-decrement advisory because ADR-0007's peer-takeover legitimately decrements without prior admission in scope). A1 promoted to `deferred-fail`/`CallLimiterAuditViolation` in `test-with-recorder` (ADR-0004 is structural); A2 stays advisory at every tier. `propertyTest` skipped (no natural input domain); `parity` defers to Slice 13. Wired into both fake (perfMode-gated, via `limiterLayer` opt) and live `stackLayer`. No real defects caught — 1470 passed + 5 skipped preserved. Detail plan: [effect-layer-wrappers/slice-12.md](effect-layer-wrappers/slice-12.md). |
+| 13 | DONE | **CallLimiter parity (redis vs memory)** | Extended `CallLimiter.contracts.ts` with `parity(blue, green)` wrapping memory vs redis impls in parallel; `CallLimiterParityViolation` defect class; `Recorder.snapshot.anomalies` carries `lim.parity.*` entries before the die. Static `CallLimiter.parity(...)` bolt-on via Object.assign (mirrors `CallBodyCodec`). `refresh` carve-out: compare only the migrated `newWindow` (timing-divergent intermediate state intentionally out of contract). `testLayers.contracts.callLimiterParity` composer. New `tests/call/limiter-parity.test.ts` runs two short scenarios (admission cycle + rejected-at-cap) in fake mode via a simulated-Lua `LimiterRedisClient` stub — no live Redis required. 1470 → 1472 passed + 5 skipped. Detail plan: [effect-layer-wrappers/slice-13.md](effect-layer-wrappers/slice-13.md). |
+| 14 | DONE | **Legacy `CallRecording` deletion** | Deleted `recording.ts` + `recording-extractor.ts` + `recording-codec.ts` + `_capture.test.ts` + `sipHarnessProjector.ts` + `fixtures/load.ts` + the captured YAML fixture. `CallRecording` type renamed `RuleTrace` and inlined into `tests/harness/rules/types.ts`; `RuleEngine` survives (Path B) for the three non-RFC rule families that don't fit a per-Tag scopedAudit. `runDriveOnly` folds in the extractor + projector. Three rule.test.ts files rewritten to synthetic inline traces. **Perf checkpoint 3 recorded** — `full vs baseline` −0.7 % (well under +50 % ceiling). Detail plan: [effect-layer-wrappers/slice-14.md](effect-layer-wrappers/slice-14.md). **Irreversible.** |
 
-Status legend: TODO / IN_PROGRESS / DONE / BLOCKED. Update inline as slices land.
+**Slices 0–3 are mandatory prerequisites.** Slices 4+ depend on them but are otherwise independent and can be reordered.
 
-**Slices 1–3 are mandatory prerequisites.** They establish the contract and the substrate (anomaly shape, SipHarness, Recorder primitives). Slices 4+ depend on them but are otherwise independent and can be reordered. Slice 13 is the optional cleanup — only worth it if Slices 3 + 5–8 have already moved consumers off legacy `CallRecording`.
+After Slice 2a, `stackLayer({ mode: "fake" })` (via `testLayers.stacks.fake`) is the canonical entry point and applies `withAllContracts` to every wrapped layer by default. "Default-on" is therefore implicit from Slice 2a; no separate flip slice needed. Tests that bypass `testLayers` are swept as part of each subsequent wrapper slice.
+
+**Irreversible slices** (point-of-no-return): 2a, 2b, 6, 8, 9, 14.
 
 ---
 
-## Critical files (read these in any slice)
+## Critical files
 
-- [src/call/codec/contracts.ts](src/call/codec/contracts.ts) — **template**. Copy the `Layer.effect(Tag, ...build inner + wrap)` pattern. Copy failure-shape conventions.
-- [src/test-harness/framework/report-recorder/Recorder.ts](src/test-harness/framework/report-recorder/Recorder.ts) — **mutualisation point**. All wrappers that capture wire events go through this Service.
-- [src/test-harness/framework/report-recorder/types.ts](src/test-harness/framework/report-recorder/types.ts) — `RecordedSipEntry`, `RecordedReplEntry`, `RecordedScenario` shapes — what wrappers write and what rule packs read.
-- [src/sip/SignalingNetwork.ts:280-657](src/sip/SignalingNetwork.ts#L280-L657) — Tag, real/realTracing/simulated impls (to split in Slice 2).
-- [src/sip/SignalingNetwork.ts:587-592](src/sip/SignalingNetwork.ts#L587-L592) — per-bindUdp finalizer; this is where `peerMonitor` hooks `Recorder.registerLane` + finalizer that runs rules.
-- [tests/harness/rules/rfc/index.ts](tests/harness/rules/rfc/index.ts) — 17 RFC validators + the per-agent recording-replay pattern; adapter source for `peerMonitor` rule pack.
-- [tests/harness/recording.ts](tests/harness/recording.ts) — legacy `CallRecording` shape (per-call); reference only — Recorder's `RecordedScenario` is the forward path.
-- [src/test-harness/framework/validation.ts](src/test-harness/framework/validation.ts) — underlying `ValidationCheckName` functions.
-- [src/cache/PartitionedRelayStorage.ts](src/cache/PartitionedRelayStorage.ts) + `PartitionedRelayStorageKvBacked.ts` — already split, second-easiest slice.
-- [src/call/CallLimiter.ts](src/call/CallLimiter.ts) — Tag + 3 inline impls (to split in Slice 7).
-- [tests/support/fakeStack.ts:83-92](tests/support/fakeStack.ts#L83-L92) — where the wrapped SignalingNetwork plugs in; Recorder layer also added here.
-- [docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md](docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md) — the invariant Slice 7 enforces.
-- `.claude/skills/effect-layer-test/SKILL.md` — pattern reference (5 hard rules, failure-shape matrix).
+- [src/call/codec/contracts.ts](src/call/codec/contracts.ts) — worked-example template (4-wrapper pattern, failure-shape conventions).
+- [src/test-harness/framework/report-recorder/Recorder.ts](src/test-harness/framework/report-recorder/Recorder.ts) — extended in Slice 0 (`forTag<S,E>`, `labelLane`, projector registration, assembled `snapshot`).
+- [src/sip/SignalingNetwork.ts](src/sip/SignalingNetwork.ts) — first wrapper target. Biggest event-channel design (Scope + Stream + sync getters all in one service).
+- [src/call/CallStateCache.ts](src/call/CallStateCache.ts) — 9 Effect-returning methods, no Stream/Scope; smallest non-codec slice to validate the helper lib end-to-end.
+- [src/call/CallLimiter.ts](src/call/CallLimiter.ts) — 402 LOC, 3 inline impls; biggest pre-wrap split.
+- [src/cache/PartitionedRelayStorage.ts](src/cache/PartitionedRelayStorage.ts) — Tag/impl already split; smallest wrapper slice.
+- [tests/harness/rules/rfc/index.ts](tests/harness/rules/rfc/index.ts) — 24 rules to migrate; the array shrinks slice-by-slice.
+- [src/test-harness/framework/validation.ts](src/test-harness/framework/validation.ts) — `ValidationCheckName` functions; reused unchanged.
+- [.claude/skills/effect-layer-test/SKILL.md](.claude/skills/effect-layer-test/SKILL.md) — pattern reference; updated in Slice 0 to document `withCanonicalContracts`, RunContext, helper lib, recording exclusions, and "no fifth wrapper" rule.
+- [tests/support/fakeStack.ts](tests/support/fakeStack.ts) / [tests/support/liveStack.ts](tests/support/liveStack.ts) — unified into `tests/support/stackLayer.ts` in Slice 2a.
+- [docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md](docs/adr/0004-strong-incr-decr-invariant-for-call-limiter.md) — the invariant Slice 12 enforces.
 
 ---
 
 ## Verification (initiative-wide)
 
-Each slice has its own verification (recorded in that slice's plan). Initiative-wide:
+Each slice has its own verification in its own detail plan. Initiative-wide:
 
-- `npm run typecheck` — zero `tsc` errors, zero Effect-plugin warnings.
+- `npm run typecheck` — zero `tsc` errors, zero Effect-plugin warnings, after every slice.
 - `npm run test:fake` — full fake-stack suite green after every slice.
-- **Canary test (lands in Slice 3, kept across all slices):** a deliberately broken fake-stack scenario where a peer sends INVITE and never receives a final response — must fail with `PeerMonitorViolation`, NOT silently pass. This is the regression gate that proves wrappers are actually active.
-- After Slice 7: a sample existing fake-stack test runs with all wrappers stacked (scopedAudit ∘ peerMonitor ∘ paranoidInputs) without timing regression > 25%. If regression > 25%, re-evaluate opt-in default for Slice 4.
+- **Canary test** (lands in Slice 1, kept across all slices): a deliberately broken fake-stack scenario where an agent sends INVITE and never receives a final response must fail with an anomaly, not silently pass. Regression gate that proves wrappers are active.
+- **Perf checkpoints** (Slices 1, 7, 14): three configurations measured per D11. Numbers recorded in each checkpoint slice's own plan.
+- After Slice 14: a representative existing fake-stack test runs with all wrappers stacked end-to-end (`testLayers.stacks.fake(...)` defaults) without any test code knowing the wrappers exist.

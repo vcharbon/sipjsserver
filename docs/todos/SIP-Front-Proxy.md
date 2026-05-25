@@ -310,7 +310,7 @@ The CANCEL branch LRU is ~30 LOC of `Effect-friendly map with TTL` and is a prox
 ## Verification Strategy (end-to-end)
 
 ### Per-PR
-Each PR ships its own test suite (see "Verification" line per PR above). All tests run under `vitest.config.fake.ts` (TestClock, simulated network) — no real cluster needed for PR1–PR4.
+Each PR ships its own test suite (see "Verification" line per PR above). All tests run under the unified `vitest.config.ts` in fake mode (`TEST_MODE=fake`, TestClock, simulated network) — no real cluster needed for PR1–PR4.
 
 ### Phase 1 acceptance (after PR6)
 - `npm run test:fake` — full transit-only + load-balancer + transparency suites pass.

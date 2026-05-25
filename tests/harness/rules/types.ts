@@ -1,61 +1,113 @@
 /**
- * Rule and RuleEngine — post-hoc verification over CallRecording[].
+ * Rule and RuleEngine — post-hoc verification over per-call traces
+ * derived from `Recorder.snapshot` plus the SipHarness channel.
  *
- * Per Q3: three rule packages with a unified Rule interface (rfc /
- * call-shape / service-case / cross-call). Per Q13: findings are binary
- * pass/fail per rule.
+ * Three rule families flow through here:
+ *   - call-shape  : per-call invariants over wire bytes.
+ *   - service-case: per-call assertions parameterised by a ServiceCase.
+ *   - cross-call  : multi-call aggregators (limiter concurrency,
+ *                   Call-ID uniqueness).
+ *
+ * The rule engine is intentionally limited to these three families.
+ * RFC-level rules moved to `SignalingNetwork.scopedAudit` (see
+ * `tests/harness/rules/rfc/`); they no longer flow through here.
+ *
+ * Findings are binary pass/fail per rule; the runner aggregates them
+ * into a single pass/fail result for the scenario.
  */
 
-import type { CallRecording } from "../recording.js"
+import type { SipMessage } from "../../../src/sip/types.js"
 import type { ServiceCase } from "../service-case/types.js"
 
-export type RuleFamily = "rfc" | "call-shape" | "service-case" | "cross-call"
+// ---------------------------------------------------------------------------
+// Per-call trace shape (consumed by the three rule families above)
+// ---------------------------------------------------------------------------
 
-/** A failure detail (a single message-or-marker concretization of a rule miss). */
+/** A SIP message captured at the wire boundary (sent or received). */
+export interface RuleTraceMessage {
+  readonly kind: "message"
+  readonly direction: "sent" | "received"
+  readonly from: string
+  readonly to: string
+  readonly label?: string
+  readonly sentMs: number
+  readonly receivedMs: number
+  /** Verbatim wire bytes — rule predicates read this directly. */
+  readonly raw: string
+  /** Set by the runner when a message did not match any expect step. */
+  readonly unexpected?: boolean
+  /** Parsed SIP, when the runner already parsed; rules re-parse on demand otherwise. */
+  readonly parsed?: SipMessage
+}
+
+/** A wait-deadline that fired without a matching message. */
+export interface RuleTraceTimeout {
+  readonly kind: "timeout"
+  readonly agent: string
+  readonly waitingFor: string
+  readonly atMs: number
+  readonly label?: string
+}
+
+/** Free-form driver-emitted marker (call-end, scenario-phase, etc.). */
+export interface RuleTraceMarker {
+  readonly kind: "marker"
+  readonly atMs: number
+  readonly label: string
+  readonly note?: string
+}
+
+export type RuleTraceEntry = RuleTraceMessage | RuleTraceTimeout | RuleTraceMarker
+
+/** Per-call trace (one per logical Call-ID). */
+export interface RuleTrace {
+  readonly scenarioId: string
+  readonly serviceCaseId: string | null
+  readonly callId: string
+  readonly startMs: number
+  readonly entries: ReadonlyArray<RuleTraceEntry>
+}
+
+// ---------------------------------------------------------------------------
+// Rule shapes
+// ---------------------------------------------------------------------------
+
+export type RuleFamily = "call-shape" | "service-case" | "cross-call"
+
 export interface RuleViolation {
   readonly message: string
-  /** Index into recording.entries, when applicable. */
   readonly entryIndex?: number
-  /** Free-form structured details for reporters. */
   readonly details?: Readonly<Record<string, unknown>>
 }
 
-/** A finding emitted by a single rule against a single recording. */
 export interface RuleFinding {
   readonly ruleName: string
   readonly family: RuleFamily
-  /** Pass = no violations; fail = at least one. */
   readonly status: "pass" | "fail"
   readonly violations: ReadonlyArray<RuleViolation>
-  /** scenarioId × callId scoping (for cross-call rules, callId may be ""). */
   readonly scenarioId: string
   readonly callId: string
   readonly serviceCaseId: string | null
 }
 
-/** Rule context — everything a rule may inspect. */
 export interface RuleCtx {
-  readonly recording: CallRecording
-  /** ServiceCase paired with this recording (null if none). */
+  readonly recording: RuleTrace
   readonly serviceCase: ServiceCase | null
 }
 
-/** A single-recording rule (RFC / call-shape / service-case). */
+/** A single-trace rule (call-shape / service-case). */
 export interface PerCallRule {
   readonly name: string
   readonly family: Exclude<RuleFamily, "cross-call">
   readonly description?: string
-  /** Returns violations; empty = pass. */
   evaluate(ctx: RuleCtx): ReadonlyArray<RuleViolation>
 }
 
-/** Cross-call evaluation context — all recordings + the paired ServiceCase. */
 export interface CrossCallCtx {
-  readonly recordings: ReadonlyArray<CallRecording>
+  readonly recordings: ReadonlyArray<RuleTrace>
   readonly serviceCase: ServiceCase | null
 }
 
-/** A multi-recording aggregator rule. */
 export interface CrossCallRule {
   readonly name: string
   readonly family: "cross-call"
@@ -65,17 +117,13 @@ export interface CrossCallRule {
 
 export type Rule = PerCallRule | CrossCallRule
 
-/** Aggregated rule run output for a scenario × ServiceCase. */
 export interface RuleEngineResult {
   readonly findings: ReadonlyArray<RuleFinding>
-  /** True iff every per-call & cross-call rule passed (after escape hatches). */
   readonly passed: boolean
 }
 
 export interface RuleEngineOpts {
-  /** Rule names to skip globally for this run. */
   readonly disableRules?: ReadonlyArray<string>
-  /** Rule names that MUST violate; passing such a rule becomes a failure. */
   readonly expectViolations?: ReadonlyArray<string>
 }
 
@@ -95,7 +143,7 @@ export class RuleEngine {
   }
 
   run(
-    recordings: ReadonlyArray<CallRecording>,
+    recordings: ReadonlyArray<RuleTrace>,
     serviceCase: ServiceCase | null,
     opts: RuleEngineOpts = {}
   ): RuleEngineResult {
@@ -154,6 +202,5 @@ function applyExpected(
   expected: ReadonlySet<string>
 ): "pass" | "fail" {
   if (!expected.has(name)) return raw
-  // Inverted: a rule we EXPECT to violate must violate. If it passed, that's the failure.
   return raw === "fail" ? "pass" : "fail"
 }

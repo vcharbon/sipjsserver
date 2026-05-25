@@ -45,8 +45,7 @@ tests/fake/**/*.test.ts          — it.effect only
 tests/live/**/*.test.ts          — it.live only
 tests/fullcall/                  — renamed from tests/e2e/ — signals
                                    "near-real call simulation, not unitary"
-vitest.config.fake.ts
-vitest.config.live.ts
+vitest.config.ts               — unified; TEST_MODE=fake|live (default fake)
 ```
 
 **Import boundary.** ESLint `no-restricted-imports`:

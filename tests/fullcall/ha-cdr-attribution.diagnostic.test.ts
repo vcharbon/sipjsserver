@@ -18,7 +18,7 @@
  *       call. That would be a bug.
  *
  * Run with:
- *   DEBUG_CDR=1 npx vitest run -c vitest.config.fake.ts \
+ *   DEBUG_CDR=1 TEST_MODE=fake npx vitest run \
  *     tests/fullcall/ha-cdr-attribution.diagnostic.test.ts
  */
 

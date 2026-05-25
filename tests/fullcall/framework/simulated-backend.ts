@@ -13,7 +13,12 @@
  */
 
 import { Effect, Option, type Scope } from "effect"
-import type { AgentInfo, NetworkTag, TestTransport } from "../../../src/test-harness/framework/types.js"
+import type {
+  AgentInfo,
+  NetworkTag,
+  ReplicationTraceEntry,
+  TestTransport,
+} from "../../../src/test-harness/framework/types.js"
 import { DEFAULT_NETWORK } from "../../../src/test-harness/framework/types.js"
 import { pumpAll } from "../../support/pumpAll.js"
 import { TransportError } from "../../../src/test-harness/framework/types.js"
@@ -41,11 +46,14 @@ import {
   proxyB2bFakeStackLayer,
   sipproxyHAFakeStackLayer,
 } from "../../support/proxyB2bFakeStack.js"
+import { PartitionedRelayStorage } from "../../../src/cache/PartitionedRelayStorage.js"
 import {
-  makeReplicationTraceRecorder,
-  type ReplicationTraceEvent,
-  type ReplicationTraceRecorder,
-} from "../../support/ReplicationTraceRecorder.js"
+  type PartitionedRelayStorageChannel,
+  type PartitionedRelayStorageEvent,
+  toReplTrace,
+} from "../../../src/cache/PartitionedRelayStorage.contracts.js"
+import { makeRecorderApi } from "../../../src/test-harness/framework/report-recorder/Recorder.js"
+import type { RecordedStamps } from "../../../src/test-harness/framework/report-recorder/types.js"
 import {
   CORE_INGRESS as REGISTRAR_CORE_INGRESS,
   EXT_INGRESS as REGISTRAR_EXT_INGRESS,
@@ -191,14 +199,24 @@ export function createSimulatedTransport(opts?: {
 
   const config = testAppConfig(sipPort, httpPort, opts?.configOverrides)
 
-  // Replication-frame recorder: captures every NDJSON frame the
-  // simulated `/replog` HTTP transport emits between b2b-1 and b2b-2.
-  // Currently wired only for `sipproxyHA` (the only SUT in the file
-  // that runs replication via a per-worker puller fiber). Drained at
-  // scenario end and rendered alongside the SIP trace in the report.
-  const replicationTraceRecorder: ReplicationTraceRecorder | undefined =
+  // Replication-frame channel: captures every Data frame the simulated
+  // `/replog` HTTP transport emits between workers. Backed by a
+  // self-contained `Recorder.forTag(PartitionedRelayStorage)` instance —
+  // the simulated-backend owns the buffer lifecycle (the SUT stack
+  // layers below do not yet require a `Recorder` service). Currently
+  // wired only for SUTs that run replication via a per-worker puller
+  // fiber. Drained at scenario end through the typed-channel projector
+  // and surfaced as `ScenarioResult.replicationTrace` for the report.
+  const replicationRecorderApi =
     sut === "sipproxyHA" || sut === "k8sFailover"
-      ? makeReplicationTraceRecorder()
+      ? makeRecorderApi("fake")
+      : undefined
+  const replicationTraceChannel: PartitionedRelayStorageChannel | undefined =
+    replicationRecorderApi !== undefined
+      ? replicationRecorderApi.forTag<
+          typeof PartitionedRelayStorage,
+          PartitionedRelayStorageEvent
+        >(PartitionedRelayStorage)
       : undefined
 
   const StackLayer =
@@ -207,8 +225,8 @@ export function createSimulatedTransport(opts?: {
           config,
           handlers: buildTestHandlers(),
           simulateMissingOutboundProxy,
-          ...(replicationTraceRecorder !== undefined
-            ? { replicationTraceRecorder }
+          ...(replicationTraceChannel !== undefined
+            ? { replicationTraceChannel }
             : {}),
         })
       : sut === "k8sFailover"
@@ -216,8 +234,8 @@ export function createSimulatedTransport(opts?: {
             config,
             handlers: buildTestHandlers(),
             simulateMissingOutboundProxy,
-            ...(replicationTraceRecorder !== undefined
-              ? { replicationTraceRecorder }
+            ...(replicationTraceChannel !== undefined
+              ? { replicationTraceChannel }
               : {}),
           })
         : sut === "proxy+b2b"
@@ -488,8 +506,14 @@ export function createSimulatedTransport(opts?: {
         return out
       }),
 
-    drainReplicationTrace: (): ReadonlyArray<ReplicationTraceEvent> =>
-      replicationTraceRecorder?.drain() ?? [],
+    drainReplicationTrace: (): ReadonlyArray<ReplicationTraceEntry> => {
+      if (replicationTraceChannel === undefined) return []
+      const events = Effect.runSync(
+        replicationTraceChannel.snapshot,
+      ) as ReadonlyArray<PartitionedRelayStorageEvent & RecordedStamps>
+      const projected = toReplTrace(events)
+      return projected.replTrace ?? []
+    },
 
     settle: () =>
       // End-of-scenario sweep — replaces the hand-tuned `20×yieldNow →

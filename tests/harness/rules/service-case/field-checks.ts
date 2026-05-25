@@ -18,11 +18,15 @@ import { Effect } from "effect"
 import { SipParser } from "../../../../src/sip/Parser.js"
 import { getHeader } from "../../../../src/sip/MessageHelpers.js"
 import type { SipMessage } from "../../../../src/sip/types.js"
-import type { CallRecording, RecordedMessage } from "../../recording.js"
-import type { PerCallRule, RuleViolation } from "../types.js"
+import type {
+  PerCallRule,
+  RuleTrace,
+  RuleTraceMessage,
+  RuleViolation,
+} from "../types.js"
 import { applyCheck, type Check } from "../../service-case/types.js"
 
-function parsedOf(e: RecordedMessage): SipMessage | null {
+function parsedOf(e: RuleTraceMessage): SipMessage | null {
   if (e.parsed) return e.parsed
   const eff = Effect.gen(function* () {
     const parser = yield* SipParser
@@ -34,7 +38,7 @@ function parsedOf(e: RecordedMessage): SipMessage | null {
 }
 
 function findInvite(
-  rec: CallRecording,
+  rec: RuleTrace,
   direction: "sent" | "received",
   agent: string
 ): { msg: SipMessage; idx: number } | null {

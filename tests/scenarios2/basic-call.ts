@@ -5,9 +5,9 @@
  * agents/URIs from it. `.expect()` is wait-only — every inline
  * validation has been moved into the rule packs (see tests/harness/rules).
  *
- * Labels attached to specific expects/sends propagate into the
- * CallRecording so service-case rules can identify the messages they
- * need to check.
+ * Labels attached to specific expects/sends propagate into the per-call
+ * RuleTrace so service-case rules can identify the messages they need
+ * to check.
  */
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"

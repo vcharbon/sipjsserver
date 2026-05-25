@@ -14,6 +14,7 @@ import { hydrateRequest } from "../../sip/parsers/extract-fields.js"
 import { PeerFabricControl } from "../../cache/PeerFabric.js"
 import { WorkerOrdinal } from "../../cache/PeerCachePort.js"
 import { WorkerId } from "../../sip-front-proxy/index.js"
+import { SipHarness } from "./SipHarness.js"
 import {
   SimulatedK8sCluster,
   type KillEvent,
@@ -1282,6 +1283,17 @@ function executeExpect(
     if (!matched) {
       state.failedRefs.add(step.ref.id)
       const expectDesc = step.match.method ?? `${step.match.statusCode}`
+      // Surface the timeout on the SipHarness typed channel if the
+      // driver provided one. Service-optional so the interpreter still
+      // runs in stacks that don't wire SipHarness.
+      const harnessOpt = yield* Effect.serviceOption(SipHarness)
+      if (Option.isSome(harnessOpt)) {
+        yield* harnessOpt.value.timeout({
+          agent: step.agent,
+          waitingFor: expectDesc,
+          expectStepId: String(step.ref.id),
+        })
+      }
       state.results.push(makeStepResult({
         stepIndex: index,
         step,

@@ -14,6 +14,7 @@
  *     line of defense against "report invents names/IPs".
  */
 
+import type { Effect } from "effect"
 import type { SipMessage } from "../../../sip/types.js"
 import type {
   Lane,
@@ -113,3 +114,42 @@ export interface RecordedScenario {
   readonly replTrace: ReadonlyArray<RecordedReplEntry>
   readonly anomalies: ReadonlyArray<RecordedAnomaly>
 }
+
+// ---------------------------------------------------------------------------
+// Typed per-Tag channels (ADR-0013 D2/D3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stamps every recorded event carries on top of the layer-specific
+ * payload. Allocated by the channel at `record` time so projectors can
+ * cross-correlate events from different channels.
+ */
+export interface RecordedStamps {
+  readonly seq: number
+  readonly atMs: number
+}
+
+/**
+ * Handle returned by `Recorder.forTag(tag)`. Helpers (`recordSync`,
+ * `recordEffectCall`, `recordScopedAcquire`, `recordStreamLifecycle`)
+ * call `record` with their layer-specific payload `E`; the channel
+ * stamps `seq` + `atMs` and appends.
+ *
+ * `snapshot` returns the stamped events typed as `E & RecordedStamps`.
+ * The type parameter `E` here is the *payload* shape — without stamps —
+ * so wrappers can declare their event union without polluting it with
+ * recorder bookkeeping.
+ */
+export interface TaggedChannel<E> {
+  readonly record: (event: E) => Effect.Effect<void>
+  readonly snapshot: Effect.Effect<ReadonlyArray<E & RecordedStamps>>
+}
+
+/**
+ * Projector — turns a channel's stored events into a partial
+ * `RecordedScenario`. Multiple projectors per tag are NOT supported
+ * this slice; first-registration wins.
+ */
+export type Projector<E> = (
+  events: ReadonlyArray<E & RecordedStamps>,
+) => Partial<RecordedScenario>

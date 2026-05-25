@@ -17,7 +17,7 @@ the kind-deployed b2bua stack as an opaque "core" peer.
    npm run test:k8s:up          # idempotent
    npm run test:k8s:images      # only after src/ changes
    tsx tests/k8s/scripts/install-stack.ts   # only on first install
-   E2E_KIND=1 npx vitest run -c vitest.config.live.ts \
+   E2E_KIND=1 TEST_MODE=live npx vitest run \
      tests/fullcall/e2e-register-fakeExt-realCore.test.ts
    ```
 5. Open `test-results/real-clock/registrarFrontProxy-kind/index.html`.

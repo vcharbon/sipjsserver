@@ -63,19 +63,19 @@ Tests are split into two non-mixing modes — see the matching section in the re
 
 ### Fake stack (default dev loop)
 
-Uses `TestClock` + in-memory `CallStateCache`/`CallLimiter` + simulated `SignalingNetwork` + a mock HTTP call-control backend. No real sockets, no Redis, no wall clock. Driven by [vitest.config.fake.ts](../../vitest.config.fake.ts).
+Uses `TestClock` + in-memory `CallStateCache`/`CallLimiter` + simulated `SignalingNetwork` + a mock HTTP call-control backend. No real sockets, no Redis, no wall clock. Driven by the unified [vitest.config.ts](../../vitest.config.ts) under `TEST_MODE=fake` (the default).
 
 ```bash
 # All fake-stack suites (unit tests + e2e-fake-clock)
 npm run test:fake
 
 # A single fake-clock scenario by test name
-npx vitest run -c vitest.config.fake.ts tests/fullcall/e2e-fake-clock.test.ts -t "basic call"
+TEST_MODE=fake npx vitest run tests/fullcall/e2e-fake-clock.test.ts -t "basic call"
 ```
 
 ### Live stack (real-clock e2e)
 
-Uses `it.live` + real `Effect.sleep` + real UDP against an in-process simulated B2BUA. Each describe block advertises a tier; `TEST_TIER=short|medium|long` gates which tiers run. Driven by [vitest.config.live.ts](../../vitest.config.live.ts).
+Uses `it.live` + real `Effect.sleep` + real UDP against an in-process simulated B2BUA. Each describe block advertises a tier; `TEST_TIER=short|medium|long` gates which tiers run. Driven by the unified [vitest.config.ts](../../vitest.config.ts) under `TEST_MODE=live`.
 
 | Tier   | Budget       | What runs                                                     |
 |--------|--------------|----------------------------------------------------------------|

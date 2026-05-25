@@ -16,7 +16,7 @@
  *   npm run test:k8s:up                        # idempotent; cluster persists
  *   npm run test:k8s:images                    # only after src/ or bin/ changes
  *   tsx tests/k8s/scripts/install-stack.ts     # only on first install
- *   E2E_KIND=1 vitest run -c vitest.config.live.ts \
+ *   E2E_KIND=1 TEST_MODE=live vitest run \
  *     tests/fullcall/e2e-register-fakeExt-realCore.test.ts
  */
 

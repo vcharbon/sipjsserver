@@ -4,7 +4,7 @@
  *
  * KNOWN FAILING (intentional — see docs/plan/crash-of-b2b-during-
  * drifting-lemur.md "Diagnostic outcome"). Marked `describe.skip` so CI
- * stays green; run manually with `npx vitest --config vitest.config.fake.ts
+ * stays green; run manually with `TEST_MODE=fake npx vitest
  * run tests/sip-front-proxy/failover/mid-ring-primary-killed.test.ts`.
  *
  * The sibling post-ACK test kills the primary after the call is fully

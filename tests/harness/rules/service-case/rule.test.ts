@@ -1,7 +1,8 @@
 /**
- * service-case rule self-tests. Pairs the clean basic-call recording
- * with the basic-call ServiceCase, then derives modified ServiceCases
- * with deliberately failing checks to confirm the rule reports.
+ * service-case rule self-tests. Pairs a synthetic per-call trace
+ * carrying a parseable INVITE pair (alice-side + leg-side) with the
+ * basic-call ServiceCase, then derives modified ServiceCases with
+ * deliberately failing checks to confirm the rule reports.
  *
  * The recording is left untouched; mutating the *expectations* (the
  * ServiceCase) is the cleanest way to surface the rule, since the rule
@@ -9,10 +10,13 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { loadRecording } from "../../fixtures/load.js"
 import { loadServiceCase } from "../../service-case/load.js"
 import type { ServiceCase, ServiceCaseLeg } from "../../service-case/types.js"
-import { RuleEngine } from "../types.js"
+import {
+  RuleEngine,
+  type RuleTrace,
+  type RuleTraceEntry,
+} from "../types.js"
 import { serviceCaseRules } from "./index.js"
 
 function ruleByName(name: string) {
@@ -26,13 +30,71 @@ function withLeg(sc: ServiceCase, name: string, patch: Partial<ServiceCaseLeg>):
   return { ...sc, legs }
 }
 
+const ALICE_INVITE = [
+  "INVITE sip:+1234@127.0.0.1:15060 SIP/2.0",
+  "Via: SIP/2.0/UDP 127.0.0.1:15661;branch=z9hG4bK1",
+  "Max-Forwards: 70",
+  "From: <sip:alice@test>;tag=a1",
+  "To: <sip:+1234@test>",
+  "Call-ID: c@h",
+  "CSeq: 1 INVITE",
+  "Contact: <sip:127.0.0.1:15661;transport=udp>",
+  "Content-Length: 0",
+  "",
+  "",
+].join("\r\n")
+
+const BOB1_INVITE = [
+  "INVITE sip:+1234@127.0.0.1:5666 SIP/2.0",
+  "Via: SIP/2.0/UDP 127.0.0.1:15060;branch=z9hG4bK2",
+  "Max-Forwards: 69",
+  "From: <sip:alice@test>;tag=b1",
+  "To: <sip:+1234@test>",
+  "Call-ID: 1-c@h",
+  "CSeq: 1 INVITE",
+  "Contact: <sip:b2bua@127.0.0.1:15060>",
+  "Content-Length: 0",
+  "",
+  "",
+].join("\r\n")
+
+function syntheticBasicCall(): RuleTrace {
+  const entries: RuleTraceEntry[] = [
+    {
+      kind: "message",
+      direction: "sent",
+      from: "alice",
+      to: "B2BUA",
+      sentMs: 0,
+      receivedMs: 15,
+      raw: ALICE_INVITE,
+    },
+    {
+      kind: "message",
+      direction: "received",
+      from: "B2BUA",
+      to: "bob1",
+      sentMs: 15,
+      receivedMs: 30,
+      raw: BOB1_INVITE,
+    },
+  ]
+  return {
+    scenarioId: "basic-call",
+    serviceCaseId: "basic-call",
+    callId: "c@h",
+    startMs: 0,
+    entries,
+  }
+}
+
 describe("service-case rule self-tests", () => {
-  const cleanRec = loadRecording("basic-call-clean")
+  const cleanRec = syntheticBasicCall()
   const baseCase = loadServiceCase("basic-call")
   const rule = ruleByName("service-case.field-checks")
   const engine = new RuleEngine([rule])
 
-  it("clean recording + clean service-case passes", () => {
+  it("clean trace + clean service-case passes", () => {
     const out = engine.run([cleanRec], baseCase)
     if (!out.passed) {
       const details = out.findings

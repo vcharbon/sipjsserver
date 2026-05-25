@@ -29,6 +29,7 @@ const CallBodyCodec = Object.assign(CallBodyCodecTag, {
   paranoidInputs: contracts.paranoidInputs,
   parity: contracts.parity,
   scopedAudit: contracts.scopedAudit,
+  withAllContracts: contracts.withAllContracts,
 })
 
 type CallBodyCodec = CallBodyCodecTag
@@ -56,10 +57,13 @@ export {
   paranoidInputs,
   parity,
   scopedAudit,
+  withAllContracts,
   PropertyViolation,
   ParanoidInputViolation,
   ParityViolation,
   AuditViolation,
+  type CallBodyCodecContractsOptions,
+  type CallBodyCodecEvent,
   type CodecPropertyId,
   type CodecProperty,
   type PropertyTestOptions,

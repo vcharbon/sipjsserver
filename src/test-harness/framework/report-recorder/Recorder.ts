@@ -10,16 +10,19 @@
  * to the renderer. Impossible to misreport from the call site.
  */
 
-import { Effect, Layer, MutableHashMap, ServiceMap } from "effect"
+import { Clock, Effect, Layer, MutableHashMap, ServiceMap } from "effect"
 import type { NetworkTag } from "../types.js"
 import {
   type Lane,
   type LaneKey,
   laneKey,
+  type Projector,
   type RecordedAnomaly,
   type RecordedReplEntry,
   type RecordedScenario,
   type RecordedSipEntry,
+  type RecordedStamps,
+  type TaggedChannel,
   type TransportKind,
 } from "./types.js"
 
@@ -75,6 +78,38 @@ export interface RecorderApi {
 
   /** Drain the recorder into the shape the renderer consumes. */
   readonly snapshot: Effect.Effect<RecordedScenario>
+
+  /**
+   * Open a typed event channel keyed by `tag.key`. Calling twice with
+   * the same tag returns the same underlying buffer.
+   *
+   * `E` is the layer-specific payload type; the channel stamps `seq` +
+   * `atMs` automatically on every `record` call. Helpers in
+   * `recordingHelpers.ts` are the intended callers.
+   */
+  readonly forTag: <S, E>(tag: ServiceMap.Key<S, any>) => TaggedChannel<E>
+
+  /**
+   * Register a projector for `tag`'s channel. First registration wins
+   * (later registrations on the same tag are ignored). Projectors run
+   * at `snapshot` time; their `Partial<RecordedScenario>` outputs are
+   * merged with the existing sipTrace/replTrace fields.
+   */
+  readonly registerProjector: <S, E>(
+    tag: ServiceMap.Key<S, any>,
+    projector: Projector<E>,
+  ) => Effect.Effect<void>
+
+  /**
+   * Sugar for `registerLane` — Slice 0 alias that the new helpers use
+   * instead of the verbose call site. Forwards to `registerLane` with
+   * the network defaulted to `"ext"`.
+   */
+  readonly labelLane: (
+    bindKey: { readonly ip: string; readonly port: number },
+    name: string,
+    network?: NetworkTag,
+  ) => Effect.Effect<void>
 }
 
 /**
@@ -109,6 +144,19 @@ export class Recorder extends ServiceMap.Service<Recorder, RecorderApi>()(
   static readonly live: Layer.Layer<Recorder> = Recorder.layer("live")
   static readonly hybrid: Layer.Layer<Recorder> = Recorder.layer("hybrid")
 }
+
+/**
+ * Build a `RecorderApi` instance synchronously, without going through
+ * the Layer. Used by harness call sites that need a stable handle
+ * before any Effect runtime is available (e.g. `simulated-backend.ts`
+ * materialising the replication-frame channel at SUT-construction
+ * time). For tests-as-effects, prefer `Recorder.fake` / `.live` /
+ * `.hybrid` and `yield* Recorder` instead.
+ */
+export const makeRecorderApi = (
+  kind: TransportKind,
+  sequencer?: RecorderSequencer,
+): RecorderApi => makeApi(kind, sequencer)
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -214,7 +262,60 @@ const makeApi = (
       }
     })
 
-  const snapshot: RecorderApi["snapshot"] = Effect.sync(() => {
+  // Per-Tag typed channels: keyed by `tag.key` string, value is the
+  // raw stamped events. Cast happens at `forTag<E>` read time.
+  const channels = new Map<string, Array<unknown & RecordedStamps>>()
+  const projectors = new Map<string, Projector<unknown>>()
+
+  const ensureChannel = (tagKey: string): Array<unknown & RecordedStamps> => {
+    let arr = channels.get(tagKey)
+    if (arr === undefined) {
+      arr = []
+      channels.set(tagKey, arr)
+    }
+    return arr
+  }
+
+  const forTag: RecorderApi["forTag"] = <S, E>(
+    tag: ServiceMap.Key<S, any>,
+  ): TaggedChannel<E> => {
+    const tagKey = tag.key
+    return {
+      record: (event: E) =>
+        Effect.gen(function* () {
+          const atMs = yield* Clock.currentTimeMillis
+          const arr = ensureChannel(tagKey)
+          arr.push({
+            ...(event as object),
+            seq: allocSeq(),
+            atMs,
+          } as E & RecordedStamps)
+        }),
+      snapshot: Effect.sync(
+        () =>
+          (channels.get(tagKey) ?? []).slice() as unknown as ReadonlyArray<
+            E & RecordedStamps
+          >,
+      ),
+    }
+  }
+
+  const registerProjector: RecorderApi["registerProjector"] = (tag, projector) =>
+    Effect.sync(() => {
+      const tagKey = tag.key
+      if (projectors.has(tagKey)) return
+      projectors.set(tagKey, projector as Projector<unknown>)
+    })
+
+  const labelLane: RecorderApi["labelLane"] = (bindKey, name, network) =>
+    registerLane({
+      ip: bindKey.ip,
+      port: bindKey.port,
+      name,
+      network: network ?? "ext",
+    })
+
+  const baseSnapshot = (): RecordedScenario => {
     const out: Lane[] = []
     for (const [, lane] of lanes) {
       out.push({
@@ -232,6 +333,39 @@ const makeApi = (
       replTrace: replTrace.slice(),
       anomalies: anomalies.slice(),
     }
+  }
+
+  const snapshot: RecorderApi["snapshot"] = Effect.sync(() => {
+    const base = baseSnapshot()
+    if (projectors.size === 0) return base
+    // Merge projector outputs over the base. Projectors may contribute
+    // additional sipTrace / replTrace / anomalies entries; lanes are
+    // owned by the Recorder and not overridable.
+    let sipTraceMerged: ReadonlyArray<RecordedSipEntry> = base.sipTrace
+    let replTraceMerged: ReadonlyArray<RecordedReplEntry> = base.replTrace
+    let anomaliesMerged: ReadonlyArray<RecordedAnomaly> = base.anomalies
+    for (const [tagKey, projector] of projectors) {
+      const events = (channels.get(tagKey) ?? []) as ReadonlyArray<
+        unknown & RecordedStamps
+      >
+      const part = projector(events)
+      if (part.sipTrace !== undefined) {
+        sipTraceMerged = [...sipTraceMerged, ...part.sipTrace]
+      }
+      if (part.replTrace !== undefined) {
+        replTraceMerged = [...replTraceMerged, ...part.replTrace]
+      }
+      if (part.anomalies !== undefined) {
+        anomaliesMerged = [...anomaliesMerged, ...part.anomalies]
+      }
+    }
+    return {
+      transportKind: base.transportKind,
+      lanes: base.lanes,
+      sipTrace: sipTraceMerged,
+      replTrace: replTraceMerged,
+      anomalies: anomaliesMerged,
+    }
   })
 
   return {
@@ -240,5 +374,8 @@ const makeApi = (
     recordRepl,
     markLaneKilled,
     snapshot,
+    forTag,
+    registerProjector,
+    labelLane,
   }
 }

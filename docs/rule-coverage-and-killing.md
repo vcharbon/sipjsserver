@@ -103,7 +103,7 @@ The script exits with status `1` if any rule survived — useful for CI gating o
 You don't need the whole campaign to test one rule. Disable it by hand:
 
 ```bash
-KILL_RULE=relay-bye npx vitest run -c vitest.config.fake.ts tests/fullcall/e2e-fake-clock.test.ts
+KILL_RULE=relay-bye TEST_MODE=fake npx vitest run tests/fullcall/e2e-fake-clock.test.ts
 ```
 
 Expected outcomes:

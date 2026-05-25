@@ -47,7 +47,10 @@ import {
 import { ChannelIndex } from "../../src/replication/ChannelIndex.js"
 import { makeReplicationApply } from "../../src/replication/EchoApply.js"
 import { decodeFrame } from "../../src/replication/ReplicationProtocol.js"
-import type { ReplicationTraceRecorder } from "./ReplicationTraceRecorder.js"
+import {
+  recordReplFrameReceived,
+  type PartitionedRelayStorageChannel,
+} from "../../src/cache/PartitionedRelayStorage.contracts.js"
 import {
   initialPeerView,
   PullerTransportError,
@@ -140,15 +143,16 @@ export interface K8sFakeStackOpts {
    */
   readonly simulateMissingOutboundProxy?: boolean
   /**
-   * Optional replication-frame trace recorder. When provided, every
-   * Data NDJSON frame the simulated `/replog` HTTP transport emits
-   * between workers is decoded and pushed onto the recorder so the
-   * harness can render the replication panel alongside the SIP trace
-   * in the HTML report. Mirrors the `proxyB2bFakeStack` opt; opt-in
+   * Optional typed-channel handle on
+   * `Recorder.forTag(PartitionedRelayStorage)`. When provided, every
+   * Data frame the simulated `/replog` HTTP transport emits between
+   * workers is decoded and pushed onto the channel so the harness can
+   * render the replication panel alongside the SIP trace via the
+   * channel's projector. Mirrors the `proxyB2bFakeStack` opt; opt-in
    * because the recording layer adds a `Stream.mapEffect` to every
    * puller and we don't want it in steady-state perf tests.
    */
-  readonly replicationTraceRecorder?: ReplicationTraceRecorder
+  readonly replicationTraceChannel?: PartitionedRelayStorageChannel
 }
 
 /**
@@ -274,7 +278,7 @@ export function k8sFakeStackLayer(opts: K8sFakeStackOpts) {
       windowSec: opts.config.limiterWindowSeconds,
       activeWindows: opts.config.limiterActiveWindows,
     },
-    opts.replicationTraceRecorder,
+    opts.replicationTraceChannel,
   )
 
   return Layer.mergeAll(
@@ -326,7 +330,7 @@ function buildClusterWithWorkersLayer(
     readonly windowSec: number
     readonly activeWindows: number
   },
-  replicationTraceRecorder?: ReplicationTraceRecorder,
+  replicationTraceChannel?: PartitionedRelayStorageChannel,
 ): Layer.Layer<
   SimulatedK8sCluster,
   never,
@@ -501,16 +505,16 @@ function buildClusterWithWorkersLayer(
               chunkSize: args.chunkSize,
               noopIntervalMs: REPL_PULL_RECONNECT_GAP_MS,
             })
-            if (replicationTraceRecorder === undefined) return base
-            // Tee each length-prefixed binary frame through the recorder.
-            // Mirrors the proxyB2bFakeStack wiring. The post-msgpackr
-            // wire format is `[4-byte BE length][msgpack payload]`; a
-            // single chunk may carry partial frames or several frames,
-            // so accumulate across chunks. Drop anything that isn't a
-            // Data frame (Noop heartbeats fire every reconnect-gap and
-            // would flood the report). Decode failures are swallowed —
-            // the recorder is observability, not correctness.
-            const recorder = replicationTraceRecorder
+            if (replicationTraceChannel === undefined) return base
+            // Tee each length-prefixed binary frame through the typed
+            // channel. Mirrors the proxyB2bFakeStack wiring. The
+            // post-msgpackr wire format is `[4-byte BE length][msgpack
+            // payload]`; a single chunk may carry partial frames or
+            // several frames, so accumulate across chunks. Drop anything
+            // that isn't a Data frame (Noop heartbeats fire every
+            // reconnect-gap and would flood the report). Decode failures
+            // are swallowed — the channel is observability, not correctness.
+            const traceChannel = replicationTraceChannel
             return Stream.suspend(() => {
               let accumulator: Buffer = Buffer.alloc(0)
               return Stream.mapEffect(base, (bytes) =>
@@ -525,7 +529,7 @@ function buildClusterWithWorkersLayer(
                     try {
                       const frame = decodeFrame(payload)
                       if (frame._tag !== "Data") continue
-                      recorder.record({
+                      yield* recordReplFrameReceived(traceChannel, {
                         timestamp: now,
                         from: peerOrdStr,
                         to: selfOrdStr,

@@ -4,7 +4,7 @@
  * Pulls the load-bearing public symbols (DSL, runner factory, types) and
  * builds a minimal `Scenario` to verify the surface compiles and shapes
  * cleanly. Does NOT actually run the proxy / send UDP — that requires a
- * live SUT and is gated under `vitest.config.live.ts`. This file's job
+ * live SUT and is gated under `TEST_MODE=live`. This file's job
  * is to fail when a Slice 2+ refactor accidentally drops a symbol from
  * the published surface.
  */

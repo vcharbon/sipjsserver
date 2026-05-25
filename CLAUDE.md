@@ -53,18 +53,11 @@ Never deactivate failing test without proper investigation first and explicit co
 
 ## Test structure (fake vs live)
 
-Tests are split into two non-mixing modes — a scenario is either fully fake or fully live:
+Default: fake (`it.effect` + TestClock + in-memory deps + simulated `SignalingNetwork` + mock HTTP). Complex scenarios belong here. Live (`it.live`, `TEST_MODE=live` against the unified `vitest.config.ts`) is reserved for behaviour TestClock can't model — real UDP, real Redis timing, P2P sockets. Tiers `short` / `medium` / `long` via `TEST_TIER`.
 
-- **Fake stack** (`vitest.config.fake.ts`). Every test uses `it.effect` + TestClock, the in-memory `CallStateCache`/`CallLimiter` variants, simulated `SignalingNetwork`, and a mock HTTP call-control backend. No real sockets, no Redis, no wall clock. Includes all unit suites and `tests/fullcall/e2e-fake-clock.*`. This is the fast inner loop.
-- **Live stack** (`vitest.config.live.ts`). `it.live` + real `Effect.sleep` + real UDP. Currently only `tests/fullcall/e2e-real-clock.test.ts`. Each scenario advertises a tier (`short` ≤ 2s real, `medium` ≤ 30s real, `long` > 30s real); `TEST_TIER` env var (short|medium|long) gates which describe blocks run.
+**Mixing is allowed but dangerous.** TestClock advances on yield; real-delay fibers advance on wall time. Pairing them races. If you must mix: use `it.live`, annotate `/* MIXED CLOCK: <what> — <why> */`, minimise the real-delay surface, and prefer a `Clock.currentTimeMillis`-backed fake.
 
-Shared assets:
-- `tests/scenarios/` — scenario DSL modules, imported by both fake and live test files.
-- `tests/support/fakeStack.ts` / `liveStack.ts` — stack-layer builders.
-- `tests/support/harness.ts` — runner consumed by both sides.
-- `tests/fullcall/` — near-real call simulation harness (was `tests/e2e/`).
-
-When adding a test: if it can run under TestClock, put it in the fake-clock file. Only move to real-clock if it needs real UDP, real Redis timing, or peer-to-peer sockets.
+Shared: `tests/scenarios/` (DSL), `tests/support/stackLayer.ts` (`stackLayer({ mode })`), `tests/support/testLayers.ts` (pre-composed bundles — RunContext, Recorder, contract wrappers; pull from here, not ad-hoc `Layer.merge`).
 
 ## Planning discipline
 

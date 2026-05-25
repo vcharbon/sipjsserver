@@ -73,8 +73,8 @@ The bring-up's sanity gate is the same e2e test you can run by hand at
 any time:
 
 ```bash
-E2E_KIND=1 E2E_KIND_PROXY_HOST=172.20.255.250 \
-  npx vitest run -c vitest.config.live.ts \
+E2E_KIND=1 E2E_KIND_PROXY_HOST=172.20.255.250 TEST_MODE=live \
+  npx vitest run \
   tests/fullcall/e2e-register-fakeExt-realCore.test.ts
 ```
 
