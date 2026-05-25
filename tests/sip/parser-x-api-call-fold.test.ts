@@ -1,12 +1,20 @@
 import { describe, test, expect } from "vitest"
 import { Result } from "effect"
 import { jssipParser } from "../../src/sip/parsers/jssip-adapter.js"
-import { sipParserNpm } from "../../src/sip/parsers/sip-parser-adapter.js"
 import { customParser } from "../../src/sip/parsers/custom/index.js"
 import { nativeParser } from "../../src/sip/parsers/native-adapter.js"
 import type { SipParserImpl } from "../../src/sip/parsers/interface.js"
 
-const parsers: SipParserImpl[] = [customParser, jssipParser, sipParserNpm, nativeParser]
+// The three parsers wired into the production stack: customParser (b2bua
+// worker + proxy default), jssipParser (legacy), nativeParser (rvoip).
+// We deliberately exclude `sipParserNpm` here — the npm `sip-parser`
+// package strips header parameters from `fieldValue` (verified: Via comes
+// out as "SIP/2.0/UDP 5.1.1.1:5060" with no `;branch=`), so it can't
+// pass the magic-cookie gate in `extract-fields.ts`. That limitation is
+// documented in `parser-compliance.test.ts` where it's in `knownFailValid`
+// for nearly every RFC 4475 fixture. This test is about whether parsers
+// USED BY THE B2BUA fold JSON commas — `sipParserNpm` isn't one of them.
+const parsers: SipParserImpl[] = [customParser, jssipParser, nativeParser]
 
 // JSON payload matching the failing k8s reroute scenario.
 const apiCallReroute = JSON.stringify({
