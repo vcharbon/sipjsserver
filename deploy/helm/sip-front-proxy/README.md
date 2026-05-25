@@ -41,8 +41,8 @@ helm install sip-proxy deploy/helm/sip-front-proxy \
 | `vip.address` | (none) | The shared VIP (e.g. `172.20.255.250`). Required when `vip.enabled`. |
 | `previousHmacKey` | `""` | Set during fleet-wide key rotation for the NFR-8 1h overlap window. |
 | `terminationGracePeriodSeconds` | `200` | RFC 3261 Timer C (180s) + 20s safety. |
-| `healthProbe.intervalMs` | `2000` | Per `OptionsKeepaliveOpts.intervalMs`. |
-| `healthProbe.timeoutMs` | `1500` | Per-probe response timeout. |
+| `healthProbe.intervalMs` | `2000` | Per `OptionsKeepaliveOpts.intervalMs`. **Calibration constraint**: `intervalMs + timeoutMs` is one full HealthProbe cycle; the `WorkerLoadObserver` rejects any combination where `payloadStaleMs < 2 × (intervalMs + timeoutMs)` and the pod refuses to boot. See [`src/sip-front-proxy/config-validation.ts`](../../../src/sip-front-proxy/config-validation.ts). |
+| `healthProbe.timeoutMs` | `1500` | Per-probe response timeout. Counted toward the probe cycle (see `intervalMs`). |
 | `healthProbe.threshold` | `3` | Misses before a worker is marked dead. |
 
 ## Client target — `vip.enabled` changes how SIP traffic reaches the proxy

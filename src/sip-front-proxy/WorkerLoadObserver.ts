@@ -88,6 +88,15 @@ const payloadMissingCounter = Metric.counter(
     incremental: true,
   },
 )
+const staleDecreaseCounter = Metric.counter(
+  "sip_proxy_worker_stale_decrease_total",
+  {
+    description:
+      "Per-worker `sweepStale` hits — AIMD cap halved because no fresh X-Overload payload arrived within `payloadStaleMs`. " +
+      "Non-zero here while ELU is healthy means the HealthProbe cycle exceeds the stale threshold (config invariant).",
+    incremental: true,
+  },
+)
 const aimdLastActionGauge = Metric.gauge(
   "sip_proxy_worker_aimd_last_action",
   {
@@ -198,6 +207,16 @@ export interface WorkerLoadObserverConfigData {
 // in 1 s and the per-OPTIONS-tick decreases collapse it further.
 // eluCritical=0.75 is the earliest filter-out threshold; eluHard=0.6
 // triggers multiplicative decrease before the worker collapses.
+//
+// `payloadStaleMs` MUST exceed one full HealthProbe cycle
+// (`intervalMs + timeoutMs`, see HealthProbe.tickLoop). If it doesn't,
+// `sweepStale` fires between every pair of probe-recvs and halves the
+// cap every cycle until it sticks at `capFloorCps` — silently. The
+// shipped Helm chart uses `intervalMs=2000 timeoutMs=1500`
+// (cycle=3500 ms), so the default below leaves at least one full
+// cycle of headroom (8000 ms ≈ 2×3500 + buffer). Cross-cutting
+// validation in `bin/proxy.ts` refuses to start if this invariant
+// is broken, but the default here must also be self-safe.
 export const defaultWorkerLoadObserverConfig: WorkerLoadObserverConfigData = {
   eluSoft: 0.4,
   eluHard: 0.6,
@@ -209,7 +228,7 @@ export const defaultWorkerLoadObserverConfig: WorkerLoadObserverConfigData = {
   capInitialCps: 30,
   capFloorCps: 1,
   capCeilingCps: 200,
-  payloadStaleMs: 3000,
+  payloadStaleMs: 8000,
   optionsIntervalMs: 1000,
 }
 
@@ -547,7 +566,7 @@ function buildObserver(
   }
 
   const sweepStale: WorkerLoadObserverApi["sweepStale"] = (nowMs) => {
-    for (const [, state] of workers) {
+    for (const [workerId, state] of workers) {
       const age = nowMs - state.lastPayloadAtMs
       if (age <= config.payloadStaleMs) continue
       state.cap = Math.max(
@@ -557,6 +576,26 @@ function buildObserver(
       state.cooldownUntilMs = nowMs + cooldownMs
       state.lastAction = "stale_decrease"
       state.payloadMissingCount++
+      // Surface the event in Prometheus. Without these, a probe-cycle-vs-
+      // stale-threshold miscalibration silently floors the cap and the
+      // operator only sees `aimd_cap=floor` with no obvious cause —
+      // because the very next applyPayload (≤1 sweep tick later) overwrites
+      // `lastAction` with `cooldown` (5), masking the stale_decrease (6).
+      // Pushing here and snapshotting the gauges keeps the smoking gun
+      // visible. See ADR notes on the 2026-05-25 root cause.
+      pushMetric(
+        staleDecreaseCounter.pipe(
+          Metric.withAttributes({ worker_id: workerId }),
+          Metric.update(1),
+        ),
+      )
+      pushMetric(
+        payloadMissingCounter.pipe(
+          Metric.withAttributes({ worker_id: workerId }),
+          Metric.update(1),
+        ),
+      )
+      exportMetricsFor(workerId, state, nowMs)
     }
   }
 

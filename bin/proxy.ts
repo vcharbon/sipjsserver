@@ -75,7 +75,9 @@ import {
   type SocketAddr,
   workerRegistryControlNoopLayer,
   WorkerLoadObserver,
+  defaultWorkerLoadObserverConfig,
 } from "../src/sip-front-proxy/index.js"
+import { assertValidProxyConfig } from "../src/sip-front-proxy/config-validation.js"
 import {
   kubernetesStatefulSetLayer,
   kubernetesWatchClient,
@@ -276,15 +278,25 @@ const buildKubernetesLayer = () => {
       : { keyPath: hmacKeyPath }
   )
 
+  // Resolve probe timings up-front so we can validate them against the
+  // observer config BEFORE building any layer. A misconfiguration here
+  // (e.g. payloadStaleMs < probe cycle, see 2026-05-25 RCA) must crash the
+  // pod, not boot it unhealthy.
+  const probeIntervalMsResolved =
+    probeIntervalMs !== undefined ? parsePort(probeIntervalMs, 1000) : 1000
+  const probeTimeoutMsResolved =
+    probeTimeoutMs !== undefined ? parsePort(probeTimeoutMs, 1500) : 1500
+  const workerLoadObserverConfig = defaultWorkerLoadObserverConfig
+  assertValidProxyConfig(
+    { intervalMs: probeIntervalMsResolved, timeoutMs: probeTimeoutMsResolved },
+    workerLoadObserverConfig,
+  )
+
   const probeLayer = healthProbeOptionsKeepaliveLayer({
     bindHost: probeBindHost,
     bindPort: probeBindPort,
-    ...(probeIntervalMs !== undefined && {
-      intervalMs: parsePort(probeIntervalMs, 1000),
-    }),
-    ...(probeTimeoutMs !== undefined && {
-      timeoutMs: parsePort(probeTimeoutMs, 1500),
-    }),
+    intervalMs: probeIntervalMsResolved,
+    timeoutMs: probeTimeoutMsResolved,
     ...(probeThreshold !== undefined && {
       threshold: Number.parseInt(probeThreshold, 10) || 2,
     }),
@@ -302,8 +314,10 @@ const buildKubernetesLayer = () => {
   // shared across consumers.
   // Slice 4 — WorkerLoadObserver is shared between HealthProbe (which
   // feeds it from OPTIONS replies) and LoadBalancerStrategy (which
-  // reads its bucket state — wired in slice 5).
-  const loadObserverLayer = WorkerLoadObserver.layer()
+  // reads its bucket state — wired in slice 5). Pass the validated
+  // config explicitly so any future override goes through the same
+  // `assertValidProxyConfig` check above.
+  const loadObserverLayer = WorkerLoadObserver.layer(workerLoadObserverConfig)
   // Slice 6 — ProxySelfGate gates external new-dialog non-emergency
   // INVITEs on proxy ELU + CPS bucket. Needs LoadSampler.liveLayer.
   const selfGateLayer = ProxySelfGate.layer().pipe(
