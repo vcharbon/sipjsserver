@@ -160,17 +160,17 @@ or the fixture.** If a rule fires unexpectedly: fix the validator or
 fix the fixture. Exceptions are a last resort for genuine *intentional*
 per-test edge cases, not for shutting up a complaint.
 
-### Every landed rule must demonstrably fire
+### Every landed rule should demonstrably fire — when feasible
 
-A rule that never fires is indistinguishable from no rule at all. **A
-Phase-2 PR that lands a new `PeerAuditRule` / `CrossMessageAuditRule`
-MUST also land a positive-case fixture that triggers it.** The fixture
-is a fake-stack scenario (`it.effect` + `testLayers.stacks.fake`)
-where a non-DUT peer deliberately emits the message the rule is meant
-to catch, and the rule's finding appears in the audit output. The
-fixture demonstrates the rule's "kill" coverage — if a future
-refactor breaks the rule's check, this fixture's expected violation
-disappears, and the test fails.
+A rule with a positive-case fixture is more reviewable: the fixture
+proves the rule isn't dead code, and a future refactor that breaks
+the rule's check will turn the fixture from "expected violation" to
+"no violation", causing the unit test to fail. **A Phase-2 PR that
+lands a new `PeerAuditRule` / `CrossMessageAuditRule` SHOULD land a
+positive-case fixture that triggers it.** The fixture is a fake-stack
+scenario (`it.effect` + `testLayers.stacks.fake`) where a non-DUT
+peer deliberately emits the message the rule is meant to catch, and
+the rule's finding appears in the audit output.
 
 Typical positive-case fixtures:
 
@@ -183,14 +183,30 @@ Typical positive-case fixtures:
   the DUT, the fixture deliberately misconfigures a backend rule to
   produce the violation. Confirms the DUT-audit invariant.
 
-Without this fixture the rule is dead code. The Rule Manifest's
-`notes` column carries a pointer at the fixture path so reviewers can
-trace each rule to its evidence-of-life.
+#### When a positive fixture is impractical
+
+A rule that does not fire on any current fixture is **still
+valuable**. The check runs against every audited bind on every test,
+so any future code or fixture change that introduces the violation
+surfaces immediately — the rule acts as a regression harness:
+silent today, vocal the moment a regression appears.
+
+When fabricating a positive case would require more code than the
+rule itself (e.g. a peer harness that exists solely to emit one
+malformed message and serves no other test), it is acceptable to
+ship the rule without a positive fixture. The Rule Manifest's
+`notes` column records the rule as `regression-only` and explains
+why a positive case was skipped. Reviewers can still request one in
+PR review.
+
+Prefer the positive-coverage shape when the fabrication is cheap
+and clarifies the rule's reach. Reach for "regression-only" only
+when the alternative is meaningful boilerplate.
 
 The B2BUA-call-control rule coverage report ([docs/rule-coverage-and-killing.md](rule-coverage-and-killing.md))
 is a separate mechanism for a different rule registry. The RFC
-verification context uses the simpler "every rule needs a positive
-fixture" contract above.
+verification context uses the "prefer positive coverage, accept
+regression-only when fabrication is too costly" contract above.
 
 ### The DUT-audit invariant
 

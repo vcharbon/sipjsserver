@@ -95,6 +95,19 @@ accept/reject the exclusions before any rule code is written.
   B2BUA-as-UAS/UAC, MUST-ID, RFC exception ledger; 10 new unit tests
   cover subject dispatch / severity override / per-test exceptions /
   DUT-name refusal. Full test:fake green (1510 passed, 4 skipped).
+- 2026-05-25: **Phase 2 mechanism validated** — first rule shipped
+  end-to-end (commit `d4b1821f`): `rfc.no100relRequireOnNonInvite`
+  (RFC3262-MUST-017). New rule pack `tests/harness/rules/rfc/rfc3262-peer-rules.ts`,
+  wired into stackLayer, unit test with positive (REGISTER + OPTIONS)
+  + negative (INVITE + clean REGISTER) coverage. Manifest row flipped
+  `planned` → `shipped`; inventory row flipped `will-implement` →
+  `already-implemented`. test:fake green (1514 passed, +4 new). Phase 2
+  backlog: 49 planned rules remaining (across RFC 3261/3262/3264).
+- 2026-05-25: **Plan revised** — "every landed rule must demonstrably
+  fire" softened from MUST to SHOULD. Rules without a positive
+  fixture are still valuable as a regression harness; the manifest
+  records them as `regression-only` with a one-line reason. Mirrored
+  in [docs/RFC_Verification.md](../RFC_Verification.md#every-landed-rule-should-demonstrably-fire-when-feasible).
 - 2026-05-25: **Phase 1 slice 3 landed** (RFC 3261 inventory).
   `docs/rfc/RFC3261.md` — 191 entries consolidated from 580 raw grep
   hits. Counts: 24 `will-implement`, 38 `already-implemented`, 110
@@ -402,6 +415,35 @@ A PR is mergeable only when:
 - every `will-implement` entry in that section has flipped to
   `already-implemented`.
 - exception ledger has no `undeclared exception` or missing-`justification` rows.
+
+#### Rules without a positive fixture are still valuable
+
+The "every landed rule must demonstrably fire" guidance in
+[docs/RFC_Verification.md](../RFC_Verification.md#every-landed-rule-must-demonstrably-fire)
+expresses the *preferred* shape, not a hard gate. A rule whose check
+never fires on any current fixture is still worth landing — its
+check runs against every audited bind on every test, so any future
+code or fixture change that introduces the violation surfaces
+immediately. In that sense the rule acts as a regression harness:
+silent today, vocal the moment a regression appears.
+
+Phase-2 PRs may therefore ship a rule without a positive-case
+fixture when:
+
+- The MUST forbids behaviour the B2BUA has no reason to ever emit
+  (e.g. `Require: 100rel` on a non-INVITE), and synthesising the
+  violation would require fabricating a peer harness that doesn't
+  serve any other test.
+- The check is structural enough that fabricating a positive case
+  costs more code than the rule itself.
+
+In those cases the Rule Manifest's `notes` column records the
+rule as `regression-only` (or equivalent) and explains why a
+positive fixture was skipped. Reviewers can still ask for one in
+PR review if they think the rule's reach is doubtful. For rules
+where fabricating a positive case is cheap and clarifies the
+rule's reach (e.g. peer-overrides-builder-to-misbehave fixtures),
+prefer the positive-coverage shape.
 
 ### Phase 3 — Lessons-learned + extension
 
