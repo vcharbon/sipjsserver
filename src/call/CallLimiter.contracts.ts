@@ -68,6 +68,7 @@ import {
   withCanonicalContracts,
   type CanonicalContractsOptions,
 } from "../test-harness/framework/effectLayerTest.js"
+import { mkAuditContext } from "../test-harness/framework/auditContext.js"
 import {
   CallLimiter,
   type LimiterDecision,
@@ -350,39 +351,23 @@ export const scopedAudit = (
   return Layer.effect(
     CallLimiter,
     Effect.gen(function* () {
-      const svcs = yield* Layer.build(inner)
-      const innerApi = ServiceMap.get(svcs, CallLimiter)
-      const recorder = yield* Recorder
-      const ctx = yield* RunContext
-      const channel = recorder.forTag<CallLimiter, CallLimiterEvent>(CallLimiter)
-
-      // Shared per-Tag anomaly buffer.
-      const anomalies: RecordedAnomaly[] = []
+      const {
+        innerApi,
+        recorder,
+        channel,
+        ctx,
+        anomalies,
+        pushAnomaly,
+      } = yield* mkAuditContext<CallLimiterEvent, CallLimiter, CallLimiterApi>(
+        CallLimiter,
+        inner,
+        "lim",
+      )
 
       const projector: Projector<CallLimiterEvent> = () => ({
         anomalies: anomalies.slice(),
       })
       yield* recorder.registerProjector(CallLimiter, projector)
-
-      const severityFor = (
-        baseline: "advisory" | "deferred-fail",
-      ): "advisory" | "deferred-fail" => {
-        if (ctx.kind === "real-run") return "advisory"
-        return baseline
-      }
-
-      const pushAnomaly = (
-        check: string,
-        detail: string,
-        baseline: "advisory" | "deferred-fail",
-      ): void => {
-        anomalies.push({
-          kind: "signalingAudit",
-          check: `lim.${check}`,
-          detail,
-          severity: severityFor(baseline),
-        })
-      }
 
       const checkAndIncrement: CallLimiterApi["checkAndIncrement"] = (
         limiterId,

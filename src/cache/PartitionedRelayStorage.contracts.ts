@@ -64,7 +64,6 @@ import {
 import type { DataFrame, NoopFrame } from "../replication/ReplicationProtocol.js"
 import type {
   Projector,
-  RecordedAnomaly,
   RecordedReplEntry,
   TaggedChannel,
 } from "../test-harness/framework/report-recorder/types.js"
@@ -74,6 +73,7 @@ import {
   withCanonicalContracts,
   type CanonicalContractsOptions,
 } from "../test-harness/framework/effectLayerTest.js"
+import { mkAuditContext } from "../test-harness/framework/auditContext.js"
 import { recordEffectCallSimple } from "../test-harness/framework/recordingHelpers.js"
 import {
   PartitionedRelayStorage,
@@ -646,18 +646,18 @@ export const scopedAudit = (
   return Layer.effect(
     PartitionedRelayStorage,
     Effect.gen(function* () {
-      const svcs = yield* Layer.build(inner)
-      const innerApi = ServiceMap.get(svcs, PartitionedRelayStorage)
-      const recorder = yield* Recorder
-      const ctx = yield* RunContext
-      const channel = recorder.forTag<
+      const {
+        innerApi,
+        recorder,
+        channel,
+        ctx,
+        anomalies,
+        pushAnomaly,
+      } = yield* mkAuditContext<
+        PartitionedRelayStorageEvent,
         PartitionedRelayStorage,
-        PartitionedRelayStorageEvent
-      >(PartitionedRelayStorage)
-
-      // Shared per-Tag anomaly buffer — both this wrapper and any
-      // future parity-side observations push into the same array.
-      const anomalies: RecordedAnomaly[] = []
+        PartitionedRelayStorageApi
+      >(PartitionedRelayStorage, inner, "prs")
 
       // Refcount bookkeeping: key = `${role}:${owner}:${callRef}`.
       const liveCalls = new Map<
@@ -686,26 +686,6 @@ export const scopedAudit = (
         return { replTrace, anomalies: anomalies.slice() }
       }
       yield* recorder.registerProjector(PartitionedRelayStorage, projector)
-
-      const severityFor = (
-        baseline: "advisory" | "deferred-fail",
-      ): "advisory" | "deferred-fail" => {
-        if (ctx.kind === "real-run") return "advisory"
-        return baseline
-      }
-
-      const pushAnomaly = (
-        check: string,
-        detail: string,
-        baseline: "advisory" | "deferred-fail",
-      ): void => {
-        anomalies.push({
-          kind: "signalingAudit", // shape reuse — see types.ts; carries check + detail
-          check: `prs.${check}`,
-          detail,
-          severity: severityFor(baseline),
-        })
-      }
 
       const refKey = (
         role: PartitionRole,
