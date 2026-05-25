@@ -1,0 +1,53 @@
+# Raw MUST/REQUIRED/SHALL grep — RFC 3262
+#
+# Source:   https://www.rfc-editor.org/rfc/rfc3262.txt
+# SHA-256:  4ecf9bc1141480cf800e15e7c2833e20d7fefca6743743dd8150c0768cd56e98
+# Captured: 2026-05-25
+# Command:  grep -nE "MUST|MUST NOT|REQUIRED|SHALL" rfc3262.txt
+#
+# Each line is "<line>:<text>" where <line> is the 1-based line number
+# in the upstream RFC .txt. Stable across IETF mirrors; serves as the
+# audit trail for the per-RFC inventory under docs/rfc/.
+#
+# Format: keep this file verbatim. Re-run the command above with the
+# checksummed source to verify no drift.
+# ---------------------------------------------------------------------
+
+121:   In this document, the key words "MUST", "MUST NOT", "REQUIRED",
+122:   "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY",
+136:   The UAS MUST send any non-100 provisional response reliably if the
+138:   100rel.  If the UAS is unwilling to do so, it MUST reject the initial
+142:   A UAS MUST NOT attempt to send a 100 (Trying) response reliably.
+145:   field indicating this feature, the UAS MUST NOT send the provisional
+154:   transaction.  However, it MUST NOT attempt to do so for any request
+159:   provisional response, the PRACK MUST be proxied.
+188:   In addition, it MUST contain a Require header field containing the
+189:   option tag 100rel, and MUST include an RSeq header field.  The value
+191:   transaction MUST be between 1 and 2**31 - 1.  It is RECOMMENDED that
+232:   unacknowledged reliable provisional response, the UAS MUST respond to
+234:   unacknowledged reliable provisional response, it MUST be responded to
+237:   retransmissions of the reliable provisional response, and MUST remove
+251:   responses.  The UAS MUST NOT send a second reliable provisional
+261:   response for the same request MUST be greater by exactly one.  RSeq
+262:   numbers MUST NOT wrap around.  Because the initial one is chosen to
+271:   description.  In that case, it MUST NOT send a final response until
+275:   provisional responses, but it MUST be prepared to process PRACK
+276:   requests for those outstanding responses.  A UAS MUST NOT send new
+292:   request.  A Require header with the value 100rel MUST NOT be present
+430:   to send one, a Supported header MUST be included in the request with
+437:   a 100 (Trying) (as opposed to 101 to 199), this option tag MUST be
+438:   ignored, and the procedures below MUST NOT be used.
+455:   The provisional response MUST establish a dialog if one is not yet
+458:   Assuming the response is to be transmitted reliably, the UAC MUST
+471:   that response MUST be discarded.  A response is a retransmission when
+473:   MUST maintain a sequence number that indicates the most recently
+475:   request.  This sequence number MUST be maintained until a final
+476:   response is received for the initial request.  Its value MUST be
+485:   than the value of the sequence number, that response MUST NOT be
+486:   acknowledged with a PRACK, and MUST NOT be processed further by the
+513:   INVITE did not contain an offer, one MUST appear in that reliable
+519:   offer), it MUST generate an answer in the PRACK.  If the UAC receives
+522:   offer, it MUST place the answer in the 2xx to the PRACK.
+530:   accepted, the UAS MUST delay sending the 2xx until the provisional
+535:   All user agents that support this extension MUST support all
+609:         that the UAS MUST send all provisional responses reliably.

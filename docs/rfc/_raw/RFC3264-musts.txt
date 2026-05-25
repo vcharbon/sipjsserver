@@ -1,0 +1,101 @@
+# Raw MUST/REQUIRED/SHALL grep — RFC 3264
+#
+# Source:   https://www.rfc-editor.org/rfc/rfc3264.txt
+# SHA-256:  c1cd87b1310c4bba1c0cd5dc1dbcf94afc294c32981c8630484ca97cc2f0e97c
+# Captured: 2026-05-25
+# Command:  grep -nE "MUST|MUST NOT|REQUIRED|SHALL" rfc3264.txt
+#
+# Each line is "<line>:<text>" where <line> is the 1-based line number
+# in the upstream RFC .txt. Stable across IETF mirrors; serves as the
+# audit trail for the per-RFC inventory under docs/rfc/.
+#
+# Format: keep this file verbatim. Re-run the command above with the
+# checksummed source to verify no drift.
+# ---------------------------------------------------------------------
+
+143:   In this document, the key words "MUST", "MUST NOT", "REQUIRED",
+144:   "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY",
+206:   session.  However, it MUST NOT generate a new offer if it has
+208:   Furthermore, it MUST NOT generate a new offer if it has generated a
+238:   The offer (and answer) MUST be a valid SDP message, as defined by RFC
+243:   and version in the o line MUST be representable with a 64 bit signed
+244:   integer.  The initial value of the version MUST be less than
+247:   large SDP message, an SDP message used in the offer/answer model MUST
+276:   MUST mark the stream as sendonly with the "a=sendonly" attribute.  We
+288:   from its peer, it MUST mark the stream as recvonly.  If the offerer
+290:   at this time, it MUST mark the stream with an "a=inactive" attribute.
+308:   stream is offered but MUST NOT be used.  This has no useful semantics
+348:   the offerer MUST send with the payload type numbers from the answer.
+363:   In all cases, the formats in the "m=" line MUST be listed in order of
+370:   receive.  The ptime attribute MUST be greater than zero.
+403:   multiple streams of the same type, each stream MUST be mapped to at
+408:   received and sent to the same sink, they MUST be combined in some
+415:   mapped to the same stream, those sources MUST be combined in some
+431:   Once the offerer has sent the offer, it MUST be prepared to receive
+432:   media for any recvonly streams described by that offer.  It MUST be
+462:   any way (different IP addresses, ports, etc.), the origin line MUST
+468:   For each "m=" line in the offer, there MUST be a corresponding "m="
+469:   line in the answer.  The answer MUST contain exactly the same number
+472:   "m=" lines, the answer MUST contain zero "m=" lines.
+474:   The "t=" line in the answer MUST equal that of the offer.  The time
+478:   a stream is rejected, the offerer and answerer MUST NOT generate
+481:   MUST be set to zero.  Any media formats listed are ignored.  At least
+482:   one MUST be present, as specified by SDP.
+490:   stream MUST contain a unicast address.  The media type of the stream
+491:   in the answer MUST match that of the offer.
+493:   If a stream is offered as sendonly, the corresponding stream MUST be
+495:   listed as recvonly in the offer, the answer MUST be marked as
+501:   stream is listed as inactive, it MUST be marked as inactive in the
+511:   For streams marked as recvonly in the answer, the "m=" line MUST
+516:   marked as sendonly in the answer, the "m=" line MUST contain at least
+519:   the "m=" line MUST contain at least one codec the answerer is willing
+537:   explicit indication otherwise).  This address and port MUST be
+544:   payload type number is used, the answer MUST contain rtpmap
+547:   media formats in the "m=" line MUST be listed in order of preference,
+575:   fmtp parameters with the same values MUST be present in the answer if
+596:   offered stream, the answerer MUST reject that media stream by setting
+602:   Once the answerer has sent the answer, it MUST be prepared to receive
+603:   media for any recvonly streams described by that answer.  It MUST be
+605:   answer, and it MAY send media immediately.  The answerer MUST be
+612:   present.  The answerer MUST send using a media format in the offer
+623:   answer.  In the case of RTP, it MUST use the payload type numbers
+634:   in the answer MUST match that of the offer.  Similarly, the
+636:   sendrecv) MUST equal that of the offer.  This is because all
+641:   The set of media formats in the answer MUST be equal to or be a
+645:   The ptime and bandwidth attributes in the answer MUST equal the ones
+653:   the answer).  It MUST send using a media format listed in the answer,
+657:      The reason this is a SHOULD, and not a MUST (its also a SHOULD,
+658:      and not a MUST, for the answerer), is because there will
+698:   the "o=" line of the new SDP MUST be identical to that in the
+699:   previous SDP, except that the version in the origin field MUST
+701:   line does not increment, the SDP MUST be identical to the SDP with
+702:   that version number.  The answerer MUST be prepared to receive an
+704:   effectively a no-op.  However, the answerer MUST generate a valid
+710:   new SDP MUST have a matching media stream for each media stream in
+712:   lines, the new SDP MUST have at least N "m=" lines.  The i-th media
+719:   streams from a previous SDP MUST NOT be removed in a new SDP;
+737:   descriptions in  the SDP.  New media descriptions MUST appear below
+756:   A stream that is offered with a port of zero MUST be marked with port
+778:   description SHOULD remain unchanged.  The offerer MUST be prepared to
+802:   it MUST be prepared to receive media on both the old and new ports as
+803:   soon as the answer is sent.  The answerer MUST NOT cease listening
+807:   port; it MUST NOT cease listening for media on the old port until
+830:   number to a particular codec within that media stream MUST NOT change
+833:   number 46 MUST refer to G.711 from that point forward in any offers
+854:   its answer, the answerer MUST begin sending media using any formats
+857:   (assuming the stream allows for sending), and MUST NOT send using any
+860:   answer, it MUST begin sending media using any formats in the answer,
+862:   sending), and MUST NOT send using any formats that are not in the
+917:   soon as it receives the offer. The offerer MUST be prepared to
+925:   offer or answer.  Generally, an agent MUST send media (if the
+972:   number MUST NOT be zero, which would specify that the stream has been
+973:   disabled.  An agent MUST be capable of receiving SDP with a
+993:   follows.  It MUST be a valid SDP, except that it MAY omit both "e="
+994:   and "p=" lines.  The "t=" line MUST be equal to "0 0".  For each
+995:   media type supported by the agent, there MUST be a corresponding
+997:   MUST be unique for each SDP constructed to indicate media
+998:   capabilities.  The port MUST be set to zero, but the connection
+1015:   attribute MUST be present to bind the type to a specific format.
+1252:   MUST provide a means for end-to-end authentication and integrity
+1257:   MUST.
+1261:   streams in a conversation.  Therefore, the application protocol MUST

@@ -1,0 +1,599 @@
+# Raw MUST/REQUIRED/SHALL grep — RFC 3261
+#
+# Source:   https://www.rfc-editor.org/rfc/rfc3261.txt
+# SHA-256:  d513777f77fea01a4de9c0a2d9d6713cb53b8231f1b7a2ab56705f8d51b066dc
+# Captured: 2026-05-25
+# Command:  grep -nE "MUST|MUST NOT|REQUIRED|SHALL" rfc3261.txt
+#
+# Each line is "<line>:<text>" where <line> is the 1-based line number
+# in the upstream RFC .txt. Stable across IETF mirrors; serves as the
+# audit trail for the per-RFC inventory under docs/rfc/.
+#
+# Format: keep this file verbatim. Re-run the command above with the
+# checksummed source to verify no drift.
+# ---------------------------------------------------------------------
+
+546:   In this document, the key words "MUST", "MUST NOT", "REQUIRED",
+547:   "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT
+1480:   The start-line, each message-header line, and the empty line MUST be
+1482:   the empty line MUST be present even if the message-body is not.
+1522:           The Request-URI MUST NOT contain unescaped spaces or control
+1523:           characters and MUST NOT be enclosed in "<>".
+1536:           applications sending SIP messages MUST include a SIP-Version
+1538:           but implementations MUST send upper-case.
+1673:   defined in Section 7.3).  It MUST be possible to combine the multiple
+1689:   they MUST NOT be combined into a single header field row.
+1691:   Implementations MUST be able to process multiple header field rows
+1744:   a header field value, any given parameter-name MUST NOT appear more
+1778:   its category (such as a request header field in a response), it MUST
+1800:   message.  Implementations MUST accept both the long and short forms
+1815:   The Internet media type of the message body MUST be given by the
+1817:   such as compression, then this MUST be indicated by the Content-
+1818:   Encoding header field; otherwise, Content-Encoding MUST be omitted.
+1824:   containing multipart message bodies MUST send a session description
+1839:   The "chunked" transfer encoding of HTTP/1.1 MUST NOT be used for SIP.
+1863:   transports MUST ignore any CRLF appearing before the start-line
+1917:   A valid SIP request formulated by a UAC MUST, at a minimum, contain
+1954:   12.2.1.1 MUST be followed (even though there is no dialog), using the
+1975:   All SIP implementations MUST support the SIP URI scheme.  Any
+1976:   implementation that supports TLS MUST support the SIPS URI scheme.
+2006:   A request outside of a dialog MUST NOT contain a To tag; the tag in
+2048:   The From field MUST contain a new "tag" parameter, chosen by the UAC.
+2061:   together a series of messages.  It MUST be the same for all requests
+2066:   header field MUST be selected by the UAC as a globally unique
+2107:   method MUST match that of the request.  For non-REGISTER requests
+2109:   sequence number value MUST be expressible as a 32-bit unsigned
+2110:   integer and MUST be less than 2**31.  As long as it follows the above
+2143:   A UAC MUST insert a Max-Forwards header field into each request it
+2159:   When the UAC creates a request, it MUST insert a Via into that
+2161:   MUST be SIP and 2.0, respectively.  The Via header field value MUST
+2166:   The branch parameter value MUST be unique across space and time for
+2178:   specification MUST always begin with the characters "z9hG4bK".  These
+2204:   The Contact header field MUST be present and contain exactly one SIP
+2210:   MUST be valid even if used in subsequent requests outside of any
+2214:   URI, the Contact header field MUST contain a SIPS URI as well.
+2226:   The option tags listed MUST only refer to extensions defined in
+2236:   MUST insert a Require header field into the request listing the
+2247:   traversed understand that extension, it MUST insert a Proxy-Require
+2252:   and Proxy-Require header fields MUST only refer to extensions defined
+2269:   local policy specifying otherwise, the destination MUST be determined
+2273:   procedures MUST be applied to the Request-URI of the request.
+2279:   Request-URI specifies a SIPS resource, the UAC MUST follow the
+2284:   MUST be contacted with TLS.  Beyond that, there are no restrictions
+2331:   timeout error is received from the transaction layer, it MUST be
+2335:   TCP), the condition MUST be treated as a 503 (Service Unavailable)
+2340:   A UAC MUST treat any final response it does not recognize as being
+2341:   equivalent to the x00 response code of that class, and MUST be able
+2346:   UAC MUST treat any provisional response different than 100 that it
+2347:   does not recognize as 183 (Session Progress).  A UAC MUST be able to
+2381:   3xx class responses MUST NOT add any given URI to the target set more
+2427:   response, a UAC MUST copy the entire URI from the target set into the
+2458:   a new client transaction, and therefore MUST have a new branch ID in
+2538:   all state changes associated with it MUST be performed.  If it is
+2539:   rejected, all state changes MUST NOT be performed.
+2549:   UAS MUST inspect the method of the request.  If the UAS recognizes
+2550:   but does not support the method of a request, it MUST generate a 405
+2552:   are described in Section 8.2.6.  The UAS MUST also add an Allow
+2554:   header field MUST list the set of methods supported by the UAS
+2564:   supported extension), the server MUST ignore that header field and
+2605:   If the request has no tag in the To header field, the UAS core MUST
+2627:   Require header field, it MUST respond by generating a response with
+2628:   status code 420 (Bad Extension).  The UAS MUST add an Unsupported
+2639:   Note that Require and Proxy-Require MUST NOT be used in a SIP CANCEL
+2641:   header fields MUST be ignored if they are present in these requests.
+2643:   An ACK request for a 2xx response MUST contain only those Require and
+2672:   Disposition header field), the UAS MUST reject the request with a 415
+2673:   (Unsupported Media Type) response.  The response MUST contain an
+2677:   by the UAS, the response MUST contain an Accept-Encoding header field
+2680:   response MUST contain an Accept-Language header field indicating the
+2698:   response MUST NOT do so unless support for that extension is
+2706:   extension(s) MUST be included in a Require header field in the
+2710:   Any extensions applied to a non-421 response MUST be listed in a
+2712:   MUST NOT apply extensions not listed in the Supported header field in
+2752:   present in the request MUST be copied into this 100 (Trying)
+2755:   This value MUST contain the difference between the time of sending of
+2760:   The From field of the response MUST equal the From header field of
+2761:   the request.  The Call-ID header field of the response MUST equal the
+2763:   response MUST equal the CSeq field of the request.  The Via header
+2764:   field values in the response MUST equal the Via header field values
+2765:   in the request and MUST maintain the same ordering.
+2768:   in the response MUST equal that of the request.  However, if the To
+2770:   header field in the response MUST equal the URI in the To header
+2771:   field; additionally, the UAS MUST add a tag to the To header field in
+2775:   same tag MUST be used for all responses to that request, both final
+2813:      o  A stateless UAS MUST NOT send provisional (1xx) responses.
+2815:      o  A stateless UAS MUST NOT retransmit responses.
+2817:      o  A stateless UAS MUST ignore ACK requests.
+2819:      o  A stateless UAS MUST ignore CANCEL requests.
+2821:      o  To header tags MUST be generated for responses in a stateless
+2884:   However, redirect servers MUST NOT redirect a request to a URI equal
+2924:   Redirect servers MUST ignore features that are not understood
+2977:   fields in the CANCEL request MUST be identical to those in the
+2979:   client MUST have only a single Via header field value matching the
+2983:   However, the method part of the CSeq header field MUST have a value
+2988:   CANCEL request MUST include that Route header field's values.
+2993:   The CANCEL request MUST NOT contain any Require or Proxy-Require
+3000:   If no provisional response has been received, the CANCEL request MUST
+3001:   NOT be sent; rather, the client MUST wait for the arrival of a
+3009:   port, and transport for the CANCEL MUST be identical to those used to
+3149:   domain MUST be able to read and write data to the location service,
+3150:   and a proxy or a redirect server for that domain MUST be capable of
+3171:   has no meaning in REGISTER requests or responses, and MUST be ignored
+3172:   if present.  In particular, the UAC MUST NOT create a new route set
+3176:   The following header fields, except Contact, MUST be included in a
+3182:           SIP URI MUST NOT be present.
+3187:           the former contains a user name.  This address-of-record MUST
+3213:           requests.  A UA MUST increment the CSeq value by one for each
+3219:   UAs MUST NOT send a new registration (that is, containing new Contact
+3393:   all registrations, but it MUST NOT be used unless the Expires header
+3502:   only REGISTER requests.  A registrar MUST not generate 6xx responses.
+3509:   Registrars MUST ignore the Record-Route header field if it is
+3510:   included in a REGISTER request.  Registrars MUST NOT include a
+3518:   of domain(s) for which it maintains bindings.  REGISTER requests MUST
+3520:   REGISTER requests MUST also be processed atomically, meaning that a
+3522:   all.  Each REGISTER message MUST be processed independently of any
+3545:         extensions, the registrar MUST process the Require header field
+3561:         the registrar MUST return a 403 (Forbidden) and skip the
+3570:         for the domain in the Request-URI, the registrar MUST send a
+3572:         MUST then be converted to a canonical form.  To do that, all
+3573:         URI parameters MUST be removed (including the user-param), and
+3574:         any escaped characters MUST be converted to their unescaped
+3597:         invalid, and the server MUST return a 400 (Invalid Request) and
+3600:         not, it MUST remove the binding.  If it does agree, it MUST
+3603:         MUST be aborted and the request fails.
+3610:            MUST be taken as the requested expiration.
+3613:            Expires header field, that value MUST be taken as the
+3616:         -  If there is neither, a locally-configured default value MUST
+3624:         Brief).  This response MUST contain a Min-Expires header field
+3652:         Call-ID value in the request, the binding MUST be removed if
+3655:         is higher than that of the existing binding, it MUST update or
+3656:         remove the binding as above.  If not, the update MUST be
+3665:         The binding updates MUST be committed (that is, made visible to
+3669:         request MUST fail with a 500 (Server Error) response and all
+3670:         tentative binding updates MUST be removed.
+3672:      8. The registrar returns a 200 (OK) response.  The response MUST
+3674:         bindings.  Each Contact value MUST feature an "expires"
+3687:   option is returned in a Supported header field.  All UAs MUST support
+3763:   chosen MUST be the same that would have been chosen had the request
+3902:   UAs MUST assign values to the dialog ID components as described
+3908:   dialog (such as a 2xx to INVITE), the UAS MUST copy all Record-Route
+3911:   whether they are known or unknown to the UAS) and MUST maintain the
+3912:   order of those values.  The UAS MUST add a Contact header field to
+3917:   the host.  The URI provided in the Contact header field MUST be a SIP
+3930:   MUST be a SIPS URI.  The URI SHOULD have global scope (that is, the
+3936:   The UAS then constructs the state of the dialog.  This state MUST be
+3942:   The route set MUST be set to the list of URIs in the Record-Route
+3945:   request, the route set MUST be set to the empty set.  This route set,
+3947:   requests in this dialog.  The remote target MUST be set to the URI
+3950:   The remote sequence number MUST be set to the value of the sequence
+3952:   number MUST be empty.  The call identifier component of the dialog ID
+3953:   MUST be set to the value of the Call-ID in the request.  The local
+3954:   tag component of the dialog ID MUST be set to the tag in the To field
+3956:   remote tag component of the dialog ID MUST be set to the tag from the
+3957:   From field in the request.  A UAS MUST be prepared to receive a
+3964:   The remote URI MUST be set to the URI in the From field, and the
+3965:   local URI MUST be set to the URI in the To field.
+3970:   INVITE) it MUST provide a SIP or SIPS URI with global scope (i.e.,
+3974:   Contact header field MUST contain a SIPS URI.
+3984:   constructs the state of the dialog.  This state MUST be maintained
+3990:   The route set MUST be set to the list of URIs in the Record-Route
+3993:   the response, the route set MUST be set to the empty set.  This route
+3995:   requests in this dialog.  The remote target MUST be set to the URI
+3998:   The local sequence number MUST be set to the value of the sequence
+4000:   number MUST be empty (it is established when the remote UA sends a
+4002:   dialog ID MUST be set to the value of the Call-ID in the request.
+4003:   The local tag component of the dialog ID MUST be set to the tag in
+4005:   dialog ID MUST be set to the tag in the To field of the response.  A
+4006:   UAC MUST be prepared to receive a response without a tag in the To
+4012:   The remote URI MUST be set to the URI in the To field, and the local
+4013:   URI MUST be set to the URI in the From field.
+4057:   The URI in the To field of the request MUST be set to the remote URI
+4059:   MUST be set to the remote tag of the dialog ID.  The From URI of the
+4060:   request MUST be set to the local URI from the dialog state.  The tag
+4061:   in the From header field of the request MUST be set to the local tag
+4063:   the tag parameter MUST be omitted from the To or From header fields,
+4074:   The Call-ID of the request MUST be set to the Call-ID of the dialog.
+4075:   Requests within a dialog MUST contain strictly monotonically
+4080:   sequence number MUST be incremented by one, and this value MUST be
+4082:   empty, an initial value MUST be chosen using the guidelines of
+4084:   MUST match the method of the request.
+4107:   If the route set is empty, the UAC MUST place the remote target URI
+4108:   into the Request-URI.  The UAC MUST NOT add a Route header field to
+4112:   contains the lr parameter (see Section 19.1.1), the UAC MUST place
+4113:   the remote target URI into the Request-URI and MUST include a Route
+4118:   lr parameter, the UAC MUST place the first URI from the route set
+4120:   in a Request-URI.  The UAC MUST add a Route header field containing
+4122:   parameters.  The UAC MUST then place the remote target URI into the
+4158:   dialog.  If the "secure" flag is true, that URI MUST be a SIPS URI.
+4195:   MUST replace the dialog's remote target URI with the URI from the
+4249:   recreate the dialog, it MUST respond to the request with a 481
+4267:   If the remote sequence number is empty, it MUST be set to the value
+4271:   is out of order and MUST be rejected with a 500 (Server Internal
+4278:   one higher than the previous received request.  The UAS MUST then set
+4288:   When a UAS receives a target refresh request, it MUST replace the
+4346:   INVITE.  A UA that supports INVITE MUST also support ACK, CANCEL and
+4417:      o  The initial offer MUST be in either an INVITE or, if not there,
+4431:      o  If the initial offer is in an INVITE, the answer MUST be in a
+4436:         prior to the answer.  The UAC MUST treat the first session
+4437:         description it receives as the answer, and MUST ignore any
+4442:         message from the UAS back to UAC, the answer MUST be in the
+4453:         offer, it MUST NOT generate subsequent offers in any responses
+4462:   All user agents that support INVITE MUST support these two exchanges.
+4464:   The Session Description Protocol (SDP) (RFC 2327 [1]) MUST be
+4466:   usage for constructing offers and answers MUST follow the procedures
+4530:   under error conditions) MUST be ignored.
+4556:   identifier of an existing dialog, the dialog MUST be transitioned to
+4557:   the "confirmed" state, and the route set for the dialog MUST be
+4559:   12.2.1.2.  Otherwise, a new dialog in the "confirmed" state MUST be
+4571:   The UAC core MUST generate an ACK request for each 2xx received from
+4575:   authentication.  The sequence number of the CSeq header field MUST be
+4576:   the same as the INVITE being acknowledged, but the CSeq method MUST
+4577:   be ACK.  The ACK MUST contain the same credentials as the INVITE.  If
+4578:   the 2xx contains an offer (based on the rules above), the ACK MUST
+4580:   acceptable, the UAC core MUST generate a valid answer in the ACK and
+4588:   ACK MUST be passed to the client transport every time a
+4606:   not want to continue with that dialog, then the UAC MUST terminate
+4663:   the UAS provide the offer of the session.  It MUST provide the offer
+4679:   send as many provisional responses as it likes.  Each of these MUST
+4687:   transaction.  To prevent cancellation, the UAS MUST send a non-100
+4743:   sent an answer, the 2xx MUST contain an answer.  If the INVITE did
+4744:   not contain an offer, the 2xx MUST contain an offer if the UAS had
+4845:   Note that a UAC MUST NOT initiate a new INVITE transaction within a
+4849:      1. If there is an ongoing INVITE client transaction, the TU MUST
+4853:      2. If there is an ongoing INVITE server transaction, the TU MUST
+4862:   parameters MUST remain unchanged, as if no re-INVITE had been issued.
+4907:   same dialog MUST return a 500 (Server Internal Error) response to the
+4908:   second INVITE and MUST include a Retry-After header field with a
+4912:   on that dialog is in progress MUST return a 491 (Request Pending)
+4915:   If a UA receives a re-INVITE for an existing dialog, it MUST check
+4919:   MUST adjust the session parameters accordingly, possibly after asking
+4953:   and media types that the UA is willing to support.  The UAS MUST
+4979:   associated with that dialog SHOULD terminate.  A UA MUST NOT send a
+4982:   confirmed dialogs, but MUST NOT send a BYE on early dialogs.
+4991:   However, the callee's UA MUST NOT send a BYE on a confirmed dialog
+5031:   client transaction, and passes it the BYE request.  The UAC MUST
+5048:   returned by the client transaction), the UAC MUST consider the
+5064:   A UAS core receiving a BYE request for an existing dialog MUST follow
+5071:   the UAS core MUST generate a 2xx response to the BYE, and MUST pass
+5074:   The UAS MUST still respond to any pending requests received for that
+5104:   element is playing the role of a UAS and MUST behave as described in
+5119:   forwarded to more than one location MUST be handled statefully.
+5129:   MUST be forwarded transaction statefully.
+5170:   MUST behave as a UAS with respect to sending an immediate provisional
+5180:   intending to proxy the request MUST:
+5221:   Before an element can proxy a request, it MUST verify the message's
+5236:   If any of these checks fail, the element MUST behave as a user agent
+5240:   MUST NOT treat merged requests as an error condition.  The endpoints
+5246:      The request MUST be well-formed enough to be handled with a server
+5248:      Request Validation steps or the Request Forwarding section MUST be
+5256:      define new methods and header fields at any time.  An element MUST
+5289:      value of zero (0), the element MUST NOT forward the request.  If
+5291:      recipient and respond per Section 11.  Otherwise, the element MUST
+5329:      understand, the element MUST return a 420 (Bad Extension)
+5330:      response.  The response MUST include an Unsupported (Section
+5337:      the request MUST be inspected as described in Section 22.3.  That
+5343:   The proxy MUST inspect the Request-URI of the request.  If the
+5346:   the proxy MUST replace the Request-URI in the request with the last
+5348:   Route header field.  The proxy MUST then proceed as if it received
+5363:   If the Request-URI contains a maddr parameter, the proxy MUST check
+5368:   default) in the Request-URI, the proxy MUST strip the maddr and any
+5389:   the proxy MUST remove that value from the request.
+5399:   Request-URI MUST be placed into the target set as the only target
+5400:   URI, and the proxy MUST proceed to Section 16.6.
+5403:   not responsible for, the Request-URI MUST be placed into the target
+5404:   set as the only target, and the element MUST proceed to the task of
+5421:   location service constructed by a registrar, the Request-URI MUST
+5454:   (based on the definition of equality for the URI type), it MUST NOT
+5457:   A proxy MUST NOT add additional targets to the target set if the
+5476:   above, any given URI MUST NOT be added to the set more than once.
+5500:   exist, the proxy MUST return a 404 (Not Found) response.
+5503:   proxy MUST return an error response, which SHOULD be the 480
+5564:         MUST initially contain all of the header fields from the
+5566:         described below MUST NOT be removed.  The copy SHOULD maintain
+5568:         The proxy MUST NOT reorder field values with a common field
+5569:         name (See Section 7.3.1).  The proxy MUST NOT add to, modify,
+5578:         The Request-URI in the copy's start line MUST be replaced with
+5580:         not allowed in a Request-URI, they MUST be removed.
+5592:         MUST decrement its value by one (1).
+5595:         proxy MUST add one with a field value, which SHOULD be 70.
+5611:         creates a dialog), it MUST insert a Record-Route header field
+5641:         The URI placed in the Record-Route header field value MUST be a
+5642:         SIP or SIPS URI.  This URI MUST contain an lr parameter (see
+5663:         The URI placed in the Record-Route header field MUST resolve to
+5670:         MUST be a SIPS URI.  Furthermore, if the request was not
+5671:         received over TLS, the proxy MUST insert a Record-Route header
+5675:         processing of bullet 6), MUST insert a Record-Route header
+5683:         MUST be distinct enough to locate at that time.  (The request
+5709:         Endpoints MUST NOT use a URI obtained from a Record-Route
+5741:         destination.  A proxy MUST ensure that all such proxies are
+5745:         (each of which contains the lr parameter).  This set MUST be
+5748:         absent, it MUST be added, containing that list of URIs.
+5755:         the request has a Route header field, this alternative MUST NOT
+5760:         Furthermore, if the Request-URI contains a SIPS URI, TLS MUST
+5763:         If the copy contains a Route header field, the proxy MUST
+5765:         contain an lr parameter, the proxy MUST modify the copy as
+5775:         -  The proxy MUST place the Request-URI into the Route header
+5778:         -  The proxy MUST then place the first Route header field value
+5794:         values of the Route and Request-URI.  Such a policy MUST NOT be
+5805:         step 6 above, the proxy MUST apply those procedures to the
+5806:         Request-URI of the request.  Otherwise, the proxy MUST apply
+5812:         resource, the proxy MUST follow the procedures of [4] as if the
+5815:         As described in [4], the proxy MUST attempt to deliver the
+5819:         For each tuple attempted, the proxy MUST format the message as
+5833:         header field inserted in step 8 MUST be different for each
+5846:         The proxy MUST insert a Via header field value into the copy
+5859:         first part MUST satisfy the constraints of Section 8.1.1.7 as
+5892:         supplies MUST depend on all information affecting processing of
+5899:         The request method MUST NOT be included in the calculation of
+5901:         (for non-2xx responses) MUST have the same branch value as the
+5910:         field, the proxy MUST insert one with the correct value for the
+5915:         A stateful proxy MUST create a new client transaction for this
+5924:         timer C.  Timer C MUST be set for each client transaction when
+5925:         an INVITE request is proxied.  The timer MUST be larger than 3
+5947:   is found, the element MUST process the response (even if it is an
+5957:   following processing MUST take place:
+5977:   The following processing MUST be performed on each response that is
+6012:         but 100), the proxy MUST reset timer C for that client
+6014:         this value MUST be greater than 3 minutes.
+6022:         response was meant for this element and MUST NOT be forwarded.
+6041:         response by adding them to the target set, it MUST remove them
+6088:         the following responses MUST be forwarded immediately:
+6096:         transactions as described in Section 10, and it MUST NOT create
+6120:         the following responses MUST be forwarded immediately:
+6124:         A stateful proxy MUST NOT immediately forward any other
+6125:         responses.  In particular, a stateful proxy MUST NOT forward
+6130:         Any response chosen for immediate forwarding MUST be processed
+6141:         A stateful proxy MUST send a final response to a response
+6146:         The stateful proxy MUST choose the "best" final response among
+6149:         If there are no final responses in the context, the proxy MUST
+6153:         Otherwise, the proxy MUST forward a response from the responses
+6154:         stored in the response context.  It MUST choose from the 6xx
+6180:         The forwarded response MUST be processed as described in steps
+6191:         responses to a dialog creating request.  A proxy MUST NOT
+6193:         if the request did not contain one.  A proxy MUST NOT modify
+6213:         A proxy MUST NOT modify the To tag in any forwarded response to
+6238:         Authentication Required), the proxy MUST collect any WWW-
+6264:         over a non-TLS connection, the proxy MUST rewrite the URI in
+6267:         over TLS, the proxy MUST rewrite the URI in the Record-Route
+6279:         The new URI provided by the proxy MUST satisfy the same
+6322:         selected response.  The proxy MUST NOT add to, modify, or
+6324:         MUST NOT remove any header field values other than the Via
+6326:         particular, the proxy MUST NOT remove any "received" parameter
+6337:         proxy MUST pass the response to the server transaction
+6342:         MUST forward the response statelessly by sending it to the
+6349:         The proxy MUST maintain the response context until all of its
+6355:         If the forwarded response was a final response, the proxy MUST
+6376:   If timer C should fire, the proxy MUST either reset the timer with
+6379:   MUST generate a CANCEL request matching that transaction.  If the
+6381:   MUST behave as if the transaction received a 408 (Request Timeout)
+6398:   forward a request (see Section 18.4), the proxy MUST behave as if the
+6414:   that request as described in section 9.1).  A proxy MUST cancel any
+6428:   CANCEL.  If a matching response context is found, the element MUST
+6431:   Section 8.2.  Furthermore, the element MUST generate CANCEL requests
+6436:   knowledge of the request to apply the CANCEL to.  It MUST statelessly
+6461:   an element MUST NOT generate its own 100 (Trying) or any other
+6464:   A stateless proxy MUST validate a request as described in Section
+6467:   A stateless proxy MUST follow the request processing steps described
+6470:      o  A stateless proxy MUST choose one and only one target from the
+6471:         target set.  This choice MUST only rely on fields in the
+6473:         particular, a retransmitted request MUST be forwarded to the
+6475:         CANCEL and non-Routed ACK requests MUST generate the same
+6478:   A stateless proxy MUST follow the request processing steps described
+6488:         component of the branch parameter that makes it unique MUST be
+6490:         for a stateless proxy, the branch parameter MUST be computed as
+6518:         MUST result in the same transformation of a retransmitted
+6520:         value or pushes URIs into the Route header field, it MUST place
+6523:         MUST be based on time-invariant configuration or
+6544:   Stateless proxies MUST NOT perform special processing for CANCEL
+6561:   proxy, the proxy MUST inspect the sent-by value in the first
+6564:   the proxy MUST remove that header field value from the response and
+6566:   field value.  The proxy MUST NOT add to, modify, or remove the
+6567:   message body.  Unless specified otherwise, the proxy MUST NOT remove
+6569:   proxy, the message MUST be silently discarded.
+6985:   Figure 5.  The initial state, "calling", MUST be entered when the TU
+6987:   client transaction MUST pass the request to the transport layer for
+6989:   used, the client transaction MUST start timer A with a value of T1.
+6992:   any transport, the client transaction MUST start timer B with a value
+6995:   When timer A fires, the client transaction MUST retransmit the
+6996:   request by passing it to the transport layer, and MUST reset the
+7011:   When timer A fires 2*T1 seconds later, the request MUST be
+7013:   state).  This process MUST continue so that the request is
+7025:   described in this section MUST be used.
+7029:   has occurred.  The client transaction MUST NOT generate an ACK.  The
+7036:   request any longer. Furthermore, the provisional response MUST be
+7037:   passed to the TU.  Any further provisional responses MUST be passed
+7041:   response with status code from 300-699 MUST cause the client
+7043:   MUST pass the received response up to the TU, and the client
+7044:   transaction MUST generate an ACK request, even if the transport is
+7047:   layer for transmission.  The ACK MUST be sent to the same address,
+7068:   the "Completed" state MUST cause the ACK to be re-passed to the
+7070:   MUST NOT be passed up to the TU.  A retransmission of the response is
+7161:   state, the client transaction MUST move to the terminated state.
+7164:   2xx response MUST cause the client transaction to enter the
+7165:   "Terminated" state, and the response MUST be passed up to the TU.
+7181:   The client transaction MUST be destroyed the instant it enters the
+7199:   MUST instead follow the rules described in Section 13.
+7201:   The ACK request constructed by the client transaction MUST contain
+7205:   header field in the ACK MUST equal the To header field in the
+7208:   tag parameter.  The ACK MUST contain a single Via header field, and
+7209:   this MUST be equal to the top Via header field of the original
+7210:   request.  The CSeq header field in the ACK MUST contain the same
+7212:   but the method parameter MUST be equal to "ACK".
+7232:   header fields, those header fields MUST appear in the ACK.  This is
+7299:   MUST be passed to the transport layer for transmission.  If an
+7300:   unreliable transport is in use, the client transaction MUST set timer
+7315:   response MUST be passed to the TU, and then the client transaction
+7318:   MUST be passed to the TU, and the client transaction MUST transition
+7321:   If Timer E fires while in the "Proceeding" state, the request MUST be
+7322:   passed to the transport layer for retransmission, and Timer E MUST be
+7324:   "Proceeding" state, the TU MUST be informed of a timeout, and the
+7325:   client transaction MUST transition to the terminated state.  If a
+7327:   "Proceeding" state, the response MUST be passed to the TU, and the
+7328:   client transaction MUST transition to the "Completed" state.
+7330:   Once the client transaction enters the "Completed" state, it MUST set
+7348:   MUST transition to the "Terminated" state.
+7350:   Once the transaction is in the terminated state, it MUST be destroyed
+7477:   "Proceeding" state.  The server transaction MUST generate a 100
+7486:   The request MUST be passed to the TU.
+7490:   "Proceeding" state, each of these MUST be passed to the transport
+7495:   recent provisional response that was received from the TU MUST be
+7501:   the server transaction, the server transaction MUST pass this
+7512:   responses are handled by the TU.  The server transaction MUST then
+7517:   MUST be passed to the transport layer for transmission, and the state
+7518:   machine MUST enter the "Completed" state.  For unreliable transports,
+7525:   When the "Completed" state is entered, timer H MUST be set to fire in
+7542:   "Completed" state, the server transaction MUST transition to the
+7547:   ACK was never received.  In this case, the server transaction MUST
+7548:   transition to the "Terminated" state, and MUST indicate to the TU
+7627:   transports.  Once timer I fires, the server MUST transition to the
+7630:   Once the transaction is in the "Terminated" state, it MUST be
+7647:   to the server transaction, the server transaction MUST enter the
+7648:   "Proceeding" state.  The response MUST be passed to the transport
+7650:   received from the TU while in the "Proceeding" state MUST be passed
+7653:   recently sent provisional response MUST be passed to the transport
+7656:   transaction MUST enter the "Completed" state, and the response MUST
+7659:   When the server transaction enters the "Completed" state, it MUST set
+7662:   server transaction MUST pass the final response to the transport
+7665:   transaction MUST be discarded while in the "Completed" state.  The
+7667:   which point it MUST transition to the "Terminated" state.
+7669:   The server transaction MUST be destroyed the instant it enters the
+7916:   All SIP elements MUST implement UDP and TCP.  SIP elements MAY
+7921:      which MUST use TCP, as discussed below.  Thus, even if an element
+7935:   than 1300 bytes and the path MTU is unknown, the request MUST be sent
+7938:   one indicated in the top Via, the value in the top Via MUST be
+7941:   implementations MUST be able to handle messages up to the maximum
+7972:   A client that sends a request to a multicast address MUST add the
+7989:   Before a request is sent, the client transport MUST insert a value of
+7999:   transport MUST be prepared to receive the response on the same
+8002:   handle this case, the transport layer MUST also be prepared to
+8015:   MUST be prepared to receive incoming connections on any address and
+8019:   For unreliable unicast transports, the client transport MUST be
+8024:   elsewhere.  The client MUST be prepared to receive responses on any
+8028:   For multicast, the client transport MUST be prepared to receive
+8049:   MUST be silently discarded.
+8054:   match, the response MUST be passed to that transaction.  Otherwise,
+8055:   the response MUST be passed to the core (whether it be stateless
+8087:   that a server listens on for UDP, it MUST listen on that same port
+8096:   MUST examine the value of the "sent-by" parameter in the top Via
+8099:   from the packet source address, the server MUST add a "received"
+8100:   parameter to that Via header field value.  This parameter MUST
+8141:   order to determine where to send a response.  It MUST follow the
+8145:         TCP or SCTP, or TLS over those, the response MUST be sent using
+8159:         parameter, the response MUST be forwarded to the address listed
+8166:         has a "received" parameter, the response MUST be sent to the
+8183:      o  Otherwise, if it is not receiver-tagged, the response MUST be
+8192:   the transport packet beyond the end of the body, they MUST be
+8195:   response, it MUST be discarded.  If the message is a request, the
+8202:   Length header field MUST be used with stream oriented transports.
+8297:         present in a SIP or SIPS URI, the user field MUST NOT be empty.
+8336:         included in a URI, any given parameter-name MUST NOT appear
+8355:         (RFC 2960 [16]).  For a SIPS URI, the transport parameter MUST
+8378:         multicast packet and MUST only be used if maddr is a multicast
+8422:         MUST silently ignore any uri-parameters that they do not
+8500:      characters and characters used as URI delimiters, also MUST be
+8501:      escaped.  URIs MUST NOT contain unescaped space and control
+8505:   which characters may appear unescaped.  All other characters MUST be
+8520:   reserved characters in header field names and values MUST be escaped.
+8527:   that do not appear in an expansion of the BNF for the user rule MUST
+8534:   implementations MUST NOT attempt to improve robustness by treating
+8632:         component MUST be present in both URIs and match for the URIs
+8697:   An implementation MUST include any provided transport, maddr, ttl, or
+8699:   contains a method parameter, its value MUST be used as the method of
+8700:   the request.  The method parameter MUST NOT be placed in the
+8701:   Request-URI.  Unknown URI parameters MUST be placed in the message's
+8727:   not a valid SIP request, the URI is invalid.  An implementation MUST
+8747:   match their capabilities.  An implementation MUST NOT send a request
+8877:   response, it MUST be globally unique and cryptographically random
+8958:           transport, then the header field MUST be sent.
+8975:   header field discussed in 20.32).  A "mandatory" header field MUST be
+8976:   present in a request, and MUST be understood by the UAS receiving the
+8977:   request.  A mandatory response header field MUST be present in the
+8978:   response, and the header field MUST be understood by the UAC
+8980:   field MUST NOT be present in a request.  If one is placed in a
+8981:   request by mistake, it MUST be ignored by the UAS receiving the
+8983:   response means that the UAS MUST NOT place the header field in the
+8984:   response, and the UAC MUST ignore the header field in the response.
+8993:   contains a comma, question mark or semicolon, the URI MUST be
+9196:   All methods, including ACK and CANCEL, understood by the UA MUST be
+9198:   present.  The absence of an Allow header field MUST NOT be
+9233:   and MUST NOT be combined into a single header line using the usual
+9322:   Even if the "display-name" is empty, the "name-addr" form MUST be
+9420:   decoding mechanisms MUST be applied in order to obtain the media-type
+9426:   content codings MUST be listed in the order in which they were
+9435:   server MUST only use encodings listed in the Accept-Encoding header
+9457:   transport, the header field MUST be used.
+9462:   Content-Length header field value MUST be set to zero.
+9485:   defined in [H3.7].  The Content-Type header field MUST be present if
+9500:   number and the request method.  The sequence number MUST be
+9597:   name" is empty, the "name-addr" form MUST be used if the "addr-spec"
+9770:   list, this header field name may be present multiple times, and MUST
+9821:   Even if the "display-name" is empty, the "name-addr" form MUST be
+9833:   request.  Although an optional header field, the Require MUST NOT be
+9837:   Section 19.2.  Each option tag defines a SIP extension that MUST be
+9840:   understood.  A UAC compliant to this specification MUST only include
+9931:   compliant to this specification MUST only include option tags
+10032:   specification, the value of the branch parameter MUST start with the
+10149:          system receiving this warning MUST NOT take any automated
+10316:   recursing, and MUST NOT be cached for future transactions.
+10326:   The requested resource MUST be accessed through the proxy given by
+10329:   proxy.  305 (Use Proxy) responses MUST only be generated by UASs.
+10388:   The response MUST include an Allow header field containing a list of
+10400:   client MUST first authenticate itself with the proxy.  SIP access
+10451:   the requested method.  The server MUST return a list of acceptable
+10466:   field.  The server MUST include a list of the unsupported extensions
+10483:   Responses with this status code MUST contain a Require header field
+10556:   It MUST be possible to configure a server to respond with status 404
+10669:   header field.  If no Retry-After is given, the client MUST act as if
+10791:   authentication has been deprecated.  Servers MUST NOT accept
+10793:   MUST NOT challenge with "Basic".  This is a change from RFC 2543.
+10803:   401 (Unauthorized) responses for authentication, but proxies MUST
+10834:   received requests MUST adhere to the following guidelines for
+10837:      o  Realm strings MUST be globally unique.  It is RECOMMENDED that
+10874:   any credentials in the INVITE that were accepted by a server MUST be
+10878:   corresponds.  Servers MUST NOT attempt to challenge an ACK.
+10880:   Although the CANCEL method does take a response (a 2xx), servers MUST
+10902:   Forbidden.  A UAC MUST NOT re-attempt requests with the credentials
+10914:   The WWW-Authenticate response-header field MUST be included in 401
+10973:   it MUST increment the CSeq header field value as it would normally
+10990:   (Proxy Authentication Required) status code.  The proxy MUST populate
+10996:   described in [17], with one difference.  Proxies MUST NOT add values
+10998:   Authentication Required) responses MUST be forwarded upstream toward
+11028:   that contain the same Call-ID.  These credentials MUST NOT be cached
+11057:   Authorization header field value MUST NOT be consumed by any proxy
+11062:   used in the Proxy-Authorization header field, a proxy server MUST
+11074:   value received in responses to the forked request MUST be placed into
+11123:   SIP servers supporting RFC 2617 MUST ensure they are backwards
+11126:   servers MUST NOT accept or request Basic authentication.
+11153:          'uri' MUST be enclosed in quotation marks.
+11185:      8.  RFC 2617 notes that a cnonce value MUST NOT be sent in an
+11194:          servers MUST always send a "qop" parameter in WWW-Authenticate
+11197:          MUST send the "qop" parameter in any resulting authorization
+11212:   These mechanisms MUST be used by a server to determine if the client
+11263:   Each user agent that supports S/MIME MUST contain a keyring
+11294:   MUST contain the certificate bearing the public key necessary to
+11322:   request, the UAS MUST notify its user of the status of the
+11346:   self-signed, or signed by no known authority, the UAC MUST notify its
+11363:   the UA MUST notify its user of a change of the certificate
+11388:   key unknown to the recipient, it MUST reject the request with a 493
+11401:   "handling" parameter of "required") MUST reject the request with a
+11445:   certificates previously exchanged during a dialog, the UA MUST notify
+11455:      o  "multipart/signed" MUST be used only with CMS detached
+11491:      o  S/MIME implementations MUST at a minimum support SHA1 as a
+11588:   constitute an integrity violation; users MUST be notified of a
+11614:   encrypted body SHOULD be displayed to the user, but MUST NOT be used
+11628:   If present, the Date header field MUST always be the same in the
+11663:   MUST ignore the header field.
+11688:   bodies that require integrity protection MUST be attached to the
+11797:      be decrypted, and the "inner" From header field MUST be used as an
+12339:   insensitive.  These special characters MUST be in a quoted string to
+12449:   the user part of the SIP URI MUST be escaped.
+13350:   The TLS_RSA_WITH_AES_128_CBC_SHA ciphersuite [6] MUST be supported at
+13453:   Proxy servers, redirect servers, and registrars MUST implement TLS,
+13454:   and MUST support both mutual and one-way authentication.  It is
+13461:   elements that support TLS MUST have a mechanism for validating
+13467:   All SIP elements that support TLS MUST also support the SIPS URI
+13478:   Proxy servers, redirect servers, registrars, and UAs MUST implement
+13536:   identified by the certificate MUST correspond with the domain in
+13543:   does not identify the appropriate party, the UA MUST NOT send the
+14096:         SHOULD be no more than twenty characters long.  The name MUST
+14460:      responses from 101 to 199 upstream.  This was changed to MUST.

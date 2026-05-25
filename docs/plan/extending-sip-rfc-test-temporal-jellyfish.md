@@ -95,6 +95,23 @@ accept/reject the exclusions before any rule code is written.
   B2BUA-as-UAS/UAC, MUST-ID, RFC exception ledger; 10 new unit tests
   cover subject dispatch / severity override / per-test exceptions /
   DUT-name refusal. Full test:fake green (1510 passed, 4 skipped).
+- 2026-05-25: **Phase 1 slice 1 landed** (process doc + raw MUST
+  snapshots + manifest skeleton + RFC 3262 inventory).
+  `docs/RFC_Verification.md` (lifecycle, justification taxonomy,
+  severity model, triage policy, DUT-audit invariant, per-test
+  exception rules, ledger reading guide, helper-extraction policy,
+  "every landed rule must demonstrably fire" contract, pilot scope,
+  lessons-learned skeleton); `docs/rfc/_raw/RFC3261-musts.txt` +
+  `RFC3262-musts.txt` + `RFC3264-musts.txt` (raw
+  `grep -nE "MUST|MUST NOT|REQUIRED|SHALL"` with provenance headers —
+  IETF source URL, SHA-256, capture date); `docs/rfc/RuleManifest.md`
+  enumerating the 18 shipped peer rules + 7 shipped cross-message
+  rules + 16 planned RFC 3262 rules; `docs/rfc/RFC3262.md` full
+  inventory (30 entries — 21 `will-implement`, 6
+  `justified-not-implemented`, 3 `restatement`). Inventories for
+  RFC 3261 and RFC 3264 remain pending — they land as follow-up
+  Phase-1 PRs. Phase 2 gate stays closed until every inventory row
+  has a final classification.
 
 ## Scope decisions (locked with user)
 
