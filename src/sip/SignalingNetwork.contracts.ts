@@ -469,8 +469,10 @@ export const scopedAudit = (
             }
 
             // Residual queue depth — catches the case where the layer
-            // scope outlives a bind scope. Advisory: same false-positive
-            // risk as the per-bindUdp queueLeak above.
+            // scope outlives a bind scope with packets still queued.
+            // Post-awaitInFlight: all transit has delivered, so a
+            // non-empty queue means the receiving endpoint never
+            // drained it (real test gap, not a transit race).
             for (const { bindKey: addr, depth } of innerApi.queueDepths()) {
               if (depth === 0) continue
               const bk = laneKey(addr.ip, addr.port)
@@ -480,7 +482,7 @@ export const scopedAudit = (
                 queueDepth: depth,
                 atMs,
                 seq: allocAnomalySeq(),
-                severity: "advisory",
+                severity: "deferred-fail",
               })
             }
           }
