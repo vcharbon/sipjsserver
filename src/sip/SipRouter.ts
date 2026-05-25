@@ -754,6 +754,7 @@ export class SipRouter extends ServiceMap.Service<
               const ok = generateResponse(req, 200, "OK", {
                 toTag: newTag(),
                 extraHeaders: [{ name: "X-Overload", value: drainingValue }],
+                incomingSource: { ip: respDest.host, port: respDest.port },
               })
               yield* Effect.logDebug(
                 `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 200 (draining-new, elu=1.000)`
@@ -768,6 +769,7 @@ export class SipRouter extends ServiceMap.Service<
                 extraHeaders: [
                   { name: "X-Overload", value: overload.xOverloadHeaderValue() },
                 ],
+                incomingSource: { ip: respDest.host, port: respDest.port },
               })
               yield* Effect.logDebug(
                 `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 200 (serving, ready)`
@@ -786,6 +788,7 @@ export class SipRouter extends ServiceMap.Service<
                   { name: "Reason", value: reasonHeader },
                   { name: "X-Overload", value: overload.xOverloadHeaderValue() },
                 ],
+                incomingSource: { ip: respDest.host, port: respDest.port },
               })
               yield* Effect.logDebug(
                 `OPTIONS keepalive from ${respDest.host}:${respDest.port} → 503 (not-ready boot drain)`

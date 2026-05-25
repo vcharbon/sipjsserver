@@ -101,6 +101,27 @@ const EMPTY_RAW = Buffer.alloc(0)
 export const B2BUA_ALLOW = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, NOTIFY, PRACK"
 export const B2BUA_SUPPORTED = "100rel, timer, replaces"
 
+/**
+ * RFC 3261 §18.2.1 + RFC 3581 §4: when responding, stamp `received=`
+ * (if sent-by host differs from source) and replace any `rport` flag
+ * with `rport=<port>` on the topmost Via. Idempotent: already-populated
+ * parameters are left alone.
+ */
+function stampReceivedRportOnVia(value: string, srcIp: string, srcPort: number): string {
+  const semi = value.indexOf(";")
+  const head = semi === -1 ? value : value.slice(0, semi)
+  let params = semi === -1 ? "" : value.slice(semi)
+  const hp = head.split(" ").pop() ?? ""
+  const colon = hp.lastIndexOf(":")
+  const sentByHost = colon === -1 ? hp : hp.slice(0, colon)
+  const needReceived = sentByHost !== srcIp
+  const hasReceived = /;received=/i.test(params)
+  const rportFlag = /(^|;)rport(?=;|$)/i.test(params)
+  if (needReceived && !hasReceived) params += `;received=${srcIp}`
+  if (rportFlag) params = params.replace(/;rport(?=;|$)/i, `;rport=${srcPort}`)
+  return head + params
+}
+
 function h(name: string, value: string): SipHeader {
   return { name, value }
 }
@@ -471,6 +492,15 @@ export interface GenerateResponseOpts {
   readonly body?: Uint8Array
   readonly contentType?: string
   readonly extraHeaders?: ReadonlyArray<SipHeader>
+  /**
+   * Source (ip, port) the request arrived from. When provided, the
+   * topmost echoed Via gets `received=<ip>` (if sent-by host differs)
+   * and any `rport` flag is replaced with `rport=<port>` per RFC 3261
+   * §18.2.1 + RFC 3581 §4. Idempotent: already-populated values are
+   * left alone. Omit only when the caller has no upstream context
+   * (synthetic stack-internal responses).
+   */
+  readonly incomingSource?: { readonly ip: string; readonly port: number }
 }
 
 /**
@@ -501,9 +531,18 @@ export function generateResponse(
   // Echo every Via from the request in order — preserves the response path
   // (RFC 3261 §8.2.6.2). Request headers are stored top-down; iterate the
   // full list instead of relying on `parsed.vias` so this works for freshly
-  // constructed requests too.
+  // constructed requests too. Topmost Via gets `received=` / `rport=`
+  // stamped from `incomingSource` when provided (RFC 3261 §18.2.1 +
+  // RFC 3581 §4); subsequent Vias are echoed verbatim.
+  let stampedTopVia = false
   for (const hdr of incomingRequest.headers) {
-    if (hdr.name.toLowerCase() === "via") headers.push(h("Via", hdr.value))
+    if (hdr.name.toLowerCase() !== "via") continue
+    const value =
+      !stampedTopVia && opts.incomingSource !== undefined
+        ? stampReceivedRportOnVia(hdr.value, opts.incomingSource.ip, opts.incomingSource.port)
+        : hdr.value
+    stampedTopVia = true
+    headers.push(h("Via", value))
   }
 
   // Echo Record-Route (RFC 3261 §16.6). Only proxies add them; B2BUA just
