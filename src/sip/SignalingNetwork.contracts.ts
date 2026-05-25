@@ -449,13 +449,6 @@ export const scopedAudit = (
               })
             }
 
-            // Undelivered packets — recorded as advisory anomalies so
-            // they surface in the report without failing the scope.
-            // The fake-stack `verifyCleanState` path is the explicit
-            // assertion site for "no undeliverables expected"; tests
-            // that legitimately send to a non-existent endpoint (e.g.
-            // overload / proxy-only-fakeStack fixtures) would otherwise
-            // produce false-positive deferred-fail at scope close.
             const undelivered = yield* innerApi.drainUndeliverable()
             for (const pkt of undelivered) {
               layerAnomalies.push({
@@ -464,7 +457,7 @@ export const scopedAudit = (
                 dst: pkt.dst,
                 atMs: pkt.timestampMs,
                 seq: allocAnomalySeq(),
-                severity: "advisory",
+                severity: "deferred-fail",
               })
             }
 
