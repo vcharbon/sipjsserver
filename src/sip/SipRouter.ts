@@ -697,7 +697,7 @@ export class SipRouter extends ServiceMap.Service<
           // ── Dialog-less OPTIONS keepalive (RFC 3261 §11) ──────────────
           // The proxy front sends out-of-dialog OPTIONS to probe the worker.
           // These are infrastructure pings, not call-bound — short-circuit
-          // BEFORE call resolution so they never touch CallStateCache.
+          // BEFORE call resolution so they never touch call storage.
           //
           // Four reply shapes, all driven by `DrainingState.mode` and the
           // boot-time readiness gate (see ADR-0008):

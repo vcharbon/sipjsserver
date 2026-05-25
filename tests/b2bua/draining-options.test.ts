@@ -18,7 +18,7 @@
  * Topology: a UAC endpoint bound on the simulated UDP fabric sends an
  * out-of-dialog OPTIONS at the B2BUA's bind port. The OPTIONS short-
  * circuit in `SipRouter.withCall` picks it up before call resolution
- * (no `CallStateCache` involvement).
+ * (no call-resolution path involvement).
  */
 
 import { describe, expect, it } from "@effect/vitest"

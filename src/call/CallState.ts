@@ -5,11 +5,11 @@
  * - In-memory MutableHashMap<callRef, Call> for active/checked-out calls
  * - In-memory MutableHashMap<sipKey, callRef> for SIP message → call routing
  * - In-memory MutableHashMap<callRef, Semaphore> for per-call sequential processing
- * - CallStateCache for persistence: flush after key events, load on demand
+ * - PartitionedRelayStorage for persistence: flush after key events, load on demand
  *
- * Persistence is delegated to the CallStateCache service so the storage
+ * Persistence is delegated to the PartitionedRelayStorage service so the storage
  * substrate (Redis in production, in-memory test fake) is swappable. CallState
- * itself is the in-memory layer; CallStateCache is the cache layer.
+ * itself is the in-memory layer; PartitionedRelayStorage is the cache layer.
  *
  * Flush lifecycle:
  * 1. After /call/new response → flush initial state

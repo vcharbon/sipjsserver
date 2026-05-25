@@ -736,23 +736,15 @@ const renderDecision = (d: LimiterDecision): string =>
  *   - `decrement` — both sides run in parallel; success/failure outcome
  *     must match.
  *
- *   - `refresh` — see carve-out below.
+ *   - `refresh` — both sides run in parallel; the migrated
+ *     `currentWindow` numeric values must match. Same comparator shape
+ *     as the other Effect-returning methods. (The Tag declares
+ *     `Effect<number, RedisError>` and both impls honour it; the
+ *     memory `Effect.sync` vs Redis two-step Lua difference is an
+ *     implementation detail not observable through the typed channel.)
  *
  *   - `currentWindow` — both sides run in parallel; numeric values must
  *     match.
- *
- * `refresh` carve-out
- * -------------------
- * Per the Slice 12 handoff: the memory `refresh` is a single
- * `Effect.sync` while the Redis `refresh` runs a two-step Lua. Both
- * reach the same end state but the failure modes differ — partial
- * failure on the Redis side (e.g. crashed mid-Lua) would leave a
- * timing-divergent view that the memory side can never reproduce. The
- * parity wrapper here Effect.all's both calls in parallel and compares
- * only the FINAL return value (the migrated `newWindow`). Intermediate
- * state divergence is intentionally outside the contract — a parity
- * test that asserts a deterministic end state should drive both sides
- * past the migration point with TestClock before observing.
  *
  * On any mismatch the wrapper `Effect.die`s with a
  * `CallLimiterParityViolation` defect (matches the
@@ -894,9 +886,9 @@ export const parity = (
             }
             return returnSide === "blue" ? bExit.value : gExit.value
           }
-          // Failure-shape divergences on refresh are timing-only per the
-          // Slice 12 handoff (memory single-sync vs redis two-step Lua).
-          // We only flag outcome-tag divergence as a parity violation.
+          // Outcome-tag divergence is a parity violation; both-failed
+          // re-raises the chosen side's Cause without comparing failure
+          // shape (matches the other Effect-returning methods).
           if (bExit._tag !== gExit._tag) {
             return yield* dieWith(
               "refresh",

@@ -63,7 +63,7 @@ Tests are split into two non-mixing modes — see the matching section in the re
 
 ### Fake stack (default dev loop)
 
-Uses `TestClock` + in-memory `CallStateCache`/`CallLimiter` + simulated `SignalingNetwork` + a mock HTTP call-control backend. No real sockets, no Redis, no wall clock. Driven by the unified [vitest.config.ts](../../vitest.config.ts) under `TEST_MODE=fake` (the default).
+Uses `TestClock` + in-memory `PartitionedRelayStorage`/`CallLimiter` + simulated `SignalingNetwork` + a mock HTTP call-control backend. No real sockets, no Redis, no wall clock. Driven by the unified [vitest.config.ts](../../vitest.config.ts) under `TEST_MODE=fake` (the default).
 
 ```bash
 # All fake-stack suites (unit tests + e2e-fake-clock)

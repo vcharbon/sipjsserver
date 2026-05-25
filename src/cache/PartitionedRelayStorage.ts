@@ -20,12 +20,10 @@
  * partition path on the fly. Single index hop, single call read, no
  * proxy headers needed on the receive path.
  *
- * This service is intentionally separate from `CallStateCache` — that
- * service still owns the legacy `call:{callRef}` flat keyspace used by
- * the B2BUA's local writes. Slice 4 will migrate those writes onto
- * this partitioned storage; until then both keyspaces coexist on the
- * same Redis without conflict (`call:foo` vs `pri:A:call:foo` are
- * disjoint prefixes).
+ * This service is the only call-state storage substrate in production
+ * today. (An earlier `CallStateCache` Tag covered the legacy
+ * `call:{callRef}` flat keyspace; it was removed once Slice 4's
+ * migration to this partitioned layout completed.)
  *
  * Two implementations:
  *   - `redisLayer` (production) — backed by RedisClient

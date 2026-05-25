@@ -91,6 +91,30 @@ When designing a new wrapped Tag, add a top-of-file JSDoc to `MyService.contract
 
 When an interpreter / runner flag short-circuits multiple downstream operations (e.g. `skipFinalSweep` skips transit drain AND timer sweep AND `verifyCleanState`), reusing the flag for any *one* of those intents implicitly opts out of the others. Document the full consequence set at the gate's `if (...)` site AND at the flag's setter, and surface the explicit escape hatch (drive the skipped op manually, like `runDriveOnly` does for `transport.settle()`). See SURPRISES T13.
 
+## Planning conventions
+
+These rules apply when *drafting* a slice brief or rollout plan — before code dispatch. They exist because each was relitigated mid-slice when the brief's premise turned out to be incomplete.
+
+### Count both the exported array AND every named-import individual symbol.
+
+When migrating a "rule pack" or any aggregate (rule chain, registry, action list), the count in the plan must include both the exported array AND every individual rule imported by name elsewhere. Grep for the pack symbol AND for each named import. The aggregate-of-aggregates pattern (e.g. `rfcRules` + 7 cross-message named imports = 24 total, not 17) systematically undercounts. See SURPRISES T4.
+
+### Deletion slices require a consumer inventory in the slice brief.
+
+Before drafting a deletion slice, run `git grep -l <class-or-symbol>` and triage every consumer. Put the inventory in the slice brief, not just in the verification step. "Delete X" with only the headline file path expands scope mid-execution every time a non-headline consumer surfaces. The shape recurred twice in the wrappers initiative — `RuleEngine` (3 non-RFC families + `runDriveOnly`) and `recording.ts` (codec + YAML fixtures + `_capture.test.ts` + `fixtures/load.ts`). See SURPRISES T6 + T9.
+
+### Verify per-method result shapes across all impls before designing parity.
+
+When wrapping a Tag that has multiple impls (memory + redis, blue + green), enumerate each method and confirm both impls return *the same* `Effect<Value, Error>` shape — same value type, same typed error set, same Cause shape on failure. Method-shape divergence is a parity-killer: the comparator either special-cases the divergent method (a smell) or silently flags spurious mismatches. If divergence is genuine and intentional, document it at the Tag's method declaration with `// per-impl carve-out:` so future readers don't trust the parity assertion as exhaustive. See SURPRISES T8.
+
+### One per-Tag anomaly buffer, shared across all wrappers on that Tag.
+
+When a Tag has multiple wrappers in its stack (e.g. `paranoidInputs + scopedAudit + parity`), use ONE per-Tag anomaly buffer shared by every wrapper. Do NOT give each wrapper its own buffer + projector — that fragments the source-of-truth on the same Tag, and the first-wins projector registration silently drops the others' findings depending on stack order. Slice 8 (codec) shipped the per-wrapper pattern; Slice 10 (storage) corrected to the shared pattern; Slices 11 and 12 followed Slice 10. The canonical reference is [PartitionedRelayStorage.contracts.ts](../../../src/cache/PartitionedRelayStorage.contracts.ts)'s shared `anomalies: RecordedAnomaly[]` array. See SURPRISES T11.
+
+### Cross-reference scope-close audit docstrings against the finalizer body.
+
+When designing or auditing a `scopedAudit`'s finalizer, every invariant listed in the docstring MUST correspond to a `push(...)` call site in the finalizer body. Gaps are bugs, not features — a documented-but-unwired check creates false confidence in coverage. Reviewing a `scopedAudit`? Grep the finalizer for each documented `A_N_xxx` ID. See SURPRISES T17 (the `A3_replicationFrameLeak` doc-vapor case).
+
 ## Canonical composition: `withCanonicalContracts` + per-Tag forwarder
 
 The composition order matters and is fixed: **`propertyTest(paranoidInputs(scopedAudit(impl)))`**. Centralised in [src/test-harness/framework/effectLayerTest.ts](../../../src/test-harness/framework/effectLayerTest.ts):

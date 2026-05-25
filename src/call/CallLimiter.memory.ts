@@ -12,11 +12,12 @@
  * `Date.now()` — so the 24 h `TestClock` end-of-scenario sweep flushes
  * limiter windows.
  *
- * `memoryLayer` is wrapped in `Layer.suspend` to defer
- * `Layer.effect(CallLimiter, ...)` past this module's load phase. The
- * parent `CallLimiter.ts` imports this module from its class-static
- * initialiser; without the suspend the class reference is undefined at
- * Layer-build time. Same workaround as `CallStateCache.memory.ts`.
+ * `memoryLayer` is wrapped in `lazyEffect` (see
+ * `src/runtime/lazyEffect.ts`) to defer `Layer.effect(CallLimiter, ...)`
+ * past this module's load phase. The parent `CallLimiter.ts` imports
+ * this module from its class-static initialiser; without the lazy
+ * thunk wrapping, the class reference is undefined at Layer-build
+ * time. See SURPRISES T1.
  */
 
 import { Clock, Effect, Layer, MutableHashMap, Option } from "effect"

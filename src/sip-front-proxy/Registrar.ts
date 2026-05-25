@@ -30,9 +30,9 @@
  *     `CoreToExtRoutingStrategy.registrarLookup` are wired together at
  *     startup to form the registrar deployment.
  *
- * Pattern mirrors `CallStateCache.memoryLayer`
- * ([src/call/CallStateCache.ts:140](src/call/CallStateCache.ts#L140)) so a
- * future `Registrar.redisLayer` slot in cleanly when persistence becomes a
+ * Pattern mirrors the per-tag `memoryLayer` / `redisLayer` split used
+ * elsewhere in the repo (e.g. `CallLimiter`) so a future
+ * `Registrar.redisLayer` slots in cleanly when persistence becomes a
  * v2 requirement.
  */
 
@@ -126,8 +126,8 @@ export class Registrar extends ServiceMap.Service<Registrar, RegistrarApi>()(
   static readonly inMemoryLayer: Layer.Layer<Registrar> = Layer.effect(
     Registrar,
     Effect.gen(function* () {
-      // userpart (lowercased) → Binding. MutableHashMap matches the
-      // CallStateCache.memoryLayer pattern: hot-path map, no Ref overhead.
+      // userpart (lowercased) → Binding. MutableHashMap: hot-path map,
+      // no Ref overhead.
       const bindings = MutableHashMap.empty<string, Binding>()
 
       /**

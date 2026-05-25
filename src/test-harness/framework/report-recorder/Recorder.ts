@@ -93,7 +93,17 @@ export interface RecorderApi {
    * Register a projector for `tag`'s channel. First registration wins
    * (later registrations on the same tag are ignored). Projectors run
    * at `snapshot` time; their `Partial<RecordedScenario>` outputs are
-   * merged with the existing sipTrace/replTrace fields.
+   * merged with the existing fields.
+   *
+   * **Output shape is constrained to `RecordedScenario`.** Projector
+   * returns are merged into `RecordedScenario.{sipTrace, replTrace,
+   * anomalies}` only — other keys on the return are silently dropped.
+   * The API name implies more flexibility than it has; if you need a
+   * projection into a different shape (e.g. legacy `CallRecording`
+   * entries), keep that projector in `tests/harness/` and invoke it
+   * manually from the runner. Extending the Recorder to carry arbitrary
+   * extras is a deliberate future call — wait until a real downstream
+   * needs it. See SURPRISES T5.
    */
   readonly registerProjector: <S, E>(
     tag: ServiceMap.Key<S, any>,

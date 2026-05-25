@@ -46,114 +46,81 @@ The work landed, but several recurring patterns burned subagent cycles or sent i
 
 ## MEDIUM — single-slice friction, but real signal
 
-### T4. The `rfcRules` count was wrong in the plan from day one
+### T4. The `rfcRules` count was wrong in the plan from day one — RESOLVED 2026-05-25
 
 **Surprise:** The original plan said "17 rfcRules." Actual count: 17 base + 7 cross-message named imports = **24 total**. Discovered during the interview phase (pre-Slice 1) — but only because I happened to grep the index file. A reader trusting the plan number would have undercounted by 30%.
 
 **Time wasted:** Minor in this session (caught early). For Slice 5 the agent had to discover this AGAIN because the slice brief inherited the wrong premise; we corrected before dispatch.
 
-**Action:**
-- Add a check rule to the skill: "When migrating a rule pack, count both the exported array AND any side-imported individual rule modules. Grep for the pack symbol AND for each named import."
-- Could also be a CI/lint check: a "rule pack" type that includes all rules by construction.
-
-**Priority:** MEDIUM — caught early this time, but the same pattern (array + named imports) lives elsewhere.
+**Resolution:** Added "Count both the exported array AND every named-import individual symbol" rule under "Planning conventions" in [.claude/skills/effect-layer-test/SKILL.md](../../.claude/skills/effect-layer-test/SKILL.md). CI/lint enforcement (a "rule pack" type that includes all rules by construction) deferred — no concrete pack-shape candidate today.
 
 ---
 
-### T5. `Recorder.registerProjector` only emits into 3 pre-defined fields
+### T5. `Recorder.registerProjector` only emits into 3 pre-defined fields — RESOLVED 2026-05-25
 
 **Surprise:** Slice 0 designed `Recorder.registerProjector(tag, projector)` to support arbitrary `Partial<RecordedScenario>` outputs. But Slice 3 needed to project SipHarness events into legacy `CallRecording.entries` — a field that's NOT in `RecordedScenario` (it's in `tests/harness/recording.ts`). The projector API couldn't be used. Slice 3 had to put the projector in `tests/harness/sipHarnessProjector.ts` and call it manually from the runner, creating a `src → tests` import boundary the skill specifically tries to avoid.
 
 **Time wasted:** Slice 3 spent time on the boundary problem, settled on a transitional projector at the test-side. Slice 14 then had to delete that file as the legacy boundary collapsed.
 
-**Action:**
-- Already self-corrected via Slice 14's CallRecording deletion. But: document this limitation in the Recorder API surface itself — `registerProjector` should have a JSDoc saying "projector outputs are merged into `RecordedScenario.sipTrace`/`replTrace`/`anomalies`; if you need a different output shape, the projector belongs in `tests/harness/` and is called manually."
-- Or extend the API to support arbitrary projector outputs (write to a `RecordedScenario.extras` map keyed by Tag).
-- Recommendation: doc the limitation; don't extend the API until a real downstream needs it.
-
-**Priority:** MEDIUM — caught and worked around, but the API shape implies more flexibility than it has.
+**Resolution:** Doc fix landed on `registerProjector` in [src/test-harness/framework/report-recorder/Recorder.ts](../../src/test-harness/framework/report-recorder/Recorder.ts) — JSDoc now states outputs are merged into `RecordedScenario.{sipTrace,replTrace,anomalies}` only and points custom-shape projectors at `tests/harness/`. API extension (a `RecordedScenario.extras` map keyed by Tag) deferred per the recommendation — no real downstream needs it.
 
 ---
 
-### T6. `RuleEngine` deletion was scoped too narrowly
+### T6. `RuleEngine` deletion was scoped too narrowly — RESOLVED 2026-05-25
 
 **Surprise:** Slice 6 was billed as "delete the old RFC runner." But `RuleEngine` has THREE non-RFC consumers (`call-shape`, `cross-call`, `service-case` rule.test.ts files) PLUS `runner.ts:runDriveOnly`. Slice 6 kept the class alive; Slice 14 had to revisit and chose Path B (keep RuleEngine permanently for these families).
 
 **Time wasted:** Slice 14 spent significant cycles inventorying which consumers needed migration. The original plan called this slice "irreversible" but it ended up being "narrow + carve-out."
 
-**Action:**
-- Before drafting a deletion slice, run `git grep -l <class-or-symbol-to-delete>` and triage consumers FIRST. Add the inventory to the slice brief, not just to the verification step.
-- Add to skill / planning guide: "Deletion slices must include a consumer-inventory section in the plan, not just a 'delete X' bullet."
-
-**Priority:** MEDIUM — the same shape will surface in any future deletion-slice planning.
+**Resolution:** Resolved alongside T9 — both stemmed from the same "headline file path only" deletion-brief shape. SKILL.md "Planning conventions" now requires a `git grep -l` consumer inventory in every deletion slice brief.
 
 ---
 
-### T7. CallStateCache has no production consumer — was it worth wrapping?
+### T7. CallStateCache has no production consumer — RESOLVED 2026-05-25
 
 **Surprise:** Slice 11 produced a full contracts file (720 LOC), 4 propertyTest + 4 paranoid + 3 audit invariants. Then the slice plan noted: `CallStateCache` has no production consumer in the B2BUA stack (CallState uses `PartitionedRelayStorage` instead). The wrapped layer's only exercise is the per-Tag unit-of-layer tests we created in the same slice.
 
 **Time wasted:** Arguably the entire Slice 11. If CallStateCache is unused, why wrap it? If we're keeping it for a planned future use, where's the ADR for that use?
 
-**Action:**
-- Decide: delete `CallStateCache` if truly dead code, OR write an ADR explaining what it's reserved for. Today it's wrapper'd-and-tested but exercises zero real call paths.
-- This is a CODEBASE hygiene issue, not a wrapper-initiative issue. But the wrappers made the dead-code more visible.
-
-**Priority:** MEDIUM — clean it up or document it.
+**Resolution:** Delete chosen after `git grep` confirmed zero production consumers (the `CallStateCacheLayer` variable in `src/main.ts` is misleadingly named — it actually wraps `PartitionedRelayStorage.redisLayer`). Removed: `src/call/CallStateCache.{ts,memory.ts,redis.ts,contracts.ts}` (~1365 LOC), the `callStateCache` entry in `tests/support/testLayers.ts`, and the wiring in `tests/support/stackLayer.ts` (both fake and live stacks). `tests/support/cache-and-limiter.test.ts` retained — it tests `CallLimiter` + `PartitionedRelayStorage` (the filename predates the file's current content). Lingering `CallStateCache` references in `src/` docstrings scrubbed. 1467 tests pass.
 
 ---
 
-### T8. CallLimiter `refresh` method-shape divergence between impls
+### T8. CallLimiter `refresh` method-shape divergence between impls — RESOLVED 2026-05-25
 
 **Surprise:** Memory impl returns `refresh` as a single `Effect.sync`; Redis impl returns it as a two-step Lua eval (acquire-old-window + set-new-window). Slice 13 parity had to add a comparator carve-out: compare only the final returned `newWindow`, not intermediate shapes.
 
 **Time wasted:** Slice 13's parity handler had to special-case `refresh` and document the carve-out. The shape divergence is the kind of thing that should have been called out by `Tag` typing — if the service's contract is "Effect<Success | Failure>", both impls must satisfy that contract identically.
 
-**Action:**
-- Audit the `CallLimiter` service interface: do the memory and redis impls actually return *the same shape* for `refresh`? If not, the Tag's type is loose. Tighten it.
-- Add to skill: "When wrapping a Tag with multiple impls, list and verify the result-shape per method across impls before designing `parity`. Method-shape divergence is a parity-killer."
-
-**Priority:** MEDIUM — caught and documented, but the same risk lives in every multi-impl layer.
+**Resolution:** Audit found the Tag's `refresh: (limiterId, originWindow) => Effect<number, RedisError>` is already exact and both impls honour it. The "carve-out" lived only in the parity docstring, never in code — the parity comparator handles `refresh` identically to the other Effect-returning methods (compare returned `newWindow` on dual success; flag outcome-tag divergence; don't deep-compare on dual fail). Dropped the misleading "carve-out" framing from the parity docstring and the matching in-method comment in [src/call/CallLimiter.contracts.ts](../../src/call/CallLimiter.contracts.ts). Added "Verify per-method result shapes across all impls before designing parity" to SKILL.md "Planning conventions" so the next multi-impl Tag dodges the same trap. No code-behaviour change.
 
 ---
 
-### T9. Slice 14 discovered 4 extra `recording.ts` consumers not in the plan
+### T9. Slice 14 discovered 4 extra `recording.ts` consumers not in the plan — RESOLVED 2026-05-25
 
 **Surprise:** The plan listed `recording.ts` + `recording-extractor.ts` for Slice 14 deletion. Actual: `recording-codec.ts`, `recording-codec.test.ts`, `_capture.test.ts`, `fixtures/load.ts` (+ a YAML fixture). Slice 14 had to discover and handle all of them.
 
 **Time wasted:** Maybe 30 minutes of subagent discovery time. The plan's inventory was incomplete.
 
-**Action:**
-- Same fix as T6: plan deletion slices with a full `git grep` consumer inventory in the slice brief, not just the headline file path.
-- This time the consumer set was wider than expected because the legacy `CallRecording` had an entire serialization sub-system (codec + YAML fixtures) that wasn't mentioned in the plan.
-
-**Priority:** MEDIUM — same root cause as T6.
+**Resolution:** Resolved alongside T6 — same root cause, same SKILL.md "Planning conventions" rule.
 
 ---
 
 ## LOW — cosmetic / process
 
-### T10. CLAUDE.md doesn't mention the test-layer library convention prominently
+### T10. CLAUDE.md doesn't mention the test-layer library convention prominently — RESOLVED 2026-05-25
 
 **Surprise:** The shared `tests/support/testLayers.ts` bundle hub was the key piece that kept slices 4–14 from each rewriting Recorder+RunContext wiring. But CLAUDE.md (after the Slice 0 rephrase) only mentions it in one line at the bottom of the test-structure section. Future test authors will probably miss it and reach for `Layer.merge` chains.
 
-**Action:**
-- Promote the testLayers.ts mention to its own bullet under "## test strategy" in CLAUDE.md.
-- Add an example invocation: `Effect.provide(testLayers.stacks.fake({ config }))`.
-
-**Priority:** LOW — discoverable from the file, but the convention deserves more emphasis.
+**Resolution:** Promoted `tests/support/testLayers.ts` to its own paragraph under "## Test structure" in [CLAUDE.md](../../CLAUDE.md) with an example invocation. `stackLayer` kept in the preceding sentence but `testLayers` is now the headline shelf.
 
 ---
 
-### T11. Slices kept reinventing the per-Tag anomaly buffer pattern
+### T11. Slices kept reinventing the per-Tag anomaly buffer pattern — RESOLVED 2026-05-25
 
 **Surprise:** Codec (Slice 8) used per-wrapper projectors. Storage (Slice 10) used a single shared per-Tag buffer (Slice 8's handoff caught the codec divergence). CallStateCache (Slice 11) and CallLimiter (Slice 12) followed Slice 10's pattern. But the skill didn't document which pattern wins.
 
-**Action:**
-- Add to [.claude/skills/effect-layer-test/SKILL.md](../../.claude/skills/effect-layer-test/SKILL.md): "When a Tag has multiple wrappers (e.g., paranoidInputs + scopedAudit + parity), use ONE per-Tag anomaly buffer shared across wrappers. Do not give each wrapper its own buffer + projector — that fragments the source-of-truth at the same Tag."
-- Reference Slice 8's mistake → Slice 10's correction as the canonical example.
-
-**Priority:** LOW — pattern is now consistent; doc fix prevents re-litigation.
+**Resolution:** Added "One per-Tag anomaly buffer, shared across all wrappers on that Tag" rule to SKILL.md "Planning conventions" with the Slice 8 → Slice 10 cross-reference and a pointer to `PartitionedRelayStorage.contracts.ts` as the canonical reference.
 
 ---
 
@@ -213,17 +180,13 @@ The wrong cite propagated to `slice-12.md`, `slice-13.md`, the master plan row 1
 
 ---
 
-### T17. Documented-but-unimplemented invariants ("doc vapor")
+### T17. Documented-but-unimplemented invariants ("doc vapor") — RESOLVED 2026-05-25
 
 **Surprise:** Investigating PartitionedRelayStorage A3 per the followup handoff (which listed `A3_replicationFrameLeak` as a live advisory needing promotion): the rule is documented in [PartitionedRelayStorage.contracts.ts:619-622](../../src/cache/PartitionedRelayStorage.contracts.ts#L619-L622)'s docstring but **the finalizer body only checks A1 and A2**. A3 was never wired in. The handoff treated it as a live audit because it appeared in the docstring; the actual check site shows otherwise.
 
 **Time wasted:** A subagent could have spent significant time investigating "why doesn't A3 ever fire?" before noticing it isn't wired. We caught it within minutes by skimming the finalizer body, but the trap is set for the next agent.
 
-**Action:**
-- When designing or auditing a scope-close audit, cross-reference the docstring's listed invariants against the actual `push(...)` call sites in the finalizer body. Gaps are bugs, not features.
-- Decide for A3 specifically: implement it or remove the docstring mention. Today it's pure vapor.
-
-**Priority:** MEDIUM — false confidence in coverage is worse than known uncovered.
+**Resolution:** Removed `A3_replicationFrameLeak` from the [PartitionedRelayStorage.contracts.ts](../../src/cache/PartitionedRelayStorage.contracts.ts) scopedAudit docstring with an inline note explaining the absence (no production producer to audit against today; reinstate alongside any future puller-side producer). Added "Cross-reference scope-close audit docstrings against the finalizer body" rule to SKILL.md "Planning conventions".
 
 ---
 
@@ -234,21 +197,21 @@ The wrong cite propagated to `slice-12.md`, `slice-13.md`, the master plan row 1
 | T1 | `Layer.suspend` TDZ workaround undocumented | **RESOLVED 2026-05-25** (helper landed; doc updates outstanding) | — | See entry |
 | T2 | Recorder+RunContext production footgun | **RESOLVED 2026-05-25** | — | See entry |
 | T3 | `forkDetach` makes Slice 4 invariants hollow | **RESOLVED 2026-05-25** (commits `3f0bdc38`, `0343c416`, `814217c1`) | — | See entry |
-| T4 | rfcRules count was wrong in plan | open | MEDIUM | SKILL.md planning checklist |
-| T5 | `registerProjector` API is narrower than it looks | open | MEDIUM | Recorder.ts JSDoc |
-| T6 | RuleEngine deletion scope too narrow | open | MEDIUM | Planning convention |
-| T7 | CallStateCache has no production consumer | open | MEDIUM | Codebase hygiene (delete or ADR) |
-| T8 | CallLimiter `refresh` shape divergence | open | MEDIUM | Tag interface tightening |
-| T9 | recording.ts consumer set wider than plan | open | MEDIUM | Planning convention (same as T6) |
-| T10 | testLayers convention buried in CLAUDE.md | open | LOW | CLAUDE.md emphasis |
-| T11 | Per-Tag anomaly buffer pattern was relitigated | open | LOW | SKILL.md guidance |
+| T4 | rfcRules count was wrong in plan | **RESOLVED 2026-05-25** (SKILL.md planning convention) | — | See entry |
+| T5 | `registerProjector` API is narrower than it looks | **RESOLVED 2026-05-25** (Recorder.ts JSDoc) | — | See entry |
+| T6 | RuleEngine deletion scope too narrow | **RESOLVED 2026-05-25** (SKILL.md planning convention) | — | See entry |
+| T7 | CallStateCache has no production consumer | **RESOLVED 2026-05-25** (delete — ~1365 LOC removed) | — | See entry |
+| T8 | CallLimiter `refresh` shape divergence | **RESOLVED 2026-05-25** (docstring fix; Tag was already exact) | — | See entry |
+| T9 | recording.ts consumer set wider than plan | **RESOLVED 2026-05-25** (same as T6) | — | See entry |
+| T10 | testLayers convention buried in CLAUDE.md | **RESOLVED 2026-05-25** (CLAUDE.md "## Test structure") | — | See entry |
+| T11 | Per-Tag anomaly buffer pattern was relitigated | **RESOLVED 2026-05-25** (SKILL.md planning convention) | — | See entry |
 | T12 | Silent external plan edits | open | LOW | Workflow note |
 | T13 | `skipFinalSweep` conflates two intents | **RESOLVED 2026-05-25** (doc-only; phase split rejected as over-engineering) | — | See entry |
 | T14 | `Effect.sleep` hangs inside layer-close finalizers under fake-clock | **RESOLVED 2026-05-25** | — | See entry |
 | T15 | `Effect.async` → `Effect.callback` v4 rename trap | **RESOLVED 2026-05-25** | — | See entry |
 | T16 | Wrong ADR cite propagated through code + plans + handoff | **RESOLVED 2026-05-25** (commit `ec69098f`) | — | See entry |
-| T17 | Documented-but-unimplemented invariants ("doc vapor") | open | MEDIUM | SKILL.md audit-design rule + decide A3 |
+| T17 | Documented-but-unimplemented invariants ("doc vapor") | **RESOLVED 2026-05-25** (A3 removed from docstring + SKILL.md rule) | — | See entry |
 
-**All HIGH-priority items now RESOLVED.** Initiative delivered: original blockers T1/T2/T3 closed; session-discovered T13/T14/T15/T16 closed; T17 documented and pending an A3 decision. The wrapper initiative is now delivering enforcement — promoting four signaling audits surfaced three real B2BUA defects (see top of doc), validating the design.
+**All HIGH- and MEDIUM-priority items now RESOLVED.** Initiative fully delivered: HIGH blockers T1/T2/T3 closed; session-discovered T13/T14/T15/T16 closed; MEDIUM items T4/T5/T6/T7/T8/T9/T10/T11/T17 closed in the 2026-05-25 follow-up pass. The wrapper initiative is delivering enforcement — promoting four signaling audits surfaced three real B2BUA defects (see top of doc), validating the design.
 
-Remaining MEDIUM-priority items (T4, T5, T6, T7, T8, T9, T11, T17) are doc-only or codebase-hygiene tasks with no immediate blocker. LOW items (T10, T12) are workflow polish.
+The only remaining item is **T12** (silent external plan edits — a workflow note about how the orchestration loop ran, not a code or doc fix).

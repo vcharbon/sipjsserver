@@ -625,10 +625,15 @@ export interface ScopedAuditOptions {
  *   - **A2_scanCursorLeak** — scanCalls streamStart without streamEnd.
  *     Surfaces partial cursor drains where a fiber was interrupted
  *     mid-walk.
- *   - **A3_replicationFrameLeak** — repl.frameReceived events recorded
- *     after a scope-close marker (the layer-close finalizer runs while
- *     a puller fiber is still draining). Advisory — the puller is a
- *     forked sibling.
+ *
+ * No A3 today: replication-frame events flow from a puller fiber
+ * outside this layer's scope, and there's no production producer to
+ * audit against. A previous draft documented `A3_replicationFrameLeak`;
+ * it was never wired and was removed to avoid false confidence in
+ * coverage. If a real puller-side producer ever lands, add A3 alongside
+ * the producer (cross-reference SURPRISES T17 and the SKILL.md
+ * "Cross-reference scope-close audit docstrings against the finalizer
+ * body" rule before doing so).
  */
 export const scopedAudit = (
   inner: Layer.Layer<PartitionedRelayStorage>,

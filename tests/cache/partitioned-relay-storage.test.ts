@@ -3,7 +3,7 @@
  *
  * Slice 3 of the HA-resilience plan. Verifies:
  *   - put/refresh/delete/scan round-trip
- *   - TTL expiry under TestClock (matches `CallStateCache.memoryLayer` semantics)
+ *   - TTL expiry under TestClock
  *   - partition isolation (`pri:A:` writes do not leak into `bak:A:` scan, etc.)
  *   - refresh is a no-op on missing entries
  *

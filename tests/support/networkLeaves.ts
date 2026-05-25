@@ -11,7 +11,7 @@
  *   - `b2buaWorkerStackLayer({ config })` — full B2BUA services
  *     (`SipRouter`, `TransactionLayer`, `CallState`, `TimerService`,
  *     `SipParser`, plus `UdpTransport`, `OverloadController`,
- *     `CallLimiter`, `CallStateCache`, `MockCallControlLayer`, no-op
+ *     `CallLimiter`, `MockCallControlLayer`, no-op
  *     tracing/CDR, `MetricsRegistry`, `AppConfig`, `DrainingState.test`).
  *   - `proxyStackLayer({ proxyAddr, workers, ... })` — full proxy
  *     services (`ProxyCore`, `LoadBalancerStrategyLive`,
@@ -110,7 +110,7 @@ export const DEFAULT_HMAC_KEY: HmacKey = {
  * Output Layer requires `SignalingNetwork`; provides every service the
  * B2BUA needs (`SipRouter`, `CallState`, `TransactionLayer`,
  * `TimerService`, `SipParser`, `UdpTransport`, `OverloadController`,
- * `CallLimiter`, `CallStateCache`, `MockCallControl`, `TracingService`,
+ * `CallLimiter`, `MockCallControl`, `TracingService`,
  * `CdrWriter`, `MetricsRegistry`, `AppConfig`, `DrainingState`).
  *
  * The `MockCallControlLayer` wires `AppConfig` for the B.7 translate

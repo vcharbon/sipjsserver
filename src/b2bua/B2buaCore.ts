@@ -22,7 +22,7 @@
  *   - AppConfig
  *   - UdpTransport (real UDP / IPC / mock queue)
  *   - OverloadController (shared with CallDecisionEngine adapters and UdpTransport)
- *   - CallStateCache (Redis / in-memory)
+ *   - PartitionedRelayStorage (Redis / in-memory)
  *   - CallLimiter (Redis / mock)
  *   - CallDecisionEngine (HTTP reference adapter / mock)
  *   - TracingService (OTel / noop)

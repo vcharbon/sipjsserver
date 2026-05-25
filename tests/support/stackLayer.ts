@@ -17,8 +17,8 @@
  *       (real UDP isn't audited the same way — `realTracing` retains
  *       Buffer payloads so reports render hop-by-hop).
  *   - `UdpTransport` bound on the network.
- *   - `CallStateCache`, `CallLimiter`, call-control, tracing, CDR — fake
- *       uses memory/mock/no-op; live uses redis-backed services.
+ *   - `CallLimiter`, call-control, tracing, CDR — fake uses
+ *       memory/mock/no-op; live uses redis-backed services.
  *   - `OverloadController`, `B2buaCoreLayer` (`SipRouter`,
  *       `TransactionLayer`, `CallState`, `TimerService`, `SipParser`).
  *
@@ -51,8 +51,6 @@ import {
   type ScopedAuditOptions as SignalingNetworkScopedAuditOptions,
 } from "../../src/sip/SignalingNetwork.contracts.js"
 import { withAllContracts as withPartitionedRelayStorageContracts } from "../../src/cache/PartitionedRelayStorage.contracts.js"
-import { CallStateCache } from "../../src/call/CallStateCache.js"
-import { withAllContracts as withCallStateCacheContracts } from "../../src/call/CallStateCache.contracts.js"
 import { TracingService } from "../../src/tracing/TracingService.js"
 import { TracerHealthSignal } from "../../src/observability/tracer-health.js"
 import { UdpTransport } from "../../src/sip/UdpTransport.js"
@@ -190,30 +188,6 @@ function buildFake(opts: FakeModeOpts) {
     )
   })()
 
-  // CallStateCache wrapper. The Tag has no production consumers in the
-  // stack today (CallState uses PartitionedRelayStorage), but `stackLayer`
-  // exposes the wrapped Layer so unit-of-layer fixtures and ad-hoc tests
-  // pull from the canonical contract-wrapped composition.
-  const CallStateCacheLayer = (() => {
-    const raw = CallStateCache.memoryLayer
-    if (perfMode === "baseline") return raw
-    const wrapped = withCallStateCacheContracts(raw, {
-      propertyTest: perfMode === "no-audit" ? { properties: false } : {},
-      paranoidInputs: perfMode !== "no-audit",
-      scopedAudit:
-        perfMode === "no-audit"
-          ? {
-              checkNoOrphanKeys: false,
-              checkNoDanglingIndexes: false,
-              checkNoTombstoneResurrection: false,
-            }
-          : true,
-    })
-    return wrapped.pipe(
-      Layer.provide(Layer.mergeAll(RecorderLayer, RunContextLayer)),
-    )
-  })()
-
   // CallLimiter wrapper. ADR-0004's counter-back-to-zero invariant is
   // enforced at scope close. `baseline` skips wrappers entirely;
   // `no-audit` keeps recording but disables both audit invariants so
@@ -244,7 +218,6 @@ function buildFake(opts: FakeModeOpts) {
   }).pipe(
     Layer.provideMerge(NetworkLayer),
     Layer.provideMerge(SipHarnessLayer),
-    Layer.provideMerge(CallStateCacheLayer),
     Layer.provideMerge(RecorderLayer),
     Layer.provideMerge(RunContextLayer),
   )
@@ -301,22 +274,6 @@ function buildLive(opts: LiveModeOpts) {
     scopedAudit: true,
   }).pipe(Layer.provide(Layer.mergeAll(RecorderLayer, RunContextLayer)))
 
-  // CallStateCache (Redis-backed) wrapped with contracts in live mode
-  // too. No production consumer in the stack, but exposed for
-  // symmetry with the fake stack so unit-of-layer fixtures can pull
-  // the canonical composition regardless of mode.
-  const CallStateCacheCacheLayer = withCallStateCacheContracts(
-    CallStateCache.redisLayer,
-    {
-      propertyTest: {},
-      paranoidInputs: true,
-      scopedAudit: true,
-    },
-  ).pipe(
-    Layer.provide(RedisLayer),
-    Layer.provide(Layer.mergeAll(RecorderLayer, RunContextLayer)),
-  )
-
   const UdpLayer = UdpTransport.layer.pipe(
     Layer.provide(AppConfigLayer),
     Layer.provide(MetricsLayer),
@@ -355,7 +312,6 @@ function buildLive(opts: LiveModeOpts) {
     Layer.provideMerge(UdpLayer),
     Layer.provideMerge(OverloadLayer),
     Layer.provideMerge(CallStateCacheLayer),
-    Layer.provideMerge(CallStateCacheCacheLayer),
     Layer.provideMerge(BufferedTerminateL),
     Layer.provideMerge(CallLimiterLayer),
     Layer.provideMerge(CallControlLayer),

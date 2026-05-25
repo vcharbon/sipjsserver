@@ -14,7 +14,6 @@ import { Recorder } from "../../src/test-harness/framework/report-recorder/Recor
 import { RunContext } from "../../src/test-harness/framework/RunContext.js"
 import { SipHarness } from "../../src/test-harness/framework/SipHarness.js"
 import { withAllContracts as withPartitionedRelayStorageContracts } from "../../src/cache/PartitionedRelayStorage.contracts.js"
-import { withAllContracts as withCallStateCacheContracts } from "../../src/call/CallStateCache.contracts.js"
 import {
   withAllContracts as withCallLimiterContracts,
   parity as callLimiterParity,
@@ -49,7 +48,6 @@ const recorder = {
 // Populated as wrapper slices land.
 const contracts = {
   partitionedRelayStorage: withPartitionedRelayStorageContracts,
-  callStateCache: withCallStateCacheContracts,
   callLimiter: withCallLimiterContracts,
   /**
    * CallLimiter parity bundle — composes `parity(memory, redis)` first,

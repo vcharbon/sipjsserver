@@ -57,7 +57,18 @@ Default: fake (`it.effect` + TestClock + in-memory deps + simulated `SignalingNe
 
 **Mixing is allowed but dangerous.** TestClock advances on yield; real-delay fibers advance on wall time. Pairing them races. If you must mix: use `it.live`, annotate `/* MIXED CLOCK: <what> — <why> */`, minimise the real-delay surface, and prefer a `Clock.currentTimeMillis`-backed fake.
 
-Shared: `tests/scenarios/` (DSL), `tests/support/stackLayer.ts` (`stackLayer({ mode })`), `tests/support/testLayers.ts` (pre-composed bundles — RunContext, Recorder, contract wrappers; pull from here, not ad-hoc `Layer.merge`).
+Shared: `tests/scenarios/` (DSL), `tests/support/stackLayer.ts` (`stackLayer({ mode })`).
+
+**`tests/support/testLayers.ts` is the single shelf for test-layer bundles.** Pull RunContext, Recorder, per-Tag contract wrappers, and pre-composed stacks from here — never compose them ad-hoc with `Layer.merge` in a test file. Example:
+
+```ts
+import { testLayers } from "../support/testLayers.js"
+
+it.effect("scenario", () =>
+  Effect.gen(function* () { /* ... */ })
+    .pipe(Effect.provide(testLayers.stacks.fake({ config })))
+)
+```
 
 ## Planning discipline
 

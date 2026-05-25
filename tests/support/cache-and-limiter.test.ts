@@ -1,6 +1,6 @@
 /**
- * Tests for the in-memory service layer variants (`CallLimiter.memoryLayer`,
- * `CallStateCache.memoryLayer`).
+ * Tests for the in-memory service layer variants — `CallLimiter.memoryLayer`
+ * plus `PartitionedRelayStorage.memoryLayer` driven through `CallState`.
  *
  * These tests run under @effect/vitest's TestClock so window rollover and
  * cache TTL expiration can be advanced deterministically without sleeping.

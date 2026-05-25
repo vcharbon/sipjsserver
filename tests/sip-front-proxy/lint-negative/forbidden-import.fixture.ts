@@ -12,7 +12,7 @@
 // `src/sip-front-proxy/**` (see `forbidden-import.test.ts`).
 
 import "src/b2bua/B2buaCore"
-import "src/call/CallStateCache"
+import "src/call/CallState"
 import "src/redis/RedisClient"
 
 export const FIXTURE_MARKER = "forbidden-import"
