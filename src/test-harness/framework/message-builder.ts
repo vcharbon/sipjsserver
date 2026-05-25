@@ -38,13 +38,6 @@ export interface AgentDialogState {
   /** Highest CSeq received from the remote party. Undefined until first message received. */
   remoteCSeq: number | undefined
   /**
-   * Baseline CSeq of the INVITE this agent *received* on a given Call-ID.
-   * Populated only on receive (see interpreter.ts) and used by the CSeq
-   * validator to check that peer in-dialog requests start at baseline + 1.
-   * Not used for outbound CSeq generation — see sentInviteCSeqByCallId.
-   */
-  inviteCSeqByCallId: Map<string, number>
-  /**
    * Baseline CSeq of the INVITE this agent *sent* on a given Call-ID. Set
    * once when the initial INVITE is built and never rewritten. Seeds the
    * per-dialog UAC counters so forked early dialogs all start from the same
@@ -152,7 +145,6 @@ export function createAgentDialogState(localIp: string): AgentDialogState {
     localTags: new Set([tag]),
     remoteTag: "",
     remoteCSeq: undefined,
-    inviteCSeqByCallId: new Map(),
     sentInviteCSeqByCallId: new Map(),
     outOfDialogCSeq: new Map(),
     remoteCSeqByDialog: new Map(),

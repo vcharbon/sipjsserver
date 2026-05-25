@@ -1543,14 +1543,6 @@ function updateDialogState(ds: AgentDialogState, msg: SipMessage): void {
       ds.remoteCSeq = cseqNum
     }
 
-    // Capture INVITE baseline per Call-ID (RFC 3261 §12.2.1.1 baseline
-    // for all dialogs — forked early dialogs share this baseline).
-    if (msg.method === "INVITE") {
-      if (!ds.inviteCSeqByCallId.has(callIdHeader)) {
-        ds.inviteCSeqByCallId.set(callIdHeader, cseqNum)
-      }
-    }
-
     // Per-dialog CSeq tracking — skip CANCEL/ACK (they reuse INVITE CSeq)
     // and messages without a full tag pair (out-of-dialog).
     if (msg.method !== "CANCEL" && cseqMethod !== "ACK") {

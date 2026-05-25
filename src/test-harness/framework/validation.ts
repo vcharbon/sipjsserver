@@ -155,15 +155,26 @@ function dialogKey(msg: SipMessage): string | undefined {
  * CSeq validation.
  *
  * Received requests:
- *   - CANCEL/ACK: CSeq number must match the pending INVITE's CSeq
- *   - In-dialog (has both tags): CSeq must be strictly monotonic per dialog
- *     (first request in dialog = INVITE baseline + 1; subsequent = prev + 1).
- *     Forked early dialogs each have their own sequence (RFC 3261 §12.2.1.1).
- *   - Out-of-dialog (no tag pair, e.g. initial INVITE): any value accepted.
  *   - CSeq method field must match the request method.
+ *   - CANCEL/ACK: CSeq number must match the CSeq of *some* received
+ *     INVITE in the dialog (RFC 3261 §13.2.2.4 / §9.1). The match is by
+ *     CSeq number, not by recency — an ACK for the initial INVITE 200
+ *     can legitimately arrive after a re-INVITE has been issued.
+ *   - In-dialog (has both tags): CSeq must be strictly monotonic per
+ *     dialog tuple. The first message in a given (Call-ID, local-tag,
+ *     remote-tag) tuple establishes the tuple's baseline; subsequent
+ *     in-dialog requests must be `prior + 1`. A repeated request with
+ *     the same CSeq is treated as a retransmission and accepted (RFC
+ *     3261 §17.2). Forked early dialogs and bogus-dialog probes each
+ *     get their own independent baseline — one Call-ID can carry
+ *     multiple unrelated dialog tuples (forks, bogus probes) whose
+ *     CSeq spaces are independent, so the per-tuple baseline is the
+ *     only safe anchor.
+ *   - Out-of-dialog (no tag pair, e.g. initial INVITE): any value
+ *     accepted.
  *
  * Received responses:
- *   - CSeq number+method must match the correlated sent request
+ *   - CSeq number+method must match the correlated sent request.
  */
 function validateCSeq(
   msg: SipMessage,
@@ -182,41 +193,39 @@ function validateCSeq(
     }
 
     if (msg.method === "CANCEL" || msg.method === "ACK") {
-      // CANCEL and ACK must reuse the INVITE's CSeq number.
-      // Both may arrive after the INVITE already has a final response
-      // (ACK for 2xx, or CANCEL crossing with a final response),
-      // so search all INVITEs regardless of finalResponseSent.
-      // Use findLast to match the most recent INVITE (handles re-INVITEs).
-      const pendingInvite = dialogState.pendingRequests.findLast(
-        (p) => p.method === "INVITE"
-      )
-      if (pendingInvite && cseq.seq !== pendingInvite.cseqNumber) {
+      // ACK/CANCEL reuses an INVITE's CSeq number. Match by CSeq value
+      // against any received INVITE in this dialog, not by recency —
+      // a late ACK for the initial 200 can arrive after a re-INVITE.
+      const inviteCSeqs = dialogState.pendingRequests
+        .filter((p) => p.method === "INVITE")
+        .map((p) => p.cseqNumber)
+      if (inviteCSeqs.length > 0 && !inviteCSeqs.includes(cseq.seq)) {
         errors.push(
-          `CSeq number mismatch: ${msg.method} has CSeq ${cseq.seq} but INVITE had ${pendingInvite.cseqNumber}`
+          `CSeq number ${cseq.seq} on ${msg.method} does not match any ` +
+          `received INVITE CSeq (saw [${inviteCSeqs.join(", ")}]) — ` +
+          `RFC 3261 §13.2.2.4 / §9.1 (ACK/CANCEL reuses the originating ` +
+          `INVITE's CSeq number).`
         )
       }
     } else {
       const key = dialogKey(msg)
       if (key !== undefined) {
-        const callId = msg.getHeader("call-id")
         const prior = dialogState.remoteCSeqByDialog.get(key)
-        const baseline = dialogState.inviteCSeqByCallId.get(callId)
-        const expected = prior !== undefined
-          ? prior + 1
-          : baseline !== undefined
-            ? baseline + 1
-            : undefined
-        if (expected !== undefined && cseq.seq !== expected) {
-          const anchor = prior !== undefined
-            ? `prior in-dialog CSeq ${prior}`
-            : `INVITE baseline ${baseline}`
-          errors.push(
-            `Per-dialog CSeq out of sequence for ${msg.method} (dialog ${key}): ` +
-            `expected ${expected} (${anchor} + 1) but got ${cseq.seq} — ` +
-            `RFC 3261 §12.2.1.1 (CSeq is scoped to the dialog; forked early dialogs ` +
-            `each maintain an independent sequence).`
-          )
+        if (prior !== undefined) {
+          // Retransmission of the most recent in-dialog request is OK.
+          if (cseq.seq !== prior && cseq.seq !== prior + 1) {
+            errors.push(
+              `Per-dialog CSeq out of sequence for ${msg.method} (dialog ${key}): ` +
+              `expected ${prior + 1} (prior in-dialog CSeq ${prior} + 1) or ` +
+              `${prior} (retransmission) but got ${cseq.seq} — ` +
+              `RFC 3261 §12.2.1.1.`
+            )
+          }
         }
+        // No prior in this tuple → first message in a new dialog tuple
+        // establishes the baseline. trackReceived sets
+        // remoteCSeqByDialog[key] = cseq.seq, so the next message in
+        // this tuple anchors on this value.
       } else if (dialogState.remoteCSeq !== undefined && cseq.seq !== dialogState.remoteCSeq + 1) {
         // Out-of-dialog fallback (no tag pair): retain legacy single-counter check.
         errors.push(

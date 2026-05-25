@@ -159,11 +159,6 @@ function trackReceived(ds: AgentDialogState, msg: SipMessage): void {
     if (ds.remoteCSeq === undefined || cseqNum > ds.remoteCSeq) {
       ds.remoteCSeq = cseqNum
     }
-    if (msg.method === "INVITE") {
-      if (!ds.inviteCSeqByCallId.has(callIdHeader)) {
-        ds.inviteCSeqByCallId.set(callIdHeader, cseqNum)
-      }
-    }
     if (msg.method !== "CANCEL" && cseqMethod !== "ACK") {
       const fromTag = msg.getHeader("from").tag
       const toTag = msg.getHeader("to").tag
@@ -244,6 +239,28 @@ const makeCheckRule = (
         return ds
       }
 
+      // Pre-compute branch → final-response-status for sent responses,
+      // so a received request that the agent rejected with 481
+      // ("Call/Transaction Does Not Exist") can be skipped from
+      // dialog-state validators — the rejection itself IS the correct
+      // handling, and re-asserting the same condition in the validator
+      // is duplicative noise.
+      const responseStatusByBranch = new Map<string, number>()
+      for (const ev of ordered) {
+        if (ev.kind !== "sent" || ev.msg.type !== "response") continue
+        if (ev.msg.status < 200) continue
+        const branch = ev.msg.getHeader("via")[0]?.branch
+        if (branch === undefined) continue
+        if (!responseStatusByBranch.has(branch)) {
+          responseStatusByBranch.set(branch, ev.msg.status)
+        }
+      }
+      const DIALOG_STATE_CHECKS: ReadonlySet<ValidationCheckName> = new Set<ValidationCheckName>([
+        "tags",
+        "cseq",
+        "dialogUri",
+      ])
+
       for (const ev of ordered) {
         const callId = ev.msg.getHeader("call-id")
         if (callId === undefined || callId === "") continue
@@ -251,6 +268,22 @@ const makeCheckRule = (
         if (ev.kind === "sent") {
           trackSent(ds, ev.msg)
           continue
+        }
+        // If this received request was 481-rejected by the agent, skip
+        // dialog-state validators on it. The rejection is the correct
+        // application-level handling for unknown-dialog probes.
+        if (
+          ev.msg.type === "request" &&
+          DIALOG_STATE_CHECKS.has(check)
+        ) {
+          const branch = ev.msg.getHeader("via")[0]?.branch
+          const status = branch !== undefined
+            ? responseStatusByBranch.get(branch)
+            : undefined
+          if (status === 481) {
+            trackReceived(ds, ev.msg)
+            continue
+          }
         }
         if (check === "contentLength") {
           const rawErr = checkRawContentLength(ev.rawBytes)

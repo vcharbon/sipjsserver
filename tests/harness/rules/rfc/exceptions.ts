@@ -52,29 +52,5 @@ export interface RfcException {
   readonly justification: string
 }
 
-export const RFC_EXCEPTIONS: ReadonlyArray<RfcException> = [
-  {
-    testPath: "tests/fullcall/e2e-fake-clock.test.ts",
-    ruleName: "*",
-    justification:
-      "Test 'in-dialog unknown dialog → 481 reject' deliberately sends " +
-      "three bogus-tagged in-dialog messages (bogus-tag-xyz, " +
-      "bogus-tag-reinvite, bogus-tag-options) to trigger the B2BUA's 481 " +
-      "responses. Every dialog-state validator will fire on the DUT bind " +
-      "by design. Negative-case fixture, not a B2BUA bug. Phase 2: " +
-      "narrow this to specific affected rules if the wildcard hides a " +
-      "regression.",
-  },
-  {
-    testPath: "tests/fullcall/refer/gating.test.ts",
-    ruleName: "rfc.cseq",
-    justification:
-      "REFER gating tests interleave A's re-INVITE (CSeq 2) with A's late " +
-      "ACK (CSeq 1) for the original INVITE on the DUT bind; the validator's " +
-      "ACK→INVITE matcher uses findLast(INVITE) and so expects CSeq 2 for " +
-      "the late ACK. Validator heuristic limitation on the DUT side, not a " +
-      "B2BUA bug. Phase 2: rewrite ACK→INVITE matching to use Via branch " +
-      "correlation instead of findLast.",
-  },
-]
+export const RFC_EXCEPTIONS: ReadonlyArray<RfcException> = []
 

@@ -138,11 +138,6 @@ const trackReceived = (ds: AgentDialogState, msg: SipMessage): void => {
     if (ds.remoteCSeq === undefined || cseqNum > ds.remoteCSeq) {
       ds.remoteCSeq = cseqNum
     }
-    if (msg.method === "INVITE") {
-      if (!ds.inviteCSeqByCallId.has(callIdHeader)) {
-        ds.inviteCSeqByCallId.set(callIdHeader, cseqNum)
-      }
-    }
     if (msg.method !== "CANCEL" && cseqMethod !== "ACK") {
       const fromTag = msg.getHeader("from").tag
       const toTag = msg.getHeader("to").tag
