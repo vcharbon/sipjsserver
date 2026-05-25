@@ -209,9 +209,10 @@ function checkRawContentLength(raw: Buffer): string | null {
 
 const ALL_CHECKS: ValidationCheckName[] = [
   "tags", "cseq", "via", "callId", "maxForwards", "contentLength",
-  "contentType", "contactPresence", "toTagPresence", "branchPrefix",
-  "dialogUri", "recordRoute", "cancelRequestUri", "cancelViaBranch",
-  "responseCorrelation", "rackCorrelation", "tagConsistency", "offerAnswer",
+  "contentType", "contactPresence", "noContactOnBye", "toTagPresence",
+  "branchPrefix", "dialogUri", "recordRoute", "cancelRequestUri",
+  "cancelViaBranch", "responseCorrelation", "rackCorrelation",
+  "tagConsistency", "offerAnswer",
 ]
 
 const makeCheckRule = (
@@ -295,6 +296,10 @@ export const rfcContactPresence: PeerAuditRule = makeCheckRule(
   "rfc.contactPresence",
   "contactPresence",
 )
+export const rfcNoContactOnBye: PeerAuditRule = makeCheckRule(
+  "rfc.noContactOnBye",
+  "noContactOnBye",
+)
 export const rfcToTagPresence: PeerAuditRule = makeCheckRule(
   "rfc.toTagPresence",
   "toTagPresence",
@@ -356,6 +361,7 @@ export const basePeerRules: ReadonlyArray<PeerAuditRule> = [
   rfcMaxForwards,
   rfcContentType,
   rfcContactPresence,
+  rfcNoContactOnBye,
   rfcToTagPresence,
   rfcDialogUri,
   rfcRecordRoute,

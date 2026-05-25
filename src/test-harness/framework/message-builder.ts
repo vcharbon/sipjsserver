@@ -442,8 +442,14 @@ export function buildRequest(
     h("To", buildToHeader(method, step.uri, ctx, dialogState)),
     h("Call-ID", ctx.local.callId),
     h("CSeq", `${cseqNumber} ${method}`),
-    h("Contact", `<sip:${ctx.local.ip}:${ctx.local.port};transport=udp>`),
   ]
+  // Contact for every in-dialog method EXCEPT BYE — BYE terminates the
+  // dialog, so target-refresh has no meaning (RFC 3261 §15.1). Scenarios
+  // that want to simulate a buggy peer can still inject Contact via
+  // `headers["Contact"]` overrides.
+  if (method !== "BYE") {
+    defaultHeaders.push(h("Contact", `<sip:${ctx.local.ip}:${ctx.local.port};transport=udp>`))
+  }
 
   // RFC 3261 §13.2.1 / §20.37: INVITE SHOULD declare Allow: and Supported:
   // so the peer can negotiate methods and Require-able extensions.

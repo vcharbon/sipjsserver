@@ -23,6 +23,7 @@ export type ValidationCheckName =
   | "contentLength"
   | "contentType"
   | "contactPresence"
+  | "noContactOnBye"
   | "toTagPresence"
   | "branchPrefix"
   | "dialogUri"
@@ -50,6 +51,7 @@ export interface ValidationOverrides {
   readonly contentLength?: ValidationFn
   readonly contentType?: ValidationFn
   readonly contactPresence?: ValidationFn
+  readonly noContactOnBye?: ValidationFn
   readonly toTagPresence?: ValidationFn
   readonly branchPrefix?: ValidationFn
   readonly dialogUri?: ValidationFn
@@ -375,6 +377,23 @@ function validateContentType(
   }
 
   return []
+}
+
+/**
+ * BYE MUST NOT carry Contact. RFC 3261 §15.1: BYE terminates the
+ * dialog, so target-refresh has no meaning. Our generator omits
+ * Contact on BYE by design; this rule catches regressions and
+ * lazy peer/test builders that pasted Contact on every method.
+ */
+function validateNoContactOnBye(
+  msg: SipMessage,
+  _dialogState: AgentDialogState,
+  _correlatedRequest: SipMessage | undefined
+): string[] {
+  if (msg.type !== "request") return []
+  if (msg.method !== "BYE") return []
+  if (getHeaderValue(msg.headers, "contact") === undefined) return []
+  return [`BYE carries Contact — RFC 3261 §15.1 (BYE terminates the dialog, target-refresh has no meaning)`]
 }
 
 /**
@@ -770,6 +789,7 @@ const defaultChecks: Record<ValidationCheckName, ValidationFn> = {
   contentLength: validateContentLength,
   contentType: validateContentType,
   contactPresence: validateContactPresence,
+  noContactOnBye: validateNoContactOnBye,
   toTagPresence: validateToTagPresence,
   branchPrefix: validateBranchPrefix,
   dialogUri: validateDialogUri,

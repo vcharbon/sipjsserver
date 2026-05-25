@@ -67,6 +67,7 @@ const ALL_CHECKS: ReadonlyArray<ValidationCheckName> = [
   "contentLength",
   "contentType",
   "contactPresence",
+  "noContactOnBye",
   "toTagPresence",
   "branchPrefix",
   "dialogUri",
