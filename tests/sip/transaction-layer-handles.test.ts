@@ -21,7 +21,7 @@ function makeOutboundRequest(method: "INVITE" | "BYE", branch: string): SipReque
       { name: "Via", value: `SIP/2.0/UDP 127.0.0.1:15070;branch=${branch}` },
       { name: "Max-Forwards", value: "70" },
       { name: "From", value: "<sip:b2bua@127.0.0.1:15070>;tag=b2bua-tag" },
-      { name: "To", value: "<sip:bob@192.0.2.20:5060>;tag=bob-tag" },
+      { name: "To", value: "<sip:bob@192.0.2.20:5060>" },
       { name: "Call-ID", value: "handle-shape-test" },
       { name: "CSeq", value: `1 ${method}` },
       { name: "Contact", value: "<sip:b2bua@127.0.0.1:15070>" },

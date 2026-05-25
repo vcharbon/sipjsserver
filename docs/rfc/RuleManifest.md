@@ -63,6 +63,7 @@ narrow proxy-only or UAS-only rules where the MUST is role-specific.
 | `rfc.responseCorrelation` | all | peer | shipped | RFC3261-MUST-038, RFC3261-MUST-040, RFC3261-MUST-078, RFC3261-MUST-144 | — | Response CSeq echoes a sent request. |
 | `rfc.rackCorrelation` | all | peer | shipped | RFC3262-MUST-009 (partial — defines "matching PRACK") | — | PRACK RAck correlates with reliable 1xx. Phase-2 audit will confirm whether the rule also covers M-021 or whether a separate `rfc.prackOnReliable1xx` is needed. |
 | `rfc.tagConsistency` | all | peer | shipped | RFC3261-MUST-041, RFC3261-MUST-130 | — | UAS final-response tag consistency. |
+| `rfc.noToTagOnInitialRequest` | all | peer | shipped | RFC3261-MUST-016 | — | First-event-per-Call-ID rule: dialog-less initial request must not carry To-tag. Positive coverage: [unit/rfc3261-peer-rules.test.ts](../../tests/harness/rules/rfc/unit/rfc3261-peer-rules.test.ts) (INVITE-with-tag + REGISTER-with-tag positive; clean-INVITE + in-dialog BYE negative). |
 
 ## Shipped rules — cross-message (`cross`)
 
@@ -104,15 +105,14 @@ authoritative for the Phase-2 work.
 
 ### RFC 3261
 
-Twenty-three planned rules cover 24 `will-implement` MUSTs (one rule
+Twenty-two planned rules cover 23 `will-implement` MUSTs (one rule
 covers two adjacent MUSTs). Inventory: [RFC3261.md](RFC3261.md).
-Thirty-eight more `already-implemented` MUSTs are covered by the
+Thirty-nine more `already-implemented` MUSTs are covered by the
 shipped peer + cross-message rules above (their MUST-IDs columns
 have been flipped).
 
 | rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
 |-----------|---------|------|--------|------------------|----------------|-------|
-| `rfc.noToTagOnInitialRequest` | uac | peer | planned | RFC3261-MUST-016 | — | Sent request inspection: dialog-less initial request must not carry To-tag. Positive fixture: Alice's builder stamps a To-tag on an INVITE. |
 | `rfc.unsupportedMethod405Allow` | uas | cross | planned | RFC3261-MUST-030 | `_dialog-model.ts` | Received unrecognised method → 405 response carrying Allow header listing supported methods. Positive fixture: peer sends fictional `BANANA` method. |
 | `rfc.unsupportedExtension420` | uas | cross | planned | RFC3261-MUST-033 | `_dialog-model.ts` | Received Require with unknown option tag → 420 response carrying Unsupported header listing the rejected tags. Positive fixture: Alice INVITE with `Require: fictional`. |
 | `rfc.noRequireOnCancelOrAck` | uac, uas | peer | planned | RFC3261-MUST-034 (covers RFC3261-MUST-047 restatement) | — | Sent CANCEL or ACK (non-2xx) must not carry Require / Proxy-Require. Positive fixture: Alice CANCEL with Require:100rel. |

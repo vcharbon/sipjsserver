@@ -108,6 +108,20 @@ accept/reject the exclusions before any rule code is written.
   fixture are still valuable as a regression harness; the manifest
   records them as `regression-only` with a one-line reason. Mirrored
   in [docs/RFC_Verification.md](../RFC_Verification.md#every-landed-rule-should-demonstrably-fire-when-feasible).
+- 2026-05-25: **Phase 2 — second rule shipped**:
+  `rfc.noToTagOnInitialRequest` (RFC3261-MUST-016). New rule pack
+  `tests/harness/rules/rfc/rfc3261-peer-rules.ts`, wired into
+  stackLayer alongside the 3262 pack. Per-bind first-event-per-Call-ID
+  heuristic: if the first event on a bind for a given Call-ID is a
+  sent request carrying a To-tag, fire. Unit test ships positive
+  (INVITE + REGISTER with stray To-tag) and negative (clean initial
+  INVITE + in-dialog BYE after own INVITE) coverage. Rule found a
+  real fixture violation in
+  [tests/sip/transaction-layer-handles.test.ts](../../tests/sip/transaction-layer-handles.test.ts) — a
+  decorative `tag=bob-tag` stamped on an outbound initial INVITE/BYE
+  fixture; corrected per the triage policy (fix the fixture, not the
+  rule). test:fake green (1518 passed, +4 new). Phase 2 backlog: 48
+  planned rules remaining.
 - 2026-05-25: **Phase 1 slice 3 landed** (RFC 3261 inventory).
   `docs/rfc/RFC3261.md` — 191 entries consolidated from 580 raw grep
   hits. Counts: 24 `will-implement`, 38 `already-implemented`, 110
