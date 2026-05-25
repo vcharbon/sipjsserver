@@ -55,8 +55,8 @@ deliverable; later phases are blocked on earlier ones.
 | Phase | Title                                                       | Status   | Blocked on |
 | ----- | ----------------------------------------------------------- | -------- | ---------- |
 | 0     | Audit-framework refactor (subject sets, DUT-on, exceptions) | **done** (2026-05-25) | —          |
-| 1     | Documentation PR: process doc + per-RFC inventory + Rule Manifest | **next** | Phase 0    |
-| 2     | Per-section rule landing for 3261/3262/3264                 | pending  | Phase 1    |
+| 1     | Documentation PR: process doc + per-RFC inventory + Rule Manifest | **done** (2026-05-25) | Phase 0    |
+| 2     | Per-section rule landing for 3261/3262/3264                 | **next** | Phase 1    |
 | 3     | Lessons-learned + queue next RFCs                           | pending  | Phase 2    |
 
 **Hard gate between Phase 1 and Phase 2**: no rule implementation
@@ -95,6 +95,20 @@ accept/reject the exclusions before any rule code is written.
   B2BUA-as-UAS/UAC, MUST-ID, RFC exception ledger; 10 new unit tests
   cover subject dispatch / severity override / per-test exceptions /
   DUT-name refusal. Full test:fake green (1510 passed, 4 skipped).
+- 2026-05-25: **Phase 1 slice 3 landed** (RFC 3261 inventory).
+  `docs/rfc/RFC3261.md` — 191 entries consolidated from 580 raw grep
+  hits. Counts: 24 `will-implement`, 38 `already-implemented`, 110
+  `justified-not-implemented`, 19 `restatement`. RuleManifest grows
+  by 23 new planned rules and every shipped peer / cross-message
+  rule's `MUST-IDs covered` cell flips from `(pending inventory)` to
+  authoritative MUST-ID lists. Scope decisions reflected: (a) §16
+  proxy MUSTs apply to B2BUA workers as proxy, not just dedicated
+  proxy binds; (b) §8.1.3.4 + §16.7 + §21 3xx-recursion MUSTs are
+  out-of-scope (B2BUA doesn't recurse); (c) §17 transactions, §18
+  transport, §19-20 URI/header grammar are mostly arch- /
+  transport- / parser-enforced rather than rule-audited. **Phase 1
+  complete**: all three pilot RFC inventories ship with final-state
+  classifications. Phase 2 gate is now open for review.
 - 2026-05-25: **Phase 1 slice 2 landed**: `docs/rfc/RFC3264.md`
   inventory (56 entries — 18 `will-implement`, 2
   `already-implemented` via existing `rfc.sdpOriginContinuity`, 35

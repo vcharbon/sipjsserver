@@ -45,24 +45,24 @@ narrow proxy-only or UAS-only rules where the MUST is role-specific.
 
 | rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
 |-----------|---------|------|--------|------------------|----------------|-------|
-| `rfc.cseq` | all | peer | shipped | (pending inventory) | — | CSeq monotonicity + method correlation. 481-aware suppression of unknown-dialog rejects. |
-| `rfc.tags` | all | peer | shipped | (pending inventory) | — | To/From tag dialog identity. Per-Call-ID partition; same 481-aware suppression. |
-| `rfc.branchPrefix` | all | peer | shipped | (pending inventory) | — | Via branch begins with `z9hG4bK`. |
-| `rfc.contentLength` | all | peer | shipped | (pending inventory) | — | Header value matches actual body byte count. Raw-buffer check (parser already slices). |
-| `rfc.callId` | all | peer | shipped | (pending inventory) | — | Call-ID consistency within a dialog. |
-| `rfc.via` | all | peer | shipped | (pending inventory) | — | Via branch on responses. |
-| `rfc.maxForwards` | all | peer | shipped | (pending inventory) | — | Max-Forwards presence + decrement. |
-| `rfc.contentType` | all | peer | shipped | (pending inventory) | — | Content-Type present when body non-empty. |
-| `rfc.contactPresence` | all | peer | shipped | (pending inventory) | — | Contact on dialog-establishing methods. |
-| `rfc.noContactOnBye` | all | peer | shipped | (pending inventory) | — | BYE / CANCEL must not carry Contact. Precedent rule from [b9ae0ec6](#). |
-| `rfc.toTagPresence` | all | peer | shipped | (pending inventory) | — | To-tag on responses with status > 100. |
-| `rfc.dialogUri` | all | peer | shipped | (pending inventory) | — | In-dialog From URI stability. |
-| `rfc.recordRoute` | all | peer | shipped | (pending inventory) | — | B2BUA must not Record-Route. |
-| `rfc.cancelRequestUri` | all | peer | shipped | (pending inventory) | — | CANCEL Request-URI matches INVITE. |
-| `rfc.cancelViaBranch` | all | peer | shipped | (pending inventory) | — | CANCEL Via branch matches INVITE. |
-| `rfc.responseCorrelation` | all | peer | shipped | (pending inventory) | — | Response CSeq echoes a sent request. |
+| `rfc.cseq` | all | peer | shipped | RFC3261-MUST-019, RFC3261-MUST-053, RFC3261-MUST-067, RFC3261-MUST-078, RFC3261-MUST-144 | — | CSeq monotonicity + method correlation. 481-aware suppression of unknown-dialog rejects. |
+| `rfc.tags` | all | peer | shipped | RFC3261-MUST-017, RFC3261-MUST-041, RFC3261-MUST-066, RFC3261-MUST-130 | — | To/From tag dialog identity. Per-Call-ID partition; same 481-aware suppression. |
+| `rfc.branchPrefix` | all | peer | shipped | RFC3261-MUST-021 | — | Via branch begins with `z9hG4bK` (folded with `rfc.via`). |
+| `rfc.contentLength` | all | peer | shipped | RFC3261-MUST-119, RFC3261-MUST-158, RFC3261-MUST-169 | — | Header value matches actual body byte count. Raw-buffer check (parser already slices). |
+| `rfc.callId` | all | peer | shipped | RFC3261-MUST-018, RFC3261-MUST-040, RFC3261-MUST-067 | — | Call-ID consistency within a dialog + uniqueness (unobservable side folded). |
+| `rfc.via` | all | peer | shipped | RFC3261-MUST-021, RFC3261-MUST-040, RFC3261-MUST-117, RFC3261-MUST-125, RFC3261-MUST-133, RFC3261-MUST-142, RFC3261-MUST-144, RFC3261-MUST-153, RFC3261-MUST-156 | — | Via branch + sent-by + received parameter on responses. |
+| `rfc.maxForwards` | all | peer | shipped | RFC3261-MUST-020, RFC3261-MUST-098, RFC3261-MUST-108 | — | Max-Forwards presence + decrement + zero-handling at proxy. |
+| `rfc.contentType` | all | peer | shipped | RFC3261-MUST-009, RFC3261-MUST-170 | — | Content-Type present when body non-empty + Content-Encoding rules. |
+| `rfc.contactPresence` | all | peer | shipped | RFC3261-MUST-022, RFC3261-MUST-061 | — | Contact on dialog-establishing methods. |
+| `rfc.noContactOnBye` | all | peer | shipped | (derived — Contact-presence semantics on BYE/CANCEL) | — | BYE / CANCEL must not carry Contact. Precedent rule from [b9ae0ec6](#). |
+| `rfc.toTagPresence` | all | peer | shipped | RFC3261-MUST-041 | — | To-tag on responses with status > 100. |
+| `rfc.dialogUri` | all | peer | shipped | RFC3261-MUST-066 | — | In-dialog From URI stability. |
+| `rfc.recordRoute` | all | peer | shipped | RFC3261-MUST-109 (B2BUA-flavor: must NOT Record-Route) | — | B2BUA must not Record-Route — opposite obligation to a generic proxy. |
+| `rfc.cancelRequestUri` | all | peer | shipped | RFC3261-MUST-044 | — | CANCEL Request-URI matches INVITE. |
+| `rfc.cancelViaBranch` | all | peer | shipped | RFC3261-MUST-044 | — | CANCEL Via branch matches INVITE. |
+| `rfc.responseCorrelation` | all | peer | shipped | RFC3261-MUST-038, RFC3261-MUST-040, RFC3261-MUST-078, RFC3261-MUST-144 | — | Response CSeq echoes a sent request. |
 | `rfc.rackCorrelation` | all | peer | shipped | RFC3262-MUST-009 (partial — defines "matching PRACK") | — | PRACK RAck correlates with reliable 1xx. Phase-2 audit will confirm whether the rule also covers M-021 or whether a separate `rfc.prackOnReliable1xx` is needed. |
-| `rfc.tagConsistency` | all | peer | shipped | (pending inventory) | — | UAS final-response tag consistency. |
+| `rfc.tagConsistency` | all | peer | shipped | RFC3261-MUST-041, RFC3261-MUST-130 | — | UAS final-response tag consistency. |
 
 ## Shipped rules — cross-message (`cross`)
 
@@ -70,13 +70,13 @@ Source: [tests/harness/rules/rfc/cross-message-rules.ts](../../tests/harness/rul
 
 | rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
 |-----------|---------|------|--------|------------------|----------------|-------|
-| `rfc.midDialogFromUri` | all | cross | shipped | (pending inventory) | `_dialog-model.ts` | In-dialog From/To URI stability per RFC 3261 §12.2.1.1. |
-| `rfc.midDialogRoute` | all | cross | shipped | (pending inventory) | `_dialog-model.ts` | Route set application per §12.2.1.1 + §16.12 (loose + strict). |
+| `rfc.midDialogFromUri` | all | cross | shipped | RFC3261-MUST-066 | `_dialog-model.ts` | In-dialog From/To URI stability per RFC 3261 §12.2.1.1. |
+| `rfc.midDialogRoute` | all | cross | shipped | RFC3261-MUST-068 | `_dialog-model.ts` | Route set application per §12.2.1.1 + §16.12 (loose + strict). |
 | `rfc.sdpOriginContinuity` | all | cross | advisory | RFC3264-MUST-039, RFC3264-MUST-040 | `_dialog-model.ts` (`parseSdpOrigin`) | RFC 4566 §5.2 / RFC 3264 §8. Advisory: transfer fixtures emit fresh `o=` per side. Phase 2 narrows subject or models origin replication. |
-| `rfc.recordRoutePlacement` | all | cross | shipped | (pending inventory) | `_dialog-model.ts` | 100 Trying must not carry Record-Route; responses to in-dialog requests must not Record-Route per §12.2.2. |
-| `rfc.rportEcho` | all | cross | advisory | (pending inventory) | `_dialog-model.ts` (`readRport`) | RFC 3581 §4. Advisory: loopback never NATs, so the response correctly omits `rport=`. Phase 2 narrows subject to `{proxy}` or models loopback. |
-| `rfc.allowSupportedOnInvite` | all | cross | shipped | (pending inventory) | `_dialog-model.ts` | Allow / Supported on re-INVITE + 2xx INVITE. SHOULD-level (3261 §13.2.1, §20.37). |
-| `rfc.proxy100TryingNotForwarded` | all | cross | shipped | (pending inventory) | `_dialog-model.ts` | Stateful proxy absorbs downstream 100 Trying per §16.7 step 5. |
+| `rfc.recordRoutePlacement` | all | cross | shipped | RFC3261-MUST-061 (Record-Route on dialog-establishing 2xx) | `_dialog-model.ts` | 100 Trying must not carry Record-Route; responses to in-dialog requests must not Record-Route per §12.2.2. |
+| `rfc.rportEcho` | all | cross | advisory | (RFC 3581 — out of pilot) | `_dialog-model.ts` (`readRport`) | RFC 3581 §4. Advisory: loopback never NATs, so the response correctly omits `rport=`. Phase 2 narrows subject to `{proxy}` or models loopback. |
+| `rfc.allowSupportedOnInvite` | all | cross | shipped | RFC3261-MUST-088, RFC3261-MUST-165 | `_dialog-model.ts` | Allow / Supported on re-INVITE + 2xx INVITE. SHOULD-level (3261 §13.2.1, §20.37). |
+| `rfc.proxy100TryingNotForwarded` | all | cross | shipped | RFC3261-MUST-127 | `_dialog-model.ts` | Stateful proxy absorbs downstream 100 Trying per §16.7 step 5. |
 
 ### Already-asserted-elsewhere
 
@@ -104,7 +104,37 @@ authoritative for the Phase-2 work.
 
 ### RFC 3261
 
-_(empty — populated when [RFC3261.md](RFC3261.md) lands)_
+Twenty-three planned rules cover 24 `will-implement` MUSTs (one rule
+covers two adjacent MUSTs). Inventory: [RFC3261.md](RFC3261.md).
+Thirty-eight more `already-implemented` MUSTs are covered by the
+shipped peer + cross-message rules above (their MUST-IDs columns
+have been flipped).
+
+| rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
+|-----------|---------|------|--------|------------------|----------------|-------|
+| `rfc.noToTagOnInitialRequest` | uac | peer | planned | RFC3261-MUST-016 | — | Sent request inspection: dialog-less initial request must not carry To-tag. Positive fixture: Alice's builder stamps a To-tag on an INVITE. |
+| `rfc.unsupportedMethod405Allow` | uas | cross | planned | RFC3261-MUST-030 | `_dialog-model.ts` | Received unrecognised method → 405 response carrying Allow header listing supported methods. Positive fixture: peer sends fictional `BANANA` method. |
+| `rfc.unsupportedExtension420` | uas | cross | planned | RFC3261-MUST-033 | `_dialog-model.ts` | Received Require with unknown option tag → 420 response carrying Unsupported header listing the rejected tags. Positive fixture: Alice INVITE with `Require: fictional`. |
+| `rfc.noRequireOnCancelOrAck` | uac, uas | peer | planned | RFC3261-MUST-034 (covers RFC3261-MUST-047 restatement) | — | Sent CANCEL or ACK (non-2xx) must not carry Require / Proxy-Require. Positive fixture: Alice CANCEL with Require:100rel. |
+| `rfc.ackRequireSubsetOfInvite` | uac | cross | planned | RFC3261-MUST-035 | planned `_transaction-correlation.ts` | ACK to 2xx INVITE's Require values are a subset of the INVITE's. Positive fixture: Alice ACK adds a Require tag absent from INVITE. |
+| `rfc.unsupported415Accepts` | uas | cross | planned | RFC3261-MUST-036 (covers RFC3261-MUST-180 restatement) | `_dialog-model.ts` | 415 response carries Accept / Accept-Encoding / Accept-Language as appropriate. Positive fixture: Alice INVITE with unsupported `Content-Type: application/foo`. |
+| `rfc.responseExtensionsAdvertised` | uas | cross | planned | RFC3261-MUST-037 | `_dialog-model.ts` | Extensions applied in response are listed in Supported (or Require if required); MUST NOT apply extensions outside the Supported list. Positive fixture: response adds an extension header without advertising it. |
+| `rfc.cancelCseqMethod` | uac | peer | planned | RFC3261-MUST-045 | — | Sent CANCEL's CSeq method must be CANCEL and CSeq number must equal the INVITE's. Positive fixture: Alice CANCEL with `CSeq: N INVITE`. |
+| `rfc.cancelRouteEchoesInvite` | uac | cross | planned | RFC3261-MUST-046 | planned `_transaction-correlation.ts` | If INVITE had a Route header, CANCEL carries the same Route values. Positive fixture: INVITE with Route, CANCEL omits Route. |
+| `rfc.cancelAfter1xx` | uac | cross | planned | RFC3261-MUST-048 | planned `_transaction-correlation.ts` | Sent CANCEL must follow a received 1xx for the same INVITE branch. Positive fixture: Alice sends CANCEL immediately after INVITE without waiting for 100. |
+| `rfc.registerNoRouteSet` | uac | cross | planned | RFC3261-MUST-051, RFC3261-MUST-052 | `_dialog-model.ts` | Sent REGISTER carries no Route header and forms no dialog/route set. Positive fixture: REGISTER with a Route header. |
+| `rfc.serialRegister` | uac | cross | planned | RFC3261-MUST-054 | planned `_transaction-correlation.ts` | No new REGISTER with new Contact until prior REGISTER receives a final response. Positive fixture: REGISTER, immediate new REGISTER with different Contact. |
+| `rfc.optionsResponseEchoes` | uas | cross | planned | RFC3261-MUST-059 | `_dialog-model.ts` | Received OPTIONS → 200 OK with Allow + Supported + Accept matching what an INVITE response would carry. Positive fixture: OPTIONS-with-Allow vs INVITE-with-Allow comparison. |
+| `rfc.unknownDialog481` | uas | cross | planned | RFC3261-MUST-071 | `_dialog-model.ts` | Received in-dialog request with no matching local dialog → 481 response. Already-suppressed pattern in `rfc.cseq`/`rfc.tags`; this rule asserts the *response* shape (complement). Positive fixture: stale BYE for a torn-down dialog. |
+| `rfc.noReInviteWhileInviteInProgress` | uac | cross | planned | RFC3261-MUST-083 (covers RFC3261-MUST-084 restatement) | planned `_transaction-correlation.ts` | UAC must not issue a new in-dialog INVITE while a prior INVITE transaction is unterminated. Positive fixture: re-INVITE while client transaction still in "Proceeding". |
+| `rfc.concurrentReInvite500or491` | uas | cross | planned | RFC3261-MUST-086 | `_dialog-model.ts` | Received concurrent in-dialog INVITE → 500 (with Retry-After) or 491 (Request Pending). Positive fixture: two near-simultaneous re-INVITEs into the same dialog. |
+| `rfc.noByeOutsideOrEarlyDialog` | uac, uas | cross | planned | RFC3261-MUST-089 | `_dialog-model.ts` | BYE forbidden outside dialog; callee-side BYE forbidden on confirmed dialog before ACK; callee BYE forbidden on early dialog (use CANCEL or 4xx instead). Positive fixture: callee sends BYE on an early dialog. |
+| `rfc.proxy100WithinT100ms` | proxy | cross | planned | RFC3261-MUST-095 | planned `_transaction-correlation.ts` | Stateful proxy sends 100 Trying for INVITE within 200ms of receipt (when relaying). Positive fixture: proxy harness slows the 100 emission past the bound. |
+| `rfc.strictRouteRewriteHandled` | proxy | cross | planned | RFC3261-MUST-100 | planned `_transaction-correlation.ts` | When received request has strict-route topmost Route, outgoing request shows the §16.4 swap (Request-URI ← last Route URI). Positive fixture: proxy receives strict-route, audit observes outbound without the swap. |
+| `rfc.noTarget404` | proxy | cross | planned | RFC3261-MUST-105 | `_dialog-model.ts` | If proxy/SipRouter cannot resolve a target → 404 (Not Found). Positive fixture: backend HTTP returns "no target", audit observes anything other than 404. |
+| `rfc.strictRouteShuffleOnSend` | proxy | peer | planned | RFC3261-MUST-113 | — | When forwarding to a Route set whose first URI lacks `;lr`, observe the request-URI / Route swap (§16.6 step 6.b). Peer rule on sent requests at proxy bind. Positive fixture: builder emits no-swap form. |
+| `rfc.ackPreservesInviteRoute` | uac | cross | planned | RFC3261-MUST-145 | planned `_transaction-correlation.ts` | ACK to non-2xx INVITE carries the same Route headers as the INVITE. Positive fixture: Alice ACK omits an INVITE Route. |
+| `rfc.unsupportedExtension421` | uas | cross | planned | RFC3261-MUST-182 (covers RFC3261-MUST-181 restatement) | `_dialog-model.ts` | 421 (Extension Required) response carries a Require header listing the required extensions. Positive fixture: response emits 421 without Require. |
 
 ### RFC 3262
 
