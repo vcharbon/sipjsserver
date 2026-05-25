@@ -2,7 +2,7 @@
 
 Parent plan: [review-this-plan-and-noble-goblet.md](../review-this-plan-and-noble-goblet.md)
 ADR: [0013-effect-layer-wrappers-and-typed-recorder.md](../../adr/0013-effect-layer-wrappers-and-typed-recorder.md)
-Load-bearing invariants: [0004-strong-incr-decr-invariant-for-call-limiter.md](../../adr/0004-strong-incr-decr-invariant-for-call-limiter.md), [0007-strict-sip-parser-as-security-boundary.md](../../adr/0007-strict-sip-parser-as-security-boundary.md) (peer-takeover overshoot)
+Load-bearing invariants: [0004-strong-incr-decr-invariant-for-call-limiter.md](../../adr/0004-strong-incr-decr-invariant-for-call-limiter.md) (counter-back-to-zero AND peer-takeover overshoot semantics)
 
 Extends `CallLimiter.contracts.ts` with the `parity` wrapper (memory vs
 redis) per Slice 13 of the parent plan. Parity stays OUTSIDE

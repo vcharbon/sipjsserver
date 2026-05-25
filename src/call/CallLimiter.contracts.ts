@@ -36,15 +36,15 @@
  *
  * ADR-0004 carve-out
  * ------------------
- * ADR-0004 makes counter symmetry a structural invariant. ADR-0007
- * (operational contract) also documents transient overshoot during
- * chaos episodes — but that's a Redis-counter view, not the structural
- * invariant. The audit here looks only at observed `checkAndIncrement`
- * outcomes vs `decrement` calls on the SAME scope. Fail-open
- * admissions (`LimiterTimeout` / `RedisError`) do NOT increment a
- * counter and MUST NOT decrement one — those are tracked separately so
- * the audit doesn't false-positive on the well-documented design
- * trade-off.
+ * ADR-0004 makes counter symmetry a structural invariant AND documents
+ * the operational-contract carve-outs: phantom INCRs left by dead
+ * workers age out via window rotation (~15 min) or are reaped by a
+ * peer's OPTIONS-driven takeover (~10 min). The audit here looks only
+ * at observed `checkAndIncrement` outcomes vs `decrement` calls on the
+ * SAME scope. Fail-open admissions (`LimiterTimeout` / `RedisError`)
+ * do NOT increment a counter and MUST NOT decrement one — those are
+ * tracked separately so the audit doesn't false-positive on the
+ * well-documented design trade-off.
  */
 
 import { Cause, Data, Effect, Layer, Option, ServiceMap } from "effect"
@@ -296,7 +296,7 @@ export interface ScopedAuditOptions {
   /**
    * When `true` (default) the audit also flags `decrement` calls that
    * don't pair with any observed `checkAndIncrement` admission within
-   * the scope. Advisory by default — ADR-0007 documents that phantom
+   * the scope. Advisory by default — ADR-0004 documents that phantom
    * INCRs from dead workers can be DECR'd by a peer's takeover path,
    * which produces exactly this pattern; it isn't a defect.
    */
@@ -305,7 +305,7 @@ export interface ScopedAuditOptions {
    * Optional predicate keyed by `limiterId`. Returning `true` excludes
    * that limiterId from the counter-back-to-zero check. Used by SUTs
    * that intentionally leak counters as part of their scenario (chaos
-   * fixtures exercising ADR-0007's reconcile bound).
+   * fixtures exercising ADR-0004's reconcile bound).
    */
   readonly skipLimiterId?: (limiterId: string) => boolean
 }
@@ -325,7 +325,7 @@ export interface ScopedAuditOptions {
  *     newWindow)`. Severity per D5 — `deferred-fail` in
  *     `test-with-recorder` (ADR-0004 says this should be structural);
  *     `advisory` in `real-run` (chaos paths produce intentional
- *     overshoot per ADR-0007).
+ *     overshoot per ADR-0004).
  *
  *   - **A2_orphanDecrement** — `decrement` calls with no matching
  *     observed admission. Advisory — peer takeover legitimately
@@ -652,7 +652,7 @@ const runAuditInvariants = (args: {
         if (decs > admits && !skipLimiterId(limiterId)) {
           push(
             "A2_orphanDecrement",
-            `(${limiterId}) ${decs} decrement(s) observed but only ${admits} admission(s); excess ${decs - admits} may be peer-takeover (ADR-0007)`,
+            `(${limiterId}) ${decs} decrement(s) observed but only ${admits} admission(s); excess ${decs - admits} may be peer-takeover (ADR-0004)`,
             "advisory",
           )
         }

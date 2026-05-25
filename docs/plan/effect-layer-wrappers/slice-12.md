@@ -65,8 +65,8 @@ inner impls currently assert. Flagged as deliberately wrapper-only.
 
 | Check | Default `test-with-recorder` | `unit-test-of-layer` | `real-run` | Rationale |
 |---|---|---|---|---|
-| `A1_counterBackToZero` | `deferred-fail` → `CallLimiterAuditViolation` | `deferred-fail` (FATAL via the unit-tier path) | `advisory` | ADR-0004's load-bearing invariant. Every successful `INCR` must be matched by exactly one `DECR`; fail-open admissions never `INCR` and must never `DECR`. In real-run mode, ADR-0007's reconcile bound documents transient overshoot — keep advisory there. In tests, every fixture should terminate every call it admits within its own scope. |
-| `A2_orphanDecrement` | `advisory` | `advisory` (no escalation) | `advisory` | ADR-0007's peer-takeover path legitimately decrements a dead worker's counters this scope never admitted — exactly the pattern this rule would otherwise flag. Keep advisory at every tier; the structural symmetry is enforced by A1. |
+| `A1_counterBackToZero` | `deferred-fail` → `CallLimiterAuditViolation` | `deferred-fail` (FATAL via the unit-tier path) | `advisory` | ADR-0004's load-bearing invariant. Every successful `INCR` must be matched by exactly one `DECR`; fail-open admissions never `INCR` and must never `DECR`. In real-run mode, ADR-0004's reconcile bound documents transient overshoot — keep advisory there. In tests, every fixture should terminate every call it admits within its own scope. |
+| `A2_orphanDecrement` | `advisory` | `advisory` (no escalation) | `advisory` | ADR-0004's peer-takeover path legitimately decrements a dead worker's counters this scope never admitted — exactly the pattern this rule would otherwise flag. Keep advisory at every tier; the structural symmetry is enforced by A1. |
 
 The escalation matrix:
 - `unit-test-of-layer` promotes the first `deferred-fail` finding to
@@ -77,7 +77,7 @@ The escalation matrix:
 
 `skipLimiterId` predicate option exists for SUTs that intentionally
 leak counters as part of their scenario (chaos fixtures exercising
-ADR-0007's reconcile bound). No fixture currently passes a predicate;
+ADR-0004's reconcile bound). No fixture currently passes a predicate;
 the option is documented for future use.
 
 #### Ledger semantics
