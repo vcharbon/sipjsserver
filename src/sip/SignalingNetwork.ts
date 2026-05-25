@@ -97,6 +97,25 @@ export type PreIngressHook = (
   depth: number
 ) => PreIngressAction
 
+/**
+ * SIP role this bind serves. Used by the audit framework to dispatch
+ * RFC rules to the binds whose role the rule covers (a `proxy`-only
+ * rule does not run against a pure-UA bind). A B2BUA bind declares
+ * `{uac, uas}` because the same socket terminates the A-leg as UAS
+ * and originates the B-leg as UAC.
+ *
+ * Optional on `BindUdpOpts`. When unset the audit layer treats the
+ * bind as `ALL_UA_ROLES`, preserving today's "every rule runs on
+ * every bind" behaviour.
+ */
+export type UaRole = "uac" | "uas" | "proxy"
+
+export const ALL_UA_ROLES: ReadonlySet<UaRole> = new Set<UaRole>([
+  "uac",
+  "uas",
+  "proxy",
+])
+
 export interface BindUdpOpts {
   readonly ip: string
   readonly port: number
@@ -107,6 +126,12 @@ export interface BindUdpOpts {
    * Simulated impl: ignored.
    */
   readonly reusePort?: boolean
+  /**
+   * The SIP role(s) this bind serves. See `UaRole`. The audit
+   * framework's per-rule dispatch consults this set. Unset = treated
+   * as `ALL_UA_ROLES`.
+   */
+  readonly roles?: ReadonlySet<UaRole>
 }
 
 // ---------------------------------------------------------------------------

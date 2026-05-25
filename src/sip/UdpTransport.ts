@@ -103,6 +103,10 @@ export class UdpTransport extends ServiceMap.Service<
           port: config.sipLocalPort,
           queueMax,
           preIngress,
+          // B2BUA worker socket: A-leg terminates as UAS, B-leg
+          // originates as UAC. Audit framework's per-rule subject
+          // dispatch (SignalingNetwork.contracts) uses this set.
+          roles: new Set(["uac", "uas"] as const),
         })
         .pipe(Effect.orDie)
 

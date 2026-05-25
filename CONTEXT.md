@@ -275,6 +275,30 @@ _Avoid_: "hard drain", "tier-2 drain".
 **Drain budget**:
 The cluster-shared SLO that bounds the sipp-observable failure impact of one graceful drain event: `final_fail_count ≤ (1.5 / num_workers) × system_cps`. Encoded as the `worker-pod-graceful` rule set in [tests/k8s/endurance/expectedImpact.ts](tests/k8s/endurance/expectedImpact.ts). The residual is funded by transaction-layer state not being replicated (UAC retransmission absorbs ~1 s of latency between primary and backup).
 
+### RFC verification
+
+**UAC** (User Agent Client):
+The role that originates a SIP request and consumes the response.
+
+**UAS** (User Agent Server):
+The role that receives a SIP request and produces the response.
+
+**A-leg**:
+The half of a B2BUA-mediated call facing the originator. The B2BUA terminates the A-leg as **UAS**.
+
+**B-leg**:
+The half facing the destination. The B2BUA originates the B-leg as **UAC**.
+_Avoid_: "inbound leg" / "outbound leg" — overloaded with transport direction.
+
+**B2BUA-as-UAS** / **B2BUA-as-UAC**:
+Role-specific shorthand naming which leg of the B2BUA an RFC obligation lands on. A single MUST may apply to one, the other, or both. A B2BUA bind covers `{uac, uas}` in the audit framework's `UaRole` set for this reason.
+
+**MUST-ID**:
+The stable identifier (`RFC<num>-MUST-<NNN>`, e.g. `RFC3261-MUST-003`) for one entry in the per-RFC inventory tables under `docs/rfc/`. Referenced by rule comments and the Rule Manifest so a code change can be traced back to the obligation it asserts.
+
+**RFC exception ledger**:
+The end-of-`test:fake` rendering of every suppression that fired during the run. Sourced from `tests/harness/rules/rfc/exceptions.ts` (the central declaration file) and the per-rule `severityOverride` field. Each entry carries a mandatory `justification` string. The ledger surfaces what the test suite is *not* enforcing today, alongside what it is.
+
 ## Flagged ambiguities
 
 - **"mirror"** was overloaded: it was used both as a description of the act of dual-writing across two sidecars AND as the name for the `entryGen=0` sentinel bucket. Resolved: keep "mirror" for the wire-level `entryGen=0` sentinel only; use "replication channel" / "dual-write" for the higher-level concept.

@@ -12,6 +12,7 @@
 
 import { Effect } from "effect"
 import type { LaneKey, RecordedStamps } from "../../../../src/test-harness/framework/report-recorder/types.js"
+import { ALL_UA_ROLES } from "../../../../src/sip/SignalingNetwork.js"
 import type {
   CrossMessageAuditRule,
   SignalingNetworkEvent,
@@ -598,35 +599,47 @@ const sliceTypedRules: ReadonlyArray<CrossMessageRule> = [
 ]
 
 /**
- * Rules forced to `advisory` regardless of `RunContext`. Each entry is
- * a rule that catches a legitimate violation but fires widely in
- * existing fake-stack fixtures — making it `deferred-fail` would
- * cascade across tests that were not authored to enforce it.
+ * Per-rule advisory downgrades, with mandatory justification — each
+ * entry is a rule that catches a legitimate violation but fires widely
+ * in existing fake-stack fixtures, so making it `deferred-fail` would
+ * cascade across tests that were not authored to enforce it. The
+ * justification surfaces in the exception ledger so reviewers can see
+ * why the rule is downgraded.
  *
- *   - rfc.allowSupportedOnInvite: many fixtures emit re-INVITE without
- *     Allow/Supported. SHOULD-level header, not MUST.
- *   - rfc.rportEcho: OPTIONS-keepalive responses from the B2BUA don't
- *     echo `rport=` when the request arrived over loopback (the source
- *     port lookup the response builder does only triggers when NAT is
- *     in play). Harmless in fake-stack; flagged for visibility.
- *   - rfc.sdpOriginContinuity: agents that don't anchor an `o=` tuple
- *     across re-offers (B2BUA-mediated transfer fixtures emit fresh
- *     SDP from each side without preserving the originator's session
- *     id). Tracked for visibility.
+ * Phase-2 inventory work will revisit each entry: either narrow the
+ * rule's subject, rewrite the validator to be B2BUA-aware, or accept
+ * the advisory state with a documented reason in the RFC inventory.
  */
-const ADVISORY_RULE_NAMES: ReadonlySet<string> = new Set<string>([
-  "rfc.sdpOriginContinuity",
+const ADVISORY_OVERRIDES: ReadonlyMap<string, string> = new Map<string, string>([
+  [
+    "rfc.sdpOriginContinuity",
+    "B2BUA-mediated transfer fixtures emit fresh SDP from each side " +
+      "without preserving the originator's o= tuple; per-fixture allowance " +
+      "until Phase 2 narrows subject or models 3264 §8 origin replication.",
+  ],
+  [
+    "rfc.rportEcho",
+    "B2BUA responses on loopback do not echo rport= because the source-port " +
+      "lookup only triggers under NAT (no NAT on 127.0.0.1). Harmless in " +
+      "fake-stack; Phase 2 will either narrow subject to {proxy} only or " +
+      "model loopback explicitly.",
+  ],
 ])
 
-const adapt = (rule: CrossMessageRule): CrossMessageAuditRule => ({
-  name: rule.name,
-  severityOverride: ADVISORY_RULE_NAMES.has(rule.name) ? "advisory" : undefined,
-  check: (events: ReadonlyArray<SignalingNetworkEvent & RecordedStamps>) =>
-    Effect.gen(function* () {
-      const slices = projectPerDialog(events)
-      return yield* rule.check(slices)
-    }),
-})
+const adapt = (rule: CrossMessageRule): CrossMessageAuditRule => {
+  const advisory = ADVISORY_OVERRIDES.get(rule.name)
+  return {
+    name: rule.name,
+    subject: ALL_UA_ROLES,
+    severityOverride: advisory !== undefined ? "advisory" : undefined,
+    justification: advisory,
+    check: (events: ReadonlyArray<SignalingNetworkEvent & RecordedStamps>) =>
+      Effect.gen(function* () {
+        const slices = projectPerDialog(events)
+        return yield* rule.check(slices)
+      }),
+  }
+}
 
 export const crossMessagePeerRules: ReadonlyArray<CrossMessageAuditRule> =
   sliceTypedRules.map(adapt)

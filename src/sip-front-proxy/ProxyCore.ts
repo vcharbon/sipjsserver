@@ -322,6 +322,10 @@ const makeProxyCore: Effect.Effect<
       port: cfg.bindPort,
       queueMax,
       reusePort: cfg.reusePort ?? false,
+      // Front-proxy ext endpoint: stateful proxy + UAS for OPTIONS
+      // health replies. UAC role covered too since the proxy may
+      // self-originate (e.g. registrar-mode 503s).
+      roles: new Set(["uac", "uas", "proxy"] as const),
     })
     .pipe(Effect.orDie)
 
@@ -351,6 +355,7 @@ const makeProxyCore: Effect.Effect<
         port: registrarCfg.coreBind.port,
         queueMax,
         reusePort: cfg.reusePort ?? false,
+        roles: new Set(["uac", "uas", "proxy"] as const),
       })
       .pipe(Effect.orDie)
     coreLocalAddress = coreEndpoint.localAddress

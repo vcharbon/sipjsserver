@@ -65,6 +65,8 @@ import { b2buaWorkerStackLayer, NoOpCdrLayer, NoOpTracingLayer } from "./network
 import { PumpableClockLayer } from "./PumpableClock.js"
 import { basePeerRules } from "../harness/rules/rfc/starter-peer-rules.js"
 import { crossMessagePeerRules } from "../harness/rules/rfc/cross-message-rules.js"
+import { RFC_EXCEPTIONS } from "../harness/rules/rfc/exceptions.js"
+import { resolveRfcExceptions } from "./rfcExceptionLoader.js"
 
 /**
  * Default simulated-network transit delay — picked high enough to expose
@@ -137,14 +139,15 @@ function buildFake(opts: FakeModeOpts) {
     transitDelayMs: opts.transitDelayMs ?? DEFAULT_TRANSIT_DELAY_MS,
   })
 
-  // Default: exempt the DUT's own bind from per-peer RFC checks. The
-  // B2BUA worker terminates multiple call legs on one socket and
-  // rewrites Call-IDs across legs, so per-(callId, peer) state runs
-  // into legitimate B2BUA behaviour that the `runValidationChecks`
-  // validators were authored against pure UAC/UAS agents.
+  // DUT bind is audited by default. Per-rule subject dispatch
+  // (PeerAuditRule.subject ∩ BindUdpOpts.roles) is what keeps
+  // proxy-only rules off UA-only binds; per-test allowances for
+  // known fixture-driven false positives live in
+  // tests/harness/rules/rfc/exceptions.ts. The legacy
+  // `shouldAuditBind` predicate is honoured if explicitly supplied
+  // (test escape hatch), but no default exemption is applied.
   const dutBindKey = `${opts.config.sipLocalIp}:${opts.config.sipLocalPort}`
-  const shouldAuditBind =
-    opts.shouldAuditBind ?? ((bindKey: string) => bindKey !== dutBindKey)
+  const shouldAuditBind = opts.shouldAuditBind
 
   const NetworkLayer = (() => {
     if (perfMode === "baseline") {
@@ -154,6 +157,9 @@ function buildFake(opts: FakeModeOpts) {
       ? []
       : [...basePeerRules, ...(opts.extraPeerRules ?? [])]
     const crossMessageRules = perfMode === "no-audit" ? [] : crossMessagePeerRules
+    const exceptions = perfMode === "no-audit"
+      ? []
+      : resolveRfcExceptions(RFC_EXCEPTIONS, { dutBindKey })
     // `no-audit` measures recording-channel overhead only; paranoidInputs
     // adds per-method preconditions that aren't part of the recording cost.
     const paranoidInputs = perfMode !== "no-audit"
@@ -162,6 +168,7 @@ function buildFake(opts: FakeModeOpts) {
         rules,
         crossMessageRules,
         shouldAuditBind,
+        exceptions,
       },
       paranoidInputs,
     }).pipe(Layer.provide(Layer.mergeAll(RecorderLayer, RunContextLayer)))

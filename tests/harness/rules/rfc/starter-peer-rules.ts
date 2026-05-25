@@ -45,6 +45,7 @@ import {
   createAgentDialogState,
   type AgentDialogState,
 } from "../../../../src/test-harness/framework/message-builder.js"
+import { ALL_UA_ROLES } from "../../../../src/sip/SignalingNetwork.js"
 import type {
   PeerAuditRule,
   SignalingNetworkEvent,
@@ -220,6 +221,7 @@ const makeCheckRule = (
   check: ValidationCheckName,
 ): PeerAuditRule => ({
   name,
+  subject: ALL_UA_ROLES,
   check: (events) =>
     Effect.sync(() => {
       const ordered = extractOrderedMessages(events)

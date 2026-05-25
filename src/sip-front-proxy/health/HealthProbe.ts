@@ -196,6 +196,9 @@ export const optionsKeepaliveLayer = (
           ip: opts.bindHost,
           port: opts.bindPort,
           queueMax,
+          // HealthProbe originates OPTIONS to workers (UAC role)
+          // and reads responses. No UAS / proxy responsibilities.
+          roles: new Set(["uac"] as const),
         })
         .pipe(Effect.orDie)
       const probeAddr = endpoint.localAddress

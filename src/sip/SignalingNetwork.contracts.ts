@@ -47,9 +47,11 @@
 
 import { Clock, Data, Effect, Layer, Result, ServiceMap, Stream } from "effect"
 import {
+  ALL_UA_ROLES,
   SignalingNetwork,
   type BindUdpOpts,
   type SignalingNetworkApi,
+  type UaRole,
   type UdpEndpoint,
   type UdpPacket,
 } from "./SignalingNetwork.js"
@@ -126,12 +128,27 @@ export class SignalingAuditViolation extends Data.TaggedError(
  * A per-peer rule. Receives the SignalingNetwork events captured for a
  * single `bindKey` (peer) and returns zero or more violation strings.
  *
+ * `subject` declares which SIP role(s) this rule covers — a rule
+ * intersected with a bind's declared `roles` (from `BindUdpOpts`)
+ * decides whether dispatch runs the rule on that bind. Use
+ * `ALL_UA_ROLES` for rules that apply to every bind. See `UaRole`.
+ *
+ * `severityOverride: "advisory"` forces the rule into the advisory tier
+ * regardless of the active `RunContext`. Reserve for rules whose
+ * findings reflect a documented systemic false positive that Phase-2
+ * inventory will address (e.g. `rfc.rportEcho` on loopback). `justification`
+ * is mandatory whenever `severityOverride` is set; it surfaces in the
+ * exception ledger so reviewers can see why the rule is downgraded.
+ *
  * Each violation becomes a `SignalingAuditViolation` (fatal) or a
  * `signalingAudit` anomaly (deferred / advisory) depending on the
  * active `RunContext` (D5).
  */
 export interface PeerAuditRule {
   readonly name: string
+  readonly subject: ReadonlySet<UaRole>
+  readonly severityOverride?: "advisory"
+  readonly justification?: string
   readonly check: (
     events: ReadonlyArray<SignalingNetworkEvent>,
     ctx: { readonly bindKey: LaneKey },
@@ -144,6 +161,10 @@ export interface PeerAuditRule {
  * Each finding still carries an originating `bindKey` so the layer's
  * `shouldAuditBind` predicate can suppress reports against the DUT bind.
  *
+ * `subject` declares the SIP role(s) this rule applies to — findings
+ * keyed to binds whose declared `roles` do not intersect `subject` are
+ * dropped before they reach the ledger.
+ *
  * `severityOverride` forces a rule into the advisory tier regardless of
  * the active `RunContext`. Reserved for rules whose findings reflect
  * widespread fixture gaps rather than real DUT defects (e.g.
@@ -153,12 +174,25 @@ export interface PeerAuditRule {
  */
 export interface CrossMessageAuditRule {
   readonly name: string
+  readonly subject: ReadonlySet<UaRole>
   readonly severityOverride?: "advisory"
+  readonly justification?: string
   readonly check: (
     events: ReadonlyArray<SignalingNetworkEvent & { seq: number; atMs: number }>,
   ) => Effect.Effect<
     ReadonlyArray<{ readonly bindKey: LaneKey; readonly detail: string }>
   >
+}
+
+/**
+ * One scoped suppression — downgrades a matching rule's finding from
+ * deferred-fail to advisory. Sourced from `tests/harness/rules/rfc/exceptions.ts`
+ * (per Phase 0 of the RFC verification plan).
+ */
+export interface RfcException {
+  readonly ruleName: string
+  readonly peerBindKey?: LaneKey
+  readonly justification: string
 }
 
 export interface ScopedAuditOptions {
@@ -168,12 +202,11 @@ export interface ScopedAuditOptions {
   /**
    * Optional bindKey predicate. Returning `false` short-circuits all
    * rule evaluation for that peer (still records events into the
-   * channel). Used to exempt the DUT's own bind from per-peer RFC
-   * checks — the B2BUA worker terminates multiple call legs on one
-   * socket and rewrites Call-IDs across legs, so per-(callId, peer)
-   * dialog state runs into legitimate B2BUA behaviour that the
-   * `runValidationChecks` validators were authored against pure
-   * UAC/UAS agents.
+   * channel). Historical escape valve used to exempt the DUT bind
+   * before per-rule `subject` dispatch landed. New code should
+   * declare bind roles via `BindUdpOpts.roles` and per-rule
+   * `subject` instead; per-test peer suppressions belong in
+   * `exceptions`.
    *
    * Cross-message rules consult the same predicate before recording a
    * finding tagged to a specific bindKey.
@@ -181,6 +214,14 @@ export interface ScopedAuditOptions {
    * `true` (or undefined) → rules run.
    */
   readonly shouldAuditBind?: (bindKey: LaneKey) => boolean
+  /**
+   * Per-test rule exemptions filtered down from
+   * `tests/harness/rules/rfc/exceptions.ts` by `testPath`. Each entry
+   * downgrades a matching deferred-fail finding to advisory and
+   * prefixes the detail with the justification so the reader sees
+   * the allowance.
+   */
+  readonly exceptions?: ReadonlyArray<RfcException>
 }
 
 // ---------------------------------------------------------------------------
@@ -287,18 +328,69 @@ export const scopedAudit = (
       // RunContext.
       const shouldAudit = options?.shouldAuditBind ?? (() => true)
 
+      // Per-bind role declaration captured at bindUdp time. Drives
+      // per-rule subject dispatch — a rule whose `subject` does not
+      // intersect the bind's `roles` is skipped for that bind. Binds
+      // that don't declare `roles` default to ALL_UA_ROLES so the
+      // pre-subject behaviour ("every rule on every bind") is
+      // preserved.
+      const bindRoles = new Map<LaneKey, ReadonlySet<UaRole>>()
+      const rolesOf = (bindKey: LaneKey): ReadonlySet<UaRole> =>
+        bindRoles.get(bindKey) ?? ALL_UA_ROLES
+
+      const subjectIntersects = (
+        subject: ReadonlySet<UaRole>,
+        roles: ReadonlySet<UaRole>,
+      ): boolean => {
+        for (const r of subject) if (roles.has(r)) return true
+        return false
+      }
+
+      // Per-test exemptions sourced from
+      // `tests/harness/rules/rfc/exceptions.ts`. An entry with no
+      // peerBindKey suppresses the rule for every bind in this test.
+      // `ruleName: "*"` is a wildcard reserved for tests that
+      // deliberately send malformed SIP (negative cases for the
+      // DUT's reject paths).
+      const exceptions = options?.exceptions ?? []
+      const matchException = (
+        ruleName: string,
+        bindKey: LaneKey,
+      ): RfcException | undefined => {
+        for (const e of exceptions) {
+          if (e.ruleName !== ruleName && e.ruleName !== "*") continue
+          if (e.peerBindKey !== undefined && e.peerBindKey !== bindKey) continue
+          return e
+        }
+        return undefined
+      }
+
       const runRulesForBind = (
         bindKey: LaneKey,
       ): Effect.Effect<void, SignalingAuditViolation> =>
         Effect.gen(function* () {
           if (rules.length === 0) return
           if (!shouldAudit(bindKey)) return
+          const roles = rolesOf(bindKey)
           const snapshot = yield* channel.snapshot
           const slice = snapshot.filter((e) => "bindKey" in e && e.bindKey === bindKey)
           for (const rule of rules) {
+            if (!subjectIntersects(rule.subject, roles)) continue
             const violations = yield* rule.check(slice, { bindKey })
             for (const v of violations) {
-              const finding = { check: rule.name, detail: v, bindKey }
+              const exc = matchException(rule.name, bindKey)
+              const detail = exc !== undefined
+                ? `[exception: ${exc.justification}] ${v}`
+                : v
+              const finding = { check: rule.name, detail, bindKey }
+              if (exc !== undefined) {
+                yield* recordAnomaly(finding, "advisory")
+                continue
+              }
+              if (rule.severityOverride === "advisory") {
+                yield* recordAnomaly(finding, "advisory")
+                continue
+              }
               if (ctx.kind === "unit-test-of-layer") {
                 yield* recordAnomaly(finding, "deferred-fail")
                 return yield* new SignalingAuditViolation(finding)
@@ -380,6 +472,9 @@ export const scopedAudit = (
       const bindUdp: SignalingNetworkApi["bindUdp"] = (opts) =>
         Effect.gen(function* () {
           const bindKey = bindKeyOf(opts.ip, opts.port)
+          // Capture the bind's declared roles for subject dispatch.
+          // Unset → ALL_UA_ROLES (preserve pre-subject behaviour).
+          bindRoles.set(bindKey, opts.roles ?? ALL_UA_ROLES)
           // recordScopedAcquire handles acquire + scope-close release
           // events. The acquire effect carries a Scope requirement which
           // is satisfied by bindUdp's own Scope context.
@@ -502,10 +597,18 @@ export const scopedAudit = (
               const found = yield* rule.check(snapshot)
               for (const f of found) {
                 if (!shouldAudit(f.bindKey)) continue
+                if (!subjectIntersects(rule.subject, rolesOf(f.bindKey))) continue
+                const exc = matchException(rule.name, f.bindKey)
                 const finding = {
                   check: rule.name,
-                  detail: f.detail,
+                  detail: exc !== undefined
+                    ? `[exception: ${exc.justification}] ${f.detail}`
+                    : f.detail,
                   bindKey: f.bindKey,
+                }
+                if (exc !== undefined) {
+                  advisoryFindings.push(finding)
+                  continue
                 }
                 if (rule.severityOverride === "advisory") {
                   advisoryFindings.push(finding)
