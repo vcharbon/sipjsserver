@@ -615,7 +615,6 @@ const sliceTypedRules: ReadonlyArray<CrossMessageRule> = [
  *     id). Tracked for visibility.
  */
 const ADVISORY_RULE_NAMES: ReadonlySet<string> = new Set<string>([
-  "rfc.allowSupportedOnInvite",
   "rfc.rportEcho",
   "rfc.sdpOriginContinuity",
 ])

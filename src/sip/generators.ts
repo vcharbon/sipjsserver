@@ -94,6 +94,13 @@ const STRUCTURAL_HEADERS: ReadonlySet<string> = new Set([
 const EMPTY_BODY = new Uint8Array(0)
 const EMPTY_RAW = Buffer.alloc(0)
 
+// RFC 3261 §13.2.1 / §20.37 — methods the B2BUA accepts on a confirmed
+// dialog and the SIP extensions it supports. Advertised on every
+// B2BUA-originated INVITE (initial + re-INVITE) so the peer can
+// negotiate accepted methods and Require-able extensions.
+export const B2BUA_ALLOW = "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO, REFER, NOTIFY, PRACK"
+export const B2BUA_SUPPORTED = "100rel, timer, replaces"
+
 function h(name: string, value: string): SipHeader {
   return { name, value }
 }
@@ -332,6 +339,12 @@ export function generateInDialogRequest(
     if (opts.subscriptionState !== undefined) {
       headers.push(h("Subscription-State", opts.subscriptionState))
     }
+  }
+  // RFC 3261 §13.2.1 / §20.37 — B2BUA-originated re-INVITEs advertise
+  // accepted methods + supported extensions to the peer.
+  if (method === "INVITE") {
+    headers.push(h("Allow", B2BUA_ALLOW))
+    headers.push(h("Supported", B2BUA_SUPPORTED))
   }
 
   if (opts.extraHeaders) {
