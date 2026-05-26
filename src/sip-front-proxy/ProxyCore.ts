@@ -1572,7 +1572,6 @@ const handleRequestRegistrarMode = (
     let target: SocketAddr | undefined
     let synthesizedReply: { status: number; reason: string } | undefined
     let reuseBranch: string | undefined
-    let ruriOverride: string | undefined
 
     if (method === "CANCEL") {
       const key = callIdCseqKey(req.getHeader("call-id"), req.getHeader("cseq").seq)
@@ -1595,7 +1594,6 @@ const handleRequestRegistrarMode = (
         synthesizedReply = { status: outcome.status, reason: outcome.reason }
       } else {
         target = outcome.destination
-        ruriOverride = outcome.ruriOverride
       }
     } else {
       // In-dialog (BYE, ACK, re-INVITE, OPTIONS, …): per RFC 3261
@@ -1707,9 +1705,7 @@ const handleRequestRegistrarMode = (
     // BufferedUdpEndpoint absorbs all per-call send failures (DNS, EAGAIN,
     // ICMP unreach); no synthetic 503-with-Retry-After. SIP UDP transaction
     // timers (T1 / T2 / Timer B) handle UAC-side retry.
-    const finalReq = ruriOverride !== undefined
-      ? ({ ...req, uri: ruriOverride, headers: nextHeaders } as SipRequest)
-      : ({ ...req, headers: nextHeaders } as SipRequest)
+    const finalReq = { ...req, headers: nextHeaders } as SipRequest
     const outBuf = serialize(finalReq)
     counters.routedRequests++
     resolvedTarget = target

@@ -2,18 +2,17 @@
  * core-call-to-registered-ext — bobExt registers, then a `core` agent
  * (representing the K8s app server) sends an INVITE for `sip:bob@…`
  * to the proxy's core ingress. The proxy's `CoreToExtRoutingStrategy.
- * registrarLookup` resolves the userpart against the in-memory registrar,
- * rewrites the RURI to bob's stored Contact, and forwards the INVITE
- * across the fabric boundary to bobExt. bobExt replies 180 + 200 (with
- * SDP), and the core-side caller completes the dialog with ACK and
- * BYE.
+ * registrarLookup` resolves the userpart against the in-memory registrar
+ * and forwards the INVITE across the fabric boundary to bobExt's stored
+ * Contact host/port. The original Request-URI is preserved on the
+ * outbound INVITE. bobExt replies 180 + 200 (with SDP), and the
+ * core-side caller completes the dialog with ACK and BYE.
  *
  * Verifies the **headline core→ext forwarding path**:
  *   - `ProxyCore.handleRequestRegistrarMode` for `INVITE on core`
  *     delegates to `coreToExtStrategy.resolve`.
  *   - `registrarLookup` extracts the RURI userpart, pulls bob's binding
- *     out of the shared `Registrar` and returns
- *     `forward { destination, ruriOverride }`.
+ *     out of the shared `Registrar` and returns `forward { destination }`.
  *   - Egress Via stamped `;net=core` → response routes back to the
  *     core endpoint so the K8s caller receives the 200 OK on its core
  *     socket.

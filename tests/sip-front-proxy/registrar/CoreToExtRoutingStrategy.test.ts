@@ -49,7 +49,6 @@ describe("CoreToExtRoutingStrategy.registrarLookupLayer", () => {
       expect(outcome._tag).toBe("forward")
       if (outcome._tag === "forward") {
         expect(outcome.destination).toEqual({ host: "10.20.0.7", port: 5062 })
-        expect(outcome.ruriOverride).toBe("sip:bob@10.20.0.7:5062")
       }
     }).pipe(Effect.provide(testLayer)),
   )

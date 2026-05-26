@@ -37,9 +37,10 @@ import type { SocketAddr } from "./RoutingStrategy.js"
 
 /**
  * Result of `resolve`. ProxyCore dispatches on the tag:
- *   - `forward { destination, ruriOverride }` → swap the Request-URI for
- *      `ruriOverride` (the registered Contact) and forward the INVITE to
- *      `destination` on the `ext` endpoint.
+ *   - `forward { destination }` → forward the INVITE to `destination` on the
+ *      `ext` endpoint with the original Request-URI untouched. The registrar
+ *      lookup uses the AOR userpart to find the binding; only the wire-level
+ *      destination (host/port) comes from the registered Contact.
  *   - `reject { status, reason }` → synthesize a response and reply on
  *      the `core` endpoint.
  */
@@ -47,7 +48,6 @@ export type RouteOutcome =
   | {
       readonly _tag: "forward"
       readonly destination: SocketAddr
-      readonly ruriOverride: string
     }
   | {
       readonly _tag: "reject"
@@ -56,10 +56,9 @@ export type RouteOutcome =
     }
 
 export const RouteOutcome = {
-  forward: (destination: SocketAddr, ruriOverride: string): RouteOutcome => ({
+  forward: (destination: SocketAddr): RouteOutcome => ({
     _tag: "forward",
     destination,
-    ruriOverride,
   }),
   reject: (status: number, reason: string): RouteOutcome => ({
     _tag: "reject",
@@ -111,7 +110,9 @@ export class CoreToExtRoutingStrategy extends ServiceMap.Service<
    *   3. Parse the bound Contact URI to get host/port. If unparseable,
    *      `500 Server Internal Error` (we wrote it; if we can't read it
    *      back, that's our bug, not the caller's).
-   *   4. Return `forward { destination, ruriOverride: contactUri }`.
+   *   4. Return `forward { destination }`. The original Request-URI is
+   *      preserved on the outbound INVITE — only the wire-level destination
+   *      (host/port) comes from the registered Contact.
    */
   static readonly registrarLookupLayer: Layer.Layer<
     CoreToExtRoutingStrategy,
@@ -139,7 +140,7 @@ export class CoreToExtRoutingStrategy extends ServiceMap.Service<
             host: parsed.host,
             port: parsed.port,
           }
-          return RouteOutcome.forward(destination, bareContact)
+          return RouteOutcome.forward(destination)
         })
       return { name: "registrarLookup", resolve }
     }),
