@@ -14,6 +14,14 @@ import type { SipRequest } from "../../src/sip/types.js"
 import { hydrateRequest } from "../../src/sip/parsers/extract-fields.js"
 
 function makeOutboundRequest(method: "INVITE" | "BYE", branch: string): SipRequest {
+  // BYE is in-dialog by spec; include a To-tag so the synthetic
+  // request models a confirmed dialog (avoids rfc.noByeOutsideOrEarlyDialog
+  // firing on a tagless out-of-dialog BYE). INVITE stays tagless to
+  // satisfy rfc.noToTagOnInitialRequest (initial INVITE outside any dialog).
+  const toHeader =
+    method === "BYE"
+      ? { name: "To", value: "<sip:bob@192.0.2.20:5060>;tag=remote-bob" }
+      : { name: "To", value: "<sip:bob@192.0.2.20:5060>" }
   return hydrateRequest({
     method,
     uri: "sip:bob@192.0.2.20:5060",
@@ -21,7 +29,7 @@ function makeOutboundRequest(method: "INVITE" | "BYE", branch: string): SipReque
       { name: "Via", value: `SIP/2.0/UDP 127.0.0.1:15070;branch=${branch}` },
       { name: "Max-Forwards", value: "70" },
       { name: "From", value: "<sip:b2bua@127.0.0.1:15070>;tag=b2bua-tag" },
-      { name: "To", value: "<sip:bob@192.0.2.20:5060>" },
+      toHeader,
       { name: "Call-ID", value: "handle-shape-test" },
       { name: "CSeq", value: `1 ${method}` },
       { name: "Contact", value: "<sip:b2bua@127.0.0.1:15070>" },

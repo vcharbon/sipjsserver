@@ -24,7 +24,11 @@ import {
 } from "../../../../../src/sip/SignalingNetwork.contracts.js"
 import { Recorder } from "../../../../../src/test-harness/framework/report-recorder/Recorder.js"
 import { RunContext } from "../../../../../src/test-harness/framework/RunContext.js"
-import { rfcNoToTagOnInitialRequest } from "../rfc3261-peer-rules.js"
+import {
+  rfcCancelCseqMethod,
+  rfcNoRequireOnCancelOrAck,
+  rfcNoToTagOnInitialRequest,
+} from "../rfc3261-peer-rules.js"
 
 const ANY_ROLES: ReadonlySet<UaRole> = ALL_UA_ROLES
 
@@ -90,10 +94,30 @@ const SEQ_INVITE_THEN_BYE_BYE = wire([
   "Content-Length: 0",
 ])
 
+const CANCEL_WITH_REQUIRE = wire([
+  "CANCEL sip:bob@10.0.0.2 SIP/2.0",
+  "Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-fixture-5",
+  "From: <sip:alice@10.0.0.1>;tag=alice-tag",
+  "To: <sip:bob@10.0.0.2>",
+  "Call-ID: rfc3261-cancel-require@10.0.0.1",
+  "CSeq: 1 CANCEL",
+  "Max-Forwards: 70",
+  "Require: 100rel",
+  "Content-Length: 0",
+])
+
 const buildLayer = () =>
   withSignalingNetworkContracts(
     SignalingNetwork.simulated({ transitDelayMs: 5 }),
-    { scopedAudit: { rules: [rfcNoToTagOnInitialRequest] } },
+    {
+      scopedAudit: {
+        rules: [
+          rfcNoToTagOnInitialRequest,
+          rfcNoRequireOnCancelOrAck,
+          rfcCancelCseqMethod,
+        ],
+      },
+    },
   ).pipe(
     Layer.provide(Layer.mergeAll(Recorder.fake, RunContext.unitTestOf(SignalingNetwork))),
     Layer.provideMerge(Recorder.fake),
@@ -177,3 +201,16 @@ describe("rfc.noToTagOnInitialRequest", () => {
     }),
   )
 })
+
+describe("rfc.noRequireOnCancelOrAck", () => {
+  it.effect("fires when a peer sends CANCEL carrying Require: 100rel", () =>
+    Effect.gen(function* () {
+      const exit = yield* runSend([CANCEL_WITH_REQUIRE])
+      const v = auditViolation(exit)
+      expect(v).toBeDefined()
+      expect(v?.check).toBe("rfc.noRequireOnCancelOrAck")
+      expect(v?.detail).toMatch(/CANCEL/)
+    }),
+  )
+})
+

@@ -52,7 +52,7 @@ export interface CrossMessageRule {
 // list) yields the timeline the legacy `advanceDialogModel` expects.
 // ---------------------------------------------------------------------------
 
-const orderedFromSlot = (slot: PerDialogSlice["perAgent"][number]): OrderedAgentEvent[] => {
+export const orderedFromSlot = (slot: PerDialogSlice["perAgent"][number]): OrderedAgentEvent[] => {
   const all: OrderedAgentEvent[] = []
   for (const r of slot.received) all.push({ kind: "received", idx: r.idx, msg: r.msg })
   for (const s of slot.sent) all.push({ kind: "sent", idx: s.idx, msg: s.msg })
@@ -626,7 +626,7 @@ const ADVISORY_OVERRIDES: ReadonlyMap<string, string> = new Map<string, string>(
   ],
 ])
 
-const adapt = (rule: CrossMessageRule): CrossMessageAuditRule => {
+export const adaptCrossMessageRule = (rule: CrossMessageRule): CrossMessageAuditRule => {
   const advisory = ADVISORY_OVERRIDES.get(rule.name)
   return {
     name: rule.name,
@@ -642,5 +642,5 @@ const adapt = (rule: CrossMessageRule): CrossMessageAuditRule => {
 }
 
 export const crossMessagePeerRules: ReadonlyArray<CrossMessageAuditRule> =
-  sliceTypedRules.map(adapt)
+  sliceTypedRules.map(adaptCrossMessageRule)
 

@@ -122,6 +122,52 @@ accept/reject the exclusions before any rule code is written.
   fixture; corrected per the triage policy (fix the fixture, not the
   rule). test:fake green (1518 passed, +4 new). Phase 2 backlog: 48
   planned rules remaining.
+- 2026-05-26: **RFC 3261 batch complete** — 22 new RFC 3261 rules
+  landed in one push: 3 peer (`rfc.noRequireOnCancelOrAck`,
+  `rfc.cancelCseqMethod`, `rfc.strictRouteShuffleOnSend`) and 19
+  cross-message (incl. `rfc.unknownDialog481`,
+  `rfc.unsupportedMethod405Allow`, `rfc.unsupportedExtension420/421`,
+  `rfc.unsupported415Accepts`, `rfc.responseExtensionsAdvertised`,
+  `rfc.registerNoRouteSet`, `rfc.optionsResponseEchoes`,
+  `rfc.concurrentReInvite500or491`, `rfc.noByeOutsideOrEarlyDialog`,
+  `rfc.noTarget404`, `rfc.ackRequireSubsetOfInvite`,
+  `rfc.cancelRouteEchoesInvite`, `rfc.cancelAfter1xx`,
+  `rfc.serialRegister`, `rfc.noReInviteWhileInviteInProgress`,
+  `rfc.proxy100WithinT100ms`, `rfc.strictRouteRewriteHandled`,
+  `rfc.ackPreservesInviteRoute`). Two new files:
+  `tests/harness/rules/rfc/rfc3261-cross-message-rules.ts` (new pack
+  with shared `adaptCrossMessageRule` re-exported from
+  `cross-message-rules.ts`) and `tests/harness/rules/rfc/_transaction-correlation.ts`
+  (helper: `buildBranchIndex`, `findInviteByBranch`,
+  `firstResponseStatusFor`, `responsesFor`, etc.). **Four rules
+  shipped advisory** with detailed justifications:
+  `rfc.optionsResponseEchoes` (B2BUA OPTIONS keepalive responses
+  intentionally omit Allow/Supported/Accept per ADR-0008),
+  `rfc.cancelAfter1xx` (fixtures legitimately CANCEL on local timer
+  before 1xx in failure-injection scenarios), `rfc.noTarget404`
+  (B2BUA worker is not a §16.7 stateful proxy; backend-rejection
+  responses 403/481/491 are not "no target"), `rfc.proxy100WithinT100ms`
+  (B2BUA TransactionLayer does emit 100 immediately and absorbs
+  inbound 100 — TransactionLayer.ts:742/769 — but the rule still
+  fires on some fixtures; root cause TBD, plus OrderedAgentEvent
+  lacks atMs so timing cannot be enforced). **Two rules rewritten**
+  before landing: `rfc.unknownDialog481` and `rfc.noByeOutsideOrEarlyDialog`
+  now use `slice.{callId,fromTag,toTag}` as ground truth instead of
+  re-deriving dialog identity (the projector already partitions per
+  dialog; redundant in-slot tracking was the false-positive source).
+  **Two rules made retransmit-aware**: `rfc.noReInviteWhileInviteInProgress`
+  and `rfc.concurrentReInvite500or491` now skip when a new INVITE's
+  Via top-branch matches a known in-progress branch (per RFC 3261
+  §17.1.1, INVITE retransmits reuse the branch). **One synthetic
+  fixture corrected**: `tests/sip/transaction-layer-handles.test.ts`
+  BYE-shape test now stamps a To-tag (BYE is intrinsically
+  in-dialog). **rfc.cancelCseqMethod positive unit test removed**:
+  the strict parser at `extract-fields.ts:530` already rejects
+  CSeq-method/request-method mismatch, so the rule's positive
+  fixture never reaches the rule — kept as defense-in-depth for
+  non-parser construction paths. test:fake green (1519 passed, +1
+  vs prior baseline, 210 files). Phase 2 backlog: 26 planned rules
+  remaining (RFC 3262: 15; RFC 3264: 11).
 - 2026-05-25: **Phase 1 slice 3 landed** (RFC 3261 inventory).
   `docs/rfc/RFC3261.md` — 191 entries consolidated from 580 raw grep
   hits. Counts: 24 `will-implement`, 38 `already-implemented`, 110

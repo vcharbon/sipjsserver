@@ -64,10 +64,14 @@ narrow proxy-only or UAS-only rules where the MUST is role-specific.
 | `rfc.rackCorrelation` | all | peer | shipped | RFC3262-MUST-009 (partial — defines "matching PRACK") | — | PRACK RAck correlates with reliable 1xx. Phase-2 audit will confirm whether the rule also covers M-021 or whether a separate `rfc.prackOnReliable1xx` is needed. |
 | `rfc.tagConsistency` | all | peer | shipped | RFC3261-MUST-041, RFC3261-MUST-130 | — | UAS final-response tag consistency. |
 | `rfc.noToTagOnInitialRequest` | all | peer | shipped | RFC3261-MUST-016 | — | First-event-per-Call-ID rule: dialog-less initial request must not carry To-tag. Positive coverage: [unit/rfc3261-peer-rules.test.ts](../../tests/harness/rules/rfc/unit/rfc3261-peer-rules.test.ts) (INVITE-with-tag + REGISTER-with-tag positive; clean-INVITE + in-dialog BYE negative). |
+| `rfc.noRequireOnCancelOrAck` | all | peer | shipped | RFC3261-MUST-034 | — | CANCEL or ACK-for-non-2xx must not carry Require/Proxy-Require. Positive coverage (CANCEL only): [unit/rfc3261-peer-rules.test.ts](../../tests/harness/rules/rfc/unit/rfc3261-peer-rules.test.ts); ACK-for-non-2xx branch is regression-only (peer-harness setup cost > rule). RFC3261-MUST-034 also covers RFC3261-MUST-047 restatement. |
+| `rfc.cancelCseqMethod` | all | peer | shipped | RFC3261-MUST-045 | — | Sent CANCEL: CSeq method part MUST be CANCEL. Regression-only — strict parser (`extract-fields.ts`) already rejects any message where request method ≠ CSeq method; this rule is defense-in-depth for non-parser SipMessage construction paths. CSeq number-equality covered by `rfc.cseq`. |
+| `rfc.strictRouteShuffleOnSend` | proxy | peer | shipped | RFC3261-MUST-113 | `_dialog-model.ts` | Regression-only — single-message peer rule cannot prove pre-swap state; surfaces 'strict-route still topmost on outbound' as a structural indicator. |
 
 ## Shipped rules — cross-message (`cross`)
 
 Source: [tests/harness/rules/rfc/cross-message-rules.ts](../../tests/harness/rules/rfc/cross-message-rules.ts).
+Plus: [tests/harness/rules/rfc/rfc3261-cross-message-rules.ts](../../tests/harness/rules/rfc/rfc3261-cross-message-rules.ts).
 
 | rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
 |-----------|---------|------|--------|------------------|----------------|-------|
@@ -78,6 +82,25 @@ Source: [tests/harness/rules/rfc/cross-message-rules.ts](../../tests/harness/rul
 | `rfc.rportEcho` | all | cross | advisory | (RFC 3581 — out of pilot) | `_dialog-model.ts` (`readRport`) | RFC 3581 §4. Advisory: loopback never NATs, so the response correctly omits `rport=`. Phase 2 narrows subject to `{proxy}` or models loopback. |
 | `rfc.allowSupportedOnInvite` | all | cross | shipped | RFC3261-MUST-088, RFC3261-MUST-165 | `_dialog-model.ts` | Allow / Supported on re-INVITE + 2xx INVITE. SHOULD-level (3261 §13.2.1, §20.37). |
 | `rfc.proxy100TryingNotForwarded` | all | cross | shipped | RFC3261-MUST-127 | `_dialog-model.ts` | Stateful proxy absorbs downstream 100 Trying per §16.7 step 5. |
+| `rfc.unknownDialog481` | uas | cross | shipped | RFC3261-MUST-071 | `_dialog-model.ts` | Regression-only — complements 481-aware suppression in `rfc.cseq`/`rfc.tags` by asserting the response shape; positive fixture would require fabricating a stale BYE no current scenario emits. |
+| `rfc.unsupportedMethod405Allow` | uas | cross | shipped | RFC3261-MUST-030 | `_dialog-model.ts` | Regression-only — no current fixture emits an unrecognised method; rule acts as a tripwire if a fabricated peer ever does. |
+| `rfc.unsupportedExtension420` | uas | cross | shipped | RFC3261-MUST-033 | `_dialog-model.ts` | Regression-only — no current fixture emits Require with a fabricated option tag; rule acts as a tripwire. |
+| `rfc.unsupported415Accepts` | uas | cross | shipped | RFC3261-MUST-036 | `_dialog-model.ts` | Sent 415 must include Accept/Accept-Encoding/Accept-Language. Regression-only — no current fixture sends 415. Also covers RFC3261-MUST-180 restatement. |
+| `rfc.responseExtensionsAdvertised` | uas | cross | shipped | RFC3261-MUST-037 | `_dialog-model.ts` | Regression-only — current fixtures emit Supported in 2xx via the message builder; rule trips if an unadvertised extension ever appears. |
+| `rfc.registerNoRouteSet` | uac | cross | shipped | RFC3261-MUST-051, RFC3261-MUST-052 | `_dialog-model.ts` | regression-only — observable half (Route-absence on REGISTER); the no-dialog half is arch-guaranteed |
+| `rfc.optionsResponseEchoes` | uas | cross | advisory | RFC3261-MUST-059 | `_dialog-model.ts` | Advisory — B2BUA emits OPTIONS keepalive 200 responses (ADR-0008 two-tier OPTIONS) that intentionally omit Allow/Supported/Accept (transport probes, not §11.2 capability discovery). Advisory until subject narrows to genuine capability OPTIONS or probe responses opt in. |
+| `rfc.concurrentReInvite500or491` | uas | cross | shipped | RFC3261-MUST-086 | `_dialog-model.ts` | regression-only — no current fixture races two re-INVITEs into the same dialog |
+| `rfc.noByeOutsideOrEarlyDialog` | uac, uas | cross | shipped | RFC3261-MUST-089 | `_dialog-model.ts` | regression-only — no current fixture violates the BYE preconditions; rule trips if a callee ever sends BYE on early dialog |
+| `rfc.noTarget404` | proxy | cross | advisory | RFC3261-MUST-105 | `_dialog-model.ts` | Advisory — rule authored for genuine §16.7 stateful proxies. B2BUA worker (classified `proxy` for subject dispatch) terminates each leg as UAC/UAS and may legitimately respond 403/481/491 without forwarding when the backend decision rejects the call — these are not 'no target' outcomes. Advisory until subject narrows to a dedicated proxy bind. |
+| `rfc.unsupportedExtension421` | uas | cross | shipped | RFC3261-MUST-182 | `_dialog-model.ts` | regression-only — no current fixture sends a 421; rule trips if a 421 is ever emitted without Require. Also covers RFC3261-MUST-181 restatement. |
+| `rfc.ackRequireSubsetOfInvite` | uac | cross | shipped | RFC3261-MUST-035 | `_transaction-correlation.ts` | regression-only — no current fixture stamps mismatched Require on ACK; rule trips if it ever happens. |
+| `rfc.cancelRouteEchoesInvite` | uac | cross | shipped | RFC3261-MUST-046 | `_transaction-correlation.ts` | regression-only — no current fixture mismatches CANCEL Route vs INVITE Route; rule trips on Route divergence. |
+| `rfc.cancelAfter1xx` | uac | cross | advisory | RFC3261-MUST-048 | `_transaction-correlation.ts` | Advisory — several fixtures legitimately fire CANCEL on a UAC-local timer before receiving the first 1xx (transient failure injection, glare). Advisory until per-fixture annotation distinguishes 'spec-required wait' from 'fixture-driven race'. |
+| `rfc.serialRegister` | uac | cross | shipped | RFC3261-MUST-054 | `_transaction-correlation.ts` | regression-only — no current fixture races concurrent REGISTERs with different Contacts for the same AOR. |
+| `rfc.noReInviteWhileInviteInProgress` | uac | cross | shipped | RFC3261-MUST-083 (covers RFC3261-MUST-084 restatement) | `_transaction-correlation.ts` | regression-only — no current fixture races re-INVITEs. Also covers RFC3261-MUST-084 restatement. |
+| `rfc.proxy100WithinT100ms` | proxy | cross | advisory | RFC3261-MUST-095 | `_transaction-correlation.ts` | Advisory — B2BUA TransactionLayer DOES emit 100 Trying immediately on inbound INVITE (TransactionLayer.ts:742) and absorbs inbound 100 (line 769) so no relay; rule still fires on some fixtures (heuristic bug in branch lookup vs projector bucket migration, OR a code path bypassing TransactionLayer). OrderedAgentEvent also lacks atMs so 200ms bound cannot be enforced. Advisory until either the bypass is found or the rule heuristic is corrected. |
+| `rfc.strictRouteRewriteHandled` | proxy | cross | shipped | RFC3261-MUST-100 | `_transaction-correlation.ts` | regression-only — current fixtures use loose routing; rule trips if a strict-route inbound request is observed and the §16.4 swap isn't applied. |
+| `rfc.ackPreservesInviteRoute` | uac | cross | shipped | RFC3261-MUST-145 | `_transaction-correlation.ts` | regression-only — no current fixture mismatches ACK/INVITE Route values; rule trips on Route divergence. |
 
 ### Already-asserted-elsewhere
 
@@ -105,36 +128,11 @@ authoritative for the Phase-2 work.
 
 ### RFC 3261
 
-Twenty-two planned rules cover 23 `will-implement` MUSTs (one rule
-covers two adjacent MUSTs). Inventory: [RFC3261.md](RFC3261.md).
-Thirty-nine more `already-implemented` MUSTs are covered by the
-shipped peer + cross-message rules above (their MUST-IDs columns
-have been flipped).
-
-| rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
-|-----------|---------|------|--------|------------------|----------------|-------|
-| `rfc.unsupportedMethod405Allow` | uas | cross | planned | RFC3261-MUST-030 | `_dialog-model.ts` | Received unrecognised method → 405 response carrying Allow header listing supported methods. Positive fixture: peer sends fictional `BANANA` method. |
-| `rfc.unsupportedExtension420` | uas | cross | planned | RFC3261-MUST-033 | `_dialog-model.ts` | Received Require with unknown option tag → 420 response carrying Unsupported header listing the rejected tags. Positive fixture: Alice INVITE with `Require: fictional`. |
-| `rfc.noRequireOnCancelOrAck` | uac, uas | peer | planned | RFC3261-MUST-034 (covers RFC3261-MUST-047 restatement) | — | Sent CANCEL or ACK (non-2xx) must not carry Require / Proxy-Require. Positive fixture: Alice CANCEL with Require:100rel. |
-| `rfc.ackRequireSubsetOfInvite` | uac | cross | planned | RFC3261-MUST-035 | planned `_transaction-correlation.ts` | ACK to 2xx INVITE's Require values are a subset of the INVITE's. Positive fixture: Alice ACK adds a Require tag absent from INVITE. |
-| `rfc.unsupported415Accepts` | uas | cross | planned | RFC3261-MUST-036 (covers RFC3261-MUST-180 restatement) | `_dialog-model.ts` | 415 response carries Accept / Accept-Encoding / Accept-Language as appropriate. Positive fixture: Alice INVITE with unsupported `Content-Type: application/foo`. |
-| `rfc.responseExtensionsAdvertised` | uas | cross | planned | RFC3261-MUST-037 | `_dialog-model.ts` | Extensions applied in response are listed in Supported (or Require if required); MUST NOT apply extensions outside the Supported list. Positive fixture: response adds an extension header without advertising it. |
-| `rfc.cancelCseqMethod` | uac | peer | planned | RFC3261-MUST-045 | — | Sent CANCEL's CSeq method must be CANCEL and CSeq number must equal the INVITE's. Positive fixture: Alice CANCEL with `CSeq: N INVITE`. |
-| `rfc.cancelRouteEchoesInvite` | uac | cross | planned | RFC3261-MUST-046 | planned `_transaction-correlation.ts` | If INVITE had a Route header, CANCEL carries the same Route values. Positive fixture: INVITE with Route, CANCEL omits Route. |
-| `rfc.cancelAfter1xx` | uac | cross | planned | RFC3261-MUST-048 | planned `_transaction-correlation.ts` | Sent CANCEL must follow a received 1xx for the same INVITE branch. Positive fixture: Alice sends CANCEL immediately after INVITE without waiting for 100. |
-| `rfc.registerNoRouteSet` | uac | cross | planned | RFC3261-MUST-051, RFC3261-MUST-052 | `_dialog-model.ts` | Sent REGISTER carries no Route header and forms no dialog/route set. Positive fixture: REGISTER with a Route header. |
-| `rfc.serialRegister` | uac | cross | planned | RFC3261-MUST-054 | planned `_transaction-correlation.ts` | No new REGISTER with new Contact until prior REGISTER receives a final response. Positive fixture: REGISTER, immediate new REGISTER with different Contact. |
-| `rfc.optionsResponseEchoes` | uas | cross | planned | RFC3261-MUST-059 | `_dialog-model.ts` | Received OPTIONS → 200 OK with Allow + Supported + Accept matching what an INVITE response would carry. Positive fixture: OPTIONS-with-Allow vs INVITE-with-Allow comparison. |
-| `rfc.unknownDialog481` | uas | cross | planned | RFC3261-MUST-071 | `_dialog-model.ts` | Received in-dialog request with no matching local dialog → 481 response. Already-suppressed pattern in `rfc.cseq`/`rfc.tags`; this rule asserts the *response* shape (complement). Positive fixture: stale BYE for a torn-down dialog. |
-| `rfc.noReInviteWhileInviteInProgress` | uac | cross | planned | RFC3261-MUST-083 (covers RFC3261-MUST-084 restatement) | planned `_transaction-correlation.ts` | UAC must not issue a new in-dialog INVITE while a prior INVITE transaction is unterminated. Positive fixture: re-INVITE while client transaction still in "Proceeding". |
-| `rfc.concurrentReInvite500or491` | uas | cross | planned | RFC3261-MUST-086 | `_dialog-model.ts` | Received concurrent in-dialog INVITE → 500 (with Retry-After) or 491 (Request Pending). Positive fixture: two near-simultaneous re-INVITEs into the same dialog. |
-| `rfc.noByeOutsideOrEarlyDialog` | uac, uas | cross | planned | RFC3261-MUST-089 | `_dialog-model.ts` | BYE forbidden outside dialog; callee-side BYE forbidden on confirmed dialog before ACK; callee BYE forbidden on early dialog (use CANCEL or 4xx instead). Positive fixture: callee sends BYE on an early dialog. |
-| `rfc.proxy100WithinT100ms` | proxy | cross | planned | RFC3261-MUST-095 | planned `_transaction-correlation.ts` | Stateful proxy sends 100 Trying for INVITE within 200ms of receipt (when relaying). Positive fixture: proxy harness slows the 100 emission past the bound. |
-| `rfc.strictRouteRewriteHandled` | proxy | cross | planned | RFC3261-MUST-100 | planned `_transaction-correlation.ts` | When received request has strict-route topmost Route, outgoing request shows the §16.4 swap (Request-URI ← last Route URI). Positive fixture: proxy receives strict-route, audit observes outbound without the swap. |
-| `rfc.noTarget404` | proxy | cross | planned | RFC3261-MUST-105 | `_dialog-model.ts` | If proxy/SipRouter cannot resolve a target → 404 (Not Found). Positive fixture: backend HTTP returns "no target", audit observes anything other than 404. |
-| `rfc.strictRouteShuffleOnSend` | proxy | peer | planned | RFC3261-MUST-113 | — | When forwarding to a Route set whose first URI lacks `;lr`, observe the request-URI / Route swap (§16.6 step 6.b). Peer rule on sent requests at proxy bind. Positive fixture: builder emits no-swap form. |
-| `rfc.ackPreservesInviteRoute` | uac | cross | planned | RFC3261-MUST-145 | planned `_transaction-correlation.ts` | ACK to non-2xx INVITE carries the same Route headers as the INVITE. Positive fixture: Alice ACK omits an INVITE Route. |
-| `rfc.unsupportedExtension421` | uas | cross | planned | RFC3261-MUST-182 (covers RFC3261-MUST-181 restatement) | `_dialog-model.ts` | 421 (Extension Required) response carries a Require header listing the required extensions. Positive fixture: response emits 421 without Require. |
+Zero planned rules remain — all RFC 3261 MUSTs in pilot scope are either
+`already-implemented` or classified `justified-not-implemented` /
+`restatement`. Inventory: [RFC3261.md](RFC3261.md). Sixty-two
+`already-implemented` MUSTs are covered by the shipped peer +
+cross-message rules above.
 
 ### RFC 3262
 
@@ -156,7 +154,7 @@ Sixteen planned rules cover 21 `will-implement` MUSTs. Inventory:
 | `rfc.noNewReliable1xxAfterFinal` | uas | cross | planned | RFC3262-MUST-016 | `_dialog-model.ts` | No new reliable 1xx (i.e. unseen RSeq) after a final response was sent on this INVITE. Positive fixture: Bob sends 200 then a fresh reliable 199. |
 | `rfc.no100relRequireOnNonInvite` | uac | peer | shipped | RFC3262-MUST-017 | — | Sent request inspection: any non-INVITE carrying `Require:100rel` is a violation. Positive coverage: [unit/rfc3262-peer-rules.test.ts](../../tests/harness/rules/rfc/unit/rfc3262-peer-rules.test.ts) (REGISTER + OPTIONS positive cases; INVITE + clean-REGISTER negative cases). |
 | `rfc.uacIgnore100rel100Trying` | uac | cross | planned | RFC3262-MUST-019 | `_dialog-model.ts` | If a 100 (Trying) carried `Require:100rel`, no PRACK should reference it. Positive fixture: Bob sends bogus 100 with Require:100rel; Alice must not PRACK. |
-| `rfc.prackOnReliable1xx` | uac | cross | planned | RFC3262-MUST-021 | planned `_transaction-correlation.ts` | Every received reliable 1xx (status 101-199 with `Require:100rel`) draws a matching outbound PRACK. Complement to existing `rfc.rackCorrelation`. Positive fixture: Bob sends reliable 180, Alice harness intentionally skips PRACK. |
+| `rfc.prackOnReliable1xx` | uac | cross | planned | RFC3262-MUST-021 | `_transaction-correlation.ts` | Every received reliable 1xx (status 101-199 with `Require:100rel`) draws a matching outbound PRACK. Complement to existing `rfc.rackCorrelation`. Positive fixture: Bob sends reliable 180, Alice harness intentionally skips PRACK. |
 | `rfc.uacRseqStrictness` | uac | cross | planned | RFC3262-MUST-024 | `_dialog-model.ts` | UAC PRACKs only the in-order RSeq; out-of-order reliable 1xx must not yield a PRACK. Positive fixture: Bob sends 180/RSeq=5 then 181/RSeq=7 (skip 6); Alice must PRACK only the 180. |
 | `rfc.prackOfferAnswerModel` | uac, uas | cross | planned | RFC3262-MUST-025, RFC3262-MUST-026, RFC3262-MUST-027 | planned `_offer-answer.ts` | Consolidated O/A walker for the PRACK-flavored exchanges (offer-in-1xx → answer-in-PRACK → answer-in-2xx-PRACK). First consumer of `_offer-answer.ts`; second consumer expected to be RFC 3264 main O/A rule. Positive fixtures: three sub-scenarios, one per MUST. |
 
@@ -193,6 +191,7 @@ policy" for the contract.
 | helper | covers | first consumer |
 |--------|--------|---------------|
 | [`_dialog-model.ts`](../../tests/harness/rules/rfc/_dialog-model.ts) | Dialog-model walk, route-set tracking, SDP origin parsing, rport reader | `rfc.midDialogFromUri` / `rfc.midDialogRoute` |
+| [`_transaction-correlation.ts`](../../tests/harness/rules/rfc/_transaction-correlation.ts) | Per-top-Via-branch index of sent/received × request/response messages on one agent's stream; convenience lookups for INVITE-by-branch, first-response status, final-response presence, and option-tag splitting | `rfc.ackRequireSubsetOfInvite` |
 
 ### Candidate helpers (illustrative; land with first consumer)
 
@@ -200,7 +199,6 @@ policy" for the contract.
 |------------------------|--------|------------------------|
 | `_offer-answer.ts` | Offer/answer pair extraction across INVITE/200/ACK, UPDATE, PRACK | first RFC 3264 cross-message rule |
 | `_dialog-iteration.ts` | Typed dialog walk with per-step state | second cross-message rule duplicating `_dialog-model.ts`'s loop shape |
-| `_transaction-correlation.ts` | Response → request match via Via branch + CSeq | first retransmission / PRACK rule beyond `rfc.rackCorrelation` |
 | `_sdp-parsing.ts` | Strict-mode SDP parsing for body-dependent rules | second SDP rule beyond `rfc.sdpOriginContinuity` |
 
 Names are illustrative — actual file names are decided when the
