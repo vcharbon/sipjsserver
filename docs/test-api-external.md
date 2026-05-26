@@ -37,9 +37,12 @@ Three agents, three steps:
 import { scenario } from "../../fullcall/framework/dsl.js"
 import { sdpOffer, sdpAnswer } from "../../fullcall/helpers/sdp.js"
 
+// Agents run on the in-memory simulated ext fabric (`5.1.x.x:5060`),
+// proxy(ext) lives at `5.1.0.1:5060`. Distinct synthetic IPs keep the
+// routing-table keys unique; the kernel never sees these packets.
 export const myCall = scenario("my-call", (s) => {
-  const alice = s.agent("alice", { uri: "sip:alice@kindlab", port: 25060 })
-  const bob   = s.agent("bob",   { uri: "sip:bob@kindlab",   port: 25061 })
+  const alice = s.agent("alice", { uri: "sip:alice@kindlab", ip: "5.1.1.1", port: 5060 })
+  const bob   = s.agent("bob",   { uri: "sip:bob@kindlab",   ip: "5.1.2.1", port: 5060 })
 
   alice.register({ expires: 3600 }).expect(200)
   bob.register({ expires: 3600 }).expect(200)
@@ -86,7 +89,7 @@ import {
   createHybridRunner,
   discoverHostReachableIp,
   flushHybridIndexReport,
-} from "../support/hybridRunner.js"
+} from "../../src/test-harness/hybrid-runner.js"
 
 const OUTPUT_DIR = "test-results/real-clock/registrarFrontProxy-kind"
 
@@ -124,10 +127,10 @@ Every agent is created with `s.agent(name, config)`:
 | field          | meaning |
 |----------------|---------|
 | `uri`          | The agent's AOR (e.g. `sip:alice@kindlab`). |
-| `port`         | Fixed UDP bind port — **required** in hybrid mode so the SBC pod can address replies back to the host. |
-| `ip`           | Bind IP. Hybrid runner forces `0.0.0.0` transport-wide; per-agent override is only useful for the simulated backend. |
-| `advertisedIp` | Per-agent override of what gets stamped in Contact / Via / From. Hybrid runner injects the kind bridge gateway IP transport-wide; you only need this for unusual topologies. |
-| `network`      | `"ext"` (default) or `"core"` — purely a label that paints the lane on the HTML report. The kind cluster is one fabric; leave it default. |
+| `ip`           | Agent's address on the in-process simulated ext fabric. Pair with a `port` to form the routing-table key. Use distinct synthetic addresses (e.g. `5.1.1.1`, `5.1.2.1`); the kernel never sees these packets. |
+| `port`         | Agent's port on the simulated fabric. Together with `ip` it must be unique across agents. Do NOT use `0` — the simulated fabric does not ephemeral-assign. |
+| `advertisedIp` | Per-agent override of what gets stamped in Contact / Via / From. Defaults to `ip`. The hybrid runner does NOT inject one transport-wide; only the proxy's `core` endpoint is on real UDP and uses `HybridRunnerOptions.advertisedIp`. |
+| `network`      | `"ext"` (default) or `"core"` — paints the lane on the report. Agents on the registrar harness are always `"ext"`; the only `"core"` lane is the proxy's outbound to the kind cluster. |
 
 The agent proxy returned exposes:
 
@@ -233,21 +236,87 @@ proceeds.
 
 ---
 
+## What the recorder captures
+
+The hybrid runner threads every observation — agent-side fake-fabric
+packets, proxy-side real-UDP packets, kill events on a lane — through a
+single in-process `Recorder` service backed by a shared
+`EventSequencer`. The merged stream lands on `ScenarioResult`:
+
+- `result.trace` — every SIP packet, in `(timestamp, seq)` order. Each
+  entry has `fromAddr`/`toAddr` `(ip, port)` (authoritative wire
+  identity), a structured `message`, the `direction`
+  (`"send"` / `"receive"`), and a `network` tag (`"ext"` or `"core"`).
+- `result.lanes` — one entry per `(ip, port)` the recorder saw. Lanes
+  carry `names` (decorations attached by the harness — e.g. `"alice"`,
+  `"proxy(ext)"`, `"k8s-ingress"`), `network`, and any `killedAt`
+  timestamps surfaced by k8s lifecycle steps. Anonymous lanes (no
+  registered name) are legitimate — render `ip:port` directly.
+- `result.anomalies` — soft data-quality warnings. The hybrid runner
+  commonly surfaces `nameConflict` (two names on one lane),
+  `undeliverable` (packet hit no bound endpoint on the simulated
+  fabric), and `signalingAudit` (fabric-level invariant tripped). They
+  are NOT step failures unless their `severity` is `"deferred-fail"`,
+  in which case the scenario fails at scope close.
+- `result.stepResults` — per-step pass / fail / skip with the matched
+  message, error string, and assertion errors.
+- `result.passed` / `failed` / `skipped` — counts. The runner's
+  `Effect` rejects with `HybridScenarioFailure` when `failed > 0`.
+
+The `seq` field on every `TraceEntry` and replication frame is the
+deterministic tiebreaker for same-ms events — the renderers use
+`(timestamp, seq)`, and any custom tooling should too. Real-clock
+collisions between the ext (fake) and core (real) fabrics are common
+enough on a busy run that timestamp alone is not stable.
+
 ## Reports
 
-Every scenario produces (under `test-results/real-clock/registrarFrontProxy-kind/`):
+The runner calls the report writers internally for every scenario it
+runs, then leaves the final `index.html` as a manual flush so a
+`describe` block can collect multiple scenarios into one index. Every
+scenario produces (under
+`test-results/real-clock/registrarFrontProxy-kind/`):
 
-| file                               | what it contains |
-|------------------------------------|------------------|
-| `index.html`                       | Master index of every scenario in the run. |
-| `<scenario>.html`                  | SVG sequence diagram + step-by-step pass/fail table + clickable per-message links to text views. |
-| `<scenario>.global.txt`            | Plain text trace, all endpoints, in arrival order. Best fed to the [sip-callflow-review](../.claude/skills/sip-callflow-review.md) skill. |
-| `ext/<scenario>.<agent>.txt`       | Per-agent endpoint view of the trace. |
+| file                                      | what it contains |
+|-------------------------------------------|------------------|
+| `<scenario>.html`                         | SVG sequence diagram, step-by-step pass/fail table, clickable per-message inspector, "data anomalies" panel. |
+| `<scenario>.global.txt`                   | Plain text trace, all endpoints, in `(timestamp, seq)` order. Best fed to the [sip-callflow-review](../.claude/skills/sip-callflow-review.md) skill. |
+| `<network>/<scenario>.<agent>.txt`        | Per-agent endpoint view of the trace. `<network>` is `ext` for agents, `core` for the proxy-core lane. Filename slug falls back to `<ip>-<port>` for anonymous lanes. |
+| `index.html`                              | Master index of every scenario flushed in the run, with PASS/FAIL badges and rule-coverage panel. Written when `flushHybridIndexReport(outputDir)` runs. |
 
 The HTML report uses real wall-clock timestamps (`T+0.000s`,
-`T+0.064s`, …) since the hybrid runner uses real `Effect.sleep`. Compare
-that to the fake-clock suite, where everything in a scenario lands at
-`T+0` because `TestClock` only advances on explicit `s.pause(ms)` calls.
+`T+0.064s`, …) since the hybrid runner uses real `Effect.sleep` on the
+core side. Compare that to the fake-clock suite, where everything in a
+scenario lands at `T+0` because `TestClock` only advances on explicit
+`s.pause(ms)` calls.
+
+### Generating reports outside the bundled runner
+
+The writers are exported and reusable on any `ScenarioResult`:
+
+```ts
+import {
+  writeScenarioReport,
+  writeTextReports,
+  writeIndexReport,
+  formatReport,
+} from "../../src/test-harness/index.js"
+
+// Per-scenario: write text first so the HTML page can link to them.
+const txtFiles = writeTextReports(result, OUTPUT_DIR)
+writeScenarioReport(result, OUTPUT_DIR, txtFiles)
+console.log(formatReport(result))   // stdout summary the runner already emits
+
+// Index: aggregate many results into one page.
+writeIndexReport(allResults, OUTPUT_DIR)
+```
+
+`flushHybridIndexReport(OUTPUT_DIR)` is the shorthand for the
+last line when the in-memory result list the hybrid runner maintains
+already holds every scenario you care about (i.e. the
+`afterAll(() => flushHybridIndexReport(OUTPUT_DIR))` pattern at the top
+of this guide). Reach for `writeIndexReport` directly when you build a
+custom runner.
 
 ---
 
@@ -273,7 +342,7 @@ You'll get the same DSL surface, but in-process and on `TestClock`.
 | symptom | cause / fix |
 |---------|-------------|
 | `REGISTER` times out on `200 OK` | Proxy isn't in registrar mode. Confirm `tests/k8s/values/sip-front-proxy.yaml` has `extraEnv: PROXY_REGISTER_MODE=in-memory` and `helm upgrade` was applied. |
-| `INVITE` reaches bob but his `180`/`200` time out | Pod cannot reach host. Verify `discoverHostReachableIp()` returned a valid IPv4 (`docker network inspect kind`). On Linux native this is the docker bridge gateway (e.g. `172.20.0.1`). The framework now respects the actual UDP source for response routing — if it's still failing, check that bob bound on `0.0.0.0` (the hybrid runner does this; the simulated backend doesn't). |
+| `INVITE` reaches bob but his `180`/`200` time out | Pod cannot reach the host on the `core` endpoint. Verify `discoverHostReachableIp()` returned a valid IPv4 (`docker network inspect kind`). On Linux native this is the docker bridge gateway (e.g. `172.20.0.1`). Note: bob lives on the in-memory ext fabric — replies travel pod → proxy(core) on real UDP, then proxy(ext) → bob in-process. If `proxy(core)` never sees the response, the pod can't reach `advertisedIp:corePort`. |
 | `/call/new` returns 200 but the worker dials sipp-uas | The mock fell back to its legacy default route because no `X-Api-Call` header reached it. Confirm the header travels alice → proxy → worker → HTTP request body's `sip_headers["X-Api-Call"]` (chain begins at [src/b2bua/InitialInviteHandler.ts:74](../src/b2bua/InitialInviteHandler.ts#L74)). |
 | Cluster up but Service unreachable on `127.0.0.1:5060` | The proxy Service must be `type: NodePort` with `nodePort: 30060` (matching `tests/k8s/cluster.yaml`'s `extraPortMappings`). See `tests/k8s/values/sip-front-proxy.yaml`. |
 | New scenario passes locally but the report shows `Status: FAIL` for unexpected messages after BYE | Some scenarios leak transaction state in the SBC; mark the scenario `.skipFinalSweep()` if you've already validated the happy path. The two existing hybrid scenarios use this. |
