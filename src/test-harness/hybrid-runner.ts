@@ -315,6 +315,16 @@ export interface HybridRunnerOptions {
    * created internally if omitted.
    */
   readonly traceSequencer?: NetworkTraceSequencer
+  /**
+   * IPs the kernel uses as a "ghost" source alias for host-bound
+   * traffic. WSL2 rewrites a host-bound source IP to `10.255.255.254`
+   * on the docker bridge while preserving the port; the label lookup
+   * then falls back to port-only matching for these IPs so the report
+   * collapses ghosts onto their canonical participants. Default
+   * includes the well-known WSL2 alias; pass a custom set for other
+   * environments or to disable the fallback.
+   */
+  readonly ghostIps?: ReadonlySet<string>
 }
 
 // ---------------------------------------------------------------------------
@@ -368,11 +378,13 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
   // same sequencer here so the merged report stays monotonic.
   const traceSequencer = opts.traceSequencer ?? makeEventSequencer()
 
+  const ghostIps = opts.ghostIps ?? new Set(["10.255.255.254"])
   const transportBase = createLiveTransport({
     useExternalNetwork: true,
     participantLabels: labels,
     participantNetworkOverrides: networks,
     traceSequencer,
+    ghostIps,
   })
   const target = { host: endpoints.extAdvertised.host, port: endpoints.extAdvertised.port }
 

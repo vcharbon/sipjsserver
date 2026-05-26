@@ -24,11 +24,29 @@ import { serializeMessage } from "./svg-sequence-diagram.js"
  * Build a `(ip,port)` → first registered name index. Lane identity is
  * `(ip,port)`; names are decorations. Empty-name lanes return `""` so
  * callers can render `(ip:port)` alone without breaking.
+ *
+ * Also folds in per-entry address → label mappings from the trace so
+ * "ghost" addresses (e.g. WSL2 NAT aliases that share a port with a
+ * known endpoint but differ in IP) render with their canonical label
+ * rather than the bare `ip:port` fallback.
  */
-function buildNameByAddr(lanes: readonly Lane[]): Map<string, string> {
+function buildNameByAddr(
+  lanes: readonly Lane[],
+  trace: readonly TraceEntry[],
+): Map<string, string> {
   const idx = new Map<string, string>()
   for (const lane of lanes) {
     idx.set(laneKey(lane.ip, lane.port), lane.names[0] ?? "")
+  }
+  for (const entry of trace) {
+    const fromKey = laneKey(entry.fromAddr.ip, entry.fromAddr.port)
+    if (!idx.has(fromKey) && entry.from.length > 0) {
+      idx.set(fromKey, entry.from)
+    }
+    const toKey = laneKey(entry.toAddr.ip, entry.toAddr.port)
+    if (!idx.has(toKey) && entry.to.length > 0) {
+      idx.set(toKey, entry.to)
+    }
   }
   return idx
 }
@@ -173,7 +191,7 @@ export function writeTextReports(
 
   const filenames: string[] = []
   const baseTs = result.trace.length > 0 ? result.trace[0]!.timestamp : 0
-  const nameByAddr = buildNameByAddr(result.lanes)
+  const nameByAddr = buildNameByAddr(result.lanes, result.trace)
 
   // --- Global report (all endpoints) ---
   {

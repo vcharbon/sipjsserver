@@ -1659,6 +1659,14 @@ function buildParticipantsAndLanes(state: InterpreterState): {
   >()
   const anomalies: RecordedAnomaly[] = []
   const conflictReported = new Set<LaneKey>()
+  // Track first lane each label landed on, so subsequent appearances of
+  // the same label at a different `(ip, port)` (e.g. a host-bound
+  // endpoint appearing under both its real bind address and the
+  // kernel's NAT-translated alias under WSL2 / Docker) collapse onto
+  // the same lane. A "label" here is anything other than the bare
+  // `ip:port` fallback the participantLabel resolver returns when no
+  // friendly name is registered.
+  const nameToLaneKey = new Map<string, LaneKey>()
 
   let order = 0
   const seeLane = (
@@ -1666,7 +1674,9 @@ function buildParticipantsAndLanes(state: InterpreterState): {
     name: string,
     network: NetworkTag,
   ): void => {
-    const key = laneKey(addr.ip, addr.port)
+    const isBareAddr = name === `${addr.ip}:${addr.port}`
+    const existingKeyForName = isBareAddr ? undefined : nameToLaneKey.get(name)
+    const key = existingKeyForName ?? laneKey(addr.ip, addr.port)
     const existing = laneMap.get(key)
     if (existing === undefined) {
       laneMap.set(key, {
@@ -1676,7 +1686,11 @@ function buildParticipantsAndLanes(state: InterpreterState): {
         names: [name],
         firstSeen: order++,
       })
+      if (!isBareAddr) nameToLaneKey.set(name, key)
       return
+    }
+    if (!isBareAddr && !nameToLaneKey.has(name)) {
+      nameToLaneKey.set(name, key)
     }
     if (existing.names.includes(name)) return
     existing.names.push(name)

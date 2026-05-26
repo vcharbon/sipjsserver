@@ -72,6 +72,14 @@ export function createLiveTransport(opts?: {
    * same counter.
    */
   traceSequencer?: NetworkTraceSequencer
+  /**
+   * IPs the kernel uses as a "ghost" source alias for host-bound
+   * traffic (e.g. WSL2 rewrites 172.20.0.1 → 10.255.255.254 on the
+   * docker bridge while preserving the port). The participant-label
+   * lookup falls back to port-only matching ONLY for these IPs, so
+   * report lanes collapse the ghosts onto their canonical participant.
+   */
+  ghostIps?: ReadonlySet<string>
 }): TestTransport {
   const bindIp = opts?.bindIp ?? "127.0.0.1"
   const transportAdvertisedIp = opts?.advertisedIp
@@ -189,12 +197,47 @@ export function createLiveTransport(opts?: {
         )
       }),
 
-    participantNetwork: (ip: string, port: number) =>
-      externalNetworks?.get(labelKey(ip, port))
-        ?? participantNetworks.get(labelKey(ip, port)),
-    participantLabel: (ip: string, port: number) =>
-      externalLabels?.get(labelKey(ip, port))
-        ?? participantLabels.get(labelKey(ip, port)),
+    participantNetwork: (ip: string, port: number) => {
+      const exact = externalNetworks?.get(labelKey(ip, port))
+        ?? participantNetworks.get(labelKey(ip, port))
+      if (exact !== undefined) return exact
+      // Port-fallback for declared "ghost" IPs only. Under WSL2 (and
+      // some Docker NAT setups) the kernel rewrites a host-bound
+      // source address to a bridge alias (e.g. host 172.20.0.1 →
+      // 10.255.255.254) while preserving the port. We collapse those
+      // ghosts onto their canonical participant by port so the report
+      // renders one lane per logical endpoint — but only for IPs the
+      // caller explicitly flagged, so legitimate distinct endpoints
+      // that happen to share a port (e.g. multiple cluster pods on
+      // 5060) keep their own lanes.
+      if (opts?.ghostIps?.has(ip) === true) {
+        for (const [k, v] of participantNetworks) {
+          if (k.endsWith(`:${port}`)) return v
+        }
+        if (externalNetworks !== undefined) {
+          for (const [k, v] of externalNetworks) {
+            if (k.endsWith(`:${port}`)) return v
+          }
+        }
+      }
+      return undefined
+    },
+    participantLabel: (ip: string, port: number) => {
+      const exact = externalLabels?.get(labelKey(ip, port))
+        ?? participantLabels.get(labelKey(ip, port))
+      if (exact !== undefined) return exact
+      if (opts?.ghostIps?.has(ip) === true) {
+        for (const [k, v] of participantLabels) {
+          if (k.endsWith(`:${port}`)) return v
+        }
+        if (externalLabels !== undefined) {
+          for (const [k, v] of externalLabels) {
+            if (k.endsWith(`:${port}`)) return v
+          }
+        }
+      }
+      return undefined
+    },
     ...(opts?.traceSequencer !== undefined
       ? { traceSequencer: opts.traceSequencer }
       : {}),

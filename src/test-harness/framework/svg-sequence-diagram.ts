@@ -309,6 +309,35 @@ export function renderSequenceDiagram(
     laneByKey.set(key, lane)
   }
 
+  // Fold trace-entry addresses into the lane index so "ghost" sources
+  // (e.g. WSL2 NAT aliases sharing a port with a canonical lane) draw
+  // arrows on their canonical column rather than being dropped because
+  // the exact `(ip,port)` lookup misses. The participant-box render
+  // loop iterates `laneByKey`, so adding entries to `laneX` alone is
+  // safe — the ghost keys point at an existing canonical column.
+  for (const entry of trace) {
+    const fromKey = laneKey(entry.fromAddr.ip, entry.fromAddr.port)
+    if (!laneX.has(fromKey)) {
+      const port = entry.fromAddr.port
+      for (const lane of lanes) {
+        if (lane.port === port && lane.names.includes(entry.from)) {
+          laneX.set(fromKey, laneX.get(laneKey(lane.ip, lane.port))!)
+          break
+        }
+      }
+    }
+    const toKey = laneKey(entry.toAddr.ip, entry.toAddr.port)
+    if (!laneX.has(toKey)) {
+      const port = entry.toAddr.port
+      for (const lane of lanes) {
+        if (lane.port === port && lane.names.includes(entry.to)) {
+          laneX.set(toKey, laneX.get(laneKey(lane.ip, lane.port))!)
+          break
+        }
+      }
+    }
+  }
+
   const podLaneIndex = buildPodLaneIndex(lanes)
 
   // Merge SIP and replication entries into a single timeline.
@@ -405,8 +434,13 @@ export function renderSequenceDiagram(
   }
 
   // --- Lane headers (two-line: address primary, names secondary) ---
-  for (const [key, x] of laneX) {
-    const lane = laneByKey.get(key)!
+  // Iterate the canonical lane list (not `laneX`) so ghost address
+  // entries — which point at an existing column — don't try to render
+  // a duplicate participant box.
+  for (const lane of lanes) {
+    const key = laneKey(lane.ip, lane.port)
+    const x = laneX.get(key)
+    if (x === undefined) continue
     const boxX = x - PARTICIPANT_BOX_WIDTH / 2
     const boxY = MARGIN_TOP
     svgParts.push(`<rect x="${boxX}" y="${boxY}" width="${PARTICIPANT_BOX_WIDTH}" height="${PARTICIPANT_BOX_HEIGHT}" rx="4" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>`)
@@ -421,7 +455,10 @@ export function renderSequenceDiagram(
   }
 
   // --- Lifelines ---
-  for (const [, x] of laneX) {
+  // One lifeline per canonical lane (matching the boxes above).
+  for (const lane of lanes) {
+    const x = laneX.get(laneKey(lane.ip, lane.port))
+    if (x === undefined) continue
     svgParts.push(`<line x1="${x}" y1="${MARGIN_TOP + PARTICIPANT_BOX_HEIGHT}" x2="${x}" y2="${totalHeight - 20}" stroke="#d1d5db" stroke-width="1" stroke-dasharray="4,4"/>`)
   }
 
