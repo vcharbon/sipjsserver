@@ -38,6 +38,7 @@ const fakeInclude = ["tests/**/*.test.ts"]
 const fakeExclude = [
   "tests/fullcall/e2e-real-clock.test.ts",
   "tests/fullcall/e2e-register-fakeExt-realCore.test.ts",
+  "tests/fullcall/e2e-register-noRr-realFabric.test.ts",
   "tests/fullcall/replication-stream-medium.test.ts",
   "tests/harness/limiter-rejection.test.ts",
   // K8s suites need a kind cluster and run under `vitest.config.k8s.ts`.
@@ -55,6 +56,7 @@ const liveInclude = [
   "tests/harness/limiter-rejection.test.ts",
   // Hybrid kind-cluster suite — no-ops unless `E2E_KIND=1` in env.
   "tests/fullcall/e2e-register-fakeExt-realCore.test.ts",
+  "tests/fullcall/e2e-register-noRr-realFabric.test.ts",
   // Replication-stream medium-tier soak (real Redis + real HTTP);
   // self-skips when TEST_TIER < medium, Redis is unreachable, or
   // `--expose-gc` is not present.
