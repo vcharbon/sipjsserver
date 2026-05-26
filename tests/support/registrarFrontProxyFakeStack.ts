@@ -73,6 +73,12 @@ export const coreIp = (n: number): string => `10.40.0.${n + 100}`
 
 export interface RegistrarFrontProxyFakeStackOpts {
   readonly config: AppConfigData
+  /**
+   * Whether the proxy stamps Record-Route on dialog-creating requests.
+   * `true` preserves existing register-proxy behaviour; `false` selects
+   * the non-record-routing mode so in-dialog traffic bypasses the proxy.
+   */
+  readonly recordRoute: boolean
   readonly transitDelayMs?: number
   /**
    * Optional send-fault injector forwarded to `SignalingNetwork.simulated`.
@@ -118,6 +124,7 @@ export function registrarFrontProxyFakeStackLayer(
     coreAdvertisedHost: CORE_INGRESS.host,
     coreAdvertisedPort: CORE_INGRESS.port,
     coreDestination: CORE_DESTINATION,
+    recordRoute: opts.recordRoute,
   })
 
   // RoutingStrategy is required by ProxyCore but `handleRequestRegistrarMode`

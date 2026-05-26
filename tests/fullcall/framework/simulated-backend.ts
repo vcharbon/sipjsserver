@@ -241,7 +241,7 @@ export function createSimulatedTransport(opts?: {
         : sut === "proxy+b2b"
           ? proxyB2bFakeStackLayer({ config, simulateMissingOutboundProxy })
           : sut === "registrarFrontProxy"
-            ? registrarFrontProxyFakeStackLayer({ config })
+            ? registrarFrontProxyFakeStackLayer({ config, recordRoute: true })
             : fakeStackLayer({ config, realClock: opts?.realClock === true })
 
   const mockState: MockTransportState = {

@@ -52,6 +52,12 @@ export interface RegistrarFrontProxyHybridStackOpts {
   readonly coreAdvertised: SocketAddr
   /** Where ext-INVITE forwards to when not resolved by registrar lookup. */
   readonly coreDestination: SocketAddr
+  /**
+   * Whether the proxy stamps Record-Route on dialog-creating requests.
+   * `true` preserves existing register-proxy behaviour; `false` selects
+   * the non-record-routing mode so in-dialog traffic bypasses the proxy.
+   */
+  readonly recordRoute: boolean
 }
 
 /**
@@ -84,6 +90,7 @@ export function registrarFrontProxyHybridStackLayer(
     coreAdvertisedHost: opts.coreAdvertised.host,
     coreAdvertisedPort: opts.coreAdvertised.port,
     coreDestination: opts.coreDestination,
+    recordRoute: opts.recordRoute,
   })
 
   // RoutingStrategy is required by ProxyCore but `handleRequestRegistrarMode`

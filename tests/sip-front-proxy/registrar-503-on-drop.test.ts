@@ -89,6 +89,7 @@ describe("BufferedUdpEndpoint at proxy egress — no 503 synthesis on drop", () 
             sipLocalIp: EXT_INGRESS.host,
             sipLocalPort: EXT_INGRESS.port,
           }),
+          recordRoute: true,
           // Force every send whose destination is the configured
           // `coreDestination` to fail — emulates EAI_AGAIN at the OS layer.
           sendFault: (_src, dst) =>

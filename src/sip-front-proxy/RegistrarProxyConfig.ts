@@ -49,6 +49,17 @@ export interface RegistrarProxyConfigData {
    * (out of v1 scope) could replace this with a strategy.
    */
   readonly coreDestination: SocketAddr
+  /**
+   * When `true` (existing register-proxy mode) the proxy inserts a
+   * Record-Route on every dialog-creating request so in-dialog traffic
+   * loops back through the proxy. When `false` (non-record-routing mode)
+   * the proxy stays out of the in-dialog path: ACK/BYE/re-INVITE travel
+   * peer-to-peer via each side's Contact and the proxy never sees them
+   * after the initial INVITE/200/ACK setup.
+   *
+   * No default — every consumer must state intent explicitly.
+   */
+  readonly recordRoute: boolean
 }
 
 export class RegistrarProxyConfig extends ServiceMap.Service<

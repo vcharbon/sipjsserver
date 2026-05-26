@@ -354,6 +354,7 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
     coreBind: endpoints.coreBind,
     coreAdvertised: endpoints.coreAdvertised,
     coreDestination: endpoints.coreDestination,
+    recordRoute: true,
   })
   // `provideMerge`: the proxy reads both `SignalingNetwork` (ext) and
   // `SignalingNetworkCore` (core), and the outer effect re-yields

@@ -1651,7 +1651,7 @@ const handleRequestRegistrarMode = (
     let nextHeaders: SipHeader[] = [...headers]
     nextHeaders = upsertHeader(nextHeaders, "Max-Forwards", String(mfNext))
 
-    if (DIALOG_CREATING.has(method)) {
+    if (DIALOG_CREATING.has(method) && registrarCfg.recordRoute) {
       // Stamp Record-Route on each side so in-dialog requests can flow
       // back through us regardless of which side originates them.
       //
@@ -1670,6 +1670,10 @@ const handleRequestRegistrarMode = (
       // single-fabric registrar mode, K8s-LB mode collapses to ext
       // only), one RR is sufficient — `egressAdvertised` collapses to
       // the same address so the legacy single-RR shape is preserved.
+      //
+      // When `recordRoute === false` the entire block is skipped — the
+      // proxy stays out of the in-dialog path; ACK/BYE/re-INVITE flow
+      // peer-to-peer via Contacts exchanged during the setup handshake.
       const sameAdvertised =
         extAdvertised.ip === coreAdvertised.ip &&
         extAdvertised.port === coreAdvertised.port
