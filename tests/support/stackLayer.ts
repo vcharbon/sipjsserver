@@ -66,6 +66,7 @@ import { PumpableClockLayer } from "./PumpableClock.js"
 import { basePeerRules } from "../harness/rules/rfc/starter-peer-rules.js"
 import { crossMessagePeerRules } from "../harness/rules/rfc/cross-message-rules.js"
 import { rfc3261CrossMessageRules } from "../harness/rules/rfc/rfc3261-cross-message-rules.js"
+import { rfc3262CrossMessageRules } from "../harness/rules/rfc/rfc3262-cross-message-rules.js"
 import { rfc3261PeerRules } from "../harness/rules/rfc/rfc3261-peer-rules.js"
 import { rfc3262PeerRules } from "../harness/rules/rfc/rfc3262-peer-rules.js"
 import { RFC_EXCEPTIONS } from "../harness/rules/rfc/exceptions.js"
@@ -159,7 +160,7 @@ function buildFake(opts: FakeModeOpts) {
     const rules = perfMode === "no-audit"
       ? []
       : [...basePeerRules, ...rfc3261PeerRules, ...rfc3262PeerRules, ...(opts.extraPeerRules ?? [])]
-    const crossMessageRules = perfMode === "no-audit" ? [] : [...crossMessagePeerRules, ...rfc3261CrossMessageRules]
+    const crossMessageRules = perfMode === "no-audit" ? [] : [...crossMessagePeerRules, ...rfc3261CrossMessageRules, ...rfc3262CrossMessageRules]
     const exceptions = perfMode === "no-audit"
       ? []
       : resolveRfcExceptions(RFC_EXCEPTIONS, { dutBindKey })

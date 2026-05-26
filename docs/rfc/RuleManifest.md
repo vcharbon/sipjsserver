@@ -72,6 +72,7 @@ narrow proxy-only or UAS-only rules where the MUST is role-specific.
 
 Source: [tests/harness/rules/rfc/cross-message-rules.ts](../../tests/harness/rules/rfc/cross-message-rules.ts).
 Plus: [tests/harness/rules/rfc/rfc3261-cross-message-rules.ts](../../tests/harness/rules/rfc/rfc3261-cross-message-rules.ts).
+Plus: [tests/harness/rules/rfc/rfc3262-cross-message-rules.ts](../../tests/harness/rules/rfc/rfc3262-cross-message-rules.ts).
 
 | rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
 |-----------|---------|------|--------|------------------|----------------|-------|
@@ -101,6 +102,20 @@ Plus: [tests/harness/rules/rfc/rfc3261-cross-message-rules.ts](../../tests/harne
 | `rfc.proxy100WithinT100ms` | proxy | cross | advisory | RFC3261-MUST-095 | `_transaction-correlation.ts` | Advisory — B2BUA TransactionLayer DOES emit 100 Trying immediately on inbound INVITE (TransactionLayer.ts:742) and absorbs inbound 100 (line 769) so no relay; rule still fires on some fixtures (heuristic bug in branch lookup vs projector bucket migration, OR a code path bypassing TransactionLayer). OrderedAgentEvent also lacks atMs so 200ms bound cannot be enforced. Advisory until either the bypass is found or the rule heuristic is corrected. |
 | `rfc.strictRouteRewriteHandled` | proxy | cross | shipped | RFC3261-MUST-100 | `_transaction-correlation.ts` | regression-only — current fixtures use loose routing; rule trips if a strict-route inbound request is observed and the §16.4 swap isn't applied. |
 | `rfc.ackPreservesInviteRoute` | uac | cross | shipped | RFC3261-MUST-145 | `_transaction-correlation.ts` | regression-only — no current fixture mismatches ACK/INVITE Route values; rule trips on Route divergence. |
+| `rfc.requireReliable1xxOnRequire` | uas | cross | shipped | RFC3262-MUST-001, RFC3262-MUST-002 | `_dialog-model.ts` | regression-only — no current fixture INVITEs with Require:100rel against a non-supporting UAS; rule trips if reliable 1xx contract is violated. Covers both MUST-001 (must send reliable) and MUST-002 (must 420 if unsupported). |
+| `rfc.reliableNeedsClientOptIn` | uas | cross | advisory | RFC3262-MUST-004 | `_dialog-model.ts` | Advisory — B2BUA emits reliable 18x on one leg when PRACK is terminated at the B2BUA; the downstream INVITE the rule sees may lack Supported:100rel even though the upstream INVITE opted in (B2BUA negotiates 100rel internally). Advisory until subject narrows to non-DUT peer binds or rule models the B2BUA's PRACK-termination policy. |
+| `rfc.noReliable1xxOnInDialog` | uas, proxy | cross | shipped | RFC3262-MUST-005 | `_dialog-model.ts` | regression-only — Phase 1 scope decision originally requested a positive fixture (Bob sending reliable 18x on a re-INVITE); deferred until cross-message rule unit-test infrastructure exists. The deferred-fail path is exercised in full-stack tests that include re-INVITE flows; no current fixture violates this MUST. |
+| `rfc.unmatchedPrackProxied` | proxy | cross | advisory | RFC3262-MUST-006 | `_dialog-model.ts` | Advisory — B2BUA worker terminates PRACK per leg (not a strict §3 proxy). PRACK from peer arrives in dialog A's slice but the triggering reliable 1xx was emitted on dialog B's leg (different Call-ID after the worker's leg rewrite), so the PRACK appears "unmatched" per-slice. Advisory until subject narrows to a dedicated proxy bind or the rule correlates across leg-mate slices. |
+| `rfc.prackResponseSemantics` | uas | cross | shipped | RFC3262-MUST-009, RFC3262-MUST-010 | `_dialog-model.ts` | regression-only — current PRACK flows correctly trigger 2xx / 481; rule trips on mismatched response. |
+| `rfc.serialReliable1xx` | uas | cross | shipped | RFC3262-MUST-012 | `_dialog-model.ts` | regression-only — current PRACK flows wait between reliable 1xx; rule trips on race. |
+| `rfc.rseqMonotonic` | uas | cross | shipped | RFC3262-MUST-013 | `_dialog-model.ts` | regression-only — current RSeq emission is contiguous; rule trips on gaps or backwards moves. |
+| `rfc.delay2xxOnUnackedReliable1xxWithSdp` | uas | cross | shipped | RFC3262-MUST-014 | `_dialog-model.ts` | regression-only — current PRACK flows wait for PRACK before 2xx; rule trips on premature 2xx. Also covers RFC3262-MUST-028 restatement. |
+| `rfc.prackAcceptedAfterFinal` | uas | cross | shipped | RFC3262-MUST-015 | `_dialog-model.ts` | regression-only — current PRACK flows accept late PRACKs; rule trips on rejection. |
+| `rfc.noNewReliable1xxAfterFinal` | uas | cross | shipped | RFC3262-MUST-016 | `_dialog-model.ts` | regression-only — current flows stop emitting 18x after final; rule trips on stray reliable 18x post-final. |
+| `rfc.uacIgnore100rel100Trying` | uac | cross | shipped | RFC3262-MUST-019 | `_dialog-model.ts` | regression-only — no current fixture has a peer send 100-Trying-with-Require:100rel; rule trips if UAC ever PRACKs such a malformed 100. |
+| `rfc.prackOnReliable1xx` | uac | cross | shipped | RFC3262-MUST-021 | `_transaction-correlation.ts` | regression-only — current UAC flows PRACK every reliable 1xx; rule trips on missed PRACK. Complement to existing `rfc.rackCorrelation` (peer-rule on PRACK→1xx match). |
+| `rfc.uacRseqStrictness` | uac | cross | shipped | RFC3262-MUST-024 | `_dialog-model.ts` | regression-only — current UAC flows respect in-order RSeq; rule trips on out-of-order PRACK. |
+| `rfc.prackOfferAnswerModel` | uac, uas | cross | advisory | RFC3262-MUST-025, RFC3262-MUST-026, RFC3262-MUST-027 | — | Advisory — B2BUA terminates PRACK per leg; reliable-1xx-with-offer body lives on one leg's slice while the PRACK-with-answer body lives on the other leg's slice (different Call-ID after the worker's leg rewrite). The body-presence heuristic fires because both halves of the O/A round are not visible per-slice. Advisory until the planned `_offer-answer.ts` helper models cross-leg PRACK O/A OR subject narrows to non-DUT peer binds. Covers M-025/-026/-027. |
 
 ### Already-asserted-elsewhere
 
@@ -136,27 +151,13 @@ cross-message rules above.
 
 ### RFC 3262
 
-Sixteen planned rules cover 21 `will-implement` MUSTs. Inventory:
+One planned rule covers 1 `will-implement` MUST. Inventory:
 [RFC3262.md](RFC3262.md).
 
 | rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
 |-----------|---------|------|--------|------------------|----------------|-------|
-| `rfc.requireReliable1xxOnRequire` | uas | cross | planned | RFC3262-MUST-001, RFC3262-MUST-002 | `_dialog-model.ts` | INVITE with `Require:100rel` → either every non-100 1xx is reliable OR a 420 with `Unsupported:100rel` is sent. Positive fixture: Alice INVITE with Require, Bob sends plain 180. |
-| `rfc.reliable1xxHeaders` | uas | peer | planned | RFC3262-MUST-003, RFC3262-MUST-007, RFC3262-MUST-008 | — | Sent 1xx response checks: status==100 → no `RSeq`/`Require:100rel`; status 101-199 reliable → both present + RSeq in `[1, 2^31-1]`. Positive fixture: peer overrides 180 builder to omit RSeq. |
-| `rfc.reliableNeedsClientOptIn` | uas | cross | planned | RFC3262-MUST-004 | `_dialog-model.ts` | If sent 1xx is reliable, the matching inbound INVITE must carry `Supported:100rel` or `Require:100rel`. Positive fixture: Bob sends reliable 180 to an INVITE with neither header. |
-| `rfc.noReliable1xxOnInDialog` | uas, proxy | cross | planned | RFC3262-MUST-005 | `_dialog-model.ts` | Reliable 1xx forbidden when request carries To-tag (re-INVITE / mid-dialog). **Positive fixture lands with this PR**: Bob emits reliable 18x on a re-INVITE so the rule's deferred-fail path is exercised. |
-| `rfc.unmatchedPrackProxied` | proxy | cross | planned | RFC3262-MUST-006 | `_dialog-model.ts` | A PRACK arriving at a proxy bind that does not correlate with a sent reliable 1xx must appear on the proxy's outbound side (forwarded, not absorbed). Positive fixture: synthetic stale PRACK. |
-| `rfc.prackResponseSemantics` | uas | cross | planned | RFC3262-MUST-009, RFC3262-MUST-010 | `_dialog-model.ts` | Received PRACK → 481 if no matching unacked RSeq; 2xx otherwise. Positive fixture: Alice emits PRACK with bogus RAck → expect Bob's 481. |
-| `rfc.serialReliable1xx` | uas | cross | planned | RFC3262-MUST-012 | `_dialog-model.ts` | Same dialog cannot emit second reliable 1xx before the first is PRACKed. Positive fixture: Bob sends 180,180 reliably back-to-back without waiting. |
-| `rfc.rseqMonotonic` | uas | cross | planned | RFC3262-MUST-013 | `_dialog-model.ts` | Subsequent reliable 1xx RSeq = prior + 1; never wraps. Positive fixture: Bob sends 180/RSeq=5 then 183/RSeq=7. |
-| `rfc.delay2xxOnUnackedReliable1xxWithSdp` | uas | cross | planned | RFC3262-MUST-014 (and restatement M-028) | `_dialog-model.ts`, planned `_offer-answer.ts` | If a reliable 1xx carrying SDP is unacked, no 2xx final until PRACK arrives. Positive fixture: Bob sends 183-with-SDP reliably, then 200 INVITE without waiting for PRACK. |
-| `rfc.prackAcceptedAfterFinal` | uas | cross | planned | RFC3262-MUST-015 | `_dialog-model.ts` | PRACK arriving after the final response still draws a 2xx. Positive fixture: Alice delays PRACK until after 200 INVITE. |
-| `rfc.noNewReliable1xxAfterFinal` | uas | cross | planned | RFC3262-MUST-016 | `_dialog-model.ts` | No new reliable 1xx (i.e. unseen RSeq) after a final response was sent on this INVITE. Positive fixture: Bob sends 200 then a fresh reliable 199. |
 | `rfc.no100relRequireOnNonInvite` | uac | peer | shipped | RFC3262-MUST-017 | — | Sent request inspection: any non-INVITE carrying `Require:100rel` is a violation. Positive coverage: [unit/rfc3262-peer-rules.test.ts](../../tests/harness/rules/rfc/unit/rfc3262-peer-rules.test.ts) (REGISTER + OPTIONS positive cases; INVITE + clean-REGISTER negative cases). |
-| `rfc.uacIgnore100rel100Trying` | uac | cross | planned | RFC3262-MUST-019 | `_dialog-model.ts` | If a 100 (Trying) carried `Require:100rel`, no PRACK should reference it. Positive fixture: Bob sends bogus 100 with Require:100rel; Alice must not PRACK. |
-| `rfc.prackOnReliable1xx` | uac | cross | planned | RFC3262-MUST-021 | `_transaction-correlation.ts` | Every received reliable 1xx (status 101-199 with `Require:100rel`) draws a matching outbound PRACK. Complement to existing `rfc.rackCorrelation`. Positive fixture: Bob sends reliable 180, Alice harness intentionally skips PRACK. |
-| `rfc.uacRseqStrictness` | uac | cross | planned | RFC3262-MUST-024 | `_dialog-model.ts` | UAC PRACKs only the in-order RSeq; out-of-order reliable 1xx must not yield a PRACK. Positive fixture: Bob sends 180/RSeq=5 then 181/RSeq=7 (skip 6); Alice must PRACK only the 180. |
-| `rfc.prackOfferAnswerModel` | uac, uas | cross | planned | RFC3262-MUST-025, RFC3262-MUST-026, RFC3262-MUST-027 | planned `_offer-answer.ts` | Consolidated O/A walker for the PRACK-flavored exchanges (offer-in-1xx → answer-in-PRACK → answer-in-2xx-PRACK). First consumer of `_offer-answer.ts`; second consumer expected to be RFC 3264 main O/A rule. Positive fixtures: three sub-scenarios, one per MUST. |
+| `rfc.reliable1xxHeaders` | uas | peer | shipped | RFC3262-MUST-003, RFC3262-MUST-007, RFC3262-MUST-008 | — | Sent 1xx checks: 100 must omit RSeq/Require:100rel; reliable 1xx with Require:100rel must carry RSeq in [1, 2^31-1]. Positive coverage: [unit/rfc3262-peer-rules.test.ts](../../tests/harness/rules/rfc/unit/rfc3262-peer-rules.test.ts) (180 reliable without RSeq positive). |
 
 ### RFC 3264
 

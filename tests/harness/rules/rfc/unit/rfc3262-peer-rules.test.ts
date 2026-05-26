@@ -24,7 +24,10 @@ import {
 } from "../../../../../src/sip/SignalingNetwork.contracts.js"
 import { Recorder } from "../../../../../src/test-harness/framework/report-recorder/Recorder.js"
 import { RunContext } from "../../../../../src/test-harness/framework/RunContext.js"
-import { rfcNo100relRequireOnNonInvite } from "../rfc3262-peer-rules.js"
+import {
+  rfcNo100relRequireOnNonInvite,
+  rfcReliable1xxHeaders,
+} from "../rfc3262-peer-rules.js"
 
 const ANY_ROLES: ReadonlySet<UaRole> = ALL_UA_ROLES
 
@@ -82,10 +85,26 @@ const OPTIONS_WITH_MIXED = wire([
   "Content-Length: 0",
 ])
 
+const RELIABLE_180_NO_RSEQ = wire([
+  "SIP/2.0 180 Ringing",
+  "Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-fixture-5",
+  "From: <sip:alice@10.0.0.1>;tag=alice-tag",
+  "To: <sip:bob@10.0.0.2>;tag=bob-tag",
+  "Call-ID: rfc3262-reliable-180-norseq@10.0.0.1",
+  "CSeq: 1 INVITE",
+  "Contact: <sip:bob@10.0.0.2:5060>",
+  "Require: 100rel",
+  "Content-Length: 0",
+])
+
 const buildLayer = () =>
   withSignalingNetworkContracts(
     SignalingNetwork.simulated({ transitDelayMs: 5 }),
-    { scopedAudit: { rules: [rfcNo100relRequireOnNonInvite] } },
+    {
+      scopedAudit: {
+        rules: [rfcNo100relRequireOnNonInvite, rfcReliable1xxHeaders],
+      },
+    },
   ).pipe(
     Layer.provide(Layer.mergeAll(Recorder.fake, RunContext.unitTestOf(SignalingNetwork))),
     Layer.provideMerge(Recorder.fake),
@@ -161,6 +180,18 @@ describe("rfc.no100relRequireOnNonInvite", () => {
     Effect.gen(function* () {
       const exit = yield* runSend(INVITE_WITH_100REL)
       expect(Exit.isSuccess(exit)).toBe(true)
+    }),
+  )
+})
+
+describe("rfc.reliable1xxHeaders", () => {
+  it.effect("fires when a reliable 180 omits RSeq", () =>
+    Effect.gen(function* () {
+      const exit = yield* runSend(RELIABLE_180_NO_RSEQ)
+      const v = auditViolation(exit)
+      expect(v).toBeDefined()
+      expect(v?.check).toBe("rfc.reliable1xxHeaders")
+      expect(v?.detail).toMatch(/Reliable 180.*no\s+RSeq/)
     }),
   )
 })
