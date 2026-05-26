@@ -61,6 +61,7 @@ import {
   SignalingNetwork,
   SignalingNetworkCore,
   type NetworkTraceEntry,
+  type NetworkTraceSequencer,
 } from "../sip/SignalingNetwork.js"
 import type { AppConfigData } from "../config/AppConfig.js"
 import { registrarFrontProxyHybridStackLayer } from "./hybrid-stacks/registrar-front-proxy.js"
@@ -274,6 +275,46 @@ export interface HybridRunnerOptions {
   readonly kindPort?: number
   /** Output directory for HTML / global.txt reports. */
   readonly outputDir?: string
+  /**
+   * Whether the proxy stamps Record-Route on dialog-creating requests.
+   * `true` preserves existing register-proxy behaviour; `false` selects
+   * the non-record-routing mode (in-dialog traffic bypasses the proxy).
+   */
+  readonly recordRoute: boolean
+  /**
+   * When `true`, the proxy reuses the ext fabric for the core endpoint —
+   * `SignalingNetworkCore` is not provided to the layer composition and
+   * ProxyCore falls back to the ext `SignalingNetwork` for both endpoints.
+   * Use this for all-real-UDP single-fabric topologies where both proxy
+   * endpoints and the agents share one routable address space.
+   */
+  readonly singleFabric?: boolean
+  /** Override the proxy ext endpoint bind (default: synthetic 5.1.0.1:5060). */
+  readonly extBind?: SocketAddr
+  /** Override the proxy ext endpoint advertised address (default: same as extBind). */
+  readonly extAdvertised?: SocketAddr
+  /** Override the proxy core endpoint bind (default: {advertisedIp, corePort}). */
+  readonly coreBind?: SocketAddr
+  /** Override the proxy core endpoint advertised address (default: same as coreBind). */
+  readonly coreAdvertised?: SocketAddr
+  /**
+   * Explicit ext-side fabric layer. Default: `SignalingNetwork.simulated`
+   * with `transitDelayMs: 0` (the current dual-fabric default).
+   */
+  readonly extNetworkLayer?: Layer.Layer<SignalingNetwork>
+  /**
+   * Explicit core-side fabric layer. Default: `SignalingNetworkCore.realTracing`.
+   * Ignored when `singleFabric === true`.
+   */
+  readonly coreNetworkLayer?: Layer.Layer<SignalingNetworkCore>
+  /**
+   * Shared trace sequencer for cross-fabric `NetworkTraceEntry.seq`
+   * monotonicity. When the consumer also passes their own network
+   * layers built with a sequencer, they MUST pass the same sequencer
+   * here so the merged report orders events deterministically. One is
+   * created internally if omitted.
+   */
+  readonly traceSequencer?: NetworkTraceSequencer
 }
 
 // ---------------------------------------------------------------------------
@@ -286,14 +327,19 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
   const kindPort = opts.kindPort ?? 5060
   const outputDir =
     opts.outputDir ?? "test-results/real-clock/registrarFrontProxy-kind"
+  const singleFabric = opts.singleFabric === true
 
+  const defaultExtBind: SocketAddr = { host: FAKE_PROXY_EXT_IP, port: FAKE_EXT_PORT }
+  const extBind = opts.extBind ?? defaultExtBind
+  const extAdvertised = opts.extAdvertised ?? extBind
+  const defaultCoreBind: SocketAddr = { host: opts.advertisedIp, port: corePort }
+  const coreBind = opts.coreBind ?? defaultCoreBind
+  const coreAdvertised = opts.coreAdvertised ?? coreBind
   const endpoints: HybridEndpoints = {
-    // ext: simulated fabric; bind == advertised, addresses are synthetic.
-    extBind: { host: FAKE_PROXY_EXT_IP, port: FAKE_EXT_PORT },
-    extAdvertised: { host: FAKE_PROXY_EXT_IP, port: FAKE_EXT_PORT },
-    // core: real UDP; bind == advertised on the kind-bridge gateway.
-    coreBind: { host: opts.advertisedIp, port: corePort },
-    coreAdvertised: { host: opts.advertisedIp, port: corePort },
+    extBind,
+    extAdvertised,
+    coreBind,
+    coreAdvertised,
     coreDestination: { host: kindHost, port: kindPort },
   }
 
@@ -317,8 +363,10 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
   // renderers can break `timestamp` ties deterministically. Without this
   // the merged fake-ext + real-core trace would scramble whenever two
   // events landed on the same ms (TestClock bursts on ext, or whenever
-  // the real core clock happened to align with an ext step).
-  const traceSequencer = makeEventSequencer()
+  // the real core clock happened to align with an ext step). When the
+  // consumer also passes pre-built network layers, they MUST pass the
+  // same sequencer here so the merged report stays monotonic.
+  const traceSequencer = opts.traceSequencer ?? makeEventSequencer()
 
   const transportBase = createLiveTransport({
     useExternalNetwork: true,
@@ -342,11 +390,14 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
   // Both fabrics share `traceSequencer` so `NetworkTraceEntry.seq`
   // values are monotonic across the merged ext+core stream and the
   // renderers can resolve same-ms ties.
-  const extNetworkLayer = SignalingNetwork.simulated({
-    transitDelayMs: 0,
-    traceSequencer,
-  })
-  const coreNetworkLayer = SignalingNetworkCore.realTracing({ traceSequencer })
+  const extNetworkLayer =
+    opts.extNetworkLayer ?? SignalingNetwork.simulated({ transitDelayMs: 0, traceSequencer })
+  // In single-fabric mode the core endpoint reuses the ext fabric:
+  // ProxyCore falls back to `SignalingNetwork` when `SignalingNetworkCore`
+  // is absent from the runtime context (see ProxyCore.ts ~351).
+  const coreNetworkLayer = singleFabric
+    ? undefined
+    : (opts.coreNetworkLayer ?? SignalingNetworkCore.realTracing({ traceSequencer }))
   const proxySutLayer = registrarFrontProxyHybridStackLayer({
     config: defaultHybridAppConfig(),
     extBind: endpoints.extBind,
@@ -354,17 +405,19 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
     coreBind: endpoints.coreBind,
     coreAdvertised: endpoints.coreAdvertised,
     coreDestination: endpoints.coreDestination,
-    recordRoute: true,
+    recordRoute: opts.recordRoute,
   })
-  // `provideMerge`: the proxy reads both `SignalingNetwork` (ext) and
-  // `SignalingNetworkCore` (core), and the outer effect re-yields
+  // `provideMerge`: the proxy reads `SignalingNetwork` (ext) and — when
+  // present — `SignalingNetworkCore` (core). The outer effect re-yields
   // `SignalingNetwork` so the agent transport binds on the same ext
-  // fabric instance. `SignalingNetworkCore` is only consumed by the
-  // proxy — no agent ever binds there.
-  const stackLayer = proxySutLayer.pipe(
-    Layer.provideMerge(extNetworkLayer),
-    Layer.provideMerge(coreNetworkLayer),
-  )
+  // fabric instance. In single-fabric mode `coreNetworkLayer` is omitted
+  // and the ProxyCore fallback at ~351 reuses ext for both endpoints.
+  const stackLayer = coreNetworkLayer === undefined
+    ? proxySutLayer.pipe(Layer.provideMerge(extNetworkLayer))
+    : proxySutLayer.pipe(
+        Layer.provideMerge(extNetworkLayer),
+        Layer.provideMerge(coreNetworkLayer),
+      )
 
   return (scenario: Scenario): Effect.Effect<void> => {
     const program = Effect.gen(function* () {
@@ -375,14 +428,14 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
           `→ core-dest=${endpoints.coreDestination.host}:${endpoints.coreDestination.port}`,
       )
 
-      // Drain both fabric trace buffers, merge by `sentMs`, then run the
-      // same dedup+filter as before. The dedup defends against the same
-      // packet being recorded twice on the real fabric (send-side +
-      // recv-side both push). The label filter drops entries where
-      // neither endpoint is one we know about — defence in depth, but
-      // with consistent IPs on both fabrics nothing should slip through.
+      // Drain fabric trace buffers, merge by `sentMs`, then dedup +
+      // filter by known labels. In single-fabric mode only the ext
+      // fabric exists (ProxyCore reuses it for both endpoints) and the
+      // core drain is skipped.
       const extNetwork = yield* SignalingNetwork
-      const coreNetwork = yield* SignalingNetworkCore
+      const coreNetwork = singleFabric
+        ? undefined
+        : yield* SignalingNetworkCore
       const labelKeyOf = (ip: string, port: number) => `${ip}:${port}`
       const transport: TestTransport = {
         ...transportBase,
@@ -390,7 +443,9 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
         drainNetworkTrace: () =>
           Effect.gen(function* () {
             const ext = yield* extNetwork.drainTrace()
-            const core = yield* coreNetwork.drainTrace()
+            const core = coreNetwork === undefined
+              ? ([] as ReadonlyArray<NetworkTraceEntry>)
+              : yield* coreNetwork.drainTrace()
             const merged = [...ext, ...core].sort(
               (a, b) => a.sentMs - b.sentMs,
             )
@@ -464,6 +519,27 @@ export interface RegistrarTestProxyRunnerOptions {
   readonly corePort?: number
   /** Output directory for HTML / global.txt reports. */
   readonly outputDir?: string
+  /**
+   * Whether the proxy stamps Record-Route on dialog-creating requests.
+   * `true` preserves the existing register-proxy mode; `false` selects
+   * the non-record-routing mode (in-dialog traffic bypasses the proxy).
+   */
+  readonly recordRoute: boolean
+  /**
+   * When `true`, the proxy reuses the ext fabric for the core endpoint —
+   * use this for all-real-UDP single-fabric topologies.
+   */
+  readonly singleFabric?: boolean
+  /** Override ext endpoint bind (default: synthetic fake-fabric address). */
+  readonly extBind?: SocketAddr
+  /** Override ext endpoint advertised address. */
+  readonly extAdvertised?: SocketAddr
+  /** Override the ext-side fabric layer (default: `SignalingNetwork.simulated`). */
+  readonly extNetworkLayer?: Layer.Layer<SignalingNetwork>
+  /** Override the core-side fabric layer (default: `SignalingNetworkCore.realTracing`). */
+  readonly coreNetworkLayer?: Layer.Layer<SignalingNetworkCore>
+  /** Shared trace sequencer for merged-report monotonicity. */
+  readonly traceSequencer?: NetworkTraceSequencer
 }
 
 /**
@@ -487,5 +563,12 @@ export function createRegistrarTestProxyRunner(
     kindHost: opts.coreDestination.host,
     kindPort: opts.coreDestination.port,
     outputDir: opts.outputDir ?? "test-results/registrar-test-proxy",
+    recordRoute: opts.recordRoute,
+    ...(opts.singleFabric !== undefined ? { singleFabric: opts.singleFabric } : {}),
+    ...(opts.extBind !== undefined ? { extBind: opts.extBind } : {}),
+    ...(opts.extAdvertised !== undefined ? { extAdvertised: opts.extAdvertised } : {}),
+    ...(opts.extNetworkLayer !== undefined ? { extNetworkLayer: opts.extNetworkLayer } : {}),
+    ...(opts.coreNetworkLayer !== undefined ? { coreNetworkLayer: opts.coreNetworkLayer } : {}),
+    ...(opts.traceSequencer !== undefined ? { traceSequencer: opts.traceSequencer } : {}),
   })
 }

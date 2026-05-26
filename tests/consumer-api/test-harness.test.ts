@@ -56,6 +56,7 @@ describe("@vcharbon/sipjs/test-harness public surface", () => {
       advertisedIp: "127.0.0.1",
       corePort: 35081,
       outputDir: "test-results/consumer-api-smoke",
+      recordRoute: true,
     }
     const runner = createRegistrarTestProxyRunner(opts)
     expect(typeof runner).toBe("function")

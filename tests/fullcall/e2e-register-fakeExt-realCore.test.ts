@@ -54,6 +54,7 @@ describe.skipIf(!E2E_KIND_ENABLED)("E2E (real clock) — register fakeExt-realCo
       corePort: CORE_PORT,
       advertisedIp,
       outputDir: OUTPUT_DIR,
+      recordRoute: true,
     })
 
   it.live(

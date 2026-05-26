@@ -102,3 +102,20 @@ export type {
 
 // Layer-level seam for advanced wiring
 export { registrarFrontProxyHybridStackLayer } from "./hybrid-stacks/registrar-front-proxy.js"
+
+// Network fabric layer factories — consumers compose `SignalingNetwork`
+// and `SignalingNetworkCore` layers explicitly when they need a topology
+// other than the runner's defaults (e.g. all-real-UDP single-fabric).
+export {
+  SignalingNetwork,
+  SignalingNetworkCore,
+} from "../sip/SignalingNetwork.js"
+export type {
+  NetworkTraceEntry,
+  NetworkTraceSequencer,
+} from "../sip/SignalingNetwork.js"
+
+// Shared trace sequencer constructor — pass the same instance to every
+// fabric layer in one scenario so the merged report orders cross-fabric
+// events deterministically.
+export { makeEventSequencer } from "./framework/EventSequencer.js"
