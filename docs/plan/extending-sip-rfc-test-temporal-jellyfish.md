@@ -122,6 +122,38 @@ accept/reject the exclusions before any rule code is written.
   fixture; corrected per the triage policy (fix the fixture, not the
   rule). test:fake green (1518 passed, +4 new). Phase 2 backlog: 48
   planned rules remaining.
+- 2026-05-26: **RFC 3262 batch complete** — 1 new peer rule
+  (`rfc.reliable1xxHeaders` covering M-003/-007/-008 with positive
+  unit-test fixture) and 14 new cross-message rules in a new pack
+  `tests/harness/rules/rfc/rfc3262-cross-message-rules.ts`:
+  `requireReliable1xxOnRequire`, `reliableNeedsClientOptIn` [advisory],
+  `noReliable1xxOnInDialog`, `unmatchedPrackProxied` [advisory],
+  `prackResponseSemantics`, `serialReliable1xx`, `rseqMonotonic`,
+  `delay2xxOnUnackedReliable1xxWithSdp`, `prackAcceptedAfterFinal`,
+  `noNewReliable1xxAfterFinal`, `uacIgnore100rel100Trying`,
+  `prackOnReliable1xx`, `uacRseqStrictness`, `prackOfferAnswerModel`
+  [advisory, inline body-presence heuristic; `_offer-answer.ts`
+  helper deferred to RFC 3264 batch]. Three rules ship advisory
+  (B2BUA terminates PRACK per leg → reliable-1xx and PRACK live in
+  separate per-Call-ID slices after leg rewrite). test:fake green
+  (1520 passed). RFC 3262 Phase 2 backlog: 0 planned rules.
+- 2026-05-26: **RFC 3264 batch complete** — 2 new peer rules
+  (`rfc.sdpBodyParseable` covering 6 SDP-grammar MUSTs, `rfc.c0PortNonZero`)
+  and 9 new cross-message rules in a new pack
+  `tests/harness/rules/rfc/rfc3264-cross-message-rules.ts`:
+  `noNewOfferWhileOfferPending` [advisory], `answerMLineCountMatchesOffer`,
+  `answerTLineEqualsOffer`, `answerMediaTypeMatchesOffer`,
+  `directionPairValid` [advisory], `rejectedStreamMinimalAnswer`,
+  `reOfferMLineCountMonotonic`, `zeroPortPropagation` [advisory],
+  `payloadTypeMappingStable`. New helper
+  `tests/harness/rules/rfc/_offer-answer.ts` (pure SDP body parsing:
+  `parseSdpBody`, `extractFormatList`, `extractDirection`,
+  `extractRtpmaps`) shared by all 9 cross-message rules. Three rules
+  ship advisory (B2BUA SDP rewriting / media anchoring across legs).
+  `rfc.sdpBodyParseable` gated on `Content-Type: application/sdp` to
+  avoid firing on non-SDP bodies. test:fake green (1520 passed). RFC
+  3264 Phase 2 backlog: 0 planned rules. **Phase 2 complete: 0
+  remaining planned rules across all three pilot RFCs.**
 - 2026-05-26: **RFC 3261 batch complete** — 22 new RFC 3261 rules
   landed in one push: 3 peer (`rfc.noRequireOnCancelOrAck`,
   `rfc.cancelCseqMethod`, `rfc.strictRouteShuffleOnSend`) and 19

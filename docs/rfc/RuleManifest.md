@@ -67,12 +67,15 @@ narrow proxy-only or UAS-only rules where the MUST is role-specific.
 | `rfc.noRequireOnCancelOrAck` | all | peer | shipped | RFC3261-MUST-034 | — | CANCEL or ACK-for-non-2xx must not carry Require/Proxy-Require. Positive coverage (CANCEL only): [unit/rfc3261-peer-rules.test.ts](../../tests/harness/rules/rfc/unit/rfc3261-peer-rules.test.ts); ACK-for-non-2xx branch is regression-only (peer-harness setup cost > rule). RFC3261-MUST-034 also covers RFC3261-MUST-047 restatement. |
 | `rfc.cancelCseqMethod` | all | peer | shipped | RFC3261-MUST-045 | — | Sent CANCEL: CSeq method part MUST be CANCEL. Regression-only — strict parser (`extract-fields.ts`) already rejects any message where request method ≠ CSeq method; this rule is defense-in-depth for non-parser SipMessage construction paths. CSeq number-equality covered by `rfc.cseq`. |
 | `rfc.strictRouteShuffleOnSend` | proxy | peer | shipped | RFC3261-MUST-113 | `_dialog-model.ts` | Regression-only — single-message peer rule cannot prove pre-swap state; surfaces 'strict-route still topmost on outbound' as a structural indicator. |
+| `rfc.sdpBodyParseable` | all | peer | shipped | RFC3264-MUST-003, RFC3264-MUST-004, RFC3264-MUST-005, RFC3264-MUST-006, RFC3264-MUST-012, RFC3264-MUST-027 | — | regression-only — strict-parses every sent SDP body; trips on missing v=0/o=/s=/t=, malformed o= (non-integer sess-id or sess-version), m= without c= or port, or ptime <= 0. Covers RFC 3264 SDP-grammar MUSTs M-003/-004/-005/-006/-012/-027 (rolled into one rule per the Phase-1 scope decision). |
+| `rfc.c0PortNonZero` | uac | peer | shipped | RFC3264-MUST-051 | — | regression-only — narrow legacy "hold" idiom check; trips if a fixture emits both c=0.0.0.0 and m= port=0 for the same stream. |
 
 ## Shipped rules — cross-message (`cross`)
 
 Source: [tests/harness/rules/rfc/cross-message-rules.ts](../../tests/harness/rules/rfc/cross-message-rules.ts).
 Plus: [tests/harness/rules/rfc/rfc3261-cross-message-rules.ts](../../tests/harness/rules/rfc/rfc3261-cross-message-rules.ts).
 Plus: [tests/harness/rules/rfc/rfc3262-cross-message-rules.ts](../../tests/harness/rules/rfc/rfc3262-cross-message-rules.ts).
+Plus: [tests/harness/rules/rfc/rfc3264-cross-message-rules.ts](../../tests/harness/rules/rfc/rfc3264-cross-message-rules.ts).
 
 | rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
 |-----------|---------|------|--------|------------------|----------------|-------|
@@ -116,6 +119,15 @@ Plus: [tests/harness/rules/rfc/rfc3262-cross-message-rules.ts](../../tests/harne
 | `rfc.prackOnReliable1xx` | uac | cross | shipped | RFC3262-MUST-021 | `_transaction-correlation.ts` | regression-only — current UAC flows PRACK every reliable 1xx; rule trips on missed PRACK. Complement to existing `rfc.rackCorrelation` (peer-rule on PRACK→1xx match). |
 | `rfc.uacRseqStrictness` | uac | cross | shipped | RFC3262-MUST-024 | `_dialog-model.ts` | regression-only — current UAC flows respect in-order RSeq; rule trips on out-of-order PRACK. |
 | `rfc.prackOfferAnswerModel` | uac, uas | cross | advisory | RFC3262-MUST-025, RFC3262-MUST-026, RFC3262-MUST-027 | — | Advisory — B2BUA terminates PRACK per leg; reliable-1xx-with-offer body lives on one leg's slice while the PRACK-with-answer body lives on the other leg's slice (different Call-ID after the worker's leg rewrite). The body-presence heuristic fires because both halves of the O/A round are not visible per-slice. Advisory until the planned `_offer-answer.ts` helper models cross-leg PRACK O/A OR subject narrows to non-DUT peer binds. Covers M-025/-026/-027. |
+| `rfc.noNewOfferWhileOfferPending` | uac, uas | cross | advisory | RFC3264-MUST-001, RFC3264-MUST-002 | `_offer-answer.ts` | Advisory — B2BUA can legitimately emit a new offer on one leg before the prior offer's answer is observed on the same leg (the answer arrives on the other leg's slice after Call-ID rewrite). Per-slice pendingOffer tracker has no cross-leg view. Advisory until subject narrows to non-DUT peer binds or rule models cross-leg O/A correlation. Covers M-001/-002. |
+| `rfc.answerMLineCountMatchesOffer` | uas | cross | shipped | RFC3264-MUST-018 | `_offer-answer.ts` | regression-only — current fixtures preserve m= count across O/A; rule trips on add/drop. |
+| `rfc.answerTLineEqualsOffer` | uas | cross | shipped | RFC3264-MUST-019 | `_offer-answer.ts` | regression-only — current fixtures preserve t= across O/A; rule trips on divergence. |
+| `rfc.answerMediaTypeMatchesOffer` | uas | cross | shipped | RFC3264-MUST-022 | `_offer-answer.ts` | regression-only — current O/A fixtures preserve per-stream media type; rule trips on swap. |
+| `rfc.directionPairValid` | uas | cross | advisory | RFC3264-MUST-023 | `_offer-answer.ts` | Advisory — B2BUA may translate SDP direction attributes across legs as part of policy (e.g. force `sendrecv` on one leg even when the peer offered `inactive` for hold reasons on the other leg). Per-slice direction pairing cannot distinguish 'policy translation' from 'genuine violation'. Advisory until subject narrows to non-DUT peer binds. |
+| `rfc.rejectedStreamMinimalAnswer` | uas | cross | shipped | RFC3264-MUST-021 | `_offer-answer.ts` | regression-only — fixtures preserve format list on rejected streams; rule trips on bare m= rejection. |
+| `rfc.reOfferMLineCountMonotonic` | uac | cross | shipped | RFC3264-MUST-042, RFC3264-MUST-043 | `_offer-answer.ts` | regression-only — current re-offers preserve m= slots; rule trips on count decrease (stream removal). Covers M-042 and M-043 (new-streams-appended ordering is structurally enforced by m= slot stability). |
+| `rfc.zeroPortPropagation` | uas | cross | advisory | RFC3264-MUST-044 | `_offer-answer.ts` | Advisory — B2BUA anchors media per leg and assigns its own RTP ports; a peer-side offer with port=0 (stream disabled) becomes a B2BUA-side offer/answer with the anchored port. Per-slice view can't see the cross-leg port-rewrite. Advisory until subject narrows to non-DUT peer binds or the rule models B2BUA media anchoring. |
+| `rfc.payloadTypeMappingStable` | uac, uas | cross | shipped | RFC3264-MUST-047 | `_offer-answer.ts` | regression-only — current re-offers keep payload-type mappings stable; rule trips on PT rebind across SDP versions. (`_sdp-parsing.ts` helper from the candidate list is not extracted here — single consumer; rtpmap parsing lives in `_offer-answer.ts`.) |
 
 ### Already-asserted-elsewhere
 
@@ -161,24 +173,8 @@ One planned rule covers 1 `will-implement` MUST. Inventory:
 
 ### RFC 3264
 
-Eleven planned rules cover 18 `will-implement` MUSTs. Inventory:
-[RFC3264.md](RFC3264.md). Two more `already-implemented` MUSTs
-(RFC3264-MUST-039 / -040) are covered by the existing
-`rfc.sdpOriginContinuity` (advisory).
-
-| rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
-|-----------|---------|------|--------|------------------|----------------|-------|
-| `rfc.noNewOfferWhileOfferPending` | uac, uas | cross | planned | RFC3264-MUST-001, RFC3264-MUST-002 | planned `_offer-answer.ts` | Glare prevention: outbound offer forbidden while own prior offer is unanswered OR while a received offer is unanswered. Positive fixture: Bob sends UPDATE-with-SDP while INVITE offer is still pending. |
-| `rfc.sdpBodyParseable` | uac, uas | peer | planned | RFC3264-MUST-003, RFC3264-MUST-004, RFC3264-MUST-005, RFC3264-MUST-006, RFC3264-MUST-012, RFC3264-MUST-027 | — | Peer rule that strict-parses every sent SDP body: valid RFC 4566 + 3264 SDP, exactly one session description, o= session-id and version fit signed-int64, initial version < 2^62-1, ptime > 0, c=/port present. Positive fixture: peer overrides SDP builder to emit ptime=0. |
-| `rfc.answerMLineCountMatchesOffer` | uas | cross | planned | RFC3264-MUST-018 | planned `_offer-answer.ts` | First answer's m= count equals offer's m= count. Positive fixture: Bob's 200 OK drops an offered video stream from the m= list. |
-| `rfc.answerTLineEqualsOffer` | uas | cross | planned | RFC3264-MUST-019 | planned `_offer-answer.ts` | Answer's t= line bytes equal the offer's t= bytes. Positive fixture: Bob emits `t=0 60` against offer `t=0 0`. |
-| `rfc.answerMediaTypeMatchesOffer` | uas | cross | planned | RFC3264-MUST-022 | planned `_offer-answer.ts` | Per-stream-index pairing: the answer's m= media type matches the offer's m= media type (audio↔audio, video↔video); unicast/multicast preserved. Positive fixture: Bob's answer swaps audio/video order. |
-| `rfc.directionPairValid` | uas | cross | planned | RFC3264-MUST-023 | planned `_offer-answer.ts` | sendonly→{recvonly, inactive}; recvonly→{sendonly, inactive}; inactive→inactive. Positive fixture: Bob answers a `sendonly` stream with `sendonly`. |
-| `rfc.rejectedStreamMinimalAnswer` | uas | cross | planned | RFC3264-MUST-021 | planned `_offer-answer.ts` | Rejected stream slot has port=0 + at least one media format listed. Positive fixture: Bob's answer for a rejected stream omits all media format tokens. |
-| `rfc.reOfferMLineCountMonotonic` | uac | cross | planned | RFC3264-MUST-042, RFC3264-MUST-043 | planned `_offer-answer.ts` | Across same-session re-offers: m= count never decreases; deleted streams keep their slot (port=0, not removed); new m= lines appear *below* existing ones. Positive fixture: re-INVITE removes one m= line entirely. |
-| `rfc.zeroPortPropagation` | uas | cross | planned | RFC3264-MUST-044 | planned `_offer-answer.ts` | If offer's m= line has port=0, answer's corresponding m= line MUST have port=0. Positive fixture: Bob's answer assigns a non-zero port to a disabled offered stream. |
-| `rfc.payloadTypeMappingStable` | uac, uas | cross | planned | RFC3264-MUST-047 | planned `_offer-answer.ts`, planned `_sdp-parsing.ts` | Dynamic payload-type → codec mapping (via `a=rtpmap`) MUST NOT change across SDP versions in the same session. Positive fixture: re-offer rebinds payload type 100 from `opus/48000` to `G722/8000`. |
-| `rfc.c0PortNonZero` | uac | peer | planned | RFC3264-MUST-051 | — | Narrow legacy hold idiom: an SDP whose `c=` is `0.0.0.0` MUST NOT also have `m=… 0 …`. Positive fixture: fixture builder produces `c=0.0.0.0` + `m=audio 0 …`. |
+Zero planned rules remain — all RFC 3264 MUSTs in pilot scope are
+`already-implemented`. Inventory: [RFC3264.md](RFC3264.md).
 
 ## Helpers
 
@@ -193,14 +189,13 @@ policy" for the contract.
 |--------|--------|---------------|
 | [`_dialog-model.ts`](../../tests/harness/rules/rfc/_dialog-model.ts) | Dialog-model walk, route-set tracking, SDP origin parsing, rport reader | `rfc.midDialogFromUri` / `rfc.midDialogRoute` |
 | [`_transaction-correlation.ts`](../../tests/harness/rules/rfc/_transaction-correlation.ts) | Per-top-Via-branch index of sent/received × request/response messages on one agent's stream; convenience lookups for INVITE-by-branch, first-response status, final-response presence, and option-tag splitting | `rfc.ackRequireSubsetOfInvite` |
+| [`_offer-answer.ts`](../../tests/harness/rules/rfc/_offer-answer.ts) | Pure SDP body parsing: best-effort `parseSdpBody`, `extractFormatList`, `extractDirection`, `extractRtpmaps` for the RFC 3264 rule family | `rfc.noNewOfferWhileOfferPending` |
 
 ### Candidate helpers (illustrative; land with first consumer)
 
 | helper (planned name) | covers | likely first consumer |
 |------------------------|--------|------------------------|
-| `_offer-answer.ts` | Offer/answer pair extraction across INVITE/200/ACK, UPDATE, PRACK | first RFC 3264 cross-message rule |
 | `_dialog-iteration.ts` | Typed dialog walk with per-step state | second cross-message rule duplicating `_dialog-model.ts`'s loop shape |
-| `_sdp-parsing.ts` | Strict-mode SDP parsing for body-dependent rules | second SDP rule beyond `rfc.sdpOriginContinuity` |
 
 Names are illustrative — actual file names are decided when the
 helper's second consumer materialises.
