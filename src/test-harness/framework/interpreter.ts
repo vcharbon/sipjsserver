@@ -64,7 +64,7 @@ function makePlaceholderRequest(method: string): SipRequest {
     raw: Buffer.alloc(0),
   })
 }
-import { getHeaders } from "../../sip/MessageHelpers.js"
+import { getHeaders, parseSipUri } from "../../sip/MessageHelpers.js"
 import type {
   AgentConfig,
   AgentInfo,
@@ -971,9 +971,43 @@ function executeSend(
     // the top Via, not the proxy. Honour the top Via for response sends so the
     // test agent (Bob) replies to whichever SIP node forwarded the request to
     // it, not blindly to the SUT ingress.
+    //
+    // For in-dialog *requests* (ACK to 2xx, BYE, re-INVITE, …) the destination
+    // is determined by RFC 3261 §12.2.1.1 / §16.12: when the route set is
+    // non-empty, send to the topmost Route URI's host/port (loose-route or
+    // strict-route — both put the first hop's address at the top of the
+    // route set); when the route set is empty, send to the remote target
+    // (the peer's Contact URI). Falling back to `baseTgt` (the SUT ingress)
+    // for in-dialog traffic would keep the proxy in the path even when the
+    // dialog's route set excludes it — surfacing as alice/bob still wire-
+    // routing BYE through our proxy in non-record-routing scenarios.
     const baseTgt = state.targetFor(step.agent)
     const tgt = (() => {
-      if (step.statusCode === undefined) return baseTgt
+      if (step.statusCode === undefined) {
+        // Initial request (no dialog yet) → SUT ingress.
+        // CANCEL also targets the original INVITE's destination, so it
+        // shares the initial-request path.
+        const isCancel = step.method === "CANCEL"
+        const isInitial = dialogState.remoteTag === "" || isCancel
+        if (isInitial) return baseTgt
+        // In-dialog request: follow the route set / remote target.
+        if (dialogState.routeSet.length > 0) {
+          const parsed = parseSipUri(dialogState.routeSet[0]!)
+          if (parsed !== undefined) {
+            return { host: parsed.host, port: parsed.port }
+          }
+        }
+        if (
+          dialogState.remoteContact !== undefined
+          && dialogState.remoteContact.length > 0
+        ) {
+          const parsed = parseSipUri(dialogState.remoteContact)
+          if (parsed !== undefined) {
+            return { host: parsed.host, port: parsed.port }
+          }
+        }
+        return baseTgt
+      }
       const reqMsg = inResponseToMsg
       if (reqMsg === undefined || reqMsg.type !== "request") return baseTgt
       // Prefer the actual UDP source of the inbound request when known —
