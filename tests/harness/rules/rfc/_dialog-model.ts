@@ -133,6 +133,18 @@ export interface OrderedAgentEvent {
   readonly kind: "sent" | "received"
   readonly idx: number
   readonly msg: SipMessage
+  /**
+   * For `sent`: the wire-level destination passed to `socket.send` —
+   * sourced from the `send.called.to` event field. For `received`: the
+   * wire-level source the kernel reported. Optional because pure unit
+   * tests construct `OrderedAgentEvent`s without going through a fabric.
+   *
+   * Read by `rfc.midDialogWireDestination` to check that in-dialog
+   * requests are wire-routed to the topmost Route URI's host/port
+   * (loose-route) or to the Request-URI (no route set) per RFC 3261
+   * §8.1.2 + RFC 3263 §4.
+   */
+  readonly wirePeer?: { readonly ip: string; readonly port: number }
 }
 
 export const advanceDialogModel = (

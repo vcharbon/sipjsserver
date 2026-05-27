@@ -44,8 +44,16 @@ export interface PerDialogSlice {
   readonly toTag: string | null
   readonly perAgent: ReadonlyArray<{
     readonly bindKey: LaneKey
-    readonly received: ReadonlyArray<{ idx: number; msg: SipMessage }>
-    readonly sent: ReadonlyArray<{ idx: number; msg: SipMessage }>
+    readonly received: ReadonlyArray<{
+      idx: number
+      msg: SipMessage
+      wirePeer: { ip: string; port: number }
+    }>
+    readonly sent: ReadonlyArray<{
+      idx: number
+      msg: SipMessage
+      wirePeer: { ip: string; port: number }
+    }>
     readonly state: AgentDialogState
   }>
 }
@@ -57,6 +65,12 @@ interface OrderedEntry {
   readonly seq: number
   readonly msg: SipMessage
   readonly rawBytes: Buffer
+  /**
+   * For `sent`: wire-level destination from `send.called.to`. For
+   * `received`: wire-level source from `envelope.rinfo`. Used by
+   * `rfc.midDialogWireDestination` (§8.1.2 / RFC 3263 §4).
+   */
+  readonly wirePeer: { readonly ip: string; readonly port: number }
 }
 
 const stamped = (
@@ -72,6 +86,7 @@ const stamped = (
       seq: e.seq,
       msg: m,
       rawBytes: e.msg,
+      wirePeer: { ip: e.to.ip, port: e.to.port },
     }
   }
   if (e.tag === "messages.streamItem") {
@@ -84,6 +99,7 @@ const stamped = (
       seq: e.seq,
       msg: m,
       rawBytes: e.envelope.raw,
+      wirePeer: { ip: e.envelope.rinfo.address, port: e.envelope.rinfo.port },
     }
   }
   return null
@@ -212,8 +228,16 @@ export const projectPerDialog = (
     readonly fromTag: string
     toTag: string | null
     readonly bindKey: LaneKey
-    readonly received: Array<{ idx: number; msg: SipMessage }>
-    readonly sent: Array<{ idx: number; msg: SipMessage }>
+    readonly received: Array<{
+      idx: number
+      msg: SipMessage
+      wirePeer: { ip: string; port: number }
+    }>
+    readonly sent: Array<{
+      idx: number
+      msg: SipMessage
+      wirePeer: { ip: string; port: number }
+    }>
     readonly state: AgentDialogState
   }
   const buckets = new Map<BucketKey, Bucket>()
@@ -264,10 +288,10 @@ export const projectPerDialog = (
     const toTagOrNull = isUasToTag(entry.msg)
     const bucket = lookup(entry.bindKey, callId, fromTag, toTagOrNull)
     if (entry.kind === "sent") {
-      bucket.sent.push({ idx: position, msg: entry.msg })
+      bucket.sent.push({ idx: position, msg: entry.msg, wirePeer: entry.wirePeer })
       trackSent(bucket.state, entry.msg)
     } else {
-      bucket.received.push({ idx: position, msg: entry.msg })
+      bucket.received.push({ idx: position, msg: entry.msg, wirePeer: entry.wirePeer })
       trackReceived(bucket.state, entry.msg)
     }
   })

@@ -13,6 +13,7 @@
 import { Effect } from "effect"
 import type { LaneKey, RecordedStamps } from "../../../../src/test-harness/framework/report-recorder/types.js"
 import { ALL_UA_ROLES } from "../../../../src/sip/SignalingNetwork.js"
+import { parseSipUri } from "../../../../src/sip/MessageHelpers.js"
 import type {
   CrossMessageAuditRule,
   SignalingNetworkEvent,
@@ -54,8 +55,12 @@ export interface CrossMessageRule {
 
 export const orderedFromSlot = (slot: PerDialogSlice["perAgent"][number]): OrderedAgentEvent[] => {
   const all: OrderedAgentEvent[] = []
-  for (const r of slot.received) all.push({ kind: "received", idx: r.idx, msg: r.msg })
-  for (const s of slot.sent) all.push({ kind: "sent", idx: s.idx, msg: s.msg })
+  for (const r of slot.received) {
+    all.push({ kind: "received", idx: r.idx, msg: r.msg, wirePeer: r.wirePeer })
+  }
+  for (const s of slot.sent) {
+    all.push({ kind: "sent", idx: s.idx, msg: s.msg, wirePeer: s.wirePeer })
+  }
   all.sort((a, b) => a.idx - b.idx)
   return all
 }
@@ -225,6 +230,94 @@ export const midDialogRouteRule: CrossMessageRule = {
                       `got ${JSON.stringify(actualTail)}) — RFC 3261 §16.12`,
                   })
                 }
+              }
+            }
+            advanceDialogModel(m, ev)
+          }
+        }
+      }
+      return out
+    }),
+}
+
+// ---------------------------------------------------------------------------
+// rfc.midDialogWireDestination — RFC 3261 §8.1.2 + RFC 3263 §4
+// ---------------------------------------------------------------------------
+//
+// MUST-024: "destination MUST be determined…procedures MUST be applied to
+// the Request-URI". In an established dialog with a non-empty route set
+// (loose-route), §12.2.1.1 places the next hop's URI as the topmost Route;
+// RFC 3263 §4 then resolves that URI to a wire (host, port). For an empty
+// route set, the request is sent to the Request-URI.
+//
+// This rule verifies the wire-level destination the harness actually
+// `socket.send`'d the bytes to matches that derivation, for in-dialog
+// requests. It does NOT fire on initial requests (no dialog yet) or on
+// CANCEL (which §9.1 ties to the matching INVITE's destination, not the
+// route set). It is intentionally silent for requests that don't yet
+// have an established dialog (no remote tag observed locally) — for
+// those the UAC is permitted to use a configured outbound proxy per
+// §8.1.2 last paragraph.
+//
+// Suppress via `exceptions.ts` for scenarios with a documented outbound-
+// proxy override that legitimately decouples wire-dst from Route-URI.
+
+export const midDialogWireDestinationRule: CrossMessageRule = {
+  name: "rfc.midDialogWireDestination",
+  check: (slices) =>
+    Effect.sync(() => {
+      const out: Array<{ bindKey: LaneKey; detail: string }> = []
+      for (const slice of slices) {
+        for (const slot of slice.perAgent) {
+          const events = orderedFromSlot(slot)
+          const m = emptyDialogModel()
+          for (const ev of events) {
+            if (ev.kind === "sent" && ev.msg.type === "request") {
+              const msg = ev.msg
+              if (msg.method === "CANCEL" || msg.method === "ACK") {
+                advanceDialogModel(m, ev)
+                continue
+              }
+              const isInitialInvite =
+                msg.method === "INVITE" &&
+                !m.initialInviteSentBranch &&
+                !m.initialInviteReceivedBranch
+              if (isInitialInvite || m.remoteTag === "") {
+                advanceDialogModel(m, ev)
+                continue
+              }
+              // In-dialog request — expected wire dst is the topmost
+              // Route URI when present, else the Request-URI.
+              const sentRoutes = getAllHeaderValues(msg.headers, "route")
+              const targetUri = sentRoutes.length > 0
+                ? extractRouteUri(sentRoutes[0]!)
+                : msg.uri
+              const parsed = parseSipUri(targetUri)
+              if (parsed === undefined) {
+                advanceDialogModel(m, ev)
+                continue
+              }
+              if (ev.wirePeer === undefined) {
+                // Unit-test fixtures may construct events without wire
+                // info — skip silently rather than false-fire.
+                advanceDialogModel(m, ev)
+                continue
+              }
+              if (
+                ev.wirePeer.ip !== parsed.host ||
+                ev.wirePeer.port !== parsed.port
+              ) {
+                out.push({
+                  bindKey: slot.bindKey,
+                  detail:
+                    `in-dialog ${msg.method} wire-sent to ` +
+                    `${ev.wirePeer.ip}:${ev.wirePeer.port} but ` +
+                    (sentRoutes.length > 0
+                      ? `topmost Route URI resolves to `
+                      : `Request-URI resolves to `) +
+                    `${parsed.host}:${parsed.port} ("${targetUri}") — ` +
+                    `RFC 3261 §8.1.2 + RFC 3263 §4`,
+                })
               }
             }
             advanceDialogModel(m, ev)
@@ -591,6 +684,7 @@ export const proxy100TryingNotForwardedRule: CrossMessageRule = {
 const sliceTypedRules: ReadonlyArray<CrossMessageRule> = [
   midDialogFromUriRule,
   midDialogRouteRule,
+  midDialogWireDestinationRule,
   sdpOriginContinuityRule,
   recordRoutePlacementRule,
   rportEchoRule,
