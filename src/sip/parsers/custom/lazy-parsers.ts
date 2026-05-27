@@ -12,6 +12,7 @@ import { Result } from "effect"
 import type { SipHeader } from "../../types.js"
 import { SipParseError } from "../errors.js"
 import {
+  findUriEmbeddedHeadersStart,
   parseContact,
   parseNameAddr,
   parseRack,
@@ -169,7 +170,7 @@ export const parseReferToHeader = (
   if (Result.isFailure(base) || base.success === undefined) return base
   // Strict SIP-URI on the target URI (head — without embedded headers).
   const uri = base.success.uri
-  const qIdx = uri.indexOf("?")
+  const qIdx = findUriEmbeddedHeadersStart(uri)
   const uriHead = qIdx === -1 ? uri : uri.slice(0, qIdx)
   const reason = validateStrictSipUri(uriHead)
   if (reason !== undefined) {

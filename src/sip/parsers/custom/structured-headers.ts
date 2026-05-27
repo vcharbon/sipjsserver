@@ -370,7 +370,7 @@ export function parseReferTo(value: string): ParsedReferTo | undefined {
   if (nameAddr.uri.length === 0) return undefined
 
   const uri = nameAddr.uri
-  const qIdx = uri.indexOf("?")
+  const qIdx = findUriEmbeddedHeadersStart(uri)
 
   let uriHead = uri
   const embeddedHeaders: Record<string, string> = {}
@@ -422,6 +422,32 @@ export function parseReferTo(value: string): ParsedReferTo | undefined {
 // SIP URI parsing: sip:user@host:port;params
 // =========================================================================
 
+/**
+ * Locate the `?` that opens embedded URI-headers (RFC 3261 §19.1.1) — the
+ * one that follows hostport, not any `?` inside userinfo. Returns the
+ * index of that `?` or `-1` when the URI has no embedded headers.
+ *
+ * `?` is valid in `user-unreserved` (§25.1), so `uri.indexOf("?")` would
+ * misidentify a userinfo `?` as the headers boundary on URIs like
+ * `sips:+33?param=v@host?Replaces=…`. We anchor the scan at hostStart
+ * (after the userinfo `@`, if present) to avoid that class of misparse.
+ */
+export function findUriEmbeddedHeadersStart(uri: string): number {
+  const colonIdx = uri.indexOf(":")
+  if (colonIdx === -1) return -1
+  // Locate userinfo `@`. RFC 3261 §25.1 allows `;` and `?` in user, so we
+  // scan the whole URI for `@` (it is reserved outside userinfo).
+  let atIdx = -1
+  for (let j = colonIdx + 1; j < uri.length; j++) {
+    if (uri.charCodeAt(j) === 0x40) { atIdx = j; break }
+  }
+  const hostStart = atIdx === -1 ? colonIdx + 1 : atIdx + 1
+  for (let j = hostStart; j < uri.length; j++) {
+    if (uri.charCodeAt(j) === 0x3f) return j // `?`
+  }
+  return -1
+}
+
 export function parseSipUriString(uri: string): ParsedUri | undefined {
   let i = 0
   const len = uri.length
@@ -436,10 +462,13 @@ export function parseSipUriString(uri: string): ParsedUri | undefined {
   let user: string | undefined
   let hostStart: number
 
-  // Look for @ to determine if there's a user part
-  // But @ could be in other contexts, so scan carefully:
-  // find the first @, ;, or end — if @ comes before ; it's user@host
-  const atIdx = scanUntilOneOf(uri, i, "@;>")
+  // RFC 3261 §25.1 allows `;`, `?`, `=`, `+`, `&`, `$`, `,`, `/` in `user`
+  // (user-unreserved), so the `@` lookup must scan past them — e.g.
+  // `sip:+331…;titi=tat@foo.bar` is well-formed. `@` is reserved outside
+  // userinfo (it must be %40-escaped elsewhere), so scanning the whole URI
+  // is safe. `>` remains a stop only as a defensive guard if a name-addr
+  // value leaked through; valid extracted URIs won't contain it.
+  const atIdx = scanUntilOneOf(uri, i, "@>")
   if (atIdx < len && uri.charCodeAt(atIdx) === 0x40) { // @
     user = uri.slice(i, atIdx)
     hostStart = atIdx + 1

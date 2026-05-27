@@ -551,3 +551,39 @@ Content-Length: 0
     expect(msg.getHeader("to").displayName).toBe("tutu")
   })
 })
+
+// RFC 3261 §19.1.1 embedded URI-headers — `?` is also valid in the user
+// portion (§25.1 user-unreserved). The Refer-To embedded-headers boundary
+// must be the `?` that follows hostport, not the first `?` in the URI.
+// Regression: parseReferTo and parseReferToHeader used to split at the
+// first `?`, misparsing the URI head as `sip:<user-prefix>` and rejecting
+// it because the partial user wasn't a valid hostname.
+describe("parseReferTo — `?` in userinfo vs embedded-headers boundary", () => {
+  test("URI with `?` in user AND embedded Replaces parses both parts", () => {
+    const referValue = "<sips:+33?param=v@host.example;lr?Replaces=abc%40d%3Bfrom-tag%3D1%3Bto-tag%3D2>"
+    const buf = sipMsg`REFER sip:bob@example.com SIP/2.0
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-refer-q
+From: <sip:alice@example.com>;tag=t1
+To: <sip:bob@example.com>;tag=t2
+Call-ID: refer-q-1@example.com
+CSeq: 1 REFER
+Refer-To: ${referValue}
+Content-Length: 0
+
+`
+    const msg = customParser.parse(buf)
+    const referToResult = msg.getHeader("refer-to")
+    if (!Result.isSuccess(referToResult)) throw new Error("Refer-To parse failed")
+    const referTo = referToResult.success
+    if (referTo === undefined) throw new Error("Refer-To missing")
+    // URI is preserved intact, including both `?` occurrences.
+    expect(referTo.uri).toBe("sips:+33?param=v@host.example;lr?Replaces=abc%40d%3Bfrom-tag%3D1%3Bto-tag%3D2")
+    // Embedded headers are split on the post-hostport `?`, so the only
+    // header is Replaces — `param=v@host…` lives in userinfo, not in
+    // the embedded-header section.
+    expect(Object.keys(referTo.embeddedHeaders)).toEqual(["Replaces"])
+    expect(referTo.replaces?.callId).toBe("abc@d")
+    expect(referTo.replaces?.fromTag).toBe("1")
+    expect(referTo.replaces?.toTag).toBe("2")
+  })
+})
