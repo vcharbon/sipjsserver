@@ -56,8 +56,8 @@ deliverable; later phases are blocked on earlier ones.
 | ----- | ----------------------------------------------------------- | -------- | ---------- |
 | 0     | Audit-framework refactor (subject sets, DUT-on, exceptions) | **done** (2026-05-25) | —          |
 | 1     | Documentation PR: process doc + per-RFC inventory + Rule Manifest | **done** (2026-05-25) | Phase 0    |
-| 2     | Per-section rule landing for 3261/3262/3264                 | **next** | Phase 1    |
-| 3     | Lessons-learned + queue next RFCs                           | pending  | Phase 2    |
+| 2     | Per-section rule landing for 3261/3262/3264                 | **done** (2026-05-26) | Phase 1    |
+| 3     | Lessons-learned + queue next RFCs                           | **next** | Phase 2    |
 
 **Hard gate between Phase 1 and Phase 2**: no rule implementation
 work starts until *every* MUST in the pilot RFCs has a final
@@ -68,6 +68,34 @@ accept/reject the exclusions before any rule code is written.
 
 ### Changelog
 
+- 2026-05-27: **Phase 3 slice 1 landed — lessons-learned appendix.**
+  [docs/RFC_Verification.md](../RFC_Verification.md#lessons-learned-appendix)
+  three per-RFC subsections (3261 / 3262 / 3264) replace the empty
+  stubs, plus a new "Cross-RFC consolidation (Phase 3)" section
+  capturing five cross-cutting patterns: (1) trust the projector —
+  don't re-derive dialog identity, (2) architectural absorbents
+  (leg-rewriting / PRACK termination / media anchoring) predict the
+  advisory rate, (3) recurring rule-design footguns (in-rule dialog
+  tracking, INVITE retransmit blindness, non-dialog-initiating-method
+  fire, Content-Type gating), (4) "materialise on second consumer"
+  helper-extraction policy validated by `_transaction-correlation.ts`
+  (8 consumers) and `_offer-answer.ts` (9 consumers), (5) inventory
+  taxonomy needs sub-cases for parser-pre-empted / agent-internal
+  state / timing-bounded MUSTs. Two Phase-3.5 follow-ups flagged
+  but explicitly deferred: a `subject: peerOnly` narrowing primitive
+  (would lift ~10 advisory rules back to deferred-fail; needs ADR)
+  and threading `atMs` through `OrderedAgentEvent` (smaller, same
+  precursor-plan shape). Doc-only commit; no rule code. Next slice:
+  RFC 3515 REFER inventory.
+- 2026-05-27: **Phase 2 marked done; Phase 3 marked next.** Status table
+  reconciled with the three Phase-2 changelog entries below (3261 / 3262 /
+  3264 batches each closed `will-implement` rows to zero). Re-verified
+  baseline at reconciliation time: `npm run typecheck` clean,
+  `npm run test:fake` green at 1521 passed / 4 skipped / 211 files (one
+  higher than the Phase-2-end 1520 due to the no-RR realFabric registrar
+  test landing post-Phase-2). Phase 3 opens with two deliverables — the
+  lessons-learned appendix in [docs/RFC_Verification.md](../RFC_Verification.md)
+  and queuing the next RFCs.
 - 2026-05-25: initial plan drafted via `/grill-with-docs`.
 - 2026-05-25: revised — single-file exception declarations
   (`tests/harness/rules/rfc/exceptions.ts`) replacing per-test

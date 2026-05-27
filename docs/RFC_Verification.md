@@ -346,21 +346,214 @@ The grep pattern in `_raw/` deliberately does **not** include `SHOULD`
 
 ## Lessons-learned appendix
 
-Empty at Phase 1 land. Phase 2 PRs append a section per RFC after that
-RFC's last `will-implement` row flips to `already-implemented`. Likely
-topics:
+Per-RFC sections are appended once that RFC's last `will-implement`
+row flips to `already-implemented`. A cross-RFC consolidation
+("Cross-RFC consolidation (Phase 3)") follows the per-RFC sections
+and feeds back into the process doc above. See plan §"Phase 3" for
+the gating criteria.
+
+Topics covered:
 
 - Which MUST shapes were unexpectedly hostile to rule formulation.
 - Which fixture rewrites were forced (and why).
 - Which architectural guarantees absorbed entire sections.
 - Which audit-framework limitations need addressing before the next
   RFC queues.
+- Recurring rule-design footguns to avoid at authoring time.
 
-Phase 3 then writes the cross-RFC consolidation and queues the next
-batch. See plan §"Phase 3" for the gating criteria.
+### RFC 3261
 
-### RFC 3261 — _(empty until Phase 2 completes)_
+24 rules landed (2 peer pre-pilot + 3 peer + 19 cross-message in
+Phase 2). 4 shipped advisory. Inventory state at Phase-2 close:
+0 `will-implement` rows remain.
 
-### RFC 3262 — _(empty until Phase 2 completes)_
+**Hostile MUST shapes.** Three patterns surfaced that the process
+doc's taxonomy didn't anticipate:
 
-### RFC 3264 — _(empty until Phase 2 completes)_
+- **"The agent recognised X"** — `RFC3261-MUST-071` (§12.2.2 unknown
+  dialog → 481) asserts an agent-internal state ("dialog known to
+  me"), not anything in the wire trace. The shipped rule
+  `rfc.unknownDialog481` is narrowed to the `slice.toTag === null`
+  window, which makes it a projector-invariant tripwire rather than
+  a real coverage check. *Process implication*: MUSTs that assert
+  agent-internal recognition without a corresponding observable
+  side-effect should classify as `unobservable-post-hoc`, not
+  `will-implement`. Add at inventory time.
+- **Timing-bounded MUSTs without `atMs`** — `RFC3261-MUST-095`
+  (§16.2 proxy 100 Trying within 200ms) is unprovable from the
+  current per-slot stream. The projector has `OrderedEntry.atMs`
+  but `OrderedAgentEvent` (what rules see) does not.
+  `rfc.proxy100WithinT100ms` ships advisory with the timing
+  dimension dropped. *Process implication*: timing bounds in MUST
+  text need an explicit decision at inventory time —
+  enforceable (if `atMs` is plumbed), advisory-only (structural
+  check minus the bound), or `unobservable-post-hoc`.
+- **Parser-pre-empted MUSTs** — `RFC3261-MUST-045` (§9.1 CANCEL
+  CSeq method must equal "CANCEL") is rejected by the strict
+  parser at [src/sip/parsers/extract-fields.ts:530](../src/sip/parsers/extract-fields.ts#L530)
+  before any rule sees the message. `rfc.cancelCseqMethod` ships as
+  defense-in-depth for non-parser SipMessage construction paths,
+  but the inventory row could have classified as `parser-enforced`
+  instead. *Process implication*: the inventory taxonomy needs a
+  sweep — some `already-implemented` MUSTs are actually
+  `parser-enforced` riding along with zero coverage delta.
+
+**Advisory drift.** Four rules shipped advisory because the B2BUA
+worker's leg-rewriting + backend-driven response semantics confuse
+a pure-UA heuristic. See justifications inline in
+[tests/harness/rules/rfc/rfc3261-cross-message-rules.ts:1509](../tests/harness/rules/rfc/rfc3261-cross-message-rules.ts#L1509)
+(`RFC3261_ADVISORY_OVERRIDES`): `rfc.optionsResponseEchoes`,
+`rfc.cancelAfter1xx`, `rfc.noTarget404`, `rfc.proxy100WithinT100ms`.
+
+**Forced fixture rewrite.** One: a stray decorative `tag=bob-tag`
+on an outbound initial INVITE/BYE in
+[tests/sip/transaction-layer-handles.test.ts](../tests/sip/transaction-layer-handles.test.ts)
+flagged by `rfc.noToTagOnInitialRequest`. Fixed in the same PR
+per the triage policy; the BYE side re-stamped once the rule was
+narrowed to dialog-initiating methods only.
+
+**Rule rewrites before landing.** Two rules — `rfc.unknownDialog481`
+and `rfc.noByeOutsideOrEarlyDialog` — were rewritten to consume
+`slice.{callId, fromTag, toTag}` directly instead of re-deriving
+dialog identity inside the rule. Two more —
+`rfc.noReInviteWhileInviteInProgress` and
+`rfc.concurrentReInvite500or491` — were made retransmit-aware
+(skip when a new INVITE's Via top-branch matches a known
+in-progress branch, per RFC 3261 §17.1.1).
+
+### RFC 3262
+
+15 rules landed (1 peer + 14 cross-message). 3 shipped advisory.
+Inventory state at close: 0 `will-implement` rows remain.
+
+**Architectural absorbent: PRACK terminated per leg.** The B2BUA
+worker terminates PRACK on each leg, so the reliable 1xx and its
+matching PRACK live in *different* per-Call-ID slices after Call-ID
+rewrite. Three rules trip on that legitimately:
+`rfc.reliableNeedsClientOptIn`, `rfc.unmatchedPrackProxied`,
+`rfc.prackOfferAnswerModel`. Justifications inline in
+[tests/harness/rules/rfc/rfc3262-cross-message-rules.ts:1353](../tests/harness/rules/rfc/rfc3262-cross-message-rules.ts#L1353)
+(`RFC3262_ADVISORY_OVERRIDES`).
+
+**Helper extraction validated.** `rfc.prackOfferAnswerModel` was
+the first cross-message rule that wanted SDP-body parsing; the
+helper was *not* extracted in this batch (inline body-presence
+heuristic, with the helper deferred to the RFC 3264 batch's
+volume). Confirmed the manifest's "materialise on second consumer"
+rule: extracting prematurely for one consumer would have been
+churn.
+
+### RFC 3264
+
+11 rules landed (2 peer + 9 cross-message). 3 shipped advisory.
+Inventory state at close: 0 `will-implement` rows remain. New
+helper [tests/harness/rules/rfc/_offer-answer.ts](../tests/harness/rules/rfc/_offer-answer.ts)
+shipped with 9 consumers.
+
+**Architectural absorbent: cross-leg O/A correlation.** Three
+rules ship advisory because per-slice tracking cannot see the
+other leg's offer or answer after Call-ID rewrite:
+`rfc.noNewOfferWhileOfferPending`, `rfc.directionPairValid`,
+`rfc.zeroPortPropagation`. The third is also confounded by B2BUA
+media anchoring (peer-side `port=0` becomes B2BUA-side anchored
+RTP port). Justifications inline in
+[tests/harness/rules/rfc/rfc3264-cross-message-rules.ts:623](../tests/harness/rules/rfc/rfc3264-cross-message-rules.ts#L623)
+(`RFC3264_ADVISORY_OVERRIDES`).
+
+**Content-Type gating discovered.** `rfc.sdpBodyParseable`
+initially fired on every body. B2BUA emits non-SDP bodies (e.g.
+`text/plain` INFO), so the rule was gated on
+`Content-Type: application/sdp`. *Process implication*: any
+body-shape MUST needs an explicit Content-Type gate at inventory
+time — otherwise the rule is structurally wrong, not just noisy.
+
+### Cross-RFC consolidation (Phase 3)
+
+Five patterns cut across all three pilot RFCs. They feed back into
+the process doc (above) and into Phase-3 follow-up work.
+
+**1. Trust the projector — don't re-derive dialog identity.**
+`tests/harness/projections.ts:projectPerDialog` partitions per
+`(bindKey, callId, fromTag, toTag|null)`. Each `PerDialogSlice`
+**is** a single dialog. Rules consume `slice.perAgent[].events`,
+already scoped to that dialog. **The single biggest false-positive
+source this pilot was redundant in-rule dialog tracking** — three
+rules had to be rewritten or shipped advisory because of it. When
+authoring a new rule, the first question is "does the projector
+already answer this?" before any per-rule state.
+
+**2. Architectural absorbents predict the advisory rate.** Ten
+rules shipped advisory across the pilot — concentrated on three
+B2BUA traits: leg-rewriting (different Call-ID per leg), PRACK
+termination, and media anchoring. The pattern is consistent enough
+to motivate a `subject: peerOnly` narrowing primitive — a rule
+opts out of DUT audit while still auditing non-DUT peers. This
+would lift many of today's advisories back to deferred-fail. It
+needs a fresh ADR / precursor plan, not a mechanical Phase-3 fix.
+The per-rule justifications in the three `*_ADVISORY_OVERRIDES`
+maps each describe the specific B2BUA pattern that confuses the
+heuristic — read them when scoping the architectural fix.
+
+**3. Recurring rule-design footguns.** Document these so the next
+round of rules avoids them at authoring time:
+
+- **Re-deriving dialog identity** — see (1). Always prefer
+  `slice.{callId, fromTag, toTag}` over in-slot tracking.
+- **Treating INVITE retransmits as new transactions** — per
+  RFC 3261 §17.1.1, INVITE retransmits reuse the Via top-branch.
+  Rules tracking "in-progress branches" must skip same-branch
+  re-entry. Two pilot rules had this bug
+  (`rfc.noReInviteWhileInviteInProgress`,
+  `rfc.concurrentReInvite500or491`).
+- **Firing on non-dialog-initiating methods for "no To-tag on
+  initial"** — `rfc.noToTagOnInitialRequest` initially fired on
+  any first-event-per-Call-ID. BYE/ACK/UPDATE/INFO/PRACK/CANCEL
+  are intrinsically in-dialog; firing on them is a fixture
+  artifact. Narrowed to {INVITE, REGISTER, SUBSCRIBE, OPTIONS,
+  REFER, MESSAGE, PUBLISH, NOTIFY}.
+- **Not gating on Content-Type for SDP body rules** — see
+  RFC 3264 above.
+
+**4. Helper extraction policy validated.** Two helpers crossed
+the policy's "materialise on second consumer" threshold cleanly
+without speculation:
+
+- [_transaction-correlation.ts](../tests/harness/rules/rfc/_transaction-correlation.ts)
+  — first consumer `rfc.ackRequireSubsetOfInvite`; ended the
+  pilot with 8 consumers.
+- [_offer-answer.ts](../tests/harness/rules/rfc/_offer-answer.ts)
+  — first consumer `rfc.noNewOfferWhileOfferPending`; ended with
+  9 consumers.
+
+`_sdp-parsing.ts` was on the candidate list but correctly **not**
+extracted — rtpmap parsing folded into `_offer-answer.ts` (single
+consumer). The candidate list was pruned. *Process implication*:
+the "materialise on second consumer" rule held up; reviewers
+should reject speculative helpers, not pre-empt them.
+
+**5. Inventory taxonomy needs a sweep.** Three borderline
+classifications surfaced this pilot:
+
+- `parser-enforced` vs `already-implemented` — see RFC 3261
+  M-045.
+- `unobservable-post-hoc` for agent-internal-state MUSTs — see
+  RFC 3261 M-071.
+- timing-bounded MUSTs without `atMs` — see RFC 3261 M-095.
+
+Next-RFC inventories should either tighten the taxonomy
+(introduce explicit sub-cases for these) or treat them as known
+edge cases when triaging. The process doc's "When in doubt,
+prefer `will-implement`" guidance held — every borderline rule
+shipped, even if advisory.
+
+**6. Phase-3.5 candidates not landed in Phase 3.** Two items
+identified but explicitly deferred:
+
+- **`subject: peerOnly` narrowing primitive** — touches
+  `SignalingNetwork.contracts.ts`, lifts ~10 advisory rules. New
+  ADR + precursor plan. Frame as a precursor to the next big
+  RFC batch rather than a Phase-3 sub-task.
+- **`atMs` on `OrderedAgentEvent`** — would let timing-bounded
+  MUSTs (M-095 and likely many in RFC 4028 session timers)
+  ship as `deferred-fail` instead of advisory. Smaller change;
+  same precursor-plan shape.
