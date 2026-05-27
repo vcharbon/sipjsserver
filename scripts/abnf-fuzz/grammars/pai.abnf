@@ -1,0 +1,32 @@
+; P-Asserted-Identity value (RFC 3325 §9.1):
+;   PAssertedID = "P-Asserted-Identity" HCOLON PAssertedID-value
+;                  *(COMMA PAssertedID-value)
+;   PAssertedID-value = name-addr / addr-spec
+; Caller delivers the part AFTER `P-Asserted-Identity:`, which can be a
+; single value or a comma-separated list, and may include `tel:` URIs.
+pai-header-value =
+    pai-value  *( COMMA  pai-value )
+
+; RFC 3261 §20.10 — when the URI contains comma/semicolon/question-mark,
+; angle-bracket form is mandatory. The list grammar would otherwise
+; produce ambiguous boundaries (`splitTopLevelCommas` can't tell a userinfo
+; `,` from an inter-value `,` without LL(∞) lookahead). Enforce wrapping.
+pai-value =
+    name-addr /  tel-name-addr
+
+; RFC 3325 explicitly permits `tel:` URIs in P-Asserted-Identity; the SIP
+; parser must accept them transparently. We model them with a permissive
+; shape (tel scheme + telephone-subscriber-ish payload).
+tel-name-addr =
+    [ display-name ]  LAQUOT  tel-addr-spec  RAQUOT
+
+tel-addr-spec =
+    "tel:"  tel-payload
+
+tel-payload =
+    [ "+" ]  1*( DIGIT /  "-" /  "." /  "(" /  ")" )  *( ";" tel-par )
+
+tel-par =
+    1*( alphanum /  "-" )  [ "="  1*( alphanum /  "-" /  "." /  "+" ) ]
+
+COMMA = ","
