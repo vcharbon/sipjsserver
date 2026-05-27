@@ -10,8 +10,8 @@ Companion docs:
 - [docs/RFC_Verification.md](../RFC_Verification.md) — the process
   this manifest implements.
 - Per-RFC inventories — [RFC3261.md](RFC3261.md), [RFC3262.md](RFC3262.md),
-  [RFC3264.md](RFC3264.md). Each row in those tables back-references a
-  manifest entry by rule name.
+  [RFC3264.md](RFC3264.md), [RFC3515.md](RFC3515.md). Each row in those
+  tables back-references a manifest entry by rule name.
 
 ## How to read this file
 
@@ -176,6 +176,25 @@ One planned rule covers 1 `will-implement` MUST. Inventory:
 Zero planned rules remain — all RFC 3264 MUSTs in pilot scope are
 `already-implemented`. Inventory: [RFC3264.md](RFC3264.md).
 
+### RFC 3515
+
+Nine planned rules cover 9 `will-implement` MUSTs. Inventory:
+[RFC3515.md](RFC3515.md). All `uas`-subject except `rfc.referToExactlyOne`
+(uac, peer-bind asserted). Suggested sub-batch order per the
+inventory's Phase 2 sequencing section.
+
+| rule name | subject | kind | status | MUST-IDs covered | helper(s) used | notes |
+|-----------|---------|------|--------|------------------|----------------|-------|
+| `rfc.referToExactlyOne` | uac | peer | planned | RFC3515-MUST-003 | — | Sent REFER must carry exactly one `Refer-To` header field value. Peer rule on the REFER-issuer (audited via peer bind in the B2BUA topology). |
+| `rfc.referMalformed400` | uas | cross | planned | RFC3515-MUST-005 | `_dialog-model.ts` | Received REFER with zero or ≥2 Refer-To header field values must yield a 400 final response. |
+| `rfc.referReturns202` | uas | cross | planned | RFC3515-MUST-006 | `_dialog-model.ts` | Accepted REFER (no earlier 4xx-6xx response) gets a 202 final before the transaction expires. Lifts the lesson that REFER-202 is currently masked by `rfc.unknownDialog481`'s slice-identity narrowing. |
+| `rfc.referAcceptedYieldsNotify` | uas | cross | planned | RFC3515-MUST-007 | `_dialog-model.ts` | 2xx REFER must be followed by at least one NOTIFY from the REFER-recipient on the same dialog (initial NOTIFY per the implicit subscription). Also covers RFC3515-MUST-008 restatement. |
+| `rfc.referNotifyEvent` | uas | peer | planned | RFC3515-MUST-009 | — | Sent NOTIFY-on-refer-subscription carries `Event: refer` (and matching `id` parameter per M-015 — which is `out-of-scope` for the DUT and need not be enforced here). |
+| `rfc.referNotifySipfrag` | uas | peer | planned | RFC3515-MUST-010 | — | Sent NOTIFY-on-refer-subscription carries `Content-Type: message/sipfrag` (any version) and a non-empty body. Also covers RFC3515-MUST-013 restatement. |
+| `rfc.subscribeReferRequiresExistingSubscription` | uas | cross | planned | RFC3515-MUST-012 | `_dialog-model.ts` | Out-of-dialog SUBSCRIBE with `Event: refer` for an unknown subscription must be rejected 403. Expected regression-only — no current fixture sends bare SUBSCRIBE-for-refer. |
+| `rfc.referNotifySipfragStatusLine` | uas | peer | planned | RFC3515-MUST-014 | — | Sent NOTIFY-on-refer-subscription body begins with `SIP/2.0 <status> <reason>`. Likely candidate for a `_sipfrag.ts` helper on second consumer. |
+| `rfc.referFinalNotifyTerminatedNoresource` | uas | cross | planned | RFC3515-MUST-017 | `_dialog-model.ts` | The last NOTIFY in a REFER subscription carries `Subscription-State: terminated;reason=noresource`. |
+
 ## Helpers
 
 Promoted to a `_*.ts` file when two rules in the same PR would share
@@ -196,6 +215,7 @@ policy" for the contract.
 | helper (planned name) | covers | likely first consumer |
 |------------------------|--------|------------------------|
 | `_dialog-iteration.ts` | Typed dialog walk with per-step state | second cross-message rule duplicating `_dialog-model.ts`'s loop shape |
+| `_sipfrag.ts` | `message/sipfrag` body parsing — status-line extraction, reason-phrase, optional embedded headers | `rfc.referNotifySipfragStatusLine` (RFC 3515); materialises only if a second NOTIFY-shape consumer appears, otherwise stays inline per "materialise on second consumer" |
 
 Names are illustrative — actual file names are decided when the
 helper's second consumer materialises.

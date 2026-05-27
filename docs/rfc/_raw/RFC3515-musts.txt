@@ -1,0 +1,31 @@
+# Raw MUST/REQUIRED/SHALL grep — RFC 3515
+#
+# Source:   https://www.rfc-editor.org/rfc/rfc3515.txt
+# SHA-256:  77898412d832bbd8f70a2dd8c1c1a82bc7fa2eae2e59ca65c5fe28d34ebf6a49
+# Captured: 2026-05-27
+# Command:  grep -nE "MUST|MUST NOT|REQUIRED|SHALL" rfc3515.txt
+#
+# Each line is "<line>:<text>" where <line> is the 1-based line number
+# in the upstream RFC .txt. Stable across IETF mirrors; serves as the
+# audit trail for the per-RFC inventory under docs/rfc/.
+#
+# Format: keep this file verbatim. Re-run the command above with the
+# checksummed source to verify no drift.
+# ---------------------------------------------------------------------
+136:   hence MUST contain a single Contact header field value.  REFERs
+137:   occurring inside an existing dialog MUST follow the Route/Record-
+292:   request MUST contain exactly one Refer-To header field value.
+299:   approval is granted, the UA MUST contact the resource identified by
+306:   An agent responding to a REFER method MUST return a 400 (Bad Request)
+319:   the UA MUST return a 202 Accepted response before the REFER
+323:   returned), the recipient MUST create a subscription and send
+345:   The NOTIFY mechanism defined in [2] MUST be used to inform the agent
+350:   Each NOTIFY MUST contain an Event header field with a value of refer
+353:   Each NOTIFY MUST contain a body of type "message/sipfrag" [3].
+357:   that document, the agent that issued the REFER MUST be prepared to
+376:   subscription that does not already exist, it MUST be rejected with a
+401:   Each NOTIFY MUST contain a body of type "message/sipfrag" [3].  The
+402:   body of a NOTIFY MUST begin with a SIP Response Status-Line as
+472:   given dialog, it MUST include an id parameter[2] in the Event header
+477:   or terminate this subscription MUST contain this id parameter.
+482:   in [2].  The final NOTIFY sent in response to a REFER MUST indicate

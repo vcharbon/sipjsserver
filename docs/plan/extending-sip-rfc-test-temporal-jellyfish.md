@@ -68,6 +68,22 @@ accept/reject the exclusions before any rule code is written.
 
 ### Changelog
 
+- 2026-05-27: **Phase 3 slice 2 landed — RFC 3515 REFER inventory.**
+  New [docs/rfc/RFC3515.md](../rfc/RFC3515.md) inventory (17 entries —
+  9 `will-implement`, 2 `already-implemented` via existing
+  `rfc.contactPresence` / `rfc.midDialogRoute`,
+  4 `justified-not-implemented`, 2 `restatement`). New raw grep snapshot
+  [docs/rfc/_raw/RFC3515-musts.txt](../rfc/_raw/RFC3515-musts.txt)
+  (SHA-256 `77898412…6a49`). [RuleManifest.md](../rfc/RuleManifest.md)
+  grows by 9 planned rules in a new "RFC 3515" subsection plus a
+  candidate `_sipfrag.ts` helper entry. Scope decisions captured in
+  the inventory: REFER-issuer (uac) obligations apply to peer binds
+  only (B2BUA never issues REFER — A-leg rejected 501, B-leg is
+  recipient); approval semantics (M-004) and concurrent-REFER `id`
+  parameter (M-015) classify `out-of-scope` / `unobservable-post-hoc`.
+  Doc-only commit; no rule code. Phase 2 gate stays open for the
+  9 will-implement rows. test:fake green (1521 passed). Phase 3
+  backlog: queue further RFCs after REFER lands or in parallel.
 - 2026-05-27: **Phase 3 slice 1 landed — lessons-learned appendix.**
   [docs/RFC_Verification.md](../RFC_Verification.md#lessons-learned-appendix)
   three per-RFC subsections (3261 / 3262 / 3264) replace the empty
