@@ -23,6 +23,10 @@ export const PROXY_HOST_VALUES = resolve(
   "tests/k8s/values/sip-front-proxy.host.yaml",
 )
 export const WORKER_VALUES = resolve(REPO_ROOT, "tests/k8s/values/b2bua-worker.yaml")
+export const NO_MASQ_BRIDGE_MANIFEST = resolve(
+  REPO_ROOT,
+  "tests/k8s/manifests/no-masq-bridge.yaml",
+)
 /**
  * Endurance-specific overlay layered on top of WORKER_VALUES when
  * launching from `tests/k8s/endurance/run-endurance.ts`. Adds memory
@@ -79,6 +83,34 @@ export const helmUninstall = (release: string, namespace: string) =>
       timeoutMs: 120_000,
     })
   })
+
+// DaemonSet that disables kindnet's MASQUERADE for traffic destined to
+// the kind docker bridge subnet (172.20.0.0/16). Without it, packets
+// the sip-front-proxy sends from its VIP get rewritten to the node's
+// primary IP on egress, breaking the "source-IP discipline" the chart
+// promises and confusing the test harness's participant labels. See
+// docs/lb-proxy-ha.md.
+export const applyNoMasqBridge = Effect.gen(function* () {
+  yield* Effect.logInfo(`kubectl apply -f ${NO_MASQ_BRIDGE_MANIFEST}`)
+  yield* exec(
+    "kubectl",
+    ["apply", "-f", NO_MASQ_BRIDGE_MANIFEST],
+    { timeoutMs: 30_000 },
+  )
+  yield* Effect.logInfo("waiting for kind-no-masq-bridge DaemonSet to roll out")
+  yield* exec(
+    "kubectl",
+    [
+      "rollout",
+      "status",
+      "daemonset/kind-no-masq-bridge",
+      "-n",
+      "kube-system",
+      "--timeout=120s",
+    ],
+    { timeoutMs: 150_000 },
+  )
+})
 
 // Opaque payload pass-through; the helm CLI's JSON output is a stable
 // external contract. Schema decoding here is overkill — extracted out

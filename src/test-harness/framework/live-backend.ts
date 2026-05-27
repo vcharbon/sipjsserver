@@ -80,6 +80,16 @@ export function createLiveTransport(opts?: {
    * report lanes collapse the ghosts onto their canonical participant.
    */
   ghostIps?: ReadonlySet<string>
+  /**
+   * Label to assign to any participant whose `(ip, port)` doesn't
+   * match the explicit `participantLabels` registry, isn't an
+   * advertised agent address, and isn't a known ghost. Used by the
+   * hybrid runner to fold every cluster-internal address (b2bua pod
+   * IPs, etc.) into a single "k8s" lane. Paired with `fallbackNetwork`.
+   */
+  fallbackLabel?: string
+  /** NetworkTag the fallback label belongs to (default `"ext"`). */
+  fallbackNetwork?: NetworkTag
 }): TestTransport {
   const bindIp = opts?.bindIp ?? "127.0.0.1"
   const transportAdvertisedIp = opts?.advertisedIp
@@ -220,7 +230,7 @@ export function createLiveTransport(opts?: {
           }
         }
       }
-      return undefined
+      return opts?.fallbackNetwork
     },
     participantLabel: (ip: string, port: number) => {
       const exact = externalLabels?.get(labelKey(ip, port))
@@ -236,7 +246,7 @@ export function createLiveTransport(opts?: {
           }
         }
       }
-      return undefined
+      return opts?.fallbackLabel
     },
     ...(opts?.traceSequencer !== undefined
       ? { traceSequencer: opts.traceSequencer }

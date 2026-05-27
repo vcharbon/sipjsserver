@@ -20,6 +20,7 @@ import { clusterUp } from "../fixtures/cluster.js"
 import { exec } from "../fixtures/exec.js"
 import { buildAndLoad } from "../fixtures/images.js"
 import {
+  applyNoMasqBridge,
   installProxy,
   installRedis,
   installSipp,
@@ -152,6 +153,11 @@ export const upFull = (opts: UpFullOptions = {}) =>
 
     // Kind cluster (idempotent — skip if already exists).
     yield* clusterUp
+
+    // Disable kindnet MASQUERADE for the docker bridge subnet so the
+    // sip-front-proxy's VIP-sourced UDP keeps src=VIP on egress to the
+    // WSL2 host. Must land before any traffic-emitting workload.
+    yield* applyNoMasqBridge
 
     // 2nd observability pass — host stack is now a no-op; this is the
     // pass that actually applies vmagent/fluent-bit/node-exporter/

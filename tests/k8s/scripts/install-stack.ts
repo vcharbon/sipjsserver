@@ -1,5 +1,6 @@
 import { Effect, References } from "effect"
 import {
+  applyNoMasqBridge,
   installProxy,
   installRedis,
   installSipp,
@@ -15,6 +16,9 @@ const program = Effect.gen(function* () {
   // nodes' containerd store. Common after a host reboot — host docker
   // still has the tags but the nodes' image stores were wiped.
   yield* ensureImagesLoaded
+  // Disable kindnet MASQUERADE for the docker bridge subnet so the
+  // proxy's VIP-sourced UDP keeps src=VIP on egress to the host.
+  yield* applyNoMasqBridge
   // Two Redis topologies coexist:
   //   - tests/k8s/charts/redis/  → cluster-shared, used ONLY by the
   //     CallLimiter (LimiterRedisClient → REDIS://redis:6379). Installed

@@ -76,6 +76,9 @@ any time:
 E2E_KIND=1 E2E_KIND_PROXY_HOST=172.20.255.250 TEST_MODE=live \
   npx vitest run \
   tests/fullcall/e2e-register-fakeExt-realCore.test.ts
+
+E2E_KIND=1 TEST_MODE=live \
+  npx vitest run tests/fullcall/e2e-register-noRr-realFabric.test.ts
 ```
 
 Report goes to `test-results/real-clock/registrarFrontProxy-kind/index.html`.

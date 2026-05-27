@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kind-no-masq-bridge
+  namespace: kube-system
+  labels:
+    app: kind-no-masq-bridge
+spec:
+  selector:
+    matchLabels:
+      app: kind-no-masq-bridge
+  template:
+    metadata:
+      labels:
+        app: kind-no-masq-bridge
+    spec:
+      # Manipulates the host node's iptables — must share the host
+      # network namespace.
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: ensure-no-masq
+          image: alpine:3.20
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["NET_ADMIN"]
+          # Insert a RETURN rule at the top of nat POSTROUTING for the
+          # kind docker bridge subnet. Without it, kindnet's KIND-MASQ-AGENT
+          # rewrites src=<sip-front-proxy VIP> to src=<node-IP> on every
+          # packet leaving the cluster toward the WSL2 host (172.20.0.1).
+          # That breaks "source-IP discipline" promised by the proxy chart
+          # (docs/lb-proxy-ha.md) and makes the test harness mis-attribute
+          # in-dialog ACK/BYE to a phantom "B2BUA" sender. Loop because
+          # node restarts / kube-proxy reconciliations occasionally
+          # rebuild POSTROUTING; idempotent on each pass.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              apk add --no-cache iptables >/dev/null
+              while true; do
+                if ! iptables -t nat -C POSTROUTING -d 172.20.0.0/16 -j RETURN 2>/dev/null; then
+                  iptables -t nat -I POSTROUTING 1 -d 172.20.0.0/16 -j RETURN
+                  echo "$(date -u +%FT%TZ) inserted nat POSTROUTING RETURN for 172.20.0.0/16"
+                fi
+                sleep 10
+              done
+          resources:
+            requests:
+              cpu: 5m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              # 128Mi covers the transient peak when `apk add iptables`
+              # downloads + unpacks the package on first start. Steady-
+              # state is well under 32Mi (the loop only runs sh + sleep
+              # + occasional iptables-check).
+              memory: 128Mi
+      terminationGracePeriodSeconds: 5

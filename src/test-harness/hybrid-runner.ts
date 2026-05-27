@@ -325,6 +325,14 @@ export interface HybridRunnerOptions {
    * environments or to disable the fallback.
    */
   readonly ghostIps?: ReadonlySet<string>
+  /**
+   * Label assigned to any participant whose address isn't in our
+   * explicit registry (agents + proxy endpoints + kind-ingress VIP).
+   * Folds cluster-internal SNAT'd sources (e.g. the kind worker node
+   * IP at 172.20.0.4 that b2bua-pod traffic appears to come from)
+   * into a single lane in the report. Default `"k8s"`.
+   */
+  readonly clusterFallbackLabel?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -361,7 +369,7 @@ export function createHybridRunner(opts: HybridRunnerOptions) {
   const labels = new Map<string, string>([
     [labelKey(endpoints.extBind.host, endpoints.extBind.port), "proxy(ext)"],
     [labelKey(endpoints.coreBind.host, endpoints.coreBind.port), "proxy(core)"],
-    [labelKey(kindHost, kindPort), "k8s-ingress"],
+    [labelKey(kindHost, kindPort), "k8s"],
   ])
   const networks = new Map<string, NetworkTag>([
     [labelKey(endpoints.extBind.host, endpoints.extBind.port), "ext"],
