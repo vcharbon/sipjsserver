@@ -526,4 +526,28 @@ describe("Custom parser — parsed fields (eager extraction)", () => {
     expect(msg.getHeader("via")[0].params["lg"]).toBe("a")
     expect(msg.getHeader("contact")?.uri).toBe("sip:alice@10.0.0.1:5060;callRef=fold-ref;leg=a")
   })
+
+  // RFC 3261 §25.1: `user-unreserved = "&" / "=" / "+" / "$" / "," / ";" / "?" / "/"`
+  // — `;` and `?` are legal inside the user portion, so the strict URI
+  // validator must scan past them to locate the userinfo `@` separator.
+  // Regression: the `@` look-ahead used to break at the first `;`/`?`,
+  // misidentifying the user as the host and rejecting it because `+` is
+  // not a valid host-label start character.
+  test("From/To with `;` parameter inside user portion is accepted", () => {
+    const buf = sipMsg`INVITE sip:bob@example.com SIP/2.0
+Via: SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-user-semi
+From: "toto" <sip:+33123456789;titi=tat@foo.bar>;tag=from-tag-1
+To: "tutu" <sip:+33198765432;npi=e164@bar.baz>
+Call-ID: user-semi-1@example.com
+CSeq: 1 INVITE
+Content-Length: 0
+
+`
+    const msg = customParser.parse(buf)
+    expect(msg.getHeader("from").uri).toBe("sip:+33123456789;titi=tat@foo.bar")
+    expect(msg.getHeader("from").displayName).toBe("toto")
+    expect(msg.getHeader("from").tag).toBe("from-tag-1")
+    expect(msg.getHeader("to").uri).toBe("sip:+33198765432;npi=e164@bar.baz")
+    expect(msg.getHeader("to").displayName).toBe("tutu")
+  })
 })

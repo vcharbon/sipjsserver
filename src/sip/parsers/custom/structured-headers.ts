@@ -778,9 +778,13 @@ export function validateStrictSipUri(uri: string): string | undefined {
   if (scheme !== "sip" && scheme !== "sips") return undefined
 
   // userinfo = user [ ":" password ] "@"   — optional.
-  // Locate the `@` that terminates userinfo, if any. The `@` is anywhere
-  // before the first hostport delimiter (`;`, `?`, `>`). Anything earlier
-  // is userinfo. A second `@` in userinfo is illegal.
+  // Locate the `@` that terminates userinfo, if any. RFC 3261 §25.1 allows
+  // `;`, `?`, `=`, `+`, `&`, `$`, `,`, `/` in `user` (user-unreserved), so
+  // we cannot stop the scan at `;`/`?` — e.g. `sip:+331…;titi=tat@foo.bar`
+  // is well-formed and the `@` sits past the user's `;`. `@` is reserved
+  // outside userinfo (it must be %40-escaped elsewhere), so scanning the
+  // whole URI is safe. `>` remains a stop only as a defensive guard in
+  // case a name-addr leaked through; valid extracted URIs won't contain it.
   let atIdx = -1
   let secondAt = false
   for (let j = i; j < uri.length; j++) {
@@ -788,7 +792,7 @@ export function validateStrictSipUri(uri: string): string | undefined {
     if (c === 0x40) { // @
       if (atIdx === -1) atIdx = j
       else { secondAt = true; break }
-    } else if (c === 0x3b || c === 0x3f || c === 0x3e) {
+    } else if (c === 0x3e) {
       break
     }
   }
