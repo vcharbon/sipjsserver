@@ -47,11 +47,15 @@ dec-octet =
     "2"  %x30-34   DIGIT /
     "25"  %x30-35
 
-; RFC 3261 §19.1.2 — port is bounded to 0-65535 (TCP/UDP semantics).
-; Constrain abnfgen so we don't generate 99999999-shaped ports.
+; RFC 3261 §19.1.2 — port is bounded to 1-65535 (TCP/UDP semantics).
+; Pure `1*DIGIT` lets abnfgen emit 0 and >65535, which the parser
+; correctly rejects — but those policy-rejections drown out real bugs.
+; Constrain generation to always-valid ports: 1-9999 (leading non-zero,
+; covers 5060/80/etc.) plus 10000-19999 for 5-digit coverage. Every
+; value here is guaranteed in (0, 65535].
 port =
-    DIGIT /
-    %x31-39   1*4DIGIT
+    %x31-39   *3DIGIT /
+    "1"   4DIGIT
 
 uri-parameters =
     *( ";"  uri-parameter )

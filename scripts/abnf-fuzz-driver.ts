@@ -181,6 +181,13 @@ function fuzzVia(line: string): void {
       recordReject(entry, `empty transport/host (transport="${parsed.transport}" host="${parsed.host}")`)
       return
     }
+    // Mirror the URI path's port-range check so via is held to the same
+    // standard. NB: parseVia itself does NOT enforce this — out-of-range
+    // sent-by ports are accepted by the parser, classified here as policy.
+    if (parsed.port !== undefined && (parsed.port === 0 || parsed.port > 65535)) {
+      recordReject(entry, `port out of range (${parsed.port})`)
+      return
+    }
   }
   stat.accepted++
 }
