@@ -299,6 +299,39 @@ The stable identifier (`RFC<num>-MUST-<NNN>`, e.g. `RFC3261-MUST-003`) for one e
 **RFC exception ledger**:
 The end-of-`test:fake` rendering of every suppression that fired during the run. Sourced from `tests/harness/rules/rfc/exceptions.ts` (the central declaration file) and the per-rule `severityOverride` field. Each entry carries a mandatory `justification` string. The ledger surfaces what the test suite is *not* enforcing today, alongside what it is.
 
+### Leg model
+
+**Leg kind**:
+An explicit role tag carried on every non-A leg, replacing the positional `legId` convention (`b-1`, `b-2`) and the transfer-specific side-band as the answer to "what is this leg." Values: `destination` (a B-leg toward the called party — the only kind in the failover/selection set), `media` (a [[media leg]]), `transfer-target` (the C-leg of a REFER). The A-leg is not tagged; it is structurally distinguished as the call-identity anchor (`callRef = {ordinal}|{aLegCallId}|{aLegFromTag}`).
+
+**Media leg**:
+A leg the B2BUA originates as **UAC** to a media server (MRF) to broker SDP and exchange control bodies (e.g. MSCML over INFO). `kind: "media"`. Never the [[active peer]]; never in the destination-selection/failover set; reaped by normal call cleanup like any leg. On the wire the media server is "just another SIP peer"; "media leg" names its *role* so prose doesn't collide with A-leg/B-leg or the singular peer counterparty.
+_Avoid_: "MRF leg" when the role is meant — reserve "MRF" for the server itself ("MRF leg" is an acceptable spoken synonym only).
+
+**Adopted leg / Unadopted leg**:
+*Ownership* of a leg's in-dialog signaling — **not** the same as being connected/peered. An *adopted* leg is one the framework's generic relay/keepalive rules are responsible for; an *unadopted* leg is driven solely by the owning extension rule (via explicit `relay-to-leg` / `send-request-to-leg`), and generic relay must **not** reach it (the relay-to-peer fallback toward `"a"` would mis-route it). Adoption tracks `kind` + lifecycle, not [[active peer]] membership:
+- A `destination` B-leg is adopted **from creation** — generic relay carries its early 18x/200 to A *before* any merge, so adopted ≠ peered.
+- A `media` leg is **never** adopted (the extension brokers its SDP, then tears it down).
+- A `transfer-target` C-leg **flips** unadopted→adopted at realignment.
+- The A-leg is always adopted.
+Modelled as an explicit per-leg flag defaulted from `kind`, flipped to `true` by the owning rule when it relinquishes a leg. Being an [[active peer]] is the steady-state of two *already-adopted* legs bridged together — a consequence, not the definition. Generalizes the transfer-only `transferPhase: "c-realign"` gate into a use-case-agnostic predicate.
+
+**Active peer**:
+The single 1↔1 bridge between two legs at any instant (`activePeer = {legA, legB}` or null). Re-pointable via `merge`/`split` across the dynamic leg collection, but **never a set** — the B2BUA bridges one pair at a time; media mixing/conferencing is the media server's job. The singleton is load-bearing for tag mapping, BYE pairing, and the replication apply gate.
+_Avoid_: "list of peers" to mean simultaneous multi-bridging — it means the dynamic leg *collection*, bridged pairwise.
+
+### Extensibility
+
+**Integrator**:
+A party that builds new call-handling behaviour on top of the B2BUA without forking it — by authoring an [[extension]] against the public [[rule SDK]] and deploying their own **worker** binary (their worker is one of ours with their extension compiled in; there is no separate runtime entity). The B2BUA's job is to stay stable underneath them; the integrator owns their callflow logic and supplies their own data, but **the B2BUA owns and replicates all per-call state** (HA constraint).
+_Avoid_: "external user" (collides with the SIP caller / URI user-part), "third party", "tenant" (the integrator runs their own deployment, not a slice of ours), "peer" (a SIP neighbour / the [[active peer]]).
+
+**Extension**:
+The integrator's deliverable: one or more **policy modules** (`definePolicyModule`) plus the `/call/new` descriptor schema they consume, compiled into a worker. Defines one callflow (PRBT, pre-call announcement, MRF-during-transfer, …) entirely through the public primitive set — with **no change to the B2BUA's HTTP API or core** per callflow.
+
+**Rule SDK**:
+The curated, independently-versioned public surface an [[extension]] builds against: `defineRule`, a narrowed `RuleContext`, and the **public subset** of the action union (leg create/destroy, send-request-to-leg with an opaque body, respond, relay/transform, timers, ruleState, terminate). The internal action set (`send-raw`, transfer / early-promote / PRACK plumbing, …) is not exported. The boundary *is* the stability contract; "easier to open than to close" — start narrow, widen as the dogfood demands.
+
 ## Flagged ambiguities
 
 - **"mirror"** was overloaded: it was used both as a description of the act of dual-writing across two sidecars AND as the name for the `entryGen=0` sentinel bucket. Resolved: keep "mirror" for the wire-level `entryGen=0` sentinel only; use "replication channel" / "dual-write" for the higher-level concept.

@@ -1811,7 +1811,9 @@ function executeTerminateCall(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  // BYE or CANCEL all legs that are still alive and peered
+  // BYE every still-alive confirmed leg; CANCEL every still-alive trying/early
+  // b-leg. Teardown is by leg state, independent of peering — an unpeered leg
+  // (e.g. an unadopted media leg) is still reaped here.
   for (const leg of [state.call.aLeg, ...state.call.bLegs]) {
     if (leg.state === "terminated") continue
 
