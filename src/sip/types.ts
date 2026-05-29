@@ -54,6 +54,21 @@ export interface ParsedContactField {
   readonly params: Record<string, string | true>
 }
 
+/**
+ * Every Contact value on a message, parsed and validated up front.
+ *
+ * `Contact: *` (RFC 3261 §10.2.2 — the REGISTER de-registration wildcard)
+ * is a distinct variant: it is a bare token, not a URI, and must stand
+ * alone. Otherwise `contacts` holds one entry per contact across all
+ * Contact header lines and comma-separated values (the two encodings are
+ * equivalent per §7.3.1), in wire order. Use this where several Contacts
+ * are legal — 3xx / 485 redirects, REGISTER and its 2xx; the single-valued
+ * `contact` accessor returns `contacts[0]` for the dialog hot path.
+ */
+export type ContactSet =
+  | { readonly wildcard: true }
+  | { readonly wildcard: false; readonly contacts: ReadonlyArray<ParsedContactField> }
+
 export interface ParsedCSeqField {
   readonly seq: number
   readonly method: string
@@ -94,8 +109,12 @@ export interface SipHeaderTypes {
   // Mandatory multi-valued — `[0]` is the top Via (response-routing hop).
   "via": NonEmptyReadonlyArray<ParsedViaField>
 
-  // Optional single-valued.
+  // Optional single-valued — `contacts[0]`, for the dialog hot path.
   "contact": ParsedContactField | undefined
+
+  // All contacts, parsed + validated eagerly. Use where several are legal
+  // (3xx / 485 / REGISTER / 2xx-REGISTER); models the `*` wildcard.
+  "contacts": ContactSet
 
   // Lazy single-valued — parse can fail without invalidating the message.
   "geolocation-routing": Result.Result<boolean | undefined, SipParseError>

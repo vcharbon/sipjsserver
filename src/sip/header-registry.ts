@@ -34,6 +34,7 @@ import type {
   ParsedNameAddrField,
   ParsedViaField,
   ParsedContactField,
+  ContactSet,
   ParsedCSeqField,
 } from "./types.js"
 import {
@@ -74,7 +75,10 @@ export interface EagerHeaderSlots {
   readonly cseq: ParsedCSeqField
   /** Always at least one Via — parser rejects the message otherwise. */
   readonly vias: ReadonlyArray<ParsedViaField>
+  /** First contact (`contacts[0]`), kept for the single-Contact dialog path. */
   readonly contact: ParsedContactField | undefined
+  /** Every contact, parsed + validated eagerly; models `Contact: *`. */
+  readonly contacts: ContactSet
 }
 
 /** Names that the built-in fast-path serves directly from eager slots / lazy parsers. */
@@ -85,6 +89,7 @@ const BUILTIN_NAMES = new Set<string>([
   "cseq",
   "via",
   "contact",
+  "contacts",
   "p-asserted-identity",
   "p-preferred-identity",
   "diversion",
@@ -201,6 +206,7 @@ export function makeGetHeader(
         // Cast: extractCommonFields guarantees at least one Via or rejects.
         case "via": return eager.vias as unknown as readonly [ParsedViaField, ...ParsedViaField[]]
         case "contact": return eager.contact
+        case "contacts": return eager.contacts
         case "p-asserted-identity": return memo(canonical, () => parsePAssertedIdentity(headers))
         case "p-preferred-identity": return memo(canonical, () => parsePPreferredIdentity(headers))
         case "diversion": return memo(canonical, () => parseDiversion(headers))

@@ -6,7 +6,7 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { ReplicationTraceEntry, ScenarioResult } from "./types.js"
-import { renderSequenceDiagram, serializeMessage } from "./svg-sequence-diagram.js"
+import { renderSequenceDiagram, wireText } from "./svg-sequence-diagram.js"
 import { ruleRegistry } from "../../b2bua/B2buaCore.js"
 import { snapshot as ruleSnapshot } from "./rule-usage-collector.js"
 import { mpUnpack } from "../../call/CallCodec.js"
@@ -98,10 +98,13 @@ export function writeScenarioReport(
   // Build message data for the click handler. Key is the entry's index
   // in `sortedTrace` — `stepIndex` would collide for internal hops
   // (proxy↔worker), which all share `stepIndex = -1`.
+  // Detail panel shows the bytes as they crossed the wire (msg.raw), not a
+  // re-serialization of the parsed structure — so duplicate headers (e.g.
+  // several Contact lines) and exact framing survive into the report.
   const messageData: Array<{ traceIndex: number; raw: string }> = sortedTrace.map(
     (entry, i) => ({
       traceIndex: i,
-      raw: serializeMessage(entry.message),
+      raw: wireText(entry.message),
     })
   )
 

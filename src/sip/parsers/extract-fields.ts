@@ -15,6 +15,8 @@ import type {
   SipRequest,
   SipResponse,
   ParsedRequestUriField,
+  ParsedContactField,
+  ContactSet,
 } from "../types.js"
 import { SipParseError } from "./errors.js"
 import { makeGetHeader, type EagerHeaderSlots } from "../header-registry.js"
@@ -290,6 +292,30 @@ export function extractCommonFields(
   // best-effort. Empty `uri` / `host` slots are surfaced as-is so the
   // parser stays tolerant of partially-malformed but routable peers.
 
+  // RFC 3261 §8.1.1 / §20: From, To, Call-ID and CSeq appear exactly once
+  // in every request and response — Via is the sole mandatory header that
+  // may repeat. Reject duplicates (compact forms are already expanded to
+  // long names upstream, so `From:`+`f:` is caught too) so a smuggled
+  // second From/To cannot open a parsing differential with a downstream hop.
+  {
+    let nFrom = 0
+    let nTo = 0
+    let nCallId = 0
+    let nCseq = 0
+    for (const hdr of headers) {
+      switch (hdr.name.toLowerCase()) {
+        case "from": nFrom++; break
+        case "to": nTo++; break
+        case "call-id": nCallId++; break
+        case "cseq": nCseq++; break
+      }
+    }
+    if (nFrom > 1) return Result.fail(new SipParseError({ reason: "Multiple From headers (RFC 3261 §8.1.1 — exactly one required)" }))
+    if (nTo > 1) return Result.fail(new SipParseError({ reason: "Multiple To headers (RFC 3261 §8.1.1 — exactly one required)" }))
+    if (nCallId > 1) return Result.fail(new SipParseError({ reason: "Multiple Call-ID headers (RFC 3261 §8.1.1 — exactly one required)" }))
+    if (nCseq > 1) return Result.fail(new SipParseError({ reason: "Multiple CSeq headers (RFC 3261 §8.1.1 — exactly one required)" }))
+  }
+
   const fromVal = getHeaderValue(headers, "From")
   if (fromVal === undefined) {
     return Result.fail(new SipParseError({ reason: "Missing mandatory From header" }))
@@ -462,21 +488,47 @@ export function extractCommonFields(
     params: v.params,
   }))
 
-  const contactVal = getHeaderValue(headers, "Contact")
-  const contactParsed = contactVal ? parseContact(contactVal) : undefined
-  if (mode === "wire" && contactParsed !== undefined) {
-    // `Contact: *` is the RFC 3261 §10.2.2 REGISTER wildcard — legitimate
-    // and bypasses URI strict-check. Any other value runs the strict pass.
-    const trimmedContact = contactVal!.trim()
-    if (trimmedContact !== "*") {
-      const contactReason = validateStrictSipUri(contactParsed.uri)
+  // Contact — parse and validate every value up front. RFC 3261 §7.3.1: a
+  // comma-list and repeated Contact lines are equivalent, so fold both into
+  // one ordered list. `Contact: *` (§10.2.2 REGISTER wildcard) is a bare
+  // token, not a URI: it skips the strict-URI gate and MUST stand alone.
+  let contactWildcard = false
+  const contactEntries: string[] = []
+  for (const v of getHeaderValues(headers, "Contact")) {
+    for (const seg of splitTopLevelCommas(v)) {
+      const trimmed = seg.trim()
+      if (trimmed.length === 0) continue
+      if (trimmed === "*") {
+        contactWildcard = true
+        continue
+      }
+      contactEntries.push(seg)
+    }
+  }
+  if (contactWildcard && contactEntries.length > 0) {
+    return Result.fail(
+      new SipParseError({ reason: "Contact: * wildcard must be the only value (RFC 3261 §10.2.2)" }),
+    )
+  }
+  const contactList: ParsedContactField[] = []
+  for (const entry of contactEntries) {
+    const parsed = parseContact(entry)
+    if (mode === "wire") {
+      const contactReason = validateStrictSipUri(parsed.uri)
       if (contactReason !== undefined) {
         return Result.fail(
-          new SipParseError({ reason: `Strict Contact URI: ${contactReason} ("${contactParsed.uri}")` }),
+          new SipParseError({ reason: `Strict Contact URI: ${contactReason} ("${parsed.uri}")` }),
         )
       }
     }
+    contactList.push(parsed)
   }
+  const contacts: ContactSet = contactWildcard
+    ? { wildcard: true }
+    : { wildcard: false, contacts: contactList }
+  const contactParsed: ParsedContactField | undefined = contactWildcard
+    ? undefined
+    : contactList[0]
 
   return Result.succeed({
     from: {
@@ -495,6 +547,7 @@ export function extractCommonFields(
     cseq: cseqParsed,
     vias,
     contact: contactParsed,
+    contacts,
   })
 }
 
@@ -516,6 +569,26 @@ export function extractRequestFields(
 ): Result.Result<RequestEager, SipParseError> {
   const common = extractCommonFields(headers, limits, mode)
   if (Result.isFailure(common)) return Result.fail(common.failure)
+  // Contact cardinality. A second Contact (or the `*` wildcard) is only
+  // ambiguous when the Contact defines a dialog's remote target — i.e. on a
+  // dialog-creating request — so only those are constrained. REGISTER lists
+  // bindings / uses `*` (§10.2); other methods (OPTIONS, unknown, …) carry
+  // Contact harmlessly and stay permissive (RFC 4475 §3.1.1.5 carries an
+  // unknown method with two Contacts that must still parse). Presence
+  // (mandatory on a dialog-creating request, §8.1.1.8) is a UA-level
+  // semantic, enforced at the handler with a 400 — not dropped here.
+  if (mode === "wire" && method !== undefined) {
+    const m = method.toUpperCase()
+    if (m === "INVITE" || m === "SUBSCRIBE" || m === "REFER") {
+      const cs = common.success.contacts
+      if (cs.wildcard) {
+        return Result.fail(new SipParseError({ reason: `Contact: * wildcard is not valid in ${m} (RFC 3261 §10.2.2)` }))
+      }
+      if (cs.contacts.length > 1) {
+        return Result.fail(new SipParseError({ reason: `${m} must not contain multiple Contact headers (RFC 3261 §8.1.1.8 — found ${cs.contacts.length})` }))
+      }
+    }
+  }
   if (method !== undefined) {
     const cseqVal = getHeaderValue(headers, "CSeq")
     if (cseqVal !== undefined) {
@@ -622,6 +695,24 @@ export function extractResponseFields(
         reason: `Non-100 response (status=${status}) missing mandatory To-tag`,
       }),
     )
+  }
+  // Contact cardinality — mirror of the request side. Only a dialog-creating
+  // method's NON-redirect response binds a remote target, so only those are
+  // constrained to a single Contact. Redirects (3xx / 485) list alternatives
+  // (§8.1.3.4); REGISTER responses list bindings (§10.3); other responses
+  // stay permissive. CSeq method identifies the request class.
+  if (mode === "wire") {
+    const cseqMethod = common.success.cseq.method.toUpperCase()
+    const isRedirect = status === 485 || (status >= 300 && status < 400)
+    if (!isRedirect && (cseqMethod === "INVITE" || cseqMethod === "SUBSCRIBE" || cseqMethod === "REFER")) {
+      const cs = common.success.contacts
+      if (cs.wildcard) {
+        return Result.fail(new SipParseError({ reason: `Contact: * wildcard is not valid in a ${status} response to ${cseqMethod} (RFC 3261 §10.2.2)` }))
+      }
+      if (cs.contacts.length > 1) {
+        return Result.fail(new SipParseError({ reason: `${status} response to ${cseqMethod} must not contain multiple Contact headers (RFC 3261 §12.1.1 — found ${cs.contacts.length})` }))
+      }
+    }
   }
   return common
 }

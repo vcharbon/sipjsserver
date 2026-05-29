@@ -14,7 +14,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { Lane, ScenarioResult, TraceEntry } from "./types.js"
 import { laneKey } from "./types.js"
-import { serializeMessage } from "./svg-sequence-diagram.js"
+import { wireText } from "./svg-sequence-diagram.js"
 
 // ---------------------------------------------------------------------------
 // Lane lookup helpers
@@ -125,7 +125,7 @@ function renderTraceEntries(
     const prefix = `── [${tsBlock}] ${fromLabel} → ${toLabel} ── ${label}${statusTag} `
     lines.push(prefix.padEnd(SEPARATOR_WIDTH, "─"))
     lines.push("")
-    lines.push(serializeMessage(entry.message))
+    lines.push(wireText(entry.message))
     lines.push("")
   }
   return lines.join("\n")

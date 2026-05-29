@@ -236,7 +236,12 @@ function replicationSummary(frame: unknown): string {
   return tag || "?"
 }
 
-/** Serialize a SipMessage to a human-readable string for the detail panel. */
+/**
+ * Re-serialize a SipMessage from its parsed structure. Lossy by design:
+ * header values are trimmed, duplicate single-value slots collapse, and
+ * folding / casing / whitespace are normalized away. Used only as the
+ * fallback in `wireText` when a trace entry has no captured wire bytes.
+ */
 export function serializeMessage(msg: SipMessage): string {
   const lines: string[] = []
   if (msg.type === "request") {
@@ -252,6 +257,39 @@ export function serializeMessage(msg: SipMessage): string {
     lines.push(new TextDecoder().decode(msg.body))
   }
   return lines.join("\r\n")
+}
+
+/**
+ * Render a recorded message exactly as it crossed the wire — a straight
+ * per-byte transform of the original packet bytes, NOT a re-serialization
+ * of the parsed structure. This is what the detail panel must show:
+ * duplicate headers (several Contact lines), header order, folding,
+ * casing, and exact whitespace are all preserved, because they are read
+ * from `msg.raw` rather than rebuilt from the parsed slots.
+ *
+ * Printable ASCII plus CR / LF / HTAB pass through verbatim so the
+ * message keeps its real line structure; every other byte (control bytes,
+ * high-bit / non-ASCII) renders as `\xNN` so it stays visible and
+ * unambiguous instead of being decoded into a glyph or a replacement
+ * character.
+ *
+ * Falls back to `serializeMessage` only when no wire bytes were captured —
+ * synthetic trace placeholders (SDP-ANSWER / PRACK markers) carry an empty
+ * `raw` and have no on-the-wire form to display.
+ */
+export function wireText(msg: SipMessage): string {
+  const raw = msg.raw
+  if (raw.length === 0) return serializeMessage(msg)
+  let out = ""
+  for (let i = 0; i < raw.length; i++) {
+    const b = raw[i]!
+    if (b === 0x09 || b === 0x0a || b === 0x0d || (b >= 0x20 && b <= 0x7e)) {
+      out += String.fromCharCode(b)
+    } else {
+      out += "\\x" + b.toString(16).padStart(2, "0").toUpperCase()
+    }
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
