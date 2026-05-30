@@ -272,29 +272,24 @@ promotePem.rule({
 // against `promotedSdp`. On mismatch, emit a B2BUA-originated re-INVITE on
 // the a-leg.
 //
-// Specificity adds `legState:[trying,early]` so the registry validator does
-// not flag a same-specificity overlap with relayFirst18xTo180's
-// `force-tag-consistency` rule (mutually exclusive at the policy-guard
-// level).
+// SERVICE_LAYER, so this wins over core confirm-dialog by layer (and always
+// consumes) — we re-emit the pieces we still want and intentionally skip
+// relay-to-peer. No override needed.
 
 promotePem.rule({
   id: "confirm-after-promote",
   name: "Confirm b after promote (no relay; SDP diff; maybe re-INVITE A)",
 
-  // Override confirm-dialog so it doesn't run alongside us — we re-emit the
-  // pieces we still want and intentionally skip relay-to-peer.
-  overrides: "confirm-dialog",
   match: {
     kind: "response",
     cseqMethod: "INVITE",
     statusClass: "2xx",
     legState: ["trying", "early"],
-    // Excluding `cancelling` keeps cancel-200-crossing as the strict
-    // winner when alice's BYE arrived before b's 200 OK (the b-leg
-    // disposition flips to `cancelling` then). Excluding `rejected`
-    // is equally important — by the time we see a 2xx the leg cannot
-    // be `rejected`, but the column narrows specificity above the
-    // default confirm-dialog and ahead of cancel-200-crossing.
+    // Match-narrowing for correctness (not ranking): excluding `cancelling`
+    // means this rule does NOT match when alice's BYE crossed b's 200 OK, so
+    // core cancel-200-crossing handles that race instead. `legState:[trying,
+    // early]` excludes a confirmed-leg 2xx (the resync re-INVITE response,
+    // owned by promote-resync-reinvite-response).
     legDisposition: ["pending", "bridged"],
     direction: "from-b",
   },
@@ -452,11 +447,8 @@ promotePem.rule({
   id: "promote-reject-a-reinvite-update",
   name: "Reject A re-INVITE/UPDATE during promote window with 491",
 
-  // Override the default UPDATE/INVITE relay rules — both have lower
-  // specificity (no filter, no direction) so this wins by ranking too,
-  // but the explicit override keeps things resilient against future
-  // additions.
-  overrides: "relay-update",
+  // SERVICE_LAYER beats core relay-update/relay-reinvite by layer (and always
+  // consumes) while the promotion window is open.
   match: {
     kind: "request",
     method: ["INVITE", "UPDATE"],
@@ -478,14 +470,13 @@ promotePem.rule({
   id: "promote-reject-a-other-indialog",
   name: "Reject A INFO/MESSAGE/NOTIFY/REFER during promote window with 488",
 
-  overrides: "relay-info",
+  // SERVICE_LAYER beats core relay-info/relay-message by layer.
   match: {
     kind: "request",
     // REFER from-a is already rejected by the default
-    // `transfer-reject-a-leg-refer` (501); leaving it out avoids a
-    // same-specificity column overlap with that rule. NOTIFY has no
-    // default relay rule and falls through to the framework's noop
-    // fallback (501), which is also a refusal.
+    // `transfer-reject-a-leg-refer` (501); leaving it out keeps these two
+    // rules non-overlapping. NOTIFY has no default relay rule and falls
+    // through to the framework's noop fallback (501), which is also a refusal.
     method: ["INFO", "MESSAGE"],
     direction: "from-a",
   },
@@ -511,7 +502,7 @@ promotePem.rule({
   id: "promote-absorb-a-ack",
   name: "Absorb A ACK during promote window",
 
-  overrides: "relay-ack",
+  // SERVICE_LAYER beats core relay-ack by layer while unbridged.
   match: {
     kind: "request",
     method: "ACK",
@@ -534,27 +525,23 @@ promotePem.rule({
 
 // ── Rule 8: B fails post-promote — BYE A with diagnostic Reason ──────────
 //
-// Override route-failure for the promoted case: the default rule treats
-// 4xx/5xx/6xx from b as a route failure that may failover and ultimately
-// 4xx alice. But alice is already confirmed — we cannot retract our
-// 200 OK. BYE alice with a Reason carrying the original status.
+// For the promoted case, core route-failure (and handle-481) would treat
+// 4xx/5xx/6xx from b as a route failure that may failover and ultimately 4xx
+// alice — but alice is already confirmed and we cannot retract our 200 OK.
+// SERVICE_LAYER + the `promoted` filter make this rule win over those core
+// rules by layer; it BYEs alice with a Reason carrying the original status.
 
 promotePem.rule({
   id: "promote-b-fails-post-promote",
   name: "B fails post-promote → BYE A with Reason",
 
-  overrides: "route-failure",
   match: {
     kind: "response",
     cseqMethod: "INVITE",
     statusClass: ["3xx", "4xx", "5xx", "6xx"],
     direction: "from-b",
-    // `callState: "active"` mirrors the default `handle-481` rule's column.
-    // With matching specificity on this dimension the validator no longer
-    // flags an equal-specificity overlap, and our higher overall score
-    // (we add `direction` + `filter`) wins for the b-failure-post-promote
-    // case while leaving handle-481 to claim 481s on other methods /
-    // outside the promotion window.
+    // Correctness gate: only while the call is active — don't re-trigger
+    // teardown on a late b-failure once the call is already terminating.
     callState: "active",
   },
   filter: (_ctx, ext) => ext.promoted,

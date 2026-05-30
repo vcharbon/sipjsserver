@@ -81,9 +81,9 @@ const suppress18x = defineRule({
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
 
-  // Identical match signature to relay-provisional; overrides claims its slot
-  // whenever this policy module is active on the call.
-  overrides: "relay-provisional",
+  // Same match shape as core relay-provisional, but this rule is SERVICE_LAYER:
+  // it wins by layer whenever the policy is active, and it always consumes, so
+  // relay-provisional never runs alongside it — no override needed.
   match: {
     kind: "response",
     cseqMethod: "INVITE",
@@ -246,8 +246,8 @@ const absorbPrack200 = defineRule({
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
 
-  // PRACK 2xx from b-leg — cseqMethod: "PRACK" beats relay-non-invite-200's
-  // array by specificity, so this wins automatically when the policy is active.
+  // PRACK 2xx from b-leg. SERVICE_LAYER, so it wins over core
+  // relay-non-invite-200 by layer when the policy is active.
   match: {
     kind: "response",
     cseqMethod: "PRACK",
@@ -277,8 +277,8 @@ const absorbPrack200 = defineRule({
 // is replaced with bob's UPDATE offer so alice's eventual 200 OK reflects
 // bob's latest state.
 //
-// The default `relay-update` rule is overridden when this rule fires —
-// specificity wins (cseqMethod equivalent + direction-from-b + filter).
+// SERVICE_LAYER, so this wins over core `relay-update` by layer (and always
+// consumes) when the fake-prack strategy is active.
 
 const fakePrackHandleUpdateFromB = defineRule({
   id: "fake-prack-handle-update-from-b",
@@ -288,7 +288,6 @@ const fakePrackHandleUpdateFromB = defineRule({
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
 
-  overrides: "relay-update",
   match: {
     kind: "request",
     method: "UPDATE",
@@ -360,7 +359,6 @@ const fakePrackHandleUpdateFromA = defineRule({
   stateSchema: PolicyState,
   paramsSchema: Schema.Undefined,
 
-  overrides: "relay-update",
   match: {
     kind: "request",
     method: "UPDATE",
