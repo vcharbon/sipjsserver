@@ -1174,6 +1174,8 @@ export class SipRouter extends ServiceMap.Service<
             noAnswerTimeoutSec: undefined,
             localUri: extractNameAddrUri(aLegToForUri),
             remoteUri: extractNameAddrUri(aLegFromForUri),
+            kind: "a",
+            adopted: true,
           }
 
           const isEmergency = isEmergencyRequest(req)

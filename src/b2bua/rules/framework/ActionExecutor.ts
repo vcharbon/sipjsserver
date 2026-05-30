@@ -29,7 +29,7 @@ import {
   bumpLocalCSeq,
   randomInitialCSeq,
   deactivateRule,
-  findBLeg,
+  findLeg,
   getPeer,
   mergeLeg,
   relayCSeqDelta,
@@ -53,6 +53,7 @@ import {
   aLegInviteCSeqNum,
   setCallExt,
   setLegExt,
+  isAdopted,
 } from "../../../call/CallModel.js"
 import {
   extractContactUri,
@@ -314,12 +315,6 @@ function applyEgressRouting(
   return { msg: result.msg, target: result.target }
 }
 
-/** Resolve a leg by ID (a-leg or b-leg). */
-function findLeg(call: Call, legId: string): Leg | undefined {
-  if (legId === "a") return call.aLeg
-  return findBLeg(call, legId)
-}
-
 /**
  * Pick the From/To tags for an outbound in-dialog request on a given target.
  *
@@ -413,6 +408,9 @@ function executeAction(
   switch (action.type) {
     case "respond":
       executeRespond(action, ctx, state)
+      break
+    case "send-provisional-to-leg":
+      executeSendProvisionalToLeg(action, ctx, state)
       break
     case "relay-to-peer":
       executeRelayToPeer(action, ctx, state)
@@ -538,6 +536,78 @@ function executeRespond(
   })
 }
 
+// ── send-provisional-to-leg ────────────────────────────────────────────────
+//
+// Emit an unreliable 1xx onto a leg's existing INVITE server transaction
+// (RFC 3261 §13.2 / §17.2.1; RFC 3262 unreliable provisional). Targets the
+// stored INVITE rather than the source transaction — the SDP-brokering tool
+// for media callflows (the MRF answer relayed to A as an informational 183).
+function executeSendProvisionalToLeg(
+  action: Extract<RuleAction, { type: "send-provisional-to-leg" }>,
+  ctx: RuleContext,
+  state: ExecutionState,
+): void {
+  const { legId, status, reason, body, contentType } = action
+
+  const skip = (why: string): void => {
+    state.spanEvents.push({
+      name: "rule_action",
+      attributes: { "rule.action": "send-provisional-to-leg", "rule.outcome": why, "rule.leg": legId },
+    })
+  }
+
+  // RFC 3261: only provisional (1xx) responses ride the INVITE server
+  // transaction without ending it. Reject anything else.
+  if (status < 100 || status > 199) return skip("not_provisional")
+
+  const targetLeg = findLeg(state.call, legId)
+  if (targetLeg === undefined) return skip("unknown_leg")
+
+  // Only the A-leg carries a stored UAS INVITE the B2BUA can answer. (Other
+  // legs are UAC-side; no inbound INVITE transaction to respond to.)
+  if (legId !== "a") return skip("no_uas_invite")
+
+  const snapshot = state.call.aLegInvite
+  const invite = hydrateRequest({
+    method: "INVITE",
+    uri: snapshot.uri,
+    headers: snapshot.headers.map((h) => ({ name: h.name, value: h.value })),
+    body: snapshot.body,
+    raw: Buffer.from(snapshot.body),
+  })
+
+  // Reuse the B2BUA-owned early To-tag so A sees a consistent early dialog
+  // (the tag picked when the first 18x was relayed). When no a-leg dialog
+  // exists yet (this provisional precedes any 18x relay), mint a tag AND
+  // persist it onto the a-leg dialog via the canonical stamp path, so a later
+  // provisional or the real 18x relay reuse the SAME tag (RFC 3261 §12.1).
+  let toTag = b2buaTag(state.call, legId)
+  if (toTag === undefined) {
+    toTag = newTag()
+    executeStampDialogToTag({ type: "stamp-dialog-to-tag", legId, toTag }, state)
+  }
+  const { contact } = legStackIdentity(state.call, legId, ctx.config)
+  const ct = contentType ?? (body !== undefined ? "application/sdp" : undefined)
+
+  // `reliable: false` ⇒ no Require: 100rel / RSeq — generateResponse adds
+  // neither unless asked, so the provisional stays unreliable (sent once).
+  const response = generateResponse(invite, status, reason ?? "", {
+    toTag,
+    contact,
+    ...(body !== undefined ? { body } : {}),
+    ...(ct !== undefined ? { contentType: ct } : {}),
+  })
+
+  const dest = legTarget(targetLeg)
+  state.effects.outbound.push({
+    type: "send-sip",
+    message: response,
+    destination: dest,
+    label: `send-provisional ${status} → ${legId}`,
+    legId,
+  })
+}
+
 // ── relay-to-peer ──────────────────────────────────────────────────────────
 
 function executeRelayToPeer(
@@ -550,8 +620,10 @@ function executeRelayToPeer(
 
   let peerLegId = getPeer(state.call, ctx.sourceLeg.legId)
 
-  // Fallback: during early dialog (before merge), b-leg's implicit peer is "a".
-  if (peerLegId === undefined && ctx.sourceLeg.legId !== "a") {
+  // Fallback: during early dialog (before merge), an adopted b-leg's implicit
+  // peer is "a". ADR-0014: an UNADOPTED leg (a parked MRF/transfer leg) must
+  // never be mis-routed to A — its signaling is owned by its extension rule.
+  if (peerLegId === undefined && ctx.sourceLeg.legId !== "a" && isAdopted(ctx.sourceLeg)) {
     peerLegId = "a"
   }
 
@@ -1552,7 +1624,7 @@ function executeCreateLeg(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const { type, destination, fromInvite, noAnswerTimeoutSec, callbackContext, bodyUpdate, headerUpdates, ruri } = action
+  const { type, destination, fromInvite, noAnswerTimeoutSec, callbackContext, bodyUpdate, headerUpdates, ruri, kind, adopted } = action
   void type
 
   // Resolve the base INVITE to clone.
@@ -1623,6 +1695,8 @@ function executeCreateLeg(
     },
     config: ctx.config,
     nowMs: ctx.nowMs,
+    ...(kind !== undefined ? { legKind: kind } : {}),
+    ...(adopted !== undefined ? { adopted } : {}),
   })
 
   state.call = result.call

@@ -65,7 +65,7 @@ export function resolveRfcExceptions(
     }
     out.push({
       ruleName: e.ruleName,
-      peerBindKey: e.peerBindKey,
+      ...(e.peerBindKey !== undefined ? { peerBindKey: e.peerBindKey } : {}),
       justification: e.justification,
     })
   }

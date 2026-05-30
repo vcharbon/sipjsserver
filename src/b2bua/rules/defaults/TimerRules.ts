@@ -7,7 +7,7 @@
 
 import { Effect, Schema } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
-import { allPeeredLegs } from "../../../call/CallModel.js"
+import { allPeeredLegs, findLeg, isAdopted } from "../../../call/CallModel.js"
 
 // ── max-duration ───────────────────────────────────────────
 
@@ -79,6 +79,11 @@ export const keepaliveRule: RuleDefinition<undefined, undefined> = {
     )
     for (const legId of peered) {
       if (pendingKeepaliveLegs.has(legId)) continue
+      // ADR-0014: generic keepalive skips unadopted legs (parked MRF/transfer).
+      // A peered leg is adopted by construction; the guard is the shared
+      // predicate kept explicit so the contract holds if peering ever widens.
+      const leg = findLeg(ctx.call, legId)
+      if (leg !== undefined && !isAdopted(leg)) continue
       actions.push({ type: "send-request-to-leg", legId, method: "OPTIONS" })
       actions.push({
         type: "schedule-timer",

@@ -2,9 +2,14 @@
 
 ## Status
 
-Proposed. Refines [ADR-0015](0015-integrator-extensibility-contract.md)
-(storage mechanism) and [ADR-0014](0014-leg-kind-and-singleton-active-peer.md);
-relates to [ADR-0011](0011-codec-and-opaque-apply.md).
+Implemented. `defineService` + typed `Call.ext` / `Leg.ext`, ext-presence
+activation (`applyRoute` writes the decision response's `serviceExt`), and the
+single precise `isApplicable` guard are live; PEM + REFER + `relayFirst18xTo180`
+run on the template. The service-authoring surface is exported through the
+`@vcharbon/sipjs/rules-sdk` entrypoint (see ADR-0015). Refines
+[ADR-0015](0015-integrator-extensibility-contract.md) (storage mechanism) and
+[ADR-0014](0014-leg-kind-and-singleton-active-peer.md); relates to
+[ADR-0011](0011-codec-and-opaque-apply.md).
 
 ## Context
 

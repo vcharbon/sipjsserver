@@ -2,7 +2,14 @@
 
 ## Status
 
-Proposed.
+Implemented. `Leg.kind` (`a` / `destination` / `media` / `transfer-target`) and
+`Leg.adopted` are on the `Leg` schema (`src/call/CallModel.ts`), carried through
+both codecs (protobuf fields 15/16; msgpack records), and default-derived via
+`legKind(leg)` / `isAdopted(leg)`. The unadopted-leg gate is live in
+`relay-to-peer` (the implicit-"a" fallback), the keepalive rule, and the generic
+route-failure / no-answer-failover rules. `create-leg` accepts `kind`/`adopted`
+so an integrator parks an MRF leg; `send-provisional-to-leg` brokers its SDP onto
+A's INVITE as an unreliable 183.
 
 ## Context
 

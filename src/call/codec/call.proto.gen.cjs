@@ -2055,6 +2055,8 @@ $root.sipjsserver = (function() {
              * @property {string|null} [inviteRequestUri] Leg inviteRequestUri
              * @property {string|null} [pendingInviteTxnJson] Leg pendingInviteTxnJson
              * @property {string|null} [extJson] Leg extJson
+             * @property {string|null} [kind] Leg kind
+             * @property {boolean|null} [adopted] Leg adopted
              */
 
             /**
@@ -2185,6 +2187,22 @@ $root.sipjsserver = (function() {
              */
             Leg.prototype.extJson = null;
 
+            /**
+             * Leg kind.
+             * @member {string|null|undefined} kind
+             * @memberof sipjsserver.call.Leg
+             * @instance
+             */
+            Leg.prototype.kind = null;
+
+            /**
+             * Leg adopted.
+             * @member {boolean|null|undefined} adopted
+             * @memberof sipjsserver.call.Leg
+             * @instance
+             */
+            Leg.prototype.adopted = null;
+
             // OneOf field names bound to virtual getters and setters
             var $oneOfFields;
 
@@ -2266,6 +2284,28 @@ $root.sipjsserver = (function() {
             });
 
             /**
+             * Leg _kind.
+             * @member {"kind"|undefined} _kind
+             * @memberof sipjsserver.call.Leg
+             * @instance
+             */
+            Object.defineProperty(Leg.prototype, "_kind", {
+                get: $util.oneOfGetter($oneOfFields = ["kind"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            /**
+             * Leg _adopted.
+             * @member {"adopted"|undefined} _adopted
+             * @memberof sipjsserver.call.Leg
+             * @instance
+             */
+            Object.defineProperty(Leg.prototype, "_adopted", {
+                get: $util.oneOfGetter($oneOfFields = ["adopted"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            /**
              * Creates a new Leg instance using the specified properties.
              * @function create
              * @memberof sipjsserver.call.Leg
@@ -2322,6 +2362,10 @@ $root.sipjsserver = (function() {
                     writer.uint32(/* id 13, wireType 2 =*/106).string(message.pendingInviteTxnJson);
                 if (message.extJson != null && Object.hasOwnProperty.call(message, "extJson"))
                     writer.uint32(/* id 14, wireType 2 =*/114).string(message.extJson);
+                if (message.kind != null && Object.hasOwnProperty.call(message, "kind"))
+                    writer.uint32(/* id 15, wireType 2 =*/122).string(message.kind);
+                if (message.adopted != null && Object.hasOwnProperty.call(message, "adopted"))
+                    writer.uint32(/* id 16, wireType 0 =*/128).bool(message.adopted);
                 return writer;
             };
 
@@ -2418,6 +2462,14 @@ $root.sipjsserver = (function() {
                         }
                     case 14: {
                             message.extJson = reader.string();
+                            break;
+                        }
+                    case 15: {
+                            message.kind = reader.string();
+                            break;
+                        }
+                    case 16: {
+                            message.adopted = reader.bool();
                             break;
                         }
                     default:
@@ -2524,6 +2576,16 @@ $root.sipjsserver = (function() {
                     if (!$util.isString(message.extJson))
                         return "extJson: string expected";
                 }
+                if (message.kind != null && message.hasOwnProperty("kind")) {
+                    properties._kind = 1;
+                    if (!$util.isString(message.kind))
+                        return "kind: string expected";
+                }
+                if (message.adopted != null && message.hasOwnProperty("adopted")) {
+                    properties._adopted = 1;
+                    if (typeof message.adopted !== "boolean")
+                        return "adopted: boolean expected";
+                }
                 return null;
             };
 
@@ -2582,6 +2644,10 @@ $root.sipjsserver = (function() {
                     message.pendingInviteTxnJson = String(object.pendingInviteTxnJson);
                 if (object.extJson != null)
                     message.extJson = String(object.extJson);
+                if (object.kind != null)
+                    message.kind = String(object.kind);
+                if (object.adopted != null)
+                    message.adopted = Boolean(object.adopted);
                 return message;
             };
 
@@ -2663,6 +2729,16 @@ $root.sipjsserver = (function() {
                     object.extJson = message.extJson;
                     if (options.oneofs)
                         object._extJson = "extJson";
+                }
+                if (message.kind != null && message.hasOwnProperty("kind")) {
+                    object.kind = message.kind;
+                    if (options.oneofs)
+                        object._kind = "kind";
+                }
+                if (message.adopted != null && message.hasOwnProperty("adopted")) {
+                    object.adopted = message.adopted;
+                    if (options.oneofs)
+                        object._adopted = "adopted";
                 }
                 return object;
             };

@@ -160,8 +160,8 @@ export const parseSdpBody = (body: Uint8Array): SdpDoc | null => {
       transport: m.transport,
       formats: m.formats,
       attributes: m.attributes,
-      cLine: m.cLine,
-      ptime: m.ptime,
+      ...(m.cLine !== undefined ? { cLine: m.cLine } : {}),
+      ...(m.ptime !== undefined ? { ptime: m.ptime } : {}),
     })),
     raw: text,
   }

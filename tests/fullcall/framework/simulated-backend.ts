@@ -12,7 +12,7 @@
  * real UDP stack would expose them.
  */
 
-import { Effect, Option, type Scope } from "effect"
+import { Effect, Layer, Option, type Scope } from "effect"
 import type {
   AgentInfo,
   NetworkTag,
@@ -32,10 +32,16 @@ import { TimerService } from "../../../src/call/TimerService.js"
 import { SimulatedK8sCluster } from "../../../src/test-harness/internal/SimulatedK8sCluster.js"
 import { buildHandlers, ruleRegistry } from "../../../src/b2bua/B2buaCore.js"
 import {
+  createRuleRegistry,
   disableRule,
   transformRegistry,
   type RuleRegistry,
 } from "../../../src/b2bua/rules/framework/RuleRegistry.js"
+import type { PolicyModule } from "../../../src/b2bua/rules/framework/PolicyModule.js"
+import { defaultRules } from "../../../src/b2bua/rules/defaults/index.js"
+import { relayFirst18xTo180 } from "../../../src/b2bua/rules/custom/relayFirst18xTo180.js"
+import { promote18xPemTo200 } from "../../../src/b2bua/rules/custom/promote18xPemTo200.js"
+import { referTransfer } from "../../../src/b2bua/rules/custom/referTransfer.js"
 import { recordFiring } from "../../../src/test-harness/framework/rule-usage-collector.js"
 import { DEFAULT_TRANSIT_DELAY_MS, fakeStackLayer } from "../../support/fakeStack.js"
 import {
@@ -78,8 +84,20 @@ export type Sut =
 // Test rule registry: disable-on-env + handle-firing tracker
 // ---------------------------------------------------------------------------
 
-function buildTestHandlers() {
-  let registry: RuleRegistry = ruleRegistry
+function buildTestHandlers(policyModules?: ReadonlyArray<PolicyModule>) {
+  // A consumer passing `policyModules` gets a registry built the same way
+  // production does (core defaults + the two shipped customs + REFER) with
+  // their modules layered on top — proving an integrator's policy at the
+  // wire level. Otherwise reuse the canonical production registry.
+  let registry: RuleRegistry =
+    policyModules !== undefined && policyModules.length > 0
+      ? createRuleRegistry(defaultRules, [
+          relayFirst18xTo180,
+          promote18xPemTo200,
+          referTransfer,
+          ...policyModules,
+        ])
+      : ruleRegistry
   const killId = process.env.KILL_RULE
   if (killId !== undefined && killId.length > 0) {
     registry = disableRule(registry, killId)
@@ -190,6 +208,14 @@ export function createSimulatedTransport(opts?: {
    * `keepalive-via-proxy.ts` for the regression-guard scenario.
    */
   simulateMissingOutboundProxy?: boolean
+  /**
+   * Integrator policy modules / callflow services to layer on top of the
+   * production registry, so a consumer can run a wire-level e2e of their own
+   * policy (`createSimulatedRunner({ policyModules: [myPolicy] })`). When set,
+   * the registry is rebuilt from core defaults + the shipped customs + these
+   * modules; otherwise the production registry is reused.
+   */
+  policyModules?: ReadonlyArray<PolicyModule>
 }): TestTransport {
   const sipPort = opts?.sipPort ?? 15060
   const httpPort = opts?.httpPort ?? 13002
@@ -214,7 +240,7 @@ export function createSimulatedTransport(opts?: {
   const replicationTraceChannel: PartitionedRelayStorageChannel | undefined =
     replicationRecorderApi !== undefined
       ? replicationRecorderApi.forTag<
-          typeof PartitionedRelayStorage,
+          PartitionedRelayStorage,
           PartitionedRelayStorageEvent
         >(PartitionedRelayStorage)
       : undefined
@@ -223,7 +249,7 @@ export function createSimulatedTransport(opts?: {
     sut === "sipproxyHA"
       ? sipproxyHAFakeStackLayer({
           config,
-          handlers: buildTestHandlers(),
+          handlers: buildTestHandlers(opts?.policyModules),
           simulateMissingOutboundProxy,
           ...(replicationTraceChannel !== undefined
             ? { replicationTraceChannel }
@@ -232,7 +258,7 @@ export function createSimulatedTransport(opts?: {
       : sut === "k8sFailover"
         ? k8sFakeStackLayer({
             config,
-            handlers: buildTestHandlers(),
+            handlers: buildTestHandlers(opts?.policyModules),
             simulateMissingOutboundProxy,
             ...(replicationTraceChannel !== undefined
               ? { replicationTraceChannel }
@@ -316,7 +342,10 @@ export function createSimulatedTransport(opts?: {
 
   return {
     kind: "fake" as const,
-    stackLayer: StackLayer,
+    // `TestTransport.stackLayer` is the marker type `Layer<never>`; the fully
+    // built fake stack provides a service union, which the runner provides and
+    // casts away (harness.ts). Narrow to the field's marker type here.
+    stackLayer: StackLayer as Layer.Layer<never>,
     setup: (agentConfigs, _b2buaTarget) =>
       (Effect.gen(function* () {
         // All services come out of the single FakeStackLayer, so the
@@ -382,7 +411,7 @@ export function createSimulatedTransport(opts?: {
           mockState.callStateRef = callState
           mockState.timerServiceRef = timerService
 
-          const testHandlers = buildTestHandlers()
+          const testHandlers = buildTestHandlers(opts?.policyModules)
           yield* Effect.forkScoped(router.start(testHandlers))
         }
 

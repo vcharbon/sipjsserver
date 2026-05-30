@@ -157,12 +157,13 @@ The values are typed AND the runtime is sound because the `RuleExecutor` runs a 
 
 | Action | What it does |
 |---|---|
-| `relay-to-peer` | Relay current event to peer leg (CSeq, tags, dialog handled by framework). During early dialog, resolves target via To-tag fallback. |
+| `relay-to-peer` | Relay current event to peer leg (CSeq, tags, dialog handled by framework). During early dialog, resolves target via To-tag fallback. **Unadopted-leg gate (ADR-0014):** the implicit-"a" fallback fires only when the source leg `isAdopted` — a parked `media`/`transfer-target` leg's events are never mis-routed to A; its owning rule brokers them (e.g. via `send-provisional-to-leg`). |
 | `relay-to-leg` | Relay to a specific leg by ID |
-| `respond` | Send a response to the event sender |
+| `respond` | Send a response to the event sender (the **source** transaction) |
+| `send-provisional-to-leg` | Send an unreliable 1xx onto a leg's existing **INVITE server transaction** (RFC 3261 §13.2 / §17.2.1; RFC 3262 — no `Require: 100rel`/`RSeq`). Targets the stored INVITE, not the source — the SDP-brokering tool that relays a `media` leg's answer to A as an informational 183 (`reliable: false`, `body` informational per RFC 3264). Only the A-leg has a stored UAS INVITE; other legs are declined. |
 | `ack-leg` | ACK a 200 OK on a specific leg |
 | `send-request-to-leg` | Generate a new request (OPTIONS, INFO, etc.) to a leg (CSeq bump handled) |
-| `create-leg` | Create a new outgoing INVITE (b-leg) |
+| `create-leg` | Create a new outgoing INVITE (b-leg). Optional `kind`/`adopted` (ADR-0014): defaults `destination`/adopted; pass `kind: "media"` to park an **unadopted** MRF leg the generic relay/keepalive/failover rules must not touch. |
 | `destroy-leg` | **Composite (Slice C audited).** Tear down a single leg: BYE (confirmed), nothing (cancelling — CANCEL already in flight), or CANCEL (trying/early). Reach: `legs.{legId}.state → "terminated"`, `legs.{legId}.byeDisposition`, `legs.{legId}.disposition → "cancelling"` on the trying/early branch, and `call.activePeer → null` when the leg was part of the current pair. Outbound: 0 or 1 SIP message depending on branch. |
 | `cancel-leg` | **Primitive.** Send CANCEL for an outstanding early/trying b-leg INVITE while keeping the leg alive so the CANCEL/2xx race can resolve. Reach: `legs.{legId}.disposition → "cancelling"` only. No state change, no `byeDisposition` — cancel-resolving rules decide the terminal disposition. |
 | `merge` | **Primitive.** Connect two legs — both named in parameters. Reach: `call.activePeer → { legA, legB }`. No leg-level mutation. |

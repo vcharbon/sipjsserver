@@ -9,6 +9,7 @@ import { Effect, Schema } from "effect"
 import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
 import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 import { headerUpdatesFromRecord, toBareUri } from "../framework/actions/factories.js"
+import { isAdopted } from "../../../call/CallModel.js"
 
 // ── route-failure ──────────────────────────────────────────
 
@@ -25,11 +26,14 @@ export const routeFailureRule = defineRule({
 
   // resolve-cancel-response (legDisposition=cancelling) and
   // absorb-stale-failure (legState=terminated) carve out by specificity.
+  // ADR-0014: decline an unadopted (media/transfer) leg's failure so its
+  // owning service rule handles it — failover never retries onto an MRF.
   match: {
     kind: "response",
     cseqMethod: "INVITE",
     statusClass: ["3xx", "4xx", "5xx", "6xx"],
     direction: "from-b",
+    filter: (ctx) => isAdopted(ctx.sourceLeg),
   },
 
   init: () => undefined,
@@ -113,6 +117,9 @@ export const noAnswerFailoverRule = defineRule({
 
       const bLeg = ctx.call.bLegs.find((l) => l.legId === legId)
       if (bLeg === undefined || bLeg.state === "terminated") return undefined
+      // ADR-0014: a parked media/transfer leg's no-answer is the owning
+      // service's concern; the generic failover must not retry onto an MRF.
+      if (!isAdopted(bLeg)) return undefined
 
       const actions: RuleAction[] = [
         { type: "add-cdr-event", eventType: "timeout" as const, legId, reason: "no_answer_timeout" },

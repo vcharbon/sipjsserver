@@ -45,8 +45,13 @@ Expected: `Layer.suspend = function`. If it prints `undefined`, the
 consumer's app has resolved a different Effect than ours — usually a
 lockfile drift or a transitive dep pulling an older `effect`. Fix at
 the lockfile level (`npm dedupe` or pin the same exact version on the
-consumer side); a future migration to `peerDependencies` + pnpm will
-make this category of bug impossible.
+consumer side).
+
+**`effect` + `@effect/*` are `peerDependencies`.** The consumer supplies
+the single Effect instance (so Context/Layer identity holds across the
+package boundary); this repo keeps them in `devDependencies` for its own
+build/test. A source/symlink consumer that still sees two copies should
+force a single one — e.g. vitest `resolve.dedupe: ["effect", "@effect/platform-node", "@effect/opentelemetry"]`.
 
 > **Not on npm yet.** The package is consumed directly from a local
 > git checkout. The simplest workflow is `git clone`, `npm install`,

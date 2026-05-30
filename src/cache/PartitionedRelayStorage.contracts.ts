@@ -1166,10 +1166,10 @@ export interface PartitionedRelayStorageContractsOptions {
  * caller-supplied callRefs). `parity` stays outside the helper per D7;
  * build a parity layer first and pass it as `impl`.
  */
-export const withAllContracts = (
-  impl: Layer.Layer<PartitionedRelayStorage>,
+export const withAllContracts = <RIn = never>(
+  impl: Layer.Layer<PartitionedRelayStorage, never, RIn>,
   options?: PartitionedRelayStorageContractsOptions,
-): Layer.Layer<PartitionedRelayStorage, never, Recorder | RunContext> => {
+): Layer.Layer<PartitionedRelayStorage, never, RIn | Recorder | RunContext> => {
   const opts: CanonicalContractsOptions<
     PartitionedRelayStorage,
     never,
@@ -1190,9 +1190,9 @@ export const withAllContracts = (
       ? { paranoidInputs: { wrap: paranoidInputs as never } }
       : {}),
   }
-  return withCanonicalContracts(PartitionedRelayStorage, impl, opts) as Layer.Layer<
+  return withCanonicalContracts(
     PartitionedRelayStorage,
-    never,
-    Recorder | RunContext
-  >
+    impl as Layer.Layer<PartitionedRelayStorage>,
+    opts,
+  ) as Layer.Layer<PartitionedRelayStorage, never, RIn | Recorder | RunContext>
 }

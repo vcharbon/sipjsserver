@@ -941,10 +941,10 @@ export interface CallLimiterContractsOptions {
  * outside this helper per D7 — build a parity layer first via
  * `CallLimiter.parity(...)` and pass it as `impl`.
  */
-export const withAllContracts = (
-  impl: Layer.Layer<CallLimiter>,
+export const withAllContracts = <RIn = never>(
+  impl: Layer.Layer<CallLimiter, never, RIn>,
   options?: CallLimiterContractsOptions,
-): Layer.Layer<CallLimiter, never, Recorder | RunContext> => {
+): Layer.Layer<CallLimiter, never, RIn | Recorder | RunContext> => {
   const opts: CanonicalContractsOptions<
     CallLimiter,
     never,
@@ -965,11 +965,11 @@ export const withAllContracts = (
         }
       : {}),
   }
-  return withCanonicalContracts(CallLimiter, impl, opts) as Layer.Layer<
+  return withCanonicalContracts(
     CallLimiter,
-    never,
-    Recorder | RunContext
-  >
+    impl as Layer.Layer<CallLimiter>,
+    opts,
+  ) as Layer.Layer<CallLimiter, never, RIn | Recorder | RunContext>
 }
 
 // ---------------------------------------------------------------------------

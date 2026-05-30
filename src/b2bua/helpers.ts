@@ -2,7 +2,7 @@
  * Shared B2BUA helpers — canonical cleanup effects, b-leg creation for failover.
  */
 
-import type { Call, Dialog, InviteTxnHandle, Leg, TimerEntry } from "../call/CallModel.js"
+import type { Call, Dialog, InviteTxnHandle, Leg, LegKind, TimerEntry } from "../call/CallModel.js"
 import { addBLeg, addCdrEvent, makeEmptyDialog, randomInitialCSeq } from "../call/CallModel.js"
 import { TERMINATING_TIMEOUT_MS } from "../call/timer-helpers.js"
 import {
@@ -145,6 +145,17 @@ export interface CreateBLegOptions {
   readonly route: RouteParams
   readonly config: AppConfigData
   readonly nowMs: number
+  /**
+   * Leg role (ADR-0014). Defaults to `"destination"` (a normal called-party
+   * leg). Pass `"media"` to park an unadopted MRF leg the generic relay /
+   * keepalive / failover rules must not touch.
+   */
+  readonly legKind?: LegKind
+  /**
+   * Whether the generic rules own this leg. Defaults from `legKind`
+   * (`media`/`transfer-target` → unadopted, else adopted).
+   */
+  readonly adopted?: boolean
 }
 
 /**
@@ -174,6 +185,7 @@ export function createBLegFromRoute(
   opts: CreateBLegOptions
 ): { call: Call; outbound: OutboundSipEffect[]; effects: HandlerEffects; warnings: string[] } {
   const { call, baseInvite, route, config, nowMs } = opts
+  const legKind: LegKind = opts.legKind ?? "destination"
   const legNumber = call.bLegs.length + 1
   const legId = `b-${legNumber}`
   const bLegFromTag = newTag()
@@ -394,6 +406,10 @@ export function createBLegFromRoute(
     // RFC 3261 §9.1: CANCEL must copy Request-URI from original INVITE
     inviteRequestUri: requestUri,
     ...(pendingInviteTxn !== undefined ? { pendingInviteTxn } : {}),
+    // ADR-0014: a routed b-leg defaults to a destination adopted by the generic
+    // relay; create-leg may park a `media` leg the generic rules must not touch.
+    kind: legKind,
+    adopted: opts.adopted ?? (legKind === "media" || legKind === "transfer-target" ? false : true),
   }
 
   let updated = addBLeg(call, bLeg)

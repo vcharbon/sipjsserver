@@ -725,8 +725,9 @@ export const adaptCrossMessageRule = (rule: CrossMessageRule): CrossMessageAudit
   return {
     name: rule.name,
     subject: ALL_UA_ROLES,
-    severityOverride: advisory !== undefined ? "advisory" : undefined,
-    justification: advisory,
+    ...(advisory !== undefined
+      ? { severityOverride: "advisory" as const, justification: advisory }
+      : {}),
     check: (events: ReadonlyArray<SignalingNetworkEvent & RecordedStamps>) =>
       Effect.gen(function* () {
         const slices = projectPerDialog(events)

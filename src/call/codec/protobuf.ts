@@ -220,6 +220,8 @@ interface ProtoLeg {
   inviteRequestUri?: string
   pendingInviteTxnJson?: string
   extJson?: string
+  kind?: string
+  adopted?: boolean
 }
 
 const decodeDialog = (d: ProtoDialog): Dialog => ({
@@ -258,6 +260,8 @@ const decodeLeg = (l: ProtoLeg): Leg => ({
     ? { pendingInviteTxn: JSON.parse(l.pendingInviteTxnJson) as Leg["pendingInviteTxn"] }
     : {}),
   ...(l.extJson !== undefined ? { ext: JSON.parse(l.extJson) as Leg["ext"] } : {}),
+  ...(l.kind !== undefined ? { kind: l.kind as Leg["kind"] } : {}),
+  ...(l.adopted !== undefined ? { adopted: l.adopted } : {}),
 })
 
 const fromProtoObject = (p: Record<string, unknown>): Call => {

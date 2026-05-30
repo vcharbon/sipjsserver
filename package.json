@@ -13,6 +13,10 @@
       "types": "./dist/b2bua/index.d.ts",
       "import": "./dist/b2bua/index.js"
     },
+    "./rules-sdk": {
+      "types": "./dist/rules-sdk/index.d.ts",
+      "import": "./dist/rules-sdk/index.js"
+    },
     "./sip-front-proxy": {
       "types": "./dist/sip-front-proxy/index.d.ts",
       "import": "./dist/sip-front-proxy/index.js"
@@ -36,7 +40,7 @@
     "proxy:dev": "tsx bin/proxy.ts",
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.bin.json && tsc -p tsconfig.test-harness.json",
     "start": "node --env-file=.env dist/main.js",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.bin.json && tsc --noEmit -p tsconfig.test-harness.json && tsc --noEmit -p tsconfig.consumer-api.json && tsc --noEmit -p tsconfig.k8s-bringup.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.bin.json && tsc --noEmit -p tsconfig.test-harness.json && tsc --noEmit -p tsconfig.consumer-api.json && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.k8s-bringup.json",
     "lint": "eslint",
     "test": "npm run test:fake && npm run test:live:short",
     "test:ci": "npm run test:fake && npm run test:live:medium",
@@ -65,11 +69,10 @@
     "test:rule-kill": "echo 'test:rule-kill is disabled — too slow pending fake-clock speedup. Run `tsx scripts/rule-kill.ts` manually if needed.' && exit 0",
     "dev:profile": "NODE_OPTIONS='--max-old-space-size=600 --expose-gc' B2BUA_EXPOSE_GC=1 CHOKIDAR_USEPOLLING=true tsx --env-file=.env --watch src/main.ts",
     "start:profile": "NODE_OPTIONS='--max-old-space-size=600 --expose-gc' B2BUA_EXPOSE_GC=1 node --env-file=.env dist/main.js",
-    "prepare": "effect-language-service patch"
+    "prepare": "effect-language-service patch",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@effect/opentelemetry": "4.0.0-beta.42",
-    "@effect/platform-node": "4.0.0-beta.43",
     "@kubernetes/client-node": "^1.4.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-trace-otlp-http": "^0.208.0",
@@ -79,16 +82,23 @@
     "@opentelemetry/sdk-trace-base": "^2.6.1",
     "@opentelemetry/sdk-trace-node": "^2.6.1",
     "@opentelemetry/semantic-conventions": "^1.40.0",
-    "effect": "4.0.0-beta.43",
     "ioredis": "^5.10.1",
     "msgpackr": "^1.11.9"
   },
+  "peerDependencies": {
+    "@effect/opentelemetry": "4.0.0-beta.42",
+    "@effect/platform-node": "4.0.0-beta.43",
+    "effect": "4.0.0-beta.43"
+  },
   "devDependencies": {
     "@effect/language-service": "latest",
+    "@effect/opentelemetry": "4.0.0-beta.42",
+    "@effect/platform-node": "4.0.0-beta.43",
     "@effect/vitest": "^4.0.0-beta.43",
     "@types/eslint": "^9.6.1",
     "@types/ioredis": "^4.28.10",
     "@types/node": "^22.0.0",
+    "effect": "4.0.0-beta.43",
     "eslint": "^10.2.1",
     "jssip": "^3.13.6",
     "sip-parser": "^1.5.1",

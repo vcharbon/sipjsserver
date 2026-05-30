@@ -22,6 +22,7 @@ import { CdrWriter } from "../../src/cdr/CdrWriter.js"
 import type { Scenario, ScenarioResult } from "../../src/test-harness/framework/types.js"
 import { executeScenario } from "../../src/test-harness/framework/interpreter.js"
 import { createSimulatedTransport, type Sut } from "../fullcall/framework/simulated-backend.js"
+import type { PolicyModule } from "../../src/b2bua/rules/framework/PolicyModule.js"
 import { createLiveTransport } from "../../src/test-harness/framework/live-backend.js"
 import { formatReport } from "../../src/test-harness/framework/report.js"
 import { writeScenarioReport, writeIndexReport } from "../../src/test-harness/framework/html-report.js"
@@ -210,6 +211,12 @@ export function createSimulatedRunner(opts?: {
    * k8s production-deployment shape under TestClock.
    */
   simulateMissingOutboundProxy?: boolean
+  /**
+   * Integrator policy modules / callflow services to layer on top of the
+   * production registry for a wire-level e2e of a consumer's own policy
+   * (`createSimulatedRunner({ policyModules: [myPolicy] })`).
+   */
+  policyModules?: ReadonlyArray<PolicyModule>
 }) {
   const sipPort = opts?.sipPort ?? 15060
   const httpPort = opts?.httpPort ?? 13002
@@ -242,10 +249,16 @@ export function createSimulatedRunner(opts?: {
 
   const realClock = opts?.realClock === true
   const simulateMissingOutboundProxy = opts?.simulateMissingOutboundProxy === true
-  const transportOpts: Parameters<typeof createSimulatedTransport>[0] =
-    opts?.configOverrides !== undefined
-      ? { sipPort, httpPort, configOverrides: opts.configOverrides, clockSleep, realClock, sut, simulateMissingOutboundProxy }
-      : { sipPort, httpPort, clockSleep, realClock, sut, simulateMissingOutboundProxy }
+  const transportOpts: Parameters<typeof createSimulatedTransport>[0] = {
+    sipPort,
+    httpPort,
+    ...(opts?.configOverrides !== undefined ? { configOverrides: opts.configOverrides } : {}),
+    clockSleep,
+    realClock,
+    sut,
+    simulateMissingOutboundProxy,
+    ...(opts?.policyModules !== undefined ? { policyModules: opts.policyModules } : {}),
+  }
   // SUT ingress address — used by scenario steps that send their
   // initial INVITE without specifying a destination explicitly. The
   // sipproxyHA SUT exposes its proxy on a non-loopback subnet IP; the

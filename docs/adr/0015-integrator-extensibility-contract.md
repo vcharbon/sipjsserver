@@ -2,10 +2,16 @@
 
 ## Status
 
-Proposed. Builds on [ADR-0014](0014-leg-kind-and-singleton-active-peer.md)
-(leg model) and [ADR-0011](0011-codec-and-opaque-apply.md) (opaque-body
-replication). Storage mechanism refined by
-[ADR-0016](0016-callflow-services-typed-ext.md).
+Implemented. The curated rule SDK ships as the `@vcharbon/sipjs/rules-sdk`
+subpath (`src/rules-sdk/index.ts`): typed `defineRule` / `defineService` /
+`definePolicyModule`, a narrowed `RuleContext` (no `callControl`/`limiter`), and
+the **public** `PublicRuleAction` subset (`src/b2bua/rules/framework/actions/public.ts`).
+The entrypoint IS the enforced boundary — internal actions (`send-raw`, PRACK /
+transfer / tag-mapping plumbing) are unreachable, and `tests/consumer-api/rules-sdk.test.ts`
+is the compile-time contract test. Builds on
+[ADR-0014](0014-leg-kind-and-singleton-active-peer.md) (leg model) and
+[ADR-0011](0011-codec-and-opaque-apply.md) (opaque-body replication). Storage
+mechanism refined by [ADR-0016](0016-callflow-services-typed-ext.md).
 
 ## Context
 

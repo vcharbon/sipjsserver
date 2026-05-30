@@ -5,11 +5,12 @@
     "rootDir": ".",
     "noEmit": true,
     "incremental": false,
+    "composite": false,
+    "tsBuildInfoFile": null,
+    "declaration": false,
+    "declarationMap": false,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "exactOptionalPropertyTypes": false,
-    "target": "ES2023",
-    "lib": ["ES2023"],
     "plugins": [],
     "paths": {
       "@vcharbon/sipjs/test-harness": ["./src/test-harness/index.ts"],
@@ -20,5 +21,11 @@
       "@vcharbon/sipjs/observability": ["./src/observability/index.ts"]
     }
   },
-  "include": ["tests/consumer-api/**/*", "examples/**/*", "src/**/*"]
+  "include": [
+    "tests/support/**/*",
+    "tests/fullcall/framework/**/*",
+    "tests/harness/**/*",
+    "src/**/*"
+  ],
+  "exclude": ["**/*.test.ts", "**/*.test-d.ts"]
 }

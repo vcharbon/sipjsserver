@@ -81,6 +81,9 @@ message Leg {
   optional string pendingInviteTxnJson = 13;
   // Per-service opaque ext slices (ADR-0016), JSON-string.
   optional string extJson = 14;
+  // Leg role + adoption (ADR-0014). Optional → absent on legacy bodies.
+  optional string kind = 15;
+  optional bool adopted = 16;
 }
 
 message ALegInvite {

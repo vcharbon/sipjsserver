@@ -3,8 +3,14 @@
  *
  * Curated re-exports for embedding the full B2BUA in a consumer's app
  * with a custom `CallDecisionEngine` (HTTP backend or otherwise).
- * Rule customization is OUT of scope for v1 — the rule registry is
- * fixed at module load time inside `B2buaCore`.
+ *
+ * To author / activate custom rules and callflow services, use the
+ * `@vcharbon/sipjs/rules-sdk` entrypoint: build a registry with
+ * `createRuleRegistry(defaultRules, [yourModule])`, compile it with
+ * `buildHandlers(...)`, and pass the result to `router.start(handlers)`
+ * instead of the default `handlers` re-exported here. The embedded layer
+ * wires per-call dependencies; handlers stay a separate argument so the
+ * rule surface lives behind the versioned SDK (ADR-0015).
  *
  * Quick start (the consumer wires their own per-call decision logic):
  *

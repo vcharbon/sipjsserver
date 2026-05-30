@@ -150,7 +150,7 @@ export interface PeerAuditRule {
   readonly severityOverride?: "advisory"
   readonly justification?: string
   readonly check: (
-    events: ReadonlyArray<SignalingNetworkEvent>,
+    events: ReadonlyArray<SignalingNetworkEvent & { seq: number; atMs: number }>,
     ctx: { readonly bindKey: LaneKey },
   ) => Effect.Effect<ReadonlyArray<string>>
 }

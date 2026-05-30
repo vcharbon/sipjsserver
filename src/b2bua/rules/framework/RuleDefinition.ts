@@ -341,6 +341,23 @@ export type RuleAction =
       readonly contentType?: string }
   | { readonly type: "ack-leg"; readonly legId: string }
 
+  // ── Send a provisional (1xx) onto a leg's existing INVITE server
+  // transaction (RFC 3261 §13.2 / §17.2.1). Unlike `respond`, which acts on
+  // the SOURCE transaction, this targets `legId`'s stored INVITE — used to
+  // broker SDP from an unadopted media leg onto the A-leg's INVITE.
+  //
+  // `reliable: false` ⇒ an UNRELIABLE 1xx (no `Require: 100rel`, no `RSeq`;
+  // sent once, not PRACK-tracked) — RFC 3262. The To-tag is the leg's
+  // B2BUA-owned early tag; CSeq / Via / From / Call-ID come from the leg's
+  // INVITE. `body` (if set) is an informational SDP answer (RFC 3264);
+  // `contentType` defaults to `application/sdp`. Reach: when the A-leg has no
+  // dialog yet, seeds `legs.a.dialogs[0]` with a minted To-tag (same path as
+  // `stamp-dialog-to-tag`) so the early-dialog tag stays stable. ──
+  | { readonly type: "send-provisional-to-leg"; readonly legId: string;
+      readonly status: number; readonly reason?: string;
+      readonly body?: Uint8Array; readonly contentType?: string;
+      readonly reliable: false }
+
   // ── Generate new request to a leg (keepalive OPTIONS, INFO, etc.) ──
   | { readonly type: "send-request-to-leg"; readonly legId: string; readonly method: string;
       readonly body?: Uint8Array }
@@ -446,6 +463,14 @@ export type RuleAction =
       readonly headerUpdates?: HeaderUpdates
       /** Typed Request-URI operation (inherit — default — or set BareSipUri). */
       readonly ruri?: RuriOp
+      /**
+       * Leg role (ADR-0014). Defaults to `"destination"`. Pass `"media"` to
+       * park an unadopted MRF leg the generic relay / keepalive / failover
+       * rules must not touch (it is never an `activePeer`).
+       */
+      readonly kind?: import("../../../call/CallModel.js").LegKind
+      /** Override the adopted flag; defaults from `kind` (media → unadopted). */
+      readonly adopted?: boolean
     }
   | {
       /**

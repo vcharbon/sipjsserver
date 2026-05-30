@@ -238,6 +238,21 @@ const TERMINAL_BYE_DISPOSITIONS: ReadonlySet<ByeDisposition> = new Set([
   "bye_confirmed", "bye_received", "bye_timeout", "cancelled", "rejected", "none",
 ])
 
+// ── Leg kind & adoption (ADR-0014) ──────────────────────────────────────────
+
+/**
+ * Explicit per-leg role. The A-leg stays structurally distinguished (call
+ * identity / replication key / limiter subject); `kind` classifies every leg:
+ *   - `a`              — the caller leg (UAS side).
+ *   - `destination`    — a B-leg toward the called party; the only kind in the
+ *                        failover / destination-selection set.
+ *   - `media`          — a leg to a media server (MRF); brokers SDP, never a
+ *                        call party, never adopted.
+ *   - `transfer-target`— the REFER C-leg; unadopted until realigned into A.
+ */
+export const LegKind = Schema.Literals(["a", "destination", "media", "transfer-target"])
+export type LegKind = typeof LegKind.Type
+
 // ── Leg ─────────────────────────────────────────────────────────────────────
 
 export const Leg = Schema.Struct({
@@ -290,9 +305,38 @@ export const Leg = Schema.Struct({
    * Encoded shape of its slice (decoded/typed at the rule layer). See ADR-0016.
    */
   ext: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  /**
+   * Explicit leg role (ADR-0014). Optional for backward compatibility with
+   * in-flight bodies — read via {@link legKind}, which defaults a→"a",
+   * everything else→"destination".
+   */
+  kind: Schema.optional(LegKind),
+  /**
+   * Whether the framework's generic relay / keepalive rules own this leg's
+   * in-dialog signaling (ADR-0014). Optional; read via {@link isAdopted}, which
+   * defaults from `kind` (media / transfer-target → unadopted, else adopted).
+   */
+  adopted: Schema.optional(Schema.Boolean),
 })
 
 export type Leg = typeof Leg.Type
+
+/** Resolve a leg's role, defaulting from `legId` when `kind` is absent. */
+export function legKind(leg: Leg): LegKind {
+  return leg.kind ?? (leg.legId === "a" ? "a" : "destination")
+}
+
+/**
+ * Whether the generic relay / keepalive / failover rules own this leg. Defaults
+ * from `kind`: `media` and an un-realigned `transfer-target` are unadopted; the
+ * A-leg and `destination` legs are adopted. The explicit `adopted` flag wins
+ * (a `transfer-target` flips to adopted at realignment).
+ */
+export function isAdopted(leg: Leg): boolean {
+  if (leg.adopted !== undefined) return leg.adopted
+  const k = legKind(leg)
+  return k !== "media" && k !== "transfer-target"
+}
 
 /**
  * Find a dialog by remote tag (for early-state forking on the b-leg).
@@ -951,6 +995,11 @@ export function addBLeg(call: Call, leg: Leg): Call {
 /** Find a b-leg by legId. */
 export function findBLeg(call: Call, legId: string): Leg | undefined {
   return call.bLegs.find((l) => l.legId === legId)
+}
+
+/** Find any leg (a-leg or b-leg) by legId. */
+export function findLeg(call: Call, legId: string): Leg | undefined {
+  return legId === call.aLeg.legId ? call.aLeg : findBLeg(call, legId)
 }
 
 /** Find a b-leg by callId. */

@@ -12,6 +12,7 @@ const subpathSource = (subpath: string) =>
 export const sipjsSubpathAliases = {
   "@vcharbon/sipjs/test-harness": subpathSource("test-harness"),
   "@vcharbon/sipjs/b2bua": subpathSource("b2bua"),
+  "@vcharbon/sipjs/rules-sdk": subpathSource("rules-sdk"),
   "@vcharbon/sipjs/sip-front-proxy": subpathSource("sip-front-proxy"),
   "@vcharbon/sipjs/sip": subpathSource("sip"),
   "@vcharbon/sipjs/observability": subpathSource("observability"),

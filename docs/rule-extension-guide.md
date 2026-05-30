@@ -13,6 +13,38 @@ The rule system has two categories:
 
 Policy modules use the `PolicyModule` type to bundle related rules with a shared activation guard. The guard is applied uniformly by `createRuleRegistry` — individual rules never check it themselves.
 
+> **In-tree vs. integrator.** The examples below import core directly (`../framework/...`) because they ship inside this repo. A **third-party integrator** authors the same rules/services against the published `@vcharbon/sipjs/rules-sdk` entrypoint — see the next section — and compiles their own worker binary (ADR-0015). Everything else (matching, layers, activation) is identical.
+
+## Integrator path: `@vcharbon/sipjs/rules-sdk`
+
+An integrator does **not** deep-import core. The versioned SDK (ADR-0015) exports the authoring surface and nothing else; internal actions (`send-raw`, PRACK / transfer / tag-mapping plumbing) are unreachable, so the public/internal boundary is the stability promise.
+
+```ts
+import {
+  defineService, definePolicyModule, defineRule,
+  createRuleRegistry, defaultRules, buildHandlers,
+  H, removeH, getHeader, newTag,
+  type RuleAction, type RuleContext,   // RuleAction is the PUBLIC subset
+} from "@vcharbon/sipjs/rules-sdk"
+
+const prbt = defineService({ id: "prbt", callExt: PrbtCallExt, legExt: PrbtLegExt })
+const ring = prbt.rule({ id: "prbt-ring", name: "…", match: { /* … */ }, handle: /* … */ })
+
+// Build the worker's handlers and hand them to SipRouter.start(...)
+export const handlers = buildHandlers(
+  createRuleRegistry(defaultRules, [prbt.toPolicyModule()]),
+)
+```
+
+**Activation is by ext-presence.** The decision backend seeds the descriptor into the `/call/new` response's `serviceExt` field — build it type-safely with `service.activate(...)`:
+
+```ts
+// in the CallDecisionEngine.newCall response:
+return { action: "route", destination, features, serviceExt: prbt.activate({ step: 0 }) }
+```
+
+`applyRoute` writes `serviceExt` into the replicated `Call.ext`; the service is active iff its `ext` key is present (or a custom `isApplicable`). No `features` member, no header sniffing. **Wire-level testing:** pass the module to the fake harness — `createSimulatedRunner({ policyModules: [prbt.toPolicyModule()] })`.
+
 ## Creating a New Policy Module
 
 ### Step 1: Add the HTTP schema field

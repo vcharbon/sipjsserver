@@ -173,7 +173,7 @@ function buildFake(opts: FakeModeOpts) {
       scopedAudit: {
         rules,
         crossMessageRules,
-        shouldAuditBind,
+        ...(shouldAuditBind !== undefined ? { shouldAuditBind } : {}),
         exceptions,
       },
       paranoidInputs,

@@ -35,7 +35,7 @@ import type { Call } from "../CallModel.js"
  */
 const CALL_STRUCTURES: ReadonlyArray<ReadonlyArray<string>> = [
   ["callRef","aLeg","bLegs","activePeer","callbackContext","billingContext","aLegInvite","limiterEntries","timers","cdrEvents","state","createdAt","aLegPendingVias","aLegPendingCSeq","tagMap","traceId","rootSpanId","sampled","workerIndex","_topology","emergency","features","policyUpdateHeaders","policyUpdateBody","activeRules","ruleState","messageCount","ext"],
-  ["legId","callId","fromTag","source","state","disposition","dialogs","noAnswerTimeoutSec","byeDisposition","localUri","remoteUri","inviteRequestUri","pendingInviteTxn","ext"],
+  ["legId","callId","fromTag","source","state","disposition","dialogs","noAnswerTimeoutSec","byeDisposition","localUri","remoteUri","inviteRequestUri","pendingInviteTxn","ext","kind","adopted"],
   ["address","port"],
   ["sip","ext"],
   ["callId","localTag","remoteTag","localUri","remoteUri","remoteTarget","localCSeq","routeSet"],
