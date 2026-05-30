@@ -34,8 +34,8 @@ import type { Call } from "../CallModel.js"
  * re-running the bootstrap.
  */
 const CALL_STRUCTURES: ReadonlyArray<ReadonlyArray<string>> = [
-  ["callRef","aLeg","bLegs","activePeer","callbackContext","billingContext","aLegInvite","limiterEntries","timers","cdrEvents","state","createdAt","aLegPendingVias","aLegPendingCSeq","tagMap","traceId","rootSpanId","sampled","workerIndex","_topology","emergency","features","policyUpdateHeaders","policyUpdateBody","activeRules","ruleState","transfer","earlyPromote","messageCount"],
-  ["legId","callId","fromTag","source","state","disposition","dialogs","noAnswerTimeoutSec","byeDisposition","localUri","remoteUri","inviteRequestUri","pendingInviteTxn"],
+  ["callRef","aLeg","bLegs","activePeer","callbackContext","billingContext","aLegInvite","limiterEntries","timers","cdrEvents","state","createdAt","aLegPendingVias","aLegPendingCSeq","tagMap","traceId","rootSpanId","sampled","workerIndex","_topology","emergency","features","policyUpdateHeaders","policyUpdateBody","activeRules","ruleState","transfer","messageCount","ext"],
+  ["legId","callId","fromTag","source","state","disposition","dialogs","noAnswerTimeoutSec","byeDisposition","localUri","remoteUri","inviteRequestUri","pendingInviteTxn","ext"],
   ["address","port"],
   ["sip","ext"],
   ["callId","localTag","remoteTag","localUri","remoteUri","remoteTarget","localCSeq","routeSet"],
@@ -57,7 +57,8 @@ const CALL_STRUCTURES: ReadonlyArray<ReadonlyArray<string>> = [
   [],
   ["ruleId","state"],
   ["phase","referrerLegId","referToUri","effectiveReferToUri","callbackContext","cLegId","referCSeq","startedAtMs","lastCLegNotifiedStatus","cInitialSdp"],
-  ["promotedSdp","windowOpen","resyncReinviteCSeq"],
+  // promote-pem call-ext slice shape (records-mode compaction for Call.ext["promote-pem"]).
+  ["promoted","promotedSdp","windowOpen","resyncReinviteCSeq"],
 ]
 
 export const CALL_STRUCTURES_HARDCODED: ReadonlyArray<ReadonlyArray<string>> =

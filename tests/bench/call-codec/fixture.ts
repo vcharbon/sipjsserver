@@ -223,6 +223,9 @@ export const representativeCall: Call = {
     { ruleId: "limit-by-subscriber", state: { admittedAt: 1779440042_000, window: 1779440000 } },
     { ruleId: "promote-pem-to-200", state: undefined },
   ],
+  ext: {
+    "promote-pem": { promoted: true, windowOpen: false, resyncReinviteCSeq: 8007 },
+  },
 }
 
 /** Quick sanity print — `node ... fixture.js` outputs the encoded size. */

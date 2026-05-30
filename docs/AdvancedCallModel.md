@@ -135,6 +135,12 @@ Omitting a column means "accept any value". `OneOrMany<T>` accepts either a sing
 
 Always prefer the `defineRule({...})` factory over a hand-typed `RuleDefinition<TState, TParams>` literal — the factory infers `TMatch` from the `match` value and threads it into `RuleContext<TMatch>`, and infers `TState` from `stateSchema` (via `NoInfer` on `init` / `handle`), so neither the handler nor `init` needs an explicit return-type annotation when the schema has optional fields.
 
+### `RuleContext` ext generics + the decode/encode bracket (ADR-0016)
+
+`RuleContext<TMatch, TCallExt, TLegExt>` carries two extra generics that project the opaque `Call.ext` / `Leg.ext` records to typed per-service slices (`call.ext`, `sourceLeg.ext`). Both default to the base opaque type, so every legacy `RuleContext<M>` usage is unchanged. Callflow services authored with [`defineService`](rule-extension-guide.md#callflow-services-defineservice--typed-per-service-ext) bind these generics to their own slice keyed by service id.
+
+The values are typed AND the runtime is sound because the `RuleExecutor` runs a **decode/encode bracket** around matching: before `pickRanked`, it decodes each active service's `call.ext[id]` / source `leg.ext[id]` (Encoded → typed) into a rule-facing projection (`matchCtx`) used for filters and handlers; the original Encoded call still reaches `executeActions` / persistence. A service rule's returned `callExt` slice (and any `set-leg-ext` action) is re-encoded by the minted closure into `set-call-ext` / `set-leg-ext` actions, so only the Encoded (JSON-safe) form ever crosses the codec. Decode/encode are synchronous `Schema` calls in the dispatch region — permitted by [ADR-0003](adr/0003-must-run-effects-under-interruption.md) and wrapped like the existing init hop (a decode defect makes that service inert for the event). Returning the same decoded object the handler was given is a true no-op — no spurious Redis flush.
+
 ## Action Types
 
 | Action | What it does |

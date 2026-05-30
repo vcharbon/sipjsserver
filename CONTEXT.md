@@ -327,10 +327,19 @@ A party that builds new call-handling behaviour on top of the B2BUA without fork
 _Avoid_: "external user" (collides with the SIP caller / URI user-part), "third party", "tenant" (the integrator runs their own deployment, not a slice of ours), "peer" (a SIP neighbour / the [[active peer]]).
 
 **Extension**:
-The integrator's deliverable: one or more **policy modules** (`definePolicyModule`) plus the `/call/new` descriptor schema they consume, compiled into a worker. Defines one callflow (PRBT, pre-call announcement, MRF-during-transfer, …) entirely through the public primitive set — with **no change to the B2BUA's HTTP API or core** per callflow.
+The integrator's deliverable: one or more **[[callflow service]]s** (each a typed bundle of cooperating rules) plus the `/call/new` descriptor schema they consume, compiled into a worker. Defines one callflow (PRBT, pre-call announcement, MRF-during-transfer, …) entirely through the public primitive set — with **no change to the B2BUA's HTTP API or core** per callflow.
 
 **Rule SDK**:
 The curated, independently-versioned public surface an [[extension]] builds against: `defineRule`, a narrowed `RuleContext`, and the **public subset** of the action union (leg create/destroy, send-request-to-leg with an opaque body, respond, relay/transform, timers, ruleState, terminate). The internal action set (`send-raw`, transfer / early-promote / PRACK plumbing, …) is not exported. The boundary *is* the stability contract; "easier to open than to close" — start narrow, widen as the dogfood demands.
+
+**Callflow service** (shorthand **service** inside this section):
+An integrator-authored bundle of cooperating [[rule SDK]] rules implementing one callflow (PRBT, announcement, MRF-during-transfer, …). Its rules are *minted from the service* (`service.rule(...)`) so they share — by construction, keyed by the service id over opaque replicated storage:
+- a typed **descriptor** — `paramsSchema`, frozen at activation, emitted by the decision response (the adapter→rule channel);
+- a typed **shared call-state** — `stateSchema`, optionally a **phase** machine that gates which rule fires;
+- typed **per-leg** / **per-dialog** data — `legSchema` / `dialogSchema` (the latter for forking flows).
+A service is **active for a call iff its per-service slice is present** (presence-based activation), seeded by the decision response — superseding the earlier closed feature-flag union.
+`promote18xPemTo200` is the first flow migrated onto this template (presence-based activation over a service-keyed call-state slice); the in-tree REFER transfer flow and the `relayFirst18xTo180` policy module remain callflow services in all but name — they still use bespoke named `Call` fields (`transfer`) and a named match column (`transferPhase`) instead of the generic service-keyed slices; migrating the rest is the proving ground. An [[extension]] ships one or more; several coexist because every slice is service-id-keyed, but two services cannot co-own the [[active peer]] bridge on one call at the same instant.
+_Avoid_: bare "service" unqualified (collides with Effect `Context.Service` / `ServiceMap.Service`, used for dependency injection — e.g. `CallDecisionEngine`); "policy module" for the typed/stateful form — a policy module is today's bare `{id, guard, rules}` bundle, and a callflow service is its typed, stateful generalization.
 
 ## Flagged ambiguities
 

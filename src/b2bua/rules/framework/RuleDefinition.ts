@@ -298,15 +298,27 @@ export type DialogFor<M extends Match> =
  * `relay-to-peer` and let ActionExecutor resolve the target with its richer
  * fallback logic (tagMap, single-b-leg fallback, etc.).
  */
-export interface RuleContext<TMatch extends Match = Match> {
-  /** Full call state — narrowed transfer / state when match-criteria imply it. */
-  readonly call: CallFor<TMatch>
+/**
+ * Base opaque ext type — the carried-but-uninterpreted per-service slot as it
+ * appears on the raw `Call`/`Leg` schema. Used as the default for the ext
+ * generics so every legacy `RuleContext<M>` usage keeps compiling unchanged.
+ */
+export type BaseExt = { readonly [key: string]: unknown } | undefined
+
+export interface RuleContext<TMatch extends Match = Match, TCallExt = BaseExt, TLegExt = BaseExt> {
+  /**
+   * Full call state — narrowed transfer / state when match-criteria imply it.
+   * `ext` is projected to the service-typed `TCallExt`; at runtime the rule
+   * framework decodes each active service's `call.ext[id]` slice before
+   * matching, so filters/handlers read a checked projection (see ADR-0016).
+   */
+  readonly call: Omit<CallFor<TMatch>, "ext"> & { readonly ext?: TCallExt }
   /** Deterministic call reference (callId|fromTag). */
   readonly callRef: string
   /** The event being processed — narrowed to the kind declared by `match.kind`. */
   readonly event: EventFor<TMatch>
-  /** Which leg the event came from. */
-  readonly sourceLeg: Leg
+  /** Which leg the event came from. `ext` projected to the service-typed `TLegExt`. */
+  readonly sourceLeg: Omit<Leg, "ext"> & { readonly ext?: TLegExt }
   /** Dialog on the source leg — non-undefined when `match` implies a confirmed dialog. */
   readonly sourceDialog: DialogFor<TMatch>
   /** Direction from which the event arrived — literal-narrowed when `match.direction` is set. */
@@ -667,16 +679,15 @@ export type RuleAction =
   | { readonly type: "update-transfer"; readonly update: Partial<TransferState> }
   | { readonly type: "clear-transfer" }
 
-  // ── Early-promote (promote-pem-to-200) state ──
+  // ── Callflow-service ext writes (ADR-0016) ──
   //
-  // set-early-promote initializes (when call.earlyPromote is absent) or
-  // merges onto Call.earlyPromote. The promote-pem-to-200 policy module
-  // writes the SDP it sent to alice, the resync re-INVITE CSeq, and flips
-  // windowOpen as alice's gate transitions.
-  // clear-early-promote nulls Call.earlyPromote outright (final cleanup
-  // once normal in-dialog flow resumes).
-  | { readonly type: "set-early-promote"; readonly update: Partial<import("../../../call/CallModel.js").EarlyPromoteState> }
-  | { readonly type: "clear-early-promote" }
+  // set-call-ext writes an Encoded per-service slice into `call.ext[serviceId]`;
+  // set-leg-ext writes one into `leg.ext[serviceId]`. Both carry the Encoded
+  // (JSON-safe) form. Service rules return typed slices (call-ext) or emit
+  // set-leg-ext with a typed value; the minted-rule closure owns encoding,
+  // so `value` here is always the at-rest Encoded form.
+  | { readonly type: "set-call-ext"; readonly serviceId: string; readonly value: unknown }
+  | { readonly type: "set-leg-ext"; readonly serviceId: string; readonly legId: string; readonly value: unknown }
 
   // ── Fire /call/refer; the result re-enters withCall as an internal-event ──
   | { readonly type: "refer-async-http"; readonly request: CallReferRequestType }

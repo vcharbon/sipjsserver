@@ -53,10 +53,12 @@ Call {
   cdrEvents: CdrEvent[]
   state: "active" | "terminating" | "terminated"
   createdAt: number              // epoch ms
+  ext?: Record<string, unknown>  // per-service opaque ext slices, keyed by service id
 }
 ```
 
 - **`callRef`** is embedded in the Contact header on relayed 200 OK so mid-dialog messages are self-routing even after crash recovery.
+- **`ext`** holds per-callflow-service state, keyed by service id, **opaque to core** (carried through the codec, never interpreted). Each [[callflow service]] owns the Encoded (JSON-safe) shape of its slice; the rule framework decodes `ext[id]` via the service's schema before matching and re-encodes the returned slice on write. Presence of a key activates the owning service. See [ADR-0016](adr/0016-callflow-services-typed-ext.md).
 - **`activePeer`** is the source of truth for "who is Alice currently talking to". Structurally enforces 1<->1 or unpeered (null) — N<->N is not representable. Set by `merge` action, cleared by `split`.
 - **`tagMap`** maps B2BUA-generated tags (shown to Alice) to real b-leg remote tags. Used for dialog resolution during early dialog (forking), before `activePeer` is set.
 - **`state`** lifecycle: `active` → `terminating` (BYE/CANCEL sent to live legs) → `terminated` (all legs resolved). Framework auto-promotes from `terminating` to `terminated` when `isFullyResolved()` is true.
@@ -76,8 +78,11 @@ Leg {
   byeDisposition?: "bye_sent" | "bye_received" | "bye_timeout" | "cancelled"
   dialogs: Dialog[]             // multiple during early state (forking)
   noAnswerTimeoutSec?: number   // per-leg, from /call/new response
+  ext?: Record<string, unknown> // per-service opaque ext slices, keyed by service id
 }
 ```
+
+- **`ext`** is the per-leg analogue of `Call.ext` — opaque per-service state keyed by service id (e.g. a service stamps `leg.ext[id] = { role: "media" }` via `set-leg-ext`). Decoded/typed at the rule layer; carried opaquely by core. See [ADR-0016](adr/0016-callflow-services-typed-ext.md).
 
 **Leg state machine:**
 ```

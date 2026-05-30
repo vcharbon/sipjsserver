@@ -149,6 +149,54 @@ import { myPolicy } from "./b2bua/rules/custom/myPolicy.js"
 const ruleRegistry = createRuleRegistry(defaultRules, [relayFirst18xTo180, myPolicy])
 ```
 
+## Callflow services (`defineService`) — typed per-service `ext`
+
+For a bundle of cooperating rules that share **typed** per-call (and per-leg)
+state, prefer `defineService` over a hand-built policy module. A service owns a
+schema for its call-ext (and optionally leg-ext) slice; rules minted from it
+read the decoded slice and return an updated one — the framework decodes
+`call.ext[id]` / `leg.ext[id]` before matching and re-encodes on write. See
+[ADR-0016](adr/0016-callflow-services-typed-ext.md).
+
+```typescript
+import { Schema } from "effect"
+import { defineService } from "../framework/Service.js"
+
+const MyCallExt = Schema.Struct({
+  phase: Schema.Literals(["announce", "bridge"]),
+  playedSdp: Schema.optional(Schema.Uint8ArrayFromBase64), // base64 at rest
+})
+
+const myService = defineService({ id: "my-service", callExt: MyCallExt })
+
+myService.rule({
+  id: "my-service-on-200",
+  name: "...",
+  match: { kind: "response", cseqMethod: "INVITE", statusClass: "2xx", direction: "from-b" },
+  // filter + handle receive the DECODED slice as the second arg (guaranteed
+  // present — the service is active iff its ext key is present):
+  filter: (_ctx, ext) => ext.phase === "announce",
+  handle: (ctx, ext) =>
+    Effect.sync(() => ({
+      actions: [/* ... */],
+      callExt: { ...ext, phase: "bridge" }, // omit to leave ext unchanged (no flush)
+    })),
+})
+
+export const myPolicy = myService.toPolicyModule() // register like any policy module
+```
+
+- **Activation = ext-presence.** Seed the slice from `/call/new` by returning
+  `serviceExt: { ...myService.activate({ phase: "announce" }) }` on the route
+  response; `applyRoute` writes it into `Call.ext`. The service's guard is
+  "ext key present" (or pass `alwaysActive: true` to `defineService`).
+- **Encoded vs decoded.** At rest (and across every codec), `ext[id]` holds the
+  **Encoded** form — `Uint8ArrayFromBase64` rides as a base64 string. Never put
+  a raw `Uint8Array` in `ext`; the framework owns encode/decode so rules only
+  ever see decoded values.
+- **Per-leg writes.** Emit a `set-leg-ext` action with a decoded value; the
+  minted closure encodes it via the service's `legExt` schema.
+
 ## Shared State via `stateKey`
 
 Multiple rules in a policy module can share state by using the same `stateKey`:

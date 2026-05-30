@@ -20,7 +20,25 @@
  *   3. Register via createRuleRegistry(builtinRules, [myModule])
  */
 
+import type { Schema } from "effect"
 import type { AnyRuleDefinition, RuleContext } from "./RuleDefinition.js"
+
+/**
+ * Runtime descriptor for a callflow service (ADR-0016). Carried on the
+ * PolicyModule a `defineService(...).toPolicyModule()` produces so
+ * `createRuleRegistry` can collect the per-service ext schemas the
+ * RuleExecutor decode/encode bracket needs. Plain rule policy modules
+ * (no service) leave `__service` absent.
+ */
+export interface ServiceRuntime {
+  readonly id: string
+  /** Schema for the call-level ext slice (`call.ext[id]`), if the service has one. */
+  readonly callExtSchema?: Schema.Codec<unknown, unknown>
+  /** Schema for the leg-level ext slice (`leg.ext[id]`), if the service has one. */
+  readonly legExtSchema?: Schema.Codec<unknown, unknown>
+  /** When true the service is active on every call regardless of ext-presence. */
+  readonly alwaysActive?: boolean
+}
 
 export interface PolicyModule {
   /** Policy identifier (for logging/tracing). */
@@ -29,6 +47,8 @@ export interface PolicyModule {
   readonly guard: (ctx: RuleContext) => boolean
   /** Rule definitions. Guard is NOT yet applied — createRuleRegistry does that. */
   readonly rules: ReadonlyArray<AnyRuleDefinition>
+  /** Present when this module was produced by `defineService(...).toPolicyModule()`. */
+  readonly __service?: ServiceRuntime
 }
 
 /**

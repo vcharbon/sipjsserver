@@ -2054,6 +2054,7 @@ $root.sipjsserver = (function() {
              * @property {string|null} [remoteUri] Leg remoteUri
              * @property {string|null} [inviteRequestUri] Leg inviteRequestUri
              * @property {string|null} [pendingInviteTxnJson] Leg pendingInviteTxnJson
+             * @property {string|null} [extJson] Leg extJson
              */
 
             /**
@@ -2176,6 +2177,14 @@ $root.sipjsserver = (function() {
              */
             Leg.prototype.pendingInviteTxnJson = null;
 
+            /**
+             * Leg extJson.
+             * @member {string|null|undefined} extJson
+             * @memberof sipjsserver.call.Leg
+             * @instance
+             */
+            Leg.prototype.extJson = null;
+
             // OneOf field names bound to virtual getters and setters
             var $oneOfFields;
 
@@ -2246,6 +2255,17 @@ $root.sipjsserver = (function() {
             });
 
             /**
+             * Leg _extJson.
+             * @member {"extJson"|undefined} _extJson
+             * @memberof sipjsserver.call.Leg
+             * @instance
+             */
+            Object.defineProperty(Leg.prototype, "_extJson", {
+                get: $util.oneOfGetter($oneOfFields = ["extJson"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            /**
              * Creates a new Leg instance using the specified properties.
              * @function create
              * @memberof sipjsserver.call.Leg
@@ -2300,6 +2320,8 @@ $root.sipjsserver = (function() {
                     writer.uint32(/* id 12, wireType 2 =*/98).string(message.inviteRequestUri);
                 if (message.pendingInviteTxnJson != null && Object.hasOwnProperty.call(message, "pendingInviteTxnJson"))
                     writer.uint32(/* id 13, wireType 2 =*/106).string(message.pendingInviteTxnJson);
+                if (message.extJson != null && Object.hasOwnProperty.call(message, "extJson"))
+                    writer.uint32(/* id 14, wireType 2 =*/114).string(message.extJson);
                 return writer;
             };
 
@@ -2392,6 +2414,10 @@ $root.sipjsserver = (function() {
                         }
                     case 13: {
                             message.pendingInviteTxnJson = reader.string();
+                            break;
+                        }
+                    case 14: {
+                            message.extJson = reader.string();
                             break;
                         }
                     default:
@@ -2493,6 +2519,11 @@ $root.sipjsserver = (function() {
                     if (!$util.isString(message.pendingInviteTxnJson))
                         return "pendingInviteTxnJson: string expected";
                 }
+                if (message.extJson != null && message.hasOwnProperty("extJson")) {
+                    properties._extJson = 1;
+                    if (!$util.isString(message.extJson))
+                        return "extJson: string expected";
+                }
                 return null;
             };
 
@@ -2549,6 +2580,8 @@ $root.sipjsserver = (function() {
                     message.inviteRequestUri = String(object.inviteRequestUri);
                 if (object.pendingInviteTxnJson != null)
                     message.pendingInviteTxnJson = String(object.pendingInviteTxnJson);
+                if (object.extJson != null)
+                    message.extJson = String(object.extJson);
                 return message;
             };
 
@@ -2625,6 +2658,11 @@ $root.sipjsserver = (function() {
                     object.pendingInviteTxnJson = message.pendingInviteTxnJson;
                     if (options.oneofs)
                         object._pendingInviteTxnJson = "pendingInviteTxnJson";
+                }
+                if (message.extJson != null && message.hasOwnProperty("extJson")) {
+                    object.extJson = message.extJson;
+                    if (options.oneofs)
+                        object._extJson = "extJson";
                 }
                 return object;
             };
@@ -5379,11 +5417,10 @@ $root.sipjsserver = (function() {
              * @property {boolean|null} [ruleStatePresent] Call ruleStatePresent
              * @property {string|null} [transferJson] Call transferJson
              * @property {boolean|null} [transferIsNull] Call transferIsNull
-             * @property {string|null} [earlyPromoteJson] Call earlyPromoteJson
-             * @property {boolean|null} [earlyPromoteIsNull] Call earlyPromoteIsNull
              * @property {number|null} [messageCount] Call messageCount
              * @property {Array.<string>|null} [terminatingRefreshLegs] Call terminatingRefreshLegs
              * @property {boolean|null} [terminatingRefreshLegsPresent] Call terminatingRefreshLegsPresent
+             * @property {string|null} [extJson] Call extJson
              */
 
             /**
@@ -5683,22 +5720,6 @@ $root.sipjsserver = (function() {
             Call.prototype.transferIsNull = null;
 
             /**
-             * Call earlyPromoteJson.
-             * @member {string|null|undefined} earlyPromoteJson
-             * @memberof sipjsserver.call.Call
-             * @instance
-             */
-            Call.prototype.earlyPromoteJson = null;
-
-            /**
-             * Call earlyPromoteIsNull.
-             * @member {boolean|null|undefined} earlyPromoteIsNull
-             * @memberof sipjsserver.call.Call
-             * @instance
-             */
-            Call.prototype.earlyPromoteIsNull = null;
-
-            /**
              * Call messageCount.
              * @member {number|null|undefined} messageCount
              * @memberof sipjsserver.call.Call
@@ -5721,6 +5742,14 @@ $root.sipjsserver = (function() {
              * @instance
              */
             Call.prototype.terminatingRefreshLegsPresent = false;
+
+            /**
+             * Call extJson.
+             * @member {string|null|undefined} extJson
+             * @memberof sipjsserver.call.Call
+             * @instance
+             */
+            Call.prototype.extJson = null;
 
             // OneOf field names bound to virtual getters and setters
             var $oneOfFields;
@@ -5913,28 +5942,6 @@ $root.sipjsserver = (function() {
             });
 
             /**
-             * Call _earlyPromoteJson.
-             * @member {"earlyPromoteJson"|undefined} _earlyPromoteJson
-             * @memberof sipjsserver.call.Call
-             * @instance
-             */
-            Object.defineProperty(Call.prototype, "_earlyPromoteJson", {
-                get: $util.oneOfGetter($oneOfFields = ["earlyPromoteJson"]),
-                set: $util.oneOfSetter($oneOfFields)
-            });
-
-            /**
-             * Call _earlyPromoteIsNull.
-             * @member {"earlyPromoteIsNull"|undefined} _earlyPromoteIsNull
-             * @memberof sipjsserver.call.Call
-             * @instance
-             */
-            Object.defineProperty(Call.prototype, "_earlyPromoteIsNull", {
-                get: $util.oneOfGetter($oneOfFields = ["earlyPromoteIsNull"]),
-                set: $util.oneOfSetter($oneOfFields)
-            });
-
-            /**
              * Call _messageCount.
              * @member {"messageCount"|undefined} _messageCount
              * @memberof sipjsserver.call.Call
@@ -5942,6 +5949,17 @@ $root.sipjsserver = (function() {
              */
             Object.defineProperty(Call.prototype, "_messageCount", {
                 get: $util.oneOfGetter($oneOfFields = ["messageCount"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            /**
+             * Call _extJson.
+             * @member {"extJson"|undefined} _extJson
+             * @memberof sipjsserver.call.Call
+             * @instance
+             */
+            Object.defineProperty(Call.prototype, "_extJson", {
+                get: $util.oneOfGetter($oneOfFields = ["extJson"]),
                 set: $util.oneOfSetter($oneOfFields)
             });
 
@@ -6049,10 +6067,6 @@ $root.sipjsserver = (function() {
                     writer.uint32(/* id 33, wireType 2 =*/266).string(message.transferJson);
                 if (message.transferIsNull != null && Object.hasOwnProperty.call(message, "transferIsNull"))
                     writer.uint32(/* id 34, wireType 0 =*/272).bool(message.transferIsNull);
-                if (message.earlyPromoteJson != null && Object.hasOwnProperty.call(message, "earlyPromoteJson"))
-                    writer.uint32(/* id 35, wireType 2 =*/282).string(message.earlyPromoteJson);
-                if (message.earlyPromoteIsNull != null && Object.hasOwnProperty.call(message, "earlyPromoteIsNull"))
-                    writer.uint32(/* id 36, wireType 0 =*/288).bool(message.earlyPromoteIsNull);
                 if (message.messageCount != null && Object.hasOwnProperty.call(message, "messageCount"))
                     writer.uint32(/* id 37, wireType 0 =*/296).int32(message.messageCount);
                 if (message.terminatingRefreshLegs != null && message.terminatingRefreshLegs.length)
@@ -6060,6 +6074,8 @@ $root.sipjsserver = (function() {
                         writer.uint32(/* id 38, wireType 2 =*/306).string(message.terminatingRefreshLegs[i]);
                 if (message.terminatingRefreshLegsPresent != null && Object.hasOwnProperty.call(message, "terminatingRefreshLegsPresent"))
                     writer.uint32(/* id 39, wireType 0 =*/312).bool(message.terminatingRefreshLegsPresent);
+                if (message.extJson != null && Object.hasOwnProperty.call(message, "extJson"))
+                    writer.uint32(/* id 40, wireType 2 =*/322).string(message.extJson);
                 return writer;
             };
 
@@ -6252,14 +6268,6 @@ $root.sipjsserver = (function() {
                             message.transferIsNull = reader.bool();
                             break;
                         }
-                    case 35: {
-                            message.earlyPromoteJson = reader.string();
-                            break;
-                        }
-                    case 36: {
-                            message.earlyPromoteIsNull = reader.bool();
-                            break;
-                        }
                     case 37: {
                             message.messageCount = reader.int32();
                             break;
@@ -6272,6 +6280,10 @@ $root.sipjsserver = (function() {
                         }
                     case 39: {
                             message.terminatingRefreshLegsPresent = reader.bool();
+                            break;
+                        }
+                    case 40: {
+                            message.extJson = reader.string();
                             break;
                         }
                     default:
@@ -6506,16 +6518,6 @@ $root.sipjsserver = (function() {
                     if (typeof message.transferIsNull !== "boolean")
                         return "transferIsNull: boolean expected";
                 }
-                if (message.earlyPromoteJson != null && message.hasOwnProperty("earlyPromoteJson")) {
-                    properties._earlyPromoteJson = 1;
-                    if (!$util.isString(message.earlyPromoteJson))
-                        return "earlyPromoteJson: string expected";
-                }
-                if (message.earlyPromoteIsNull != null && message.hasOwnProperty("earlyPromoteIsNull")) {
-                    properties._earlyPromoteIsNull = 1;
-                    if (typeof message.earlyPromoteIsNull !== "boolean")
-                        return "earlyPromoteIsNull: boolean expected";
-                }
                 if (message.messageCount != null && message.hasOwnProperty("messageCount")) {
                     properties._messageCount = 1;
                     if (!$util.isInteger(message.messageCount))
@@ -6531,6 +6533,11 @@ $root.sipjsserver = (function() {
                 if (message.terminatingRefreshLegsPresent != null && message.hasOwnProperty("terminatingRefreshLegsPresent"))
                     if (typeof message.terminatingRefreshLegsPresent !== "boolean")
                         return "terminatingRefreshLegsPresent: boolean expected";
+                if (message.extJson != null && message.hasOwnProperty("extJson")) {
+                    properties._extJson = 1;
+                    if (!$util.isString(message.extJson))
+                        return "extJson: string expected";
+                }
                 return null;
             };
 
@@ -6694,10 +6701,6 @@ $root.sipjsserver = (function() {
                     message.transferJson = String(object.transferJson);
                 if (object.transferIsNull != null)
                     message.transferIsNull = Boolean(object.transferIsNull);
-                if (object.earlyPromoteJson != null)
-                    message.earlyPromoteJson = String(object.earlyPromoteJson);
-                if (object.earlyPromoteIsNull != null)
-                    message.earlyPromoteIsNull = Boolean(object.earlyPromoteIsNull);
                 if (object.messageCount != null)
                     message.messageCount = object.messageCount | 0;
                 if (object.terminatingRefreshLegs) {
@@ -6709,6 +6712,8 @@ $root.sipjsserver = (function() {
                 }
                 if (object.terminatingRefreshLegsPresent != null)
                     message.terminatingRefreshLegsPresent = Boolean(object.terminatingRefreshLegsPresent);
+                if (object.extJson != null)
+                    message.extJson = String(object.extJson);
                 return message;
             };
 
@@ -6895,16 +6900,6 @@ $root.sipjsserver = (function() {
                     if (options.oneofs)
                         object._transferIsNull = "transferIsNull";
                 }
-                if (message.earlyPromoteJson != null && message.hasOwnProperty("earlyPromoteJson")) {
-                    object.earlyPromoteJson = message.earlyPromoteJson;
-                    if (options.oneofs)
-                        object._earlyPromoteJson = "earlyPromoteJson";
-                }
-                if (message.earlyPromoteIsNull != null && message.hasOwnProperty("earlyPromoteIsNull")) {
-                    object.earlyPromoteIsNull = message.earlyPromoteIsNull;
-                    if (options.oneofs)
-                        object._earlyPromoteIsNull = "earlyPromoteIsNull";
-                }
                 if (message.messageCount != null && message.hasOwnProperty("messageCount")) {
                     object.messageCount = message.messageCount;
                     if (options.oneofs)
@@ -6917,6 +6912,11 @@ $root.sipjsserver = (function() {
                 }
                 if (message.terminatingRefreshLegsPresent != null && message.hasOwnProperty("terminatingRefreshLegsPresent"))
                     object.terminatingRefreshLegsPresent = message.terminatingRefreshLegsPresent;
+                if (message.extJson != null && message.hasOwnProperty("extJson")) {
+                    object.extJson = message.extJson;
+                    if (options.oneofs)
+                        object._extJson = "extJson";
+                }
                 return object;
             };
 

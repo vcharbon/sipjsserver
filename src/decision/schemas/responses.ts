@@ -77,6 +77,13 @@ export const NewCallRouteResponse = Schema.Struct({
   ),
   /** Canonical feature activations. Adapter-synthesized; always present on success. */
   features: Schema.optional(FeatureActivations),
+  /**
+   * Per-service ext descriptor (ADR-0016) — each entry is one callflow
+   * service's Encoded call-ext slice keyed by service id, built type-safely
+   * via `service.activate(descriptor)`. `applyRoute` writes it into
+   * `Call.ext`, activating the owning service by ext-presence.
+   */
+  serviceExt: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 })
 
 /**

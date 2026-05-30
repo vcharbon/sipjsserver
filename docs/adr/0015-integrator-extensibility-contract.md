@@ -4,7 +4,8 @@
 
 Proposed. Builds on [ADR-0014](0014-leg-kind-and-singleton-active-peer.md)
 (leg model) and [ADR-0011](0011-codec-and-opaque-apply.md) (opaque-body
-replication).
+replication). Storage mechanism refined by
+[ADR-0016](0016-callflow-services-typed-ext.md).
 
 ## Context
 
@@ -44,12 +45,14 @@ ride in fields that already exist.
 **The descriptor and flow state live in the replicated call body, opaque
 to the core:**
 
-- Initial config (MRF URI, MSCML payloads/refs, flow parameters) →
-  `Call.activeRules[].params` (`Schema.Unknown`, frozen at activation),
-  decoded only by the owning rule's `paramsSchema`.
-- Evolving callflow state (cursor, media-leg id, what has been played) →
-  `Call.ruleState[].state` (`Schema.Unknown`), decoded only by the rule's
-  `stateSchema`.
+Descriptor (initial config: MRF URI, MSCML payloads/refs, flow parameters)
+and evolving callflow state (cursor, media-leg id, what has been played) now
+ride in typed **`Call.ext` / `Leg.ext`**, keyed by service id and decoded via
+the owning service's schema (see
+[ADR-0016](0016-callflow-services-typed-ext.md)). This supersedes the original
+sketch, which parked them on `Call.activeRules[].params` and
+`Call.ruleState[].state` (both `Schema.Unknown`, never decoded — an unchecked
+cast). The rest of the storage model is unchanged.
 
 Both are part of the `Call` schema, so they replicate and survive
 takeover (ADR-0011) with zero core involvement. The B2BUA never parses

@@ -284,6 +284,12 @@ export const Leg = Schema.Struct({
    * for CANCEL branch reuse (§9.1) and ACK-for-2xx CSeq (§13.2.2.4).
    */
   pendingInviteTxn: Schema.optional(InviteTxnHandleSchema),
+  /**
+   * Per-service opaque extension slot, keyed by callflow-service id. Carried
+   * by core through the codec, never interpreted; each service owns the
+   * Encoded shape of its slice (decoded/typed at the rule layer). See ADR-0016.
+   */
+  ext: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 })
 
 export type Leg = typeof Leg.Type
@@ -512,35 +518,6 @@ export const RuleStateEntry = Schema.Struct({
 
 export type RuleStateEntry = typeof RuleStateEntry.Type
 
-// ── Early-media promotion state (promote-pem-to-200 strategy) ──────────────
-
-/**
- * Per-call state for the `promote-pem-to-200` early-media strategy.
- *
- * Set when the first `183 + SDP + P-Early-Media` from any b-leg fork is
- * synthesized into a 200 OK on the a-leg. While present, the policy module:
- *
- *   - suppresses every subsequent b-side 18x from reaching alice
- *     (alice already saw 200 OK; PRACK still locally generated on B if
- *     reliable),
- *   - rejects in-dialog requests from alice with 491/488 (BYE excepted),
- *   - on b's eventual 200 OK, diffs `promotedSdp` against b's body and
- *     either silently bridges or emits a B2BUA-originated re-INVITE on the
- *     a-leg with b's SDP.
- *
- * Cleared once the call enters normal in-dialog flow.
- */
-export const EarlyPromoteState = Schema.Struct({
-  /** SDP body sent to alice in the synthetic 200 OK; compared against b's final answer. */
-  promotedSdp: Schema.Uint8ArrayFromBase64,
-  /** While true, alice's in-dialog requests (other than BYE) are rejected. */
-  windowOpen: Schema.Boolean,
-  /** CSeq of an outstanding B2BUA-originated re-INVITE toward alice; set during resync. */
-  resyncReinviteCSeq: Schema.optional(Schema.Int),
-})
-
-export type EarlyPromoteState = typeof EarlyPromoteState.Type
-
 // ── Call state ──────────────────────────────────────────────────────────────
 
 /**
@@ -717,11 +694,12 @@ export const Call = Schema.Struct({
    */
   transfer: Schema.optional(Schema.NullOr(TransferState)),
   /**
-   * Promote-PEM-to-200 transient state. Set by the `promote18xPemTo200`
-   * policy module when the first `183 + SDP + P-Early-Media` is synthesized
-   * into a 200 OK on the a-leg. Cleared once normal in-dialog flow resumes.
+   * Per-service opaque extension slot, keyed by callflow-service id. Carried
+   * by core through the codec, never interpreted; each service decodes its
+   * own slice via its schema at the rule layer. Presence of a key activates
+   * the owning service (ext-presence activation). See ADR-0016.
    */
-  earlyPromote: Schema.optional(Schema.NullOr(EarlyPromoteState)),
+  ext: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   /**
    * Per-call message counter for MAX_MESSAGES_PER_CALL cap-defense.
    * Bumped by SipRouter on every event resolved to this call. Lives on
@@ -1211,6 +1189,28 @@ export function setRuleState(call: Call, ruleId: string, state: unknown): Call {
     ? [...existing.slice(0, idx), entry, ...existing.slice(idx + 1)]
     : [...existing, entry]
   return { ...call, ruleState: updated }
+}
+
+// ── Service ext helpers (ADR-0016) ────────────────────────────────────────
+//
+// `ext` holds per-service Encoded (JSON-safe) slices keyed by service id.
+// Core never interprets them; the rule framework decodes/re-encodes via each
+// service's schema. The writers below preserve referential equality on a
+// no-op write so the RuleExecutor auto-flush gate stays honest.
+
+/** Write an Encoded ext slice into `call.ext[serviceId]`. */
+export function setCallExt(call: Call, serviceId: string, value: unknown): Call {
+  if (call.ext?.[serviceId] === value) return call
+  return { ...call, ext: { ...call.ext, [serviceId]: value } }
+}
+
+/** Write an Encoded ext slice into the named leg's `ext[serviceId]`. */
+export function setLegExt(call: Call, legId: string, serviceId: string, value: unknown): Call {
+  return updateLeg(call, legId, (leg) =>
+    leg.ext?.[serviceId] === value
+      ? leg
+      : { ...leg, ext: { ...leg.ext, [serviceId]: value } },
+  )
 }
 
 /** Deactivate a rule (set active = false). Preserves state for tracing/CDR. */

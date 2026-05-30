@@ -15,7 +15,7 @@
  * are appended after the composing rule's actions.
  */
 
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import type { CallEvent, Handler, HandlerResult } from "../../../sip/SipRouter.js"
 import type { ResolvedContext } from "../../../sip/SipRouter.js"
 import type { RuleRegistry } from "./RuleRegistry.js"
@@ -26,7 +26,7 @@ import { enforceByeDispositionInvariant, type ByeDispositionViolation } from "./
 import { handleLimiterRefresh } from "./FrameworkLimiterRefresh.js"
 import { pickRanked } from "./Matcher.js"
 import { getRuleState, setRuleState, isFullyResolved } from "../../../call/CallModel.js"
-import type { Call } from "../../../call/CallModel.js"
+import type { Call, Leg } from "../../../call/CallModel.js"
 
 // ── Context conversion ─────────────────────────────────────────────────────
 
@@ -44,6 +44,61 @@ function toRuleContext(ctx: ResolvedContext): RuleContext {
     limiter: ctx.limiter,
     nowMs: ctx.nowMs,
   }
+}
+
+// ── Callflow-service ext decode (ADR-0016) ────────────────────────────────
+//
+// Before matching, decode each ACTIVE service's `call.ext[id]` / source
+// `leg.ext[id]` (Encoded → typed) so filters and handlers read a checked
+// projection. A service is active when its `call.ext` key is present (or it's
+// `alwaysActive`). Decode is synchronous Schema work wrapped like the existing
+// init hop (ADR-0003: sync JS in the dispatch region is permitted). A decode
+// defect makes that service inert this event (its key is omitted from the
+// decoded maps, so its guard/filters see `undefined`).
+
+/** Sentinel for "decode failed → skip this service this event". */
+const DECODE_SKIP: unique symbol = Symbol.for("b2bua/service-ext-decode-skip")
+
+function decodeServiceExt(
+  registry: RuleRegistry,
+  call: Call,
+  sourceLeg: Leg,
+): Effect.Effect<{ readonly callExt: Record<string, unknown>; readonly legExt: Record<string, unknown> }> {
+  return Effect.gen(function* () {
+    const callExt: Record<string, unknown> = {}
+    const legExt: Record<string, unknown> = {}
+    for (const [sid, svc] of registry.services) {
+      const rawCall = call.ext?.[sid]
+      if (rawCall === undefined && svc.alwaysActive !== true) continue
+
+      if (svc.callExtSchema !== undefined && rawCall !== undefined) {
+        const decoded = yield* Effect.catchDefect(
+          Effect.sync(() => Schema.decodeUnknownSync(svc.callExtSchema!)(rawCall)),
+          (defect) =>
+            Effect.logWarning(`Service ${sid}: call-ext decode failed: ${defect}`).pipe(
+              Effect.as(DECODE_SKIP as typeof DECODE_SKIP),
+            ),
+        )
+        if (decoded === DECODE_SKIP) continue
+        callExt[sid] = decoded
+      }
+
+      if (svc.legExtSchema !== undefined) {
+        const rawLeg = sourceLeg.ext?.[sid]
+        if (rawLeg !== undefined) {
+          const decoded = yield* Effect.catchDefect(
+            Effect.sync(() => Schema.decodeUnknownSync(svc.legExtSchema!)(rawLeg)),
+            (defect) =>
+              Effect.logWarning(`Service ${sid}: leg-ext decode failed: ${defect}`).pipe(
+                Effect.as(DECODE_SKIP as typeof DECODE_SKIP),
+              ),
+          )
+          if (decoded !== DECODE_SKIP) legExt[sid] = decoded
+        }
+      }
+    }
+    return { callExt, legExt }
+  })
 }
 
 // ── Per-call entry bookkeeping ────────────────────────────────────────────
@@ -230,7 +285,25 @@ export function executeRules(
 
       const ruleCtx = toRuleContext(ctx)
 
-      const candidates = pickRanked(defs, ruleCtx)
+      // Decode active services' ext into a rule-facing projection used for
+      // matching + filters + handlers. The original `ruleCtx` (Encoded ext) is
+      // what reaches setRuleState / executeActions / persistence — the minted
+      // service-rule closures re-encode their slices via set-call-ext /
+      // set-leg-ext, so only Encoded values ever cross the codec.
+      const decodedExt = registry.services.size === 0
+        ? undefined
+        : yield* decodeServiceExt(registry, call, ctx.leg)
+      const matchCtx: RuleContext =
+        decodedExt === undefined ||
+        (Object.keys(decodedExt.callExt).length === 0 && Object.keys(decodedExt.legExt).length === 0)
+          ? ruleCtx
+          : {
+              ...ruleCtx,
+              call: { ...ruleCtx.call, ext: decodedExt.callExt },
+              sourceLeg: { ...ruleCtx.sourceLeg, ext: decodedExt.legExt },
+            }
+
+      const candidates = pickRanked(defs, matchCtx)
 
       if (candidates.length === 0) {
         return yield* defaultHandler(ctx)
@@ -265,9 +338,10 @@ export function executeRules(
         if (initResult === null) continue
         const state: unknown = initResult
 
-        // Run rule handler with defect boundary
+        // Run rule handler with defect boundary. The handler reads decoded
+        // service ext via `matchCtx`; persistence below uses `ruleCtx`.
         const outcome: RuleHandleResult<unknown> | undefined | void = yield* Effect.catchDefect(
-          definition.handle(ruleCtx, state, params),
+          definition.handle(matchCtx, state, params),
           (defect) => {
             const errorPolicy = definition.onError ?? "passthrough"
             if (errorPolicy === "terminate") {

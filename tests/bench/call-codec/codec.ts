@@ -351,6 +351,7 @@ const protoRoot = protobuf.Root.fromJSON({
             localUri: { type: "string", id: 9 },
             remoteUri: { type: "string", id: 10 },
             inviteRequestUri: { type: "string", id: 11 },
+            extJson: { type: "string", id: 12 },
           },
         },
         ALegInvite: {
@@ -440,7 +441,7 @@ const protoRoot = protobuf.Root.fromJSON({
             activeRules: { rule: "repeated", type: "ActiveRule", id: 25 },
             ruleState: { rule: "repeated", type: "RuleStateEntry", id: 26 },
             transferJson: { type: "string", id: 27 },
-            earlyPromoteJson: { type: "string", id: 28 },
+            extJson: { type: "string", id: 28 },
           },
         },
         Frame: {
@@ -481,12 +482,12 @@ const toProtoCall = (c: any): any => {
   if (c.features !== undefined) out.featuresJson = JSON.stringify(c.features)
   if (c.policyUpdateHeaders !== undefined) out.policyUpdateHeadersJson = JSON.stringify(c.policyUpdateHeaders)
   if (c.transfer !== undefined) out.transferJson = JSON.stringify(c.transfer)
-  if (c.earlyPromote !== undefined) out.earlyPromoteJson = JSON.stringify(c.earlyPromote)
+  if (c.ext !== undefined) out.extJson = JSON.stringify(c.ext)
   if (c._topology !== undefined) out.topology = c._topology
   delete out.features
   delete out.policyUpdateHeaders
   delete out.transfer
-  delete out.earlyPromote
+  delete out.ext
   delete out._topology
   // The production spread stamps __writtenAtMs on the Call before
   // encode. Protobuf has no field for it (it would live in the envelope
@@ -514,12 +515,12 @@ const fromProtoCall = (p: any): any => {
   if (p.featuresJson !== undefined) out.features = JSON.parse(p.featuresJson)
   if (p.policyUpdateHeadersJson !== undefined) out.policyUpdateHeaders = JSON.parse(p.policyUpdateHeadersJson)
   if (p.transferJson !== undefined) out.transfer = JSON.parse(p.transferJson)
-  if (p.earlyPromoteJson !== undefined) out.earlyPromote = JSON.parse(p.earlyPromoteJson)
+  if (p.extJson !== undefined) out.ext = JSON.parse(p.extJson)
   if (p.topology !== undefined) out._topology = p.topology
   delete out.featuresJson
   delete out.policyUpdateHeadersJson
   delete out.transferJson
-  delete out.earlyPromoteJson
+  delete out.extJson
   delete out.topology
   return out
 }

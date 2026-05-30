@@ -26,7 +26,7 @@
  *   - `features`         ↔ `featuresJson`     (closed union, structurally serialised as JSON)
  *   - `policyUpdateHeaders` ↔ `policyUpdateHeadersJson`
  *   - `transfer`         ↔ `transferJson`     (+ `transferIsNull` for null)
- *   - `earlyPromote`     ↔ `earlyPromoteJson` (+ `earlyPromoteIsNull` for null)
+ *   - `Call.ext` / `Leg.ext` ↔ `extJson`      (opaque per-service slices, JSON)
  *   - `ActiveRule.params`     ↔ `paramsJson`  (+ `paramsPresent`)
  *   - `RuleStateEntry.state`  ↔ `stateJson`   (+ `statePresent`)
  *   - `pendingInviteTxn`      ↔ `pendingInviteTxnJson` (best-effort handle)
@@ -95,6 +95,8 @@ const encodeLeg = (l: Leg): unknown => ({
   pendingInviteTxnJson:
     l.pendingInviteTxn === undefined ? undefined : JSON.stringify(l.pendingInviteTxn),
   pendingInviteTxn: undefined,
+  extJson: l.ext === undefined ? undefined : JSON.stringify(l.ext),
+  ext: undefined,
 })
 
 const encodeActiveRule = (r: ActiveRule): unknown => ({
@@ -175,13 +177,7 @@ const toProtoObject = (call: Call): Record<string, unknown> => {
       out.transferJson = JSON.stringify(call.transfer)
     }
   }
-  if (call.earlyPromote !== undefined) {
-    if (call.earlyPromote === null) {
-      out.earlyPromoteIsNull = true
-    } else {
-      out.earlyPromoteJson = JSON.stringify(call.earlyPromote)
-    }
-  }
+  if (call.ext !== undefined) out.extJson = JSON.stringify(call.ext)
   if (call.messageCount !== undefined) out.messageCount = call.messageCount
   if (call.terminatingRefreshLegs !== undefined) {
     out.terminatingRefreshLegs = [...call.terminatingRefreshLegs]
@@ -230,6 +226,7 @@ interface ProtoLeg {
   remoteUri?: string
   inviteRequestUri?: string
   pendingInviteTxnJson?: string
+  extJson?: string
 }
 
 const decodeDialog = (d: ProtoDialog): Dialog => ({
@@ -267,6 +264,7 @@ const decodeLeg = (l: ProtoLeg): Leg => ({
   ...(l.pendingInviteTxnJson !== undefined
     ? { pendingInviteTxn: JSON.parse(l.pendingInviteTxnJson) as Leg["pendingInviteTxn"] }
     : {}),
+  ...(l.extJson !== undefined ? { ext: JSON.parse(l.extJson) as Leg["ext"] } : {}),
 })
 
 const fromProtoObject = (p: Record<string, unknown>): Call => {
@@ -347,11 +345,7 @@ const fromProtoObject = (p: Record<string, unknown>): Call => {
     out.transfer = JSON.parse(p.transferJson as string)
   }
 
-  if (p.earlyPromoteIsNull === true) {
-    out.earlyPromote = null
-  } else if (p.earlyPromoteJson !== undefined) {
-    out.earlyPromote = JSON.parse(p.earlyPromoteJson as string)
-  }
+  if (p.extJson !== undefined) out.ext = JSON.parse(p.extJson as string)
 
   if (p.messageCount !== undefined) out.messageCount = p.messageCount
   if (p.terminatingRefreshLegsPresent === true) {

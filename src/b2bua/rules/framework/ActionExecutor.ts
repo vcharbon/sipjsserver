@@ -21,7 +21,7 @@ import type {
   FireAndForgetEffect,
 } from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
-import type { TimerEntry, Leg, Dialog, TransferState, EarlyPromoteState, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
+import type { TimerEntry, Leg, Dialog, TransferState, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
 import { replaceTimerById } from "../../../call/timer-helpers.js"
 import {
   type Call,
@@ -51,6 +51,8 @@ import {
   findPendingRequest,
   removePendingRequest,
   aLegInviteCSeqNum,
+  setCallExt,
+  setLegExt,
 } from "../../../call/CallModel.js"
 import {
   extractContactUri,
@@ -500,11 +502,11 @@ function executeAction(
     case "clear-transfer":
       state.call = { ...state.call, transfer: null }
       break
-    case "set-early-promote":
-      executeSetEarlyPromote(action, state)
+    case "set-call-ext":
+      state.call = setCallExt(state.call, action.serviceId, action.value)
       break
-    case "clear-early-promote":
-      state.call = { ...state.call, earlyPromote: null }
+    case "set-leg-ext":
+      state.call = setLegExt(state.call, action.legId, action.serviceId, action.value)
       break
     case "refer-async-http":
       executeReferAsyncHttp(action, ctx, state)
@@ -2128,26 +2130,6 @@ function executeUpdateTransfer(
     ? (update as TransferState)
     : { ...existing, ...update }) satisfies TransferState
   state.call = { ...state.call, transfer: merged }
-}
-
-// ── set-early-promote ─────────────────────────────────────────────────────
-
-/**
- * Merge a Partial<EarlyPromoteState> onto `call.earlyPromote`, or seed it
- * when absent. When seeding from empty the caller must include every
- * required field (`promotedSdp`, `windowOpen`); subsequent updates
- * typically just flip `windowOpen` or stash/clear `resyncReinviteCSeq`.
- */
-function executeSetEarlyPromote(
-  action: Extract<RuleAction, { type: "set-early-promote" }>,
-  state: ExecutionState,
-): void {
-  const { update } = action
-  const existing = state.call.earlyPromote ?? null
-  const merged = (existing === null
-    ? (update as EarlyPromoteState)
-    : { ...existing, ...update }) satisfies EarlyPromoteState
-  state.call = { ...state.call, earlyPromote: merged }
 }
 
 // ── merge / split (peering primitives) ────────────────────────────────────

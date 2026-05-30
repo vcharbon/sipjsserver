@@ -73,6 +73,8 @@ message Leg {
   optional string remoteUri = 11;
   optional string inviteRequestUri = 12;
   optional string pendingInviteTxnJson = 13;
+  // Per-service opaque ext slices (ADR-0016), JSON-string.
+  optional string extJson = 14;
 }
 
 message ALegInvite {
@@ -184,12 +186,14 @@ message Call {
   // `Schema.optional(Schema.NullOr(T))` — three states (absent/null/value).
   optional string transferJson = 33;
   optional bool transferIsNull = 34;
-  optional string earlyPromoteJson = 35;
-  optional bool earlyPromoteIsNull = 36;
+  // ids 35/36 (earlyPromote{Json,IsNull}) retired with ADR-0016; not reused.
 
   optional int32 messageCount = 37;
   repeated string terminatingRefreshLegs = 38;
   bool terminatingRefreshLegsPresent = 39;
+
+  // Per-service opaque ext slices (ADR-0016), JSON-string.
+  optional string extJson = 40;
 }
 
 // ──────────────────────────────────────────────────────────────────────────

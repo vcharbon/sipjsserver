@@ -4,11 +4,17 @@
  */
 
 import type { AnyRuleDefinition, Match, RuleContext } from "./RuleDefinition.js"
-import type { PolicyModule } from "./PolicyModule.js"
+import type { PolicyModule, ServiceRuntime } from "./PolicyModule.js"
 import { specificityScore } from "./Matcher.js"
 
 export interface RuleRegistry {
   readonly definitions: ReadonlyMap<string, AnyRuleDefinition>
+  /**
+   * Callflow services (ADR-0016) registered via `defineService(...)`, keyed by
+   * service id. The RuleExecutor uses each entry's ext schemas to decode
+   * `call.ext[id]` / `leg.ext[id]` before matching and re-encode on write.
+   */
+  readonly services: ReadonlyMap<string, ServiceRuntime>
 }
 
 /**
@@ -24,10 +30,12 @@ export function createRuleRegistry(
   policyModules?: ReadonlyArray<PolicyModule>,
 ): RuleRegistry {
   const allRules: AnyRuleDefinition[] = [...builtinRules]
+  const services = new Map<string, ServiceRuntime>()
 
   // Flatten policy modules — compose the module's guard into each rule's
   // match.filter so the Matcher respects policy activation.
   for (const mod of (policyModules ?? [])) {
+    if (mod.__service !== undefined) services.set(mod.__service.id, mod.__service)
     for (const rule of mod.rules) {
       const originalFilter = rule.match.filter as ((ctx: RuleContext) => boolean) | undefined
       const guardedFilter: (ctx: RuleContext) => boolean = originalFilter !== undefined
@@ -55,7 +63,7 @@ export function createRuleRegistry(
 
   validateMatchSchemas(allRules)
 
-  return { definitions: map }
+  return { definitions: map, services }
 }
 
 // ── Match schema validation (shadow / reachability) ───────────────────────
@@ -220,7 +228,7 @@ export function transformRegistry(
     }
     map.set(id, wrapped)
   }
-  return { definitions: map }
+  return { definitions: map, services: registry.services }
 }
 
 /**
@@ -238,5 +246,5 @@ export function disableRule(registry: RuleRegistry, ruleId: string): RuleRegistr
   }
   const map = new Map<string, AnyRuleDefinition>(registry.definitions)
   map.set(ruleId, disabled)
-  return { definitions: map }
+  return { definitions: map, services: registry.services }
 }

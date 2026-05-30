@@ -226,6 +226,24 @@ export function applyRoute(
       }
     }
 
+    // ── Service ext descriptor → Call.ext (ADR-0016) ───────────────────────
+    //
+    // Write the adapter's `serviceExt` descriptor into the replicated
+    // `Call.ext`, activating each service by ext-presence. For PEM, also derive
+    // its slice from `strategy === "promote-pem-to-200"` so the existing
+    // scenarios activate the service unchanged (PEM stays entangled with the
+    // `relayFirst18xTo180` feature until that migrates). The seed is the
+    // pre-promotion call-ext (Encoded == decoded for these boolean fields).
+    {
+      const serviceExt: Record<string, unknown> = { ...(routing.serviceExt ?? {}) }
+      if (strategy === "promote-pem-to-200") {
+        serviceExt["promote-pem"] = { promoted: false, windowOpen: false }
+      }
+      if (Object.keys(serviceExt).length > 0) {
+        updated = { ...updated, ext: { ...updated.ext, ...serviceExt } }
+      }
+    }
+
     // ── Limiter acquisition ────────────────────────────────────────────────
     // Typed channels (see CallLimiter.LimiterDecision / LimiterBackendError):
     //   - success channel: `Allowed` or `Rejected` (both normal outcomes)
