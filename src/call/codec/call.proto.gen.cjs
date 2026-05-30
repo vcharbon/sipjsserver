@@ -5415,8 +5415,6 @@ $root.sipjsserver = (function() {
              * @property {boolean|null} [activeRulesPresent] Call activeRulesPresent
              * @property {Array.<sipjsserver.call.IRuleStateEntry>|null} [ruleState] Call ruleState
              * @property {boolean|null} [ruleStatePresent] Call ruleStatePresent
-             * @property {string|null} [transferJson] Call transferJson
-             * @property {boolean|null} [transferIsNull] Call transferIsNull
              * @property {number|null} [messageCount] Call messageCount
              * @property {Array.<string>|null} [terminatingRefreshLegs] Call terminatingRefreshLegs
              * @property {boolean|null} [terminatingRefreshLegsPresent] Call terminatingRefreshLegsPresent
@@ -5704,22 +5702,6 @@ $root.sipjsserver = (function() {
             Call.prototype.ruleStatePresent = false;
 
             /**
-             * Call transferJson.
-             * @member {string|null|undefined} transferJson
-             * @memberof sipjsserver.call.Call
-             * @instance
-             */
-            Call.prototype.transferJson = null;
-
-            /**
-             * Call transferIsNull.
-             * @member {boolean|null|undefined} transferIsNull
-             * @memberof sipjsserver.call.Call
-             * @instance
-             */
-            Call.prototype.transferIsNull = null;
-
-            /**
              * Call messageCount.
              * @member {number|null|undefined} messageCount
              * @memberof sipjsserver.call.Call
@@ -5920,28 +5902,6 @@ $root.sipjsserver = (function() {
             });
 
             /**
-             * Call _transferJson.
-             * @member {"transferJson"|undefined} _transferJson
-             * @memberof sipjsserver.call.Call
-             * @instance
-             */
-            Object.defineProperty(Call.prototype, "_transferJson", {
-                get: $util.oneOfGetter($oneOfFields = ["transferJson"]),
-                set: $util.oneOfSetter($oneOfFields)
-            });
-
-            /**
-             * Call _transferIsNull.
-             * @member {"transferIsNull"|undefined} _transferIsNull
-             * @memberof sipjsserver.call.Call
-             * @instance
-             */
-            Object.defineProperty(Call.prototype, "_transferIsNull", {
-                get: $util.oneOfGetter($oneOfFields = ["transferIsNull"]),
-                set: $util.oneOfSetter($oneOfFields)
-            });
-
-            /**
              * Call _messageCount.
              * @member {"messageCount"|undefined} _messageCount
              * @memberof sipjsserver.call.Call
@@ -6063,10 +6023,6 @@ $root.sipjsserver = (function() {
                         $root.sipjsserver.call.RuleStateEntry.encode(message.ruleState[i], writer.uint32(/* id 31, wireType 2 =*/250).fork(), q + 1).ldelim();
                 if (message.ruleStatePresent != null && Object.hasOwnProperty.call(message, "ruleStatePresent"))
                     writer.uint32(/* id 32, wireType 0 =*/256).bool(message.ruleStatePresent);
-                if (message.transferJson != null && Object.hasOwnProperty.call(message, "transferJson"))
-                    writer.uint32(/* id 33, wireType 2 =*/266).string(message.transferJson);
-                if (message.transferIsNull != null && Object.hasOwnProperty.call(message, "transferIsNull"))
-                    writer.uint32(/* id 34, wireType 0 =*/272).bool(message.transferIsNull);
                 if (message.messageCount != null && Object.hasOwnProperty.call(message, "messageCount"))
                     writer.uint32(/* id 37, wireType 0 =*/296).int32(message.messageCount);
                 if (message.terminatingRefreshLegs != null && message.terminatingRefreshLegs.length)
@@ -6258,14 +6214,6 @@ $root.sipjsserver = (function() {
                         }
                     case 32: {
                             message.ruleStatePresent = reader.bool();
-                            break;
-                        }
-                    case 33: {
-                            message.transferJson = reader.string();
-                            break;
-                        }
-                    case 34: {
-                            message.transferIsNull = reader.bool();
                             break;
                         }
                     case 37: {
@@ -6508,16 +6456,6 @@ $root.sipjsserver = (function() {
                 if (message.ruleStatePresent != null && message.hasOwnProperty("ruleStatePresent"))
                     if (typeof message.ruleStatePresent !== "boolean")
                         return "ruleStatePresent: boolean expected";
-                if (message.transferJson != null && message.hasOwnProperty("transferJson")) {
-                    properties._transferJson = 1;
-                    if (!$util.isString(message.transferJson))
-                        return "transferJson: string expected";
-                }
-                if (message.transferIsNull != null && message.hasOwnProperty("transferIsNull")) {
-                    properties._transferIsNull = 1;
-                    if (typeof message.transferIsNull !== "boolean")
-                        return "transferIsNull: boolean expected";
-                }
                 if (message.messageCount != null && message.hasOwnProperty("messageCount")) {
                     properties._messageCount = 1;
                     if (!$util.isInteger(message.messageCount))
@@ -6697,10 +6635,6 @@ $root.sipjsserver = (function() {
                 }
                 if (object.ruleStatePresent != null)
                     message.ruleStatePresent = Boolean(object.ruleStatePresent);
-                if (object.transferJson != null)
-                    message.transferJson = String(object.transferJson);
-                if (object.transferIsNull != null)
-                    message.transferIsNull = Boolean(object.transferIsNull);
                 if (object.messageCount != null)
                     message.messageCount = object.messageCount | 0;
                 if (object.terminatingRefreshLegs) {
@@ -6890,16 +6824,6 @@ $root.sipjsserver = (function() {
                 }
                 if (message.ruleStatePresent != null && message.hasOwnProperty("ruleStatePresent"))
                     object.ruleStatePresent = message.ruleStatePresent;
-                if (message.transferJson != null && message.hasOwnProperty("transferJson")) {
-                    object.transferJson = message.transferJson;
-                    if (options.oneofs)
-                        object._transferJson = "transferJson";
-                }
-                if (message.transferIsNull != null && message.hasOwnProperty("transferIsNull")) {
-                    object.transferIsNull = message.transferIsNull;
-                    if (options.oneofs)
-                        object._transferIsNull = "transferIsNull";
-                }
                 if (message.messageCount != null && message.hasOwnProperty("messageCount")) {
                     object.messageCount = message.messageCount;
                     if (options.oneofs)

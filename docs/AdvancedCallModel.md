@@ -23,7 +23,7 @@ TransactionLayer events
        the Matcher for the ranked candidate list:
          1. drop any rule whose id is overridden by an active override rule
          2. keep rules whose declarative `match` descriptor accepts the event
-         3. sort by specificity score desc
+         3. order by precedence layer desc, registration order within a layer
        walks the ranked candidates:
          first one whose handle() returns non-undefined wins
            -> ActionExecutor (CSeq, tags, dialog, message construction)
@@ -33,11 +33,20 @@ TransactionLayer events
   -> SipRouter.processResult (stamp Via/Contact, serialize, send, execute effects)
 ```
 
-### Specificity-based selection
+### Layered, explicit-order selection
 
-Every rule carries a declarative `match: Match` descriptor — a discriminated union on event `kind` (`request` / `response` / `timer` / `timeout` / `cancelled` / `internal-event`). The Matcher scores each candidate: a singleton column (e.g. `method: "INVITE"`) scores higher than an array column (e.g. `statusClass: ["3xx","4xx"]`), exact `status` beats `statusClass`, and a `filter` adds one more point. The highest-scoring rule whose `match` accepts the event wins.
+Every rule carries a declarative `match: Match` descriptor — a discriminated union on event `kind` (`request` / `response` / `timer` / `timeout` / `cancelled` / `internal-event`) plus an optional `filter`. The Matcher keeps **every** rule whose columns (and filter) accept the event, then picks the winner by **precedence layer**, breaking ties by **registration order** (first-match-wins). There is no per-rule priority/specificity scoring.
 
-Specificity ties on overlapping match sets are a registration error — the registry validator throws at startup unless one rule declares `overrides:` or `composesWith:` against the other. Overrides are explicit: a rule declaring `overrides: "some-other-id"` removes the named base from the candidate set whenever the overriding rule's `match` accepts the event (used by policy modules — see `suppress-18x` — and by transfer rules to displace corner-case rules like `retransmit-200`). `composesWith: "base-id"` layers a rule additively before the base (see `force-tag-consistency`).
+**Layers (provenance, stamped by `createRuleRegistry`, never authored):**
+
+- `CORE_LAYER` (0) — built-in `defaultRules`.
+- `SERVICE_LAYER` (1) — rules from a `defineService(...)` / policy module.
+
+A higher layer wins, so an **active callflow service automatically takes precedence over core** for the same event — the service author never names a core rule id. "Active" is the service's single applicability predicate (`isApplicable`, default: `call.ext[id]` present, or `alwaysActive`); the predicate is composed into every service rule's `filter`, so a service rule only outranks core *when its service is active and its own match accepts*.
+
+**Within a layer, order is explicit and authoritative.** `defaultRules` must list more-specific / corner-case rules before the broad relay+lifecycle rules they refine; a service lists its rules in the order it wants them tried. The registry's **reachability lint** throws at startup if a later rule in the same layer is fully shadowed by an earlier filterless rule (the one real ordering hazard the model introduces).
+
+**Escape hatches (rare, layer-agnostic):** `overrides: "some-id"` removes the named rule from the candidate set whenever the overriding rule's `match` accepts the event — this is how a *lower*-layer rule can deliberately trump a higher one (e.g. the core seed rule `transfer-reject-replaces` over the service rule `transfer-reject-second-refer`), and how same-layer rules with identical matches disambiguate (see `suppress-18x` over `relay-provisional`). `composesWith: "base-id"` layers a rule additively before the base (see `force-tag-consistency`).
 
 ## INAP Mapping
 
@@ -100,8 +109,9 @@ interface RuleDefinition<TState, TParams> {
   name: string                  // display name for logging
   alwaysActive?: boolean        // true = runs on every call (built-in rules)
   stateKey?: string             // rules sharing a stateKey share persisted state
-  composesWith?: string         // run additively BEFORE this base rule's id
-  overrides?: string            // replace this base rule's id in the candidate set
+  // layer is framework-stamped (CORE_LAYER / SERVICE_LAYER) — authors never set it.
+  composesWith?: string         // RARE: run additively BEFORE this base rule's id
+  overrides?: string            // RARE escape hatch: remove this rule from candidates (layer-agnostic)
   stateSchema: Schema<TState>   // validates rule-specific state
   paramsSchema: Schema<TParams> // validates params from HTTP response
   match: Match                  // declarative match descriptor (discriminated by kind)
@@ -111,7 +121,9 @@ interface RuleDefinition<TState, TParams> {
 }
 ```
 
-Rules return `undefined`/`void` to pass (next ranked candidate gets a turn), or `{ actions, state }` to consume the event.
+**Decline vs. consume.** A `handle()` returning `undefined`/`void` **declines** the event — the dispatcher moves to the next candidate (next in the same layer, then lower layers, ultimately a core default). Returning `{ actions, state }` **consumes** it; `{ actions: [] }` is a valid "handled, nothing to do" no-op. So `undefined` ≠ `{ actions: [] }`: the first defers to another rule, the second claims the event. Because a declined service rule falls through to core, encode a rule's precondition in its `filter` rather than in a defensive `undefined` return inside `handle()`.
+
+**Activation must be precise.** A service/policy rule only competes when its guard reports the service active; that guard must be `false` unless the service genuinely owns the call (ADR-0016). An over-broad guard makes the rule compete in a sibling service's flow — a correctness defect the layered model surfaces (it was previously masked by specificity scoring).
 
 ### Match descriptor
 
@@ -221,7 +233,7 @@ interface MessageTransform {
 
 ## Default Rules (Built-In, Always-Active)
 
-Selection ordering is purely by specificity (and explicit `overrides`). The `match` descriptor on each rule disambiguates pairs; specificity ties on overlapping matches throw at registry construction.
+All default rules sit in `CORE_LAYER`, so selection among them is by their **order in the `defaultRules` array** (first-match-wins) plus explicit `overrides`. The array lists corner-case / narrower rules before the broad rules they refine; the registry's reachability lint throws at startup if a later rule is fully shadowed by an earlier filterless one.
 
 ### Corner Cases
 
@@ -264,7 +276,7 @@ Narrower-than-default rules that intercept edge cases (legState columns, filter 
 
 ### Terminating-State Rules
 
-Each rule narrows on `callState: "terminating"` so it outranks the active-state relay rules (relay-bye, etc.) by specificity whenever both can match. Events during teardown that no rule claims fall through to the framework's `noopFallback` (silent for ACK/responses; 501 Not Implemented for other unhandled requests).
+Each rule narrows on `callState: "terminating"` and is listed before the active-state relay rules (relay-bye, etc.), so it wins whenever both can match. Events during teardown that no rule claims fall through to the framework's `noopFallback` (silent for ACK/responses; 501 Not Implemented for other unhandled requests).
 
 | Rule | Matches | Actions |
 |---|---|---|

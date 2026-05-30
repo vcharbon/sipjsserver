@@ -183,10 +183,9 @@ message Call {
   repeated RuleStateEntry ruleState = 31;
   bool ruleStatePresent = 32;
 
-  // `Schema.optional(Schema.NullOr(T))` — three states (absent/null/value).
-  optional string transferJson = 33;
-  optional bool transferIsNull = 34;
-  // ids 35/36 (earlyPromote{Json,IsNull}) retired with ADR-0016; not reused.
+  // ids 33/34 (transfer{Json,IsNull}) retired with the REFER service migration
+  // (ADR-0016) — transfer state now rides inside the generic `ext` carry
+  // (extJson). ids 35/36 (earlyPromote{Json,IsNull}) retired earlier. Not reused.
 
   optional int32 messageCount = 37;
   repeated string terminatingRefreshLegs = 38;

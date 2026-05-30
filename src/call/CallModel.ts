@@ -442,59 +442,9 @@ export type ALegInviteSnapshot = typeof ALegInviteSnapshot.Type
 // than boolean truthiness, so absence means "explicitly disabled" per
 // SplitServiceLogic.md §D5.
 
-// ── Transfer state (REFER-driven blind transfer) ──────────────────────────
-//
-// Populated by TransferRules when the B-leg issues a REFER. Drives the
-// transfer phase state machine (declared via Match.transferPhase on rules)
-// and anchors the realigning re-INVITE exchanges. Pointer + payload data
-// only — no inline fiber/handle state.
-
-/** Phase marker for the REFER-driven transfer state machine. */
-export const TransferPhase = Schema.Literals([
-  /** REFER received, awaiting HTTP authorization decision. */
-  "refer-authorizing",
-  /** C-leg INVITE sent, awaiting final response. */
-  "c-ringing",
-  /** Re-INVITE toward C with A's SDP in flight. */
-  "c-realigning",
-  /** Re-INVITE toward A with C's endpoint in flight. */
-  "a-realigning",
-])
-export type TransferPhase = typeof TransferPhase.Type
-
-export const TransferState = Schema.Struct({
-  /** Current transfer phase — gates which TransferRules can match. */
-  phase: TransferPhase,
-  /** B-leg that issued the REFER (origin of the implicit subscription). */
-  referrerLegId: Schema.String,
-  /** Raw Refer-To URI as received from the referrer. */
-  referToUri: Schema.String,
-  /** Refer-To URI after any HTTP-driven rewrite (`new_refer_to`). */
-  effectiveReferToUri: Schema.optional(Schema.String),
-  /** Callback context propagated from the /call/refer response. */
-  callbackContext: Schema.optional(Schema.String),
-  /** Newly-created C-leg identifier (set when create-leg fires). */
-  cLegId: Schema.optional(Schema.String),
-  /** CSeq of the REFER request on the referrer's dialog (for NOTIFY correlation). */
-  referCSeq: Schema.optional(Schema.Int),
-  /** Wall-clock ms when the REFER was received — drives the overall safety timer. */
-  startedAtMs: Schema.Number,
-  /**
-   * Last 1xx status code forwarded on the REFER subscription as a NOTIFY
-   * sipfrag. Used by `transfer-c-1xx-to-notify` to dedupe repeats (180,
-   * then another 180 → only one NOTIFY). Unset until the first provisional
-   * is translated.
-   */
-  lastCLegNotifiedStatus: Schema.optional(Schema.Int),
-  /**
-   * C-leg's initial answer SDP (captured from C's 200 OK to the initial
-   * INVITE). Carried across the c-realigning phase so that when the
-   * c-realign re-INVITE (with A's SDP) succeeds we already know the SDP
-   * to offer back to A in the a-realigning re-INVITE.
-   */
-  cInitialSdp: Schema.optional(Schema.Uint8ArrayFromBase64),
-})
-export type TransferState = typeof TransferState.Type
+// REFER-driven blind transfer state is no longer a bespoke `Call` field — it
+// rides inside the generic per-service `ext` carry as the transfer service's
+// typed call-ext slice (`TransferCallExt` in referTransfer.ts). See ADR-0016.
 
 // ── Rule system (active rules + per-rule state on Call) ────────────────────
 
@@ -687,12 +637,6 @@ export const Call = Schema.Struct({
    * persists it here before action execution. Serialized through Redis.
    */
   ruleState: Schema.optional(Schema.Array(RuleStateEntry)),
-  /**
-   * REFER-driven blind transfer state. Populated on REFER receipt, cleared
-   * once the transfer completes (success or failure). The `phase` field
-   * gates which TransferRules can match via Match.transferPhase.
-   */
-  transfer: Schema.optional(Schema.NullOr(TransferState)),
   /**
    * Per-service opaque extension slot, keyed by callflow-service id. Carried
    * by core through the codec, never interpreted; each service decodes its
@@ -1198,8 +1142,13 @@ export function setRuleState(call: Call, ruleId: string, state: unknown): Call {
 // service's schema. The writers below preserve referential equality on a
 // no-op write so the RuleExecutor auto-flush gate stays honest.
 
-/** Write an Encoded ext slice into `call.ext[serviceId]`. */
+/** Write an Encoded ext slice into `call.ext[serviceId]`; `undefined` drops the key. */
 export function setCallExt(call: Call, serviceId: string, value: unknown): Call {
+  if (value === undefined) {
+    if (call.ext === undefined || !(serviceId in call.ext)) return call
+    const { [serviceId]: _dropped, ...rest } = call.ext
+    return { ...call, ext: rest }
+  }
   if (call.ext?.[serviceId] === value) return call
   return { ...call, ext: { ...call.ext, [serviceId]: value } }
 }

@@ -186,10 +186,20 @@ myService.rule({
 export const myPolicy = myService.toPolicyModule() // register like any policy module
 ```
 
-- **Activation = ext-presence.** Seed the slice from `/call/new` by returning
-  `serviceExt: { ...myService.activate({ phase: "announce" }) }` on the route
-  response; `applyRoute` writes it into `Call.ext`. The service's guard is
-  "ext key present" (or pass `alwaysActive: true` to `defineService`).
+- **Activation = one applicability predicate.** By default the service is
+  active iff its ext key is present: seed the slice from `/call/new` by
+  returning `serviceExt: { ...myService.activate({ phase: "announce" }) }` on
+  the route response (`applyRoute` writes it into `Call.ext`), or pass
+  `alwaysActive: true`. To gate on richer call context, pass
+  `isApplicable: (ctx) => boolean` to `defineService` — the single
+  applicability decision for the whole ruleset. Individual rules never re-check
+  activation; the predicate is composed into every rule's `filter`.
+- **Service rules automatically outrank core.** A service's rules live in
+  `SERVICE_LAYER`, above core's `CORE_LAYER`. While the service is active, its
+  rules win over any colliding core rule for the same event — you never name or
+  know core rule ids. Within your own service, the **order you declare rules**
+  is the precedence (first-match-wins); a rule whose `handle` returns
+  `undefined` passes the event to the next rule and ultimately down to core.
 - **Encoded vs decoded.** At rest (and across every codec), `ext[id]` holds the
   **Encoded** form — `Uint8ArrayFromBase64` rides as a base64 string. Never put
   a raw `Uint8Array` in `ext`; the framework owns encode/decode so rules only
@@ -247,13 +257,12 @@ const myPreProcessor = defineRule({
 
 ## Resolving overlap with default rules
 
-A new rule can collide with an existing rule when their `match` descriptors overlap and score the same specificity. The registry validator throws at startup in that case — you must declare the relationship explicitly:
+If your rule lives in a `defineService` / policy module, you usually do **nothing**: service rules are in `SERVICE_LAYER` and automatically win over the colliding core rule while the service is active — no override, no naming of core ids. The cases that still need attention:
 
-- **`overrides: "<base-id>"`** — the new rule replaces the base in the candidate set whenever its own `match` accepts the event. Used by `suppress-18x` (overrides `relay-provisional`) and by transfer rules (e.g. `transfer-c-realign-200` overrides `retransmit-200`).
-- **`composesWith: "<base-id>"`** — the new rule runs additively before the base; the base's actions are appended after. Used by `force-tag-consistency` to pre-seed tag mappings before `confirm-dialog`.
-- **Narrow the match** — add a column the existing rule doesn't set (e.g. `legState`, `legDisposition`, `transferPhase`), or replace `statusClass` with an exact `status`. The narrower rule wins by specificity, no override needed.
+- **A core rule must trump your service rule** (rare) — the lower layer can't win by position, so the core rule declares **`overrides: "<your-rule-id>"`**. This is exactly how the core seed rule `transfer-reject-replaces` beats the service rule `transfer-reject-second-refer`. `overrides` removes the named rule from the candidate set whenever the overriding rule's `match` accepts the event, regardless of layer.
+- **Two rules in the SAME layer collide** — order them: list the rule you want to win first (first-match-wins within a layer). For an additive relationship use **`composesWith: "<base-id>"`** (the composing rule runs first, the base's actions are appended after — see `force-tag-consistency` before `confirm-dialog`). For a hard takeover of an identically-matched sibling use **`overrides`** (see `suppress-18x` over `relay-provisional`).
 
-If you don't pick one of these, `createRuleRegistry` throws with the conflicting pair listed.
+There is no specificity scoring: a rule does **not** win by having more columns. The registry's reachability lint throws at startup only if a rule is statically unreachable — an earlier filterless rule in the same layer fully shadows it; the fix is to reorder, narrow the earlier rule, or declare `overrides`/`composesWith`.
 
 ## Action Types
 

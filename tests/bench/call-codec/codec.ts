@@ -440,7 +440,7 @@ const protoRoot = protobuf.Root.fromJSON({
             policyUpdateBody: { type: "bytes", id: 24 },
             activeRules: { rule: "repeated", type: "ActiveRule", id: 25 },
             ruleState: { rule: "repeated", type: "RuleStateEntry", id: 26 },
-            transferJson: { type: "string", id: 27 },
+            // id 27 (transferJson) retired — transfer state rides inside extJson.
             extJson: { type: "string", id: 28 },
           },
         },
@@ -481,12 +481,10 @@ const toProtoCall = (c: any): any => {
   }
   if (c.features !== undefined) out.featuresJson = JSON.stringify(c.features)
   if (c.policyUpdateHeaders !== undefined) out.policyUpdateHeadersJson = JSON.stringify(c.policyUpdateHeaders)
-  if (c.transfer !== undefined) out.transferJson = JSON.stringify(c.transfer)
   if (c.ext !== undefined) out.extJson = JSON.stringify(c.ext)
   if (c._topology !== undefined) out.topology = c._topology
   delete out.features
   delete out.policyUpdateHeaders
-  delete out.transfer
   delete out.ext
   delete out._topology
   // The production spread stamps __writtenAtMs on the Call before
@@ -514,12 +512,10 @@ const fromProtoCall = (p: any): any => {
   }
   if (p.featuresJson !== undefined) out.features = JSON.parse(p.featuresJson)
   if (p.policyUpdateHeadersJson !== undefined) out.policyUpdateHeaders = JSON.parse(p.policyUpdateHeadersJson)
-  if (p.transferJson !== undefined) out.transfer = JSON.parse(p.transferJson)
   if (p.extJson !== undefined) out.ext = JSON.parse(p.extJson)
   if (p.topology !== undefined) out._topology = p.topology
   delete out.featuresJson
   delete out.policyUpdateHeadersJson
-  delete out.transferJson
   delete out.extJson
   delete out.topology
   return out

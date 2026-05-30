@@ -279,22 +279,40 @@ describe("deactivate-rule reach-diff", () => {
   })
 })
 
-// ── clear-transfer ─────────────────────────────────────────────────────────
+// ── set-call-ext (replaces update-transfer / clear-transfer, ADR-0016) ──────
+//
+// Transfer state moved off the core `Call.transfer` field into the generic
+// per-service `ext` carry. The transfer service's `clearCallExt` lowers to a
+// `set-call-ext` with `value: undefined`, which drops the key from `Call.ext`.
 
-describe("clear-transfer reach-diff", () => {
-  test("names transfer only", () => {
+describe("set-call-ext reach-diff", () => {
+  test("writing a slice names ext only", () => {
+    const { aLeg, bLeg } = bridged()
+    const call: Call = { ...makeCall(aLeg, bLeg), ext: undefined }
+    const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
+    const { after } = runActions(
+      [{ type: "set-call-ext", serviceId: "transfer", value: { phase: "refer-authorizing" } }],
+      ctx,
+    )
+    expect(diffCall(call, after)).toEqual(new Set(["ext"]))
+  })
+
+  test("value undefined drops the key (names ext only)", () => {
     const { aLeg, bLeg } = bridged()
     const call: Call = {
       ...makeCall(aLeg, bLeg),
-      transfer: {
-        phase: "refer-authorizing",
-        referrerLegId: "a",
-        referToUri: "sip:charlie@example.com",
-        startedAtMs: 0,
+      ext: {
+        transfer: {
+          phase: "refer-authorizing",
+          referrerLegId: "a",
+          referToUri: "sip:charlie@example.com",
+          startedAtMs: 0,
+        },
       },
     }
     const ctx = makeCtx(call, aLeg, aLeg.dialogs[0], "from-a", make200InviteFromB("bob-tag"))
-    const { after } = runActions([{ type: "clear-transfer" }], ctx)
-    expect(diffCall(call, after)).toEqual(new Set(["transfer"]))
+    const { after } = runActions([{ type: "set-call-ext", serviceId: "transfer", value: undefined }], ctx)
+    expect(diffCall(call, after)).toEqual(new Set(["ext"]))
+    expect(after.ext?.["transfer"]).toBeUndefined()
   })
 })

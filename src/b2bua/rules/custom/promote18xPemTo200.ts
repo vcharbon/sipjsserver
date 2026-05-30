@@ -143,8 +143,10 @@ function pendingBLegId(call: { readonly bLegs: ReadonlyArray<{ readonly legId: s
 // ── Rule 1: promote-183-pem ──────────────────────────────────────────────
 //
 // Match: 183 + SDP + P-Early-Media from b-leg, before any earlier promotion.
-// Specificity (status:183 + filter) is the highest among any rule that could
-// claim a 1xx INVITE response, so this wins by ranking — no `overrides`.
+// Beats core `relay-provisional` automatically by layer (SERVICE_LAYER). No
+// override needed: the `relayFirst18xTo180` module is mutually exclusive with
+// this strategy (its guard excludes `promote-pem-to-200`), so its `suppress-18x`
+// is never a candidate on a promote-pem call.
 
 promotePem.rule({
   id: "promote-183-pem",
@@ -226,19 +228,13 @@ promotePem.rule({
 // Once promoted, every subsequent 18x from b (any fork, any status) must
 // stay on the b-side. The default `relay-provisional` would otherwise
 // forward another 18x to alice — confusing because alice already saw 200 OK.
-//
-// Specificity is statusClass:1xx + filter (=5) which is one above
-// relay-provisional (no filter, =4) but below promote-183-pem (status:183 +
-// filter, =6). The `overrides` declaration on `suppress-18x` is needed so
-// the registry validator skips the equal-specificity column overlap with
-// the relayFirst18xTo180 module's `suppress-18x` rule (mutually exclusive
-// at the policy-guard level, but the validator works column-only).
+// This SERVICE_LAYER rule beats core `relay-provisional` by layer; no override
+// is needed (the relayFirst18xTo180 module is inactive on a promote-pem call).
 
 promotePem.rule({
   id: "suppress-post-promote-18x",
   name: "Suppress 18x from b after promotion",
 
-  overrides: "suppress-18x",
   match: {
     kind: "response",
     cseqMethod: "INVITE",
@@ -301,10 +297,6 @@ promotePem.rule({
     // default confirm-dialog and ahead of cancel-200-crossing.
     legDisposition: ["pending", "bridged"],
     direction: "from-b",
-    // `transferPhase: null` carves out the REFER lifecycle (c-ringing /
-    // c-realigning / a-realigning) — the dedicated transfer rules own
-    // 2xx INVITE responses during those phases.
-    transferPhase: null,
   },
   filter: (_ctx, ext) => ext.promoted,
 
@@ -414,9 +406,6 @@ promotePem.rule({
     kind: "response",
     cseqMethod: "INVITE",
     direction: "from-a",
-    // `transferPhase: null` carves out a-realign responses (which a transfer
-    // phase owns) and keeps this rule scoped to the post-promote resync only.
-    transferPhase: null,
   },
   filter: (ctx, ext) => {
     const cseq = ctx.event.message.getHeader("cseq").seq
@@ -567,10 +556,6 @@ promotePem.rule({
     // case while leaving handle-481 to claim 481s on other methods /
     // outside the promotion window.
     callState: "active",
-    // `transferPhase: null` keeps the REFER c-leg failure rules
-    // (transfer-c-fail-initial / transfer-c-realign-fail) as the strict
-    // owners of failure responses inside the transfer lifecycle.
-    transferPhase: null,
   },
   filter: (_ctx, ext) => ext.promoted,
 

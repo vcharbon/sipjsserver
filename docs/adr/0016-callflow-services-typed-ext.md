@@ -34,10 +34,16 @@ per-leg data, and forced header-sniffing for activation.
   back via the rule's returned `callExt` slice (a `set-call-ext` action minted
   by the closure); leg-ext via a `set-leg-ext` action. A returned slice that is
   referentially the decoded input is a true no-op — no spurious Redis flush.
-- **Activation by presence** — the decision response carries a generic
+- **Activation by a single precise predicate** — each service has exactly one
+  applicability guard `(ctx) => boolean`; individual rules never re-check
+  activation (the guard is composed into every rule's `match.filter`). The
+  default is presence-based: the decision response carries a generic
   `serviceExt` descriptor (typed via `service.activate()`); `applyRoute` writes
-  it into the replicated `Call.ext`; a service is active iff its `ext` key is
-  present (or `alwaysActive`). Replaces the closed-`features` guard.
+  it into the replicated `Call.ext`; the service is active iff its `ext` key is
+  present (or `alwaysActive`). For richer conditions pass `isApplicable` to
+  `defineService`. Replaces the closed-`features` guard. **The guard MUST be
+  `false` unless the service genuinely owns the call** — see the precedence
+  section below for why an over-broad guard is a defect, not just a style issue.
 - **Per-service codec** — core carries `ext` as opaque bytes through its fast
   static base codec; each service owns its slice's codec (core-provided default
   = schema-driven Encoded form; integrator may supply a fast bytes codec).
@@ -49,6 +55,53 @@ per-leg data, and forced header-sniffing for activation.
   (call-ext only); REFER + `relayFirst18xTo180` follow; their bespoke named
   fields (`Call.transfer`, the retired `Call.earlyPromote`) and `features`
   activation retire as each migrates.
+
+## Rule precedence, ordering, and the decline contract
+
+Discovered while migrating REFER onto this template. These are framework
+contracts, not advice:
+
+- **Layered precedence, no per-rule priority.** Rule selection is
+  first-match-wins by **layer**, then registration order *within* a layer.
+  `createRuleRegistry` stamps core defaults `CORE_LAYER` and service /
+  policy-module rules `SERVICE_LAYER`; a higher layer wins. So an active
+  service automatically outranks a colliding core rule **without the author
+  naming any core rule id**. There is deliberately **no specificity scoring** —
+  the old per-column score was removed because it forced integrators to reason
+  about a global ranking and core internals (it "doesn't scale").
+- **Ordering is the author's tool, within their own layer.** Order rules
+  most-specific-first within `defaultRules` (core) or within a service. The
+  registry's reachability lint throws at startup only when a later rule is
+  fully shadowed by an earlier *filterless* same-layer rule. `overrides` /
+  `composesWith` survive as rare, layer-agnostic escape hatches: a core rule
+  that must trump a service rule (e.g. `transfer-reject-replaces` over the
+  service rule `transfer-reject-second-refer`), or two same-layer rules that
+  must resolve one way.
+- **The guard must be precise — false unless the service owns the call.** A
+  too-broad guard is a correctness defect: it makes a service active alongside
+  a sibling that owns the call, leaking its rules into the wrong flow. Concrete
+  case: `relayFirst18xTo180`'s guard was `features.relayFirst18xTo180 !==
+  undefined`, true for *all four* strategies including `promote-pem-to-200` —
+  so its `suppress-18x` competed with the PEM service's `promote-183-pem` on
+  the same 183. Old specificity masked it (183 outscored 1xx); the layered
+  model exposed it. Fix: the guard excludes `promote-pem-to-200`, making the
+  two services **mutually exclusive by applicability**. Two services that can
+  both match an event must be mutually exclusive by guard (or ordered /
+  `overrides`-resolved) — never left to chance.
+- **Easy "active" hint.** For presence-based services, omit `isApplicable` and
+  let the default guard fire on `call.ext[id]` presence (seed the slice from
+  `/call/new` via `service.activate(...)`). When several strategies share one
+  feature flag, the guard must discriminate the strategy this service owns, not
+  the flag's mere presence.
+- **Returning `undefined` declines the event.** A rule whose `handle()` returns
+  `undefined`/`void` does **not** consume the event — the dispatcher proceeds
+  to the next candidate (next in the same layer, then lower layers, ultimately
+  a core default). Returning `{ actions: [] }` *consumes* it as a handled
+  no-op. These are different: use `undefined` to defer to a more general rule;
+  use `{ actions: [] }` to claim-and-do-nothing. Because a declined service
+  rule falls through to core, a rule's `filter` should encode its precondition
+  precisely (e.g. `ctx.sourceLeg.legId === ext.cLegId`) rather than relying on
+  a defensive `undefined` return inside `handle()`.
 
 ## Considered options
 

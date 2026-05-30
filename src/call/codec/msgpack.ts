@@ -34,7 +34,7 @@ import type { Call } from "../CallModel.js"
  * re-running the bootstrap.
  */
 const CALL_STRUCTURES: ReadonlyArray<ReadonlyArray<string>> = [
-  ["callRef","aLeg","bLegs","activePeer","callbackContext","billingContext","aLegInvite","limiterEntries","timers","cdrEvents","state","createdAt","aLegPendingVias","aLegPendingCSeq","tagMap","traceId","rootSpanId","sampled","workerIndex","_topology","emergency","features","policyUpdateHeaders","policyUpdateBody","activeRules","ruleState","transfer","messageCount","ext"],
+  ["callRef","aLeg","bLegs","activePeer","callbackContext","billingContext","aLegInvite","limiterEntries","timers","cdrEvents","state","createdAt","aLegPendingVias","aLegPendingCSeq","tagMap","traceId","rootSpanId","sampled","workerIndex","_topology","emergency","features","policyUpdateHeaders","policyUpdateBody","activeRules","ruleState","messageCount","ext"],
   ["legId","callId","fromTag","source","state","disposition","dialogs","noAnswerTimeoutSec","byeDisposition","localUri","remoteUri","inviteRequestUri","pendingInviteTxn","ext"],
   ["address","port"],
   ["sip","ext"],
@@ -56,9 +56,16 @@ const CALL_STRUCTURES: ReadonlyArray<ReadonlyArray<string>> = [
   ["id","params","active"],
   [],
   ["ruleId","state"],
+  // transfer state no longer rides as a dedicated Call field; it lives inside
+  // the generic `ext` carry as the transfer service's call-ext slice (decoded
+  // JSON, records-mode learns the shape on first encode). This row keeps the
+  // transfer-call-ext shape so records-mode can compact Call.ext["transfer"].
   ["phase","referrerLegId","referToUri","effectiveReferToUri","callbackContext","cLegId","referCSeq","startedAtMs","lastCLegNotifiedStatus","cInitialSdp"],
   // promote-pem call-ext slice shape (records-mode compaction for Call.ext["promote-pem"]).
   ["promoted","promotedSdp","windowOpen","resyncReinviteCSeq"],
+  // generic single-field `{ role }` leg-ext slice shape (records-mode compaction
+  // for any Leg.ext[...] = { role } slice).
+  ["role"],
 ]
 
 export const CALL_STRUCTURES_HARDCODED: ReadonlyArray<ReadonlyArray<string>> =

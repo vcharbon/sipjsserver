@@ -33,6 +33,12 @@ export interface ServiceHandleResult<TCallExt> {
    * given) to leave `call.ext[id]` unchanged — no spurious write/flush.
    */
   readonly callExt?: TCallExt
+  /**
+   * Drop `call.ext[id]` — deactivates the service for this call. Mutually
+   * exclusive with `callExt` (clear wins). Use it for the terminal rules that
+   * end the callflow (reject / timeout / completion / rollback).
+   */
+  readonly clearCallExt?: boolean
 }
 
 /** Rule context as seen by a service's rules — `ext` keyed by the service id. */
@@ -59,7 +65,7 @@ export interface Service<Id extends string, TCallExt, TLegExt> {
     readonly alwaysActive?: boolean
     readonly stateKey?: string
     readonly composesWith?: string
-    readonly overrides?: string
+    readonly overrides?: string | ReadonlyArray<string>
     readonly onError?: "passthrough" | "terminate"
   }): AnyRuleDefinition
   /** Build a typed `{ [id]: encoded }` descriptor entry for the decision response. */
@@ -77,8 +83,15 @@ export function defineService<Id extends string, TCallExt = never, TLegExt = nev
   readonly legExt?: Schema.Codec<TLegExt, unknown>
   /** Active on every call regardless of ext-presence (e.g. core services). */
   readonly alwaysActive?: boolean
+  /**
+   * Whether this service's whole ruleset applies to a call. When omitted the
+   * default is ext-presence (`call.ext[id]` set) or `alwaysActive`. Supply it
+   * to gate the layer on richer call context — the single applicability
+   * decision for the service; individual rules never re-check activation.
+   */
+  readonly isApplicable?: (ctx: RuleContext) => boolean
 }): Service<Id, TCallExt, TLegExt> {
-  const { id, callExt, legExt, alwaysActive } = config
+  const { id, callExt, legExt, alwaysActive, isApplicable } = config
   const minted: AnyRuleDefinition[] = []
 
   const service: Service<Id, TCallExt, TLegExt> = {
@@ -113,10 +126,13 @@ export function defineService<Id extends string, TCallExt = never, TLegExt = nev
                     : a,
                 )
               }
-              // Append a call-ext write only when the slice actually changed —
-              // returning the same decoded object is a true no-op (no flush).
+              // Clear wins: drop call.ext[id] so the service deactivates.
+              // Otherwise append a call-ext write only when the slice actually
+              // changed — returning the same decoded object is a true no-op.
               const current = readSlice(ctx.call.ext, id)
-              if (r.callExt !== undefined && r.callExt !== current && callExt !== undefined) {
+              if (r.clearCallExt === true) {
+                actions = [...actions, { type: "set-call-ext", serviceId: id, value: undefined }]
+              } else if (r.callExt !== undefined && r.callExt !== current && callExt !== undefined) {
                 actions = [
                   ...actions,
                   { type: "set-call-ext", serviceId: id, value: Schema.encodeSync(callExt)(r.callExt) },
@@ -158,8 +174,9 @@ export function defineService<Id extends string, TCallExt = never, TLegExt = nev
         ...(legExt !== undefined ? { legExtSchema: legExt as Schema.Codec<unknown, unknown> } : {}),
         ...(alwaysActive !== undefined ? { alwaysActive } : {}),
       }
-      const guard = (ctx: RuleContext): boolean =>
-        alwaysActive === true || readSlice(ctx.call.ext, id) !== undefined
+      const guard = isApplicable ??
+        ((ctx: RuleContext): boolean =>
+          alwaysActive === true || readSlice(ctx.call.ext, id) !== undefined)
       return { id, guard, rules: minted, __service: runtime }
     },
   }

@@ -16,7 +16,7 @@ import type {
   SipResponseTagged,
   ParsedCSeqField,
 } from "../../../sip/types.js"
-import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType, TransferPhase, TransferState } from "../../../call/CallModel.js"
+import type { Call, CallModelState, Leg, LegState, LegDisposition, Dialog, CdrEventType, TimerType } from "../../../call/CallModel.js"
 import type { AppConfigData } from "../../../config/AppConfig.js"
 import type { CallEvent } from "../../../sip/SipRouter.js"
 import type { CallDecisionEngine } from "../../../decision/CallDecisionEngine.js"
@@ -27,8 +27,9 @@ import type { BodyUpdate, HeaderUpdates, RuriOp } from "./actions/types.js"
 // ── Declarative match schema (reified predicates) ─────────────────────────
 //
 // Every rule declares a `match` object. Columns are discriminated by event
-// kind; the Matcher picks the strictly-most-specific rule at runtime, and
-// the RuleRegistry validates shadowing at startup. See
+// kind; the Matcher keeps every rule whose columns (+ optional filter) accept
+// the event and picks the winner by layer then registration order. The
+// RuleRegistry validates intra-layer reachability at startup. See
 // docs/AdvancedCallModel.md for the full design and column semantics.
 
 /** SIP methods the B2BUA discriminates on in rule matching. */
@@ -41,6 +42,20 @@ export type StatusClass = "1xx" | "2xx" | "3xx" | "4xx" | "5xx" | "6xx"
 
 /** Direction an event arrived from. */
 export type Direction = "from-a" | "from-b"
+
+// ── Precedence layers ─────────────────────────────────────────────────────
+//
+// Rule selection is layered: when several rules accept the same event, a rule
+// in a HIGHER layer wins, and within a layer the registration/array order
+// decides (first-match-wins). Layers are stamped by `createRuleRegistry` from
+// provenance — authors never set them. Core defaults sit in CORE_LAYER; a
+// callflow service / policy module sits in SERVICE_LAYER, so an active service
+// automatically takes precedence over core for the same event without naming
+// any core rule id. The rare cross-cutting exception (a core rule that must
+// trump a service rule, e.g. `transfer-reject-replaces`) uses `overrides`,
+// which is layer-agnostic.
+export const CORE_LAYER = 0
+export const SERVICE_LAYER = 1
 
 /** Singleton or array form for enum columns. */
 type OneOrMany<T> = T | ReadonlyArray<T>
@@ -56,24 +71,6 @@ type OneOrMany<T> = T | ReadonlyArray<T>
  */
 export type MatchFilter<M extends Match = Match> = (ctx: RuleContext<M>) => boolean
 
-/**
- * Transfer-phase gate.
- *
- * Rules opt into a TransferPhase to express that they should only match while
- * the call's `transfer.phase` is in a particular state (or set of states).
- *
- * - `undefined` (omitted): rule runs regardless of transfer state — the
- *   normal case for default rules that know nothing about REFER.
- * - `null` (or array containing `null`): rule requires `call.transfer` to be
- *   absent/cleared. Use this to assert "non-transfer" when necessary.
- * - phase literal(s): rule only fires when `call.transfer?.phase` is one of
- *   the listed phases.
- */
-export type TransferPhaseGate =
-  | TransferPhase
-  | ReadonlyArray<TransferPhase | null>
-  | null
-
 /** Match descriptor for an inbound SIP request. */
 export interface RequestMatch {
   readonly kind: "request"
@@ -83,7 +80,6 @@ export interface RequestMatch {
   readonly legState?: OneOrMany<LegState>
   readonly legDisposition?: OneOrMany<LegDisposition>
   readonly direction?: Direction
-  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter<RequestMatch>
 }
 
@@ -100,7 +96,6 @@ export interface ResponseMatch {
   readonly legState?: OneOrMany<LegState>
   readonly legDisposition?: OneOrMany<LegDisposition>
   readonly direction?: Direction
-  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter<ResponseMatch>
 }
 
@@ -110,7 +105,6 @@ export interface TimerMatch {
   /** Omitted = match any timer type. */
   readonly timerType?: OneOrMany<TimerType>
   readonly callState?: OneOrMany<CallModelState>
-  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter<TimerMatch>
 }
 
@@ -119,7 +113,6 @@ export interface TimeoutMatch {
   readonly kind: "timeout"
   readonly method?: OneOrMany<SipMethod>
   readonly callState?: OneOrMany<CallModelState>
-  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter<TimeoutMatch>
 }
 
@@ -127,7 +120,6 @@ export interface TimeoutMatch {
 export interface CancelledMatch {
   readonly kind: "cancelled"
   readonly callState?: OneOrMany<CallModelState>
-  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter<CancelledMatch>
 }
 
@@ -143,7 +135,6 @@ export interface InternalEventMatch {
   /** Omitted = match any outcome. */
   readonly outcome?: OneOrMany<string>
   readonly callState?: OneOrMany<CallModelState>
-  readonly transferPhase?: TransferPhaseGate
   readonly filter?: MatchFilter<InternalEventMatch>
 }
 
@@ -179,9 +170,6 @@ type Singleton<T> = T extends ReadonlyArray<infer U> ? U : T
 type IsInDialogRequest<M extends RequestMatch> =
     M extends { readonly legState: "confirmed" } ? true
   : M extends { readonly legState: ReadonlyArray<infer LS> } ? "confirmed" extends LS ? true : false
-  : M extends { readonly transferPhase: TransferPhase } ? true
-  : M extends { readonly transferPhase: ReadonlyArray<infer P> }
-      ? P extends TransferPhase ? true : false
   : M extends { readonly callState: "bridged" } ? true
   : false
 
@@ -234,26 +222,6 @@ export type DirectionFor<M extends Match> =
   [Match] extends [M] ? Direction
     : M extends { readonly direction: infer D } ? D extends Direction ? D : Direction : Direction
 
-/**
- * Narrow `ctx.call.transfer` from `Match.transferPhase`.
- *
- * - `transferPhase: null`              → transfer is `null | undefined`
- * - `transferPhase: <TransferPhase>`   → transfer non-null, `phase` literal-narrowed
- * - `transferPhase: ReadonlyArray<…>`  → transfer non-null, `phase` is the union
- * - omitted                             → transfer stays at the wide type
- */
-export type TransferFor<M extends Match> =
-    M extends { readonly transferPhase: null } ? null | undefined
-  : M extends { readonly transferPhase: infer P }
-      ? P extends TransferPhase
-          ? Omit<TransferState, "phase"> & { readonly phase: P }
-      : P extends ReadonlyArray<infer Q>
-          ? Q extends TransferPhase
-              ? Omit<TransferState, "phase"> & { readonly phase: Q }
-              : TransferState | null | undefined
-          : TransferState | null | undefined
-  : TransferState | null | undefined
-
 /** Narrow `ctx.call.state` from `Match.callState`. */
 type CallStateFor<M extends Match> =
   M extends { readonly callState: infer S }
@@ -264,14 +232,13 @@ type CallStateFor<M extends Match> =
 
 /**
  * Narrow `ctx.call`. The wide-case guard makes `CallFor<Match>` reduce back to
- * `Call` (preserving `transfer?` optionality and `state` width); only specific
- * matches synthesize the narrowed shape.
+ * `Call` (preserving `state` width); only specific matches synthesize the
+ * narrowed shape.
  */
 export type CallFor<M extends Match> =
   [Match] extends [M]
     ? Call
-    : Omit<Call, "transfer" | "state"> & {
-        readonly transfer: TransferFor<M>
+    : Omit<Call, "state"> & {
         readonly state: CallStateFor<M>
       }
 
@@ -673,12 +640,6 @@ export type RuleAction =
   | { readonly type: "send-reinvite"; readonly legId: string;
       readonly bodyUpdate?: BodyUpdate; readonly headerUpdates?: HeaderUpdates }
 
-  // ── REFER transfer state management ──
-  // update-transfer merges onto Call.transfer (creating it if absent).
-  // clear-transfer nulls Call.transfer outright (final cleanup).
-  | { readonly type: "update-transfer"; readonly update: Partial<TransferState> }
-  | { readonly type: "clear-transfer" }
-
   // ── Callflow-service ext writes (ADR-0016) ──
   //
   // set-call-ext writes an Encoded per-service slice into `call.ext[serviceId]`;
@@ -707,6 +668,39 @@ export interface RuleHandleResult<TState> {
  * processes them. Rules are registered once at startup; activated per-call
  * via the HTTP API response.
  *
+ * ── SELECTION CONTRACT (read before writing a rule) ───────────────────────
+ *
+ * For each event the Matcher keeps every ACTIVE rule whose `match` (+ optional
+ * `filter`) accepts it, then picks a winner — there is NO per-rule priority /
+ * specificity score:
+ *
+ *   1. LAYER first. Core defaults are CORE_LAYER; callflow-service /
+ *      policy-module rules are SERVICE_LAYER (stamped by `createRuleRegistry` —
+ *      you never set `layer`). A higher layer wins, so an active service rule
+ *      automatically beats a colliding core rule WITHOUT naming it.
+ *   2. REGISTRATION ORDER within a layer. List the more-specific rule first;
+ *      first-match-wins. Order in `defaultRules` / within a service is
+ *      authoritative. The registry throws at startup if a later rule is fully
+ *      shadowed by an earlier filterless rule in the same layer.
+ *
+ * DECLINE BY RETURNING `undefined`. A `handle()` returning `undefined`/`void`
+ * does NOT consume the event — the dispatcher moves to the next candidate (next
+ * in this layer, then lower layers, ultimately a core default). Returning
+ * `{ actions: [] }` CONSUMES the event as a handled no-op. These differ:
+ *   - `undefined`      → "not mine, let someone else handle it"
+ *   - `{ actions: [] }` → "mine, but nothing to do"
+ * Because a declined service rule falls through to core, encode your
+ * precondition in `filter` (e.g. `ctx.sourceLeg.legId === ext.cLegId`) rather
+ * than relying on a defensive `undefined` return inside `handle()`.
+ *
+ * ACTIVATION. A service/policy rule only competes when its guard says the
+ * service is active. That guard MUST be false unless the service genuinely
+ * owns the call (see Service.ts `isApplicable` and ADR-0016) — an over-broad
+ * guard leaks your rules into a sibling service's flow.
+ *
+ * `overrides` / `composesWith` are RARE, layer-agnostic escape hatches (below)
+ * — not the normal way to win. Layer + order handle the common case.
+ *
  * TState — rule-specific state (serializable via stateSchema)
  * TParams — rule-specific configuration from HTTP response (decoded via paramsSchema)
  */
@@ -721,6 +715,14 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
    * Policy module rules are set to alwaysActive by createRuleRegistry.
    */
   readonly alwaysActive?: boolean
+
+  /**
+   * Precedence layer (CORE_LAYER / SERVICE_LAYER). Stamped by
+   * `createRuleRegistry` from provenance — authors never set it. Higher layer
+   * wins when two rules accept the same event; within a layer, registration
+   * order decides. Treated as CORE_LAYER when absent.
+   */
+  readonly layer?: number
 
   /** Display name for logging and tracing. */
   readonly name: string
@@ -753,19 +755,26 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
   readonly composesWith?: string
 
   /**
-   * Declarative override — this rule replaces the named base rule in the
-   * matcher's candidate set whenever its own match descriptor is satisfied
-   * AND its policy-module guard (if any) is active. Used when a custom rule
-   * has the identical match signature as a default rule (would otherwise
-   * collide at registry build time) and needs to fully take over the slot.
+   * Declarative override — removes the named rule(s) from the candidate set
+   * whenever this rule's match (+ guard) accepts the event. LAYER-AGNOSTIC, so
+   * it is the one tool that lets a LOWER-layer rule beat a higher one.
    *
-   * Example: suppress-18x overrides relay-provisional.
+   * RARE by design — layer + registration order handle the common case (a
+   * service rule already beats core by layer; you do NOT need `overrides` for
+   * that). Reach for it only when:
+   *   - a core rule must trump a service rule (lower beats higher), e.g.
+   *     `transfer-reject-replaces` over `transfer-reject-second-refer`; or
+   *   - two SAME-layer rules with identical matches must resolve one way, e.g.
+   *     `suppress-18x` over `relay-provisional`.
+   *
+   * Array form overrides multiple base rules at once.
    */
-  readonly overrides?: string
+  readonly overrides?: string | ReadonlyArray<string>
 
   /**
-   * Declarative match descriptor. The Matcher uses this to pick the winning
-   * rule by strict specificity. Required for every rule.
+   * Declarative match descriptor. The Matcher keeps every rule whose `match`
+   * (and optional `filter`) accepts the event; the winner is chosen by layer
+   * then registration order (first-match-wins). Required for every rule.
    */
   readonly match: Match
 
@@ -790,8 +799,11 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
 
   /**
    * Process an event. Returns:
-   * - RuleHandleResult: rule consumed the event (actions + updated state)
-   * - undefined: rule passes — event flows to next rule or default handler
+   * - `{ actions, state }`: rule CONSUMES the event (actions execute; `actions:
+   *   []` is a valid "handled, nothing to do" no-op).
+   * - `undefined`/`void`: rule DECLINES — the event flows to the next candidate
+   *   (next in this layer, then lower layers, ultimately a core default).
+   * See the SELECTION CONTRACT on the interface: `undefined` ≠ `{ actions: [] }`.
    */
   readonly handle: (
     ctx: RuleContext,
@@ -815,7 +827,7 @@ export type AnyRuleDefinition = RuleDefinition<any, any>
  *
  * `defineRule` infers `TMatch` from the literal `match` value, so the handler's
  * `ctx` is typed as `RuleContext<TMatch>` — narrowed event, message, direction,
- * call.transfer, sourceDialog all derived from the match-criteria. The result
+ * call.state, sourceDialog all derived from the match-criteria. The result
  * is a plain `RuleDefinition<TState, TParams>` (handler context erased to the
  * wide form) which the dispatcher invokes via the same code path as legacy
  * rules; the cast is sound because the dispatcher only invokes the handler
@@ -828,7 +840,7 @@ export type AnyRuleDefinition = RuleDefinition<any, any>
  *   name: "Transfer intercept REFER",
  *   match: {
  *     kind: "request", method: "REFER", direction: "from-b",
- *     callState: "bridged", transferPhase: null,
+ *     callState: "bridged",
  *   },
  *   stateSchema: Schema.Undefined,
  *   paramsSchema: Schema.Undefined,
@@ -837,7 +849,6 @@ export type AnyRuleDefinition = RuleDefinition<any, any>
  *     // ctx.event.message: InDialogMethodRequest<"REFER"> — to.tag, from.tag both string
  *     // ctx.sourceDialog: Dialog (non-undefined)
  *     // ctx.direction: "from-b"
- *     // ctx.call.transfer: null | undefined
  *     // ctx.call.state: "bridged"
  *     return undefined
  *   }),
@@ -865,7 +876,7 @@ export function defineRule<
     readonly alwaysActive?: boolean
     readonly stateKey?: string
     readonly composesWith?: string
-    readonly overrides?: string
+    readonly overrides?: string | ReadonlyArray<string>
     readonly onError?: "passthrough" | "terminate"
   },
 ): RuleDefinition<TState, TParams> {

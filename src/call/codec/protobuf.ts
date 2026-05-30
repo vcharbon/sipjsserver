@@ -25,8 +25,8 @@
  *   - `_topology`        ↔ `topology`         (proto identifiers can't lead with `_`)
  *   - `features`         ↔ `featuresJson`     (closed union, structurally serialised as JSON)
  *   - `policyUpdateHeaders` ↔ `policyUpdateHeadersJson`
- *   - `transfer`         ↔ `transferJson`     (+ `transferIsNull` for null)
- *   - `Call.ext` / `Leg.ext` ↔ `extJson`      (opaque per-service slices, JSON)
+ *   - `Call.ext` / `Leg.ext` ↔ `extJson`      (opaque per-service slices, JSON;
+ *      transfer state now rides inside `ext` as the transfer service slice)
  *   - `ActiveRule.params`     ↔ `paramsJson`  (+ `paramsPresent`)
  *   - `RuleStateEntry.state`  ↔ `stateJson`   (+ `statePresent`)
  *   - `pendingInviteTxn`      ↔ `pendingInviteTxnJson` (best-effort handle)
@@ -169,13 +169,6 @@ const toProtoObject = (call: Call): Record<string, unknown> => {
   if (call.ruleState !== undefined) {
     out.ruleState = call.ruleState.map(encodeRuleState)
     out.ruleStatePresent = true
-  }
-  if (call.transfer !== undefined) {
-    if (call.transfer === null) {
-      out.transferIsNull = true
-    } else {
-      out.transferJson = JSON.stringify(call.transfer)
-    }
   }
   if (call.ext !== undefined) out.extJson = JSON.stringify(call.ext)
   if (call.messageCount !== undefined) out.messageCount = call.messageCount
@@ -337,12 +330,6 @@ const fromProtoObject = (p: Record<string, unknown>): Call => {
         ? { state: r.stateJson === undefined ? undefined : JSON.parse(r.stateJson) }
         : {}),
     }))
-  }
-
-  if (p.transferIsNull === true) {
-    out.transfer = null
-  } else if (p.transferJson !== undefined) {
-    out.transfer = JSON.parse(p.transferJson as string)
   }
 
   if (p.extJson !== undefined) out.ext = JSON.parse(p.extJson as string)

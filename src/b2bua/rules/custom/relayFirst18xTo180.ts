@@ -384,8 +384,16 @@ const fakePrackHandleUpdateFromA = defineRule({
 // ── Single export: the PolicyModule ───────────────────────────────────────
 
 export const relayFirst18xTo180 = definePolicyModule({
+  // Applicable only for THIS module's own early-media strategies. The
+  // `promote-pem-to-200` strategy is owned by the promote18xPemTo200 service
+  // (which seeds its own `ext["promote-pem"]`), so this module's rules must be
+  // inactive there — otherwise `suppress-18x` would compete with PEM's
+  // promotion. The two are mutually exclusive by strategy.
   id: "relayFirst18x_to_180",
-  guard: (ctx) => ctx.call.features?.relayFirst18xTo180 !== undefined,
+  guard: (ctx) => {
+    const strategy = ctx.call.features?.relayFirst18xTo180?.strategy
+    return strategy !== undefined && strategy !== "promote-pem-to-200"
+  },
   rules: [
     suppress18x,
     forceTagConsistency,

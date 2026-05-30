@@ -3,9 +3,9 @@
  * Built at startup; immutable after construction.
  */
 
-import type { AnyRuleDefinition, Match, RuleContext } from "./RuleDefinition.js"
+import type { AnyRuleDefinition, Match, RuleContext, ResponseMatch, StatusClass } from "./RuleDefinition.js"
+import { CORE_LAYER, SERVICE_LAYER } from "./RuleDefinition.js"
 import type { PolicyModule, ServiceRuntime } from "./PolicyModule.js"
-import { specificityScore } from "./Matcher.js"
 
 export interface RuleRegistry {
   readonly definitions: ReadonlyMap<string, AnyRuleDefinition>
@@ -20,10 +20,11 @@ export interface RuleRegistry {
 /**
  * Create a rule registry from built-in rules and optional policy modules.
  *
- * Built-in rules are registered as-is (they are alwaysActive by definition).
- * Policy module rules have their module's guard composed into each rule's
- * match.filter and are set to alwaysActive — the guard is the activation
- * mechanism.
+ * Built-in rules are registered as-is in CORE_LAYER (they are alwaysActive by
+ * definition). Policy module / service rules have their module's guard composed
+ * into each rule's match.filter, are set to alwaysActive (the guard is the
+ * activation mechanism), and are stamped into SERVICE_LAYER so an active
+ * service automatically outranks core for the same event (see Matcher.pickRanked).
  */
 export function createRuleRegistry(
   builtinRules: ReadonlyArray<AnyRuleDefinition>,
@@ -48,6 +49,7 @@ export function createRuleRegistry(
       allRules.push({
         ...rule,
         alwaysActive: true,
+        layer: SERVICE_LAYER,
         match: { ...rule.match, filter: guardedFilter as never },
       })
     }
@@ -66,130 +68,114 @@ export function createRuleRegistry(
   return { definitions: map, services }
 }
 
-// ── Match schema validation (shadow / reachability) ───────────────────────
+// ── Intra-layer reachability validation ───────────────────────────────────
+//
+// Selection is first-match-wins by layer then registration order (no
+// specificity scoring). The one authoring hazard this introduces is an
+// UNREACHABLE rule: a later rule in the SAME layer whose every matchable
+// event is already claimed by an earlier filterless rule in that layer. Such
+// a rule can never fire. (Cross-layer shadowing is by design — a higher layer
+// is meant to win — so this check is strictly intra-layer.)
 
-/** Do two column values share any concrete value? */
-function valuesOverlap(a: unknown, b: unknown): boolean {
-  if (a === undefined || b === undefined) return true
-  const arrA = Array.isArray(a) ? (a as ReadonlyArray<unknown>) : [a]
-  const arrB = Array.isArray(b) ? (b as ReadonlyArray<unknown>) : [b]
-  for (const va of arrA) if (arrB.includes(va)) return true
-  return false
+/** Does column value `aCol` accept every concrete value `bCol` can take? */
+function colSubsumes(aCol: unknown, bCol: unknown): boolean {
+  if (aCol === undefined) return true   // a accepts anything in this column
+  if (bCol === undefined) return false  // b is broader than a here
+  const aArr = Array.isArray(aCol) ? (aCol as ReadonlyArray<unknown>) : [aCol]
+  const bArr = Array.isArray(bCol) ? (bCol as ReadonlyArray<unknown>) : [bCol]
+  return bArr.every((v) => aArr.includes(v))
 }
 
-/** Return true if two same-kind match descriptors can match a common event. */
-function matchesOverlap(a: Match, b: Match): boolean {
+/** Does response `a`'s status/statusClass dimension subsume `b`'s? */
+function statusDimSubsumes(a: ResponseMatch, b: ResponseMatch): boolean {
+  if (a.status === undefined && a.statusClass === undefined) return true // a: any status
+  if (a.status !== undefined) return b.status === a.status               // a: one exact status
+  const aClasses = (Array.isArray(a.statusClass) ? a.statusClass : [a.statusClass]) as ReadonlyArray<StatusClass>
+  if (b.status !== undefined) {
+    return aClasses.includes((Math.floor(b.status / 100) + "xx") as StatusClass)
+  }
+  if (b.statusClass !== undefined) {
+    const bClasses = (Array.isArray(b.statusClass) ? b.statusClass : [b.statusClass]) as ReadonlyArray<StatusClass>
+    return bClasses.every((c) => aClasses.includes(c))
+  }
+  return false // b: any status, a: a class → not subsumed
+}
+
+/** True when every event `b` matches is also matched by `a` (same kind). */
+function matchSubsumes(a: Match, b: Match): boolean {
   if (a.kind !== b.kind) return false
   switch (a.kind) {
     case "request": {
       const bb = b as typeof a
-      return (
-        valuesOverlap(a.method, bb.method) &&
-        valuesOverlap(a.callState, bb.callState) &&
-        valuesOverlap(a.legState, bb.legState) &&
-        valuesOverlap(a.legDisposition, bb.legDisposition) &&
-        valuesOverlap(a.direction, bb.direction) &&
-        valuesOverlap(a.transferPhase, bb.transferPhase)
-      )
+      return colSubsumes(a.method, bb.method) && colSubsumes(a.callState, bb.callState) &&
+        colSubsumes(a.legState, bb.legState) && colSubsumes(a.legDisposition, bb.legDisposition) &&
+        colSubsumes(a.direction, bb.direction)
     }
     case "response": {
       const bb = b as typeof a
-      if (!valuesOverlap(a.cseqMethod, bb.cseqMethod)) return false
-      // status vs statusClass — compare conservatively (assume overlap unless both are exact and differ)
-      if (a.status !== undefined && bb.status !== undefined && a.status !== bb.status) return false
-      if (a.status !== undefined && bb.statusClass !== undefined) {
-        // exact a.status must fall into bb.statusClass range
-        const cls = Math.floor(a.status / 100) + "xx"
-        if (!valuesOverlap(bb.statusClass, cls)) return false
-      }
-      if (bb.status !== undefined && a.statusClass !== undefined) {
-        const cls = Math.floor(bb.status / 100) + "xx"
-        if (!valuesOverlap(a.statusClass, cls)) return false
-      }
-      if (a.statusClass !== undefined && bb.statusClass !== undefined &&
-          !valuesOverlap(a.statusClass, bb.statusClass)) return false
-      return (
-        valuesOverlap(a.callState, bb.callState) &&
-        valuesOverlap(a.legState, bb.legState) &&
-        valuesOverlap(a.legDisposition, bb.legDisposition) &&
-        valuesOverlap(a.direction, bb.direction) &&
-        valuesOverlap(a.transferPhase, bb.transferPhase)
-      )
+      return colSubsumes(a.cseqMethod, bb.cseqMethod) && statusDimSubsumes(a, bb) &&
+        colSubsumes(a.callState, bb.callState) && colSubsumes(a.legState, bb.legState) &&
+        colSubsumes(a.legDisposition, bb.legDisposition) && colSubsumes(a.direction, bb.direction)
     }
     case "timer": {
       const bb = b as typeof a
-      return (
-        valuesOverlap(a.timerType, bb.timerType) &&
-        valuesOverlap(a.callState, bb.callState) &&
-        valuesOverlap(a.transferPhase, bb.transferPhase)
-      )
+      return colSubsumes(a.timerType, bb.timerType) && colSubsumes(a.callState, bb.callState)
     }
     case "timeout": {
       const bb = b as typeof a
-      return (
-        valuesOverlap(a.method, bb.method) &&
-        valuesOverlap(a.callState, bb.callState) &&
-        valuesOverlap(a.transferPhase, bb.transferPhase)
-      )
+      return colSubsumes(a.method, bb.method) && colSubsumes(a.callState, bb.callState)
     }
     case "cancelled": {
       const bb = b as typeof a
-      return (
-        valuesOverlap(a.callState, bb.callState) &&
-        valuesOverlap(a.transferPhase, bb.transferPhase)
-      )
+      return colSubsumes(a.callState, bb.callState)
     }
     case "internal-event": {
       const bb = b as typeof a
-      return (
-        valuesOverlap(a.topic, bb.topic) &&
-        valuesOverlap(a.outcome, bb.outcome) &&
-        valuesOverlap(a.callState, bb.callState) &&
-        valuesOverlap(a.transferPhase, bb.transferPhase)
-      )
+      return colSubsumes(a.topic, bb.topic) && colSubsumes(a.outcome, bb.outcome) &&
+        colSubsumes(a.callState, bb.callState)
     }
   }
 }
 
+/** Is there an explicit override/compose relationship between the two rules? */
+function relatedByDecl(a: AnyRuleDefinition, b: AnyRuleDefinition): boolean {
+  const declares = (o: string | ReadonlyArray<string> | undefined, id: string): boolean =>
+    o === id || (Array.isArray(o) && o.includes(id))
+  return declares(a.overrides, b.id) || declares(b.overrides, a.id) ||
+    a.composesWith === b.id || b.composesWith === a.id
+}
+
 /**
- * Throw if any two rules have overlapping match sets at equal specificity
- * with no explicit ordering. Each such pair would have ambiguous winner
- * selection at runtime — the only deterministic resolutions are:
- *   - declare `overrides: <other-id>` on one rule
- *   - declare `composesWith: <other-id>` on one rule
- *   - narrow one rule's match descriptor to disambiguate
+ * Throw if any rule is statically unreachable: an earlier same-layer rule with
+ * no `filter` whose match subsumes it always wins first. The fix is to reorder
+ * (put the specific rule first), narrow the earlier rule, or — when the
+ * earlier rule should defer — give it a `filter`. Rules deliberately related
+ * via `overrides`/`composesWith` are exempt.
+ *
+ * Note: a filter on the earlier rule means it may decline at runtime, so the
+ * later rule stays reachable — those pairs are not flagged (sound, no false
+ * positives from phase/role filters).
  */
 function validateMatchSchemas(rules: ReadonlyArray<AnyRuleDefinition>): void {
-  const byKind = new Map<string, AnyRuleDefinition[]>()
-  for (const r of rules) {
-    const bucket = byKind.get(r.match.kind) ?? []
-    bucket.push(r)
-    byKind.set(r.match.kind, bucket)
-  }
-
   const conflicts: Array<readonly [AnyRuleDefinition, AnyRuleDefinition]> = []
-  for (const bucket of byKind.values()) {
-    for (let i = 0; i < bucket.length; i++) {
-      for (let j = i + 1; j < bucket.length; j++) {
-        const a = bucket[i]!, b = bucket[j]!
-        if (!matchesOverlap(a.match, b.match)) continue
-        if (specificityScore(a.match) !== specificityScore(b.match)) continue
-        const overrideDeclared =
-          a.overrides === b.id || b.overrides === a.id ||
-          a.composesWith === b.id || b.composesWith === a.id
-        if (overrideDeclared) continue
-        conflicts.push([a, b])
-      }
+  for (let j = 0; j < rules.length; j++) {
+    const b = rules[j]!
+    for (let i = 0; i < j; i++) {
+      const a = rules[i]!
+      if ((a.layer ?? CORE_LAYER) !== (b.layer ?? CORE_LAYER)) continue
+      if (a.match.filter !== undefined) continue
+      if (relatedByDecl(a, b)) continue
+      if (matchSubsumes(a.match, b.match)) conflicts.push([a, b])
     }
   }
 
   if (conflicts.length > 0) {
     const lines = conflicts.map(([a, b]) =>
-      `  - '${a.id}' and '${b.id}': overlapping match, equal specificity`
+      `  - '${b.id}' is unreachable: earlier same-layer rule '${a.id}' (no filter) subsumes its match`
     ).join("\n")
     throw new Error(
-      `RuleRegistry: ${conflicts.length} unresolved match shadow${conflicts.length === 1 ? "" : "s"} detected.\n` +
-      `Each pair must declare overrides/composesWith or narrow its match descriptor:\n${lines}`
+      `RuleRegistry: ${conflicts.length} unreachable rule${conflicts.length === 1 ? "" : "s"} detected.\n` +
+      `Reorder (specific rule first), narrow the earlier rule, or declare overrides/composesWith:\n${lines}`
     )
   }
 }

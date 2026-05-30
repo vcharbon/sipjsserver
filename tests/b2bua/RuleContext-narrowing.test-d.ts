@@ -14,7 +14,6 @@ import type {
   RuleContext,
   EventFor,
   DirectionFor,
-  TransferFor,
   CallFor,
   DialogFor,
   Match,
@@ -25,7 +24,7 @@ import type {
   InDialogMethodRequest,
   MethodRequest,
 } from "../../src/sip/types.js"
-import type { Call, Dialog, TransferState } from "../../src/call/CallModel.js"
+import type { Call, Dialog } from "../../src/call/CallModel.js"
 import type { CallEvent } from "../../src/sip/SipRouter.js"
 
 /** Strict structural equality between two types. */
@@ -39,7 +38,6 @@ assertEqual<EventFor<Match>, CallEvent>(true)
 assertEqual<DirectionFor<Match>, "from-a" | "from-b">(true)
 assertEqual<CallFor<Match>, Call>(true)
 assertEqual<DialogFor<Match>, Dialog | undefined>(true)
-assertEqual<TransferFor<Match>, TransferState | null | undefined>(true)
 
 // ── kind: "request" → event.message: SipRequest ─────────────────────────
 
@@ -64,17 +62,6 @@ assertExtends<ReferMsg["method"], "REFER">()
 
 // ── In-dialog inference for requests ────────────────────────────────────
 
-// transferPhase: <non-null phase> → InDialogMethodRequest, sourceDialog: Dialog
-type CRingingMatch = {
-  readonly kind: "request"
-  readonly method: "INVITE"
-  readonly transferPhase: "c-ringing"
-}
-type CRingingMsg = EventFor<CRingingMatch> extends { readonly type: "sip" } ? EventFor<CRingingMatch>["message"] : never
-assertExtends<CRingingMsg, InDialogMethodRequest<"INVITE">>()
-type CRingingDialog = DialogFor<CRingingMatch>
-assertEqual<CRingingDialog, Dialog>(true)
-
 // legState: "confirmed" → InDialogRequest, sourceDialog: Dialog
 type ConfirmedMatch = { readonly kind: "request"; readonly legState: "confirmed" }
 type ConfirmedMsg = EventFor<ConfirmedMatch> extends { readonly type: "sip" } ? EventFor<ConfirmedMatch>["message"] : never
@@ -85,11 +72,6 @@ assertExtends<ConfirmedMsg, import("../../src/sip/types.js").InDialogRequest>()
 type ActiveMatch = { readonly kind: "request"; readonly callState: "active"; readonly legState: "confirmed" }
 type ActiveDialog = DialogFor<ActiveMatch>
 assertEqual<ActiveDialog, Dialog>(true)
-
-// transferPhase: null → call.transfer: null | undefined; sourceDialog stays Dialog | undefined
-type NoTransferMatch = { readonly kind: "request"; readonly transferPhase: null }
-assertEqual<TransferFor<NoTransferMatch>, null | undefined>(true)
-assertEqual<DialogFor<NoTransferMatch>, Dialog | undefined>(true)
 
 // ── direction narrowing ─────────────────────────────────────────────────
 
@@ -104,14 +86,11 @@ type Resp200InviteMsg = Resp200InviteEvent extends { readonly type: "sip" } ? Re
 // The narrowed message is a SipResponseTagged whose CSeq method is literal "INVITE".
 assertExtends<Resp200InviteMsg, SipResponseTagged>()
 
-// ── transferPhase: "c-ringing" narrows call.transfer.phase ──────────────
-
-type CRingingTransfer = TransferFor<CRingingMatch>
-// Phase is the literal, not the wide TransferPhase union.
-type CRingingPhase = CRingingTransfer extends { readonly phase: infer P } ? P : never
-assertEqual<CRingingPhase, "c-ringing">(true)
-
-// ── Sample full RuleContext on a transfer rule ──────────────────────────
+// ── Sample full RuleContext on the REFER seed rule ──────────────────────
+// (The `transferPhase` Match column + `ctx.call.transfer` narrowing were
+// retired with ADR-0016; the transfer flow gates phase via the service's
+// typed `ext.phase` filter, not a match column. In-dialog narrowing now comes
+// from `legState: "confirmed"`.)
 
 type ReferRuleMatch = {
   readonly kind: "request"
@@ -119,19 +98,16 @@ type ReferRuleMatch = {
   readonly direction: "from-b"
   readonly callState: "active"
   readonly legState: "confirmed"
-  readonly transferPhase: null
 }
 type Ctx = RuleContext<ReferRuleMatch>
 // Event narrows to a sip-request envelope carrying an in-dialog REFER.
 assertExtends<Ctx["event"]["type"], "sip">()
 type CtxMsg = Ctx["event"] extends { readonly type: "sip" } ? Ctx["event"]["message"] : never
 assertExtends<CtxMsg, InDialogMethodRequest<"REFER">>()
-// sourceDialog is non-undefined.
+// sourceDialog is non-undefined (legState: "confirmed").
 assertEqual<Ctx["sourceDialog"], Dialog>(true)
 // direction is the literal.
 assertEqual<Ctx["direction"], "from-b">(true)
-// transfer is null|undefined (we asserted "no active transfer" via transferPhase: null).
-assertEqual<Ctx["call"]["transfer"], null | undefined>(true)
 // call.state narrows to the literal.
 assertEqual<Ctx["call"]["state"], "active">(true)
 

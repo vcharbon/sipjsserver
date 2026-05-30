@@ -21,7 +21,7 @@ import type {
   FireAndForgetEffect,
 } from "../../../sip/SipRouter.js"
 import type { SipHeader, SipRequest, SipResponse } from "../../../sip/types.js"
-import type { TimerEntry, Leg, Dialog, TransferState, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
+import type { TimerEntry, Leg, Dialog, MakeDialogLegCtx, InviteTxnHandle } from "../../../call/CallModel.js"
 import { replaceTimerById } from "../../../call/timer-helpers.js"
 import {
   type Call,
@@ -495,12 +495,6 @@ function executeAction(
       break
     case "send-reinvite":
       executeSendReinvite(action, ctx, state)
-      break
-    case "update-transfer":
-      executeUpdateTransfer(action, ctx, state)
-      break
-    case "clear-transfer":
-      state.call = { ...state.call, transfer: null }
       break
     case "set-call-ext":
       state.call = setCallExt(state.call, action.serviceId, action.value)
@@ -2105,31 +2099,6 @@ function executeSendReinvite(
     label: `re-INVITE ${legId}`,
     legId,
   })
-}
-
-// ── update-transfer ───────────────────────────────────────────────────────
-
-/**
- * Merge a Partial<TransferState> onto `call.transfer`, or seed it when absent.
- *
- * When seeding from empty, the caller must include every required field of
- * TransferState (phase, referrerLegId, referToUri, startedAtMs). Subsequent
- * updates typically flip the phase or attach the created C-leg id / callback
- * context.
- */
-function executeUpdateTransfer(
-  action: Extract<RuleAction, { type: "update-transfer" }>,
-  _ctx: RuleContext,
-  state: ExecutionState,
-): void {
-  const { type, update } = action
-  void type
-
-  const existing = state.call.transfer ?? null
-  const merged = (existing === null
-    ? (update as TransferState)
-    : { ...existing, ...update }) satisfies TransferState
-  state.call = { ...state.call, transfer: merged }
 }
 
 // ── merge / split (peering primitives) ────────────────────────────────────

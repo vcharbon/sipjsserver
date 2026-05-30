@@ -27,6 +27,19 @@ const PemCallExt = Schema.Struct({
   resyncReinviteCSeq: Schema.optional(Schema.Int),
 })
 
+// The transfer service slices (mirror referTransfer.ts).
+const TransferCallExt = Schema.Struct({
+  phase: Schema.Literals(["refer-authorizing", "c-ringing", "c-realigning", "a-realigning"]),
+  referrerLegId: Schema.String,
+  referToUri: Schema.String,
+  effectiveReferToUri: Schema.optional(Schema.String),
+  callbackContext: Schema.optional(Schema.String),
+  cLegId: Schema.optional(Schema.String),
+  referCSeq: Schema.optional(Schema.Int),
+  startedAtMs: Schema.Number,
+  lastCLegNotifiedStatus: Schema.optional(Schema.Int),
+  cInitialSdp: Schema.optional(Schema.Uint8ArrayFromBase64),
+})
 const CODECS: ReadonlyArray<{ name: string; codec: CallBodyCodecApi }> = [
   { name: "Msgpack", codec: makeMsgpackUnsafe(false) },
   { name: "MsgpackRecords", codec: makeMsgpackUnsafe(true) },
@@ -45,10 +58,32 @@ const encodedSlice = Schema.encodeSync(PemCallExt)({
   resyncReinviteCSeq: 42,
 })
 
+// The transfer C-leg initial SDP — the Uint8Array/base64 trap, same as PEM's
+// promotedSdp. Riding inside the transfer service call-ext slice.
+const cInitialSdpBytes = new TextEncoder().encode(
+  "v=0\r\no=- 9001 1 IN IP4 10.30.0.7\r\ns=-\r\nc=IN IP4 10.30.0.7\r\nt=0 0\r\nm=audio 50000 RTP/AVP 8\r\n",
+)
+const encodedTransferSlice = Schema.encodeSync(TransferCallExt)({
+  phase: "c-realigning",
+  referrerLegId: "b-1",
+  referToUri: "sip:carol@example.com",
+  effectiveReferToUri: "sip:carol@10.30.0.7",
+  callbackContext: "xfer-ctx-77",
+  cLegId: "b-2",
+  referCSeq: 7,
+  startedAtMs: 1779440099_000,
+  lastCLegNotifiedStatus: 180,
+  cInitialSdp: cInitialSdpBytes,
+})
 const callWithExt: Call = {
   ...representativeCall,
-  ext: { "promote-pem": encodedSlice },
-  aLeg: { ...representativeCall.aLeg, ext: { "demo-leg-service": { role: "media" } } },
+  ext: { "promote-pem": encodedSlice, "transfer": encodedTransferSlice },
+  // The transfer service addresses legs by id (no leg-ext); a synthetic
+  // `demo-leg-service` exercises the generic leg-ext capability on the a-leg.
+  aLeg: {
+    ...representativeCall.aLeg,
+    ext: { "demo-leg-service": { role: "media" } },
+  },
 }
 
 describe("service-ext round-trip across codecs (ADR-0016)", () => {
@@ -69,6 +104,18 @@ describe("service-ext round-trip across codecs (ADR-0016)", () => {
       it("leg-ext entry survives encode→decode", () => {
         const decoded = codec.decode(codec.encode(callWithExt))
         expect(decoded.aLeg.ext?.["demo-leg-service"]).toEqual({ role: "media" })
+      })
+
+      it("transfer call-ext cInitialSdp base64 survives and re-decodes to bytes", () => {
+        const decoded = codec.decode(codec.encode(callWithExt))
+        const slice = decoded.ext?.["transfer"]
+        expect(slice).toEqual(encodedTransferSlice)
+        // cInitialSdp is a base64 string at rest, never a Uint8Array.
+        expect(typeof (slice as { cInitialSdp: unknown }).cInitialSdp).toBe("string")
+        const reDecoded = Schema.decodeUnknownSync(TransferCallExt)(slice)
+        expect(reDecoded.cInitialSdp).toEqual(cInitialSdpBytes)
+        expect(reDecoded.phase).toBe("c-realigning")
+        expect(reDecoded.cLegId).toBe("b-2")
       })
     })
   }

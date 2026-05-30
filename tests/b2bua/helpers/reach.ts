@@ -60,7 +60,7 @@ const CALL_ATOMIC_KEYS = [
   "policyUpdateHeaders",
   "activeRules",
   "ruleState",
-  "transfer",
+  "ext",
 ] as const satisfies ReadonlyArray<keyof Call>
 
 const LEG_ATOMIC_KEYS = [

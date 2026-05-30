@@ -1,20 +1,21 @@
 /**
- * Schema roundtrip tests for TransferState and Call.transfer.
+ * Schema round-trip tests for the transfer service slices (ADR-0016).
  *
- * Slice 3 of the REFER implementation: ensures the new optional transfer
- * field on Call encodes/decodes cleanly through Schema so it can survive
- * Redis persistence in later slices.
+ * Transfer state moved off the core `Call.transfer` field onto the transfer
+ * callflow service's typed call-ext (`TransferCallExt`) slice in
+ * referTransfer.ts, riding inside the generic `Call.ext` carry. Legs are
+ * addressed by id (no per-leg ext). This test re-points to those schemas and
+ * keeps locking the Schema shapes that REFER persistence depends on.
  */
 
 import { describe, expect, test } from "vitest"
 import { Schema } from "effect"
+import { Call, randomInitialCSeq, type Leg } from "../../src/call/CallModel.js"
 import {
-  Call,
+  TransferCallExt,
   TransferPhase,
-  TransferState,
-  randomInitialCSeq,
-  type Leg,
-} from "../../src/call/CallModel.js"
+  encodeTransferCallExt,
+} from "../../src/b2bua/rules/custom/referTransfer.js"
 
 const CallJson = Schema.fromJsonString(Call)
 
@@ -120,7 +121,7 @@ describe("TransferPhase schema", () => {
   })
 })
 
-describe("TransferState schema", () => {
+describe("TransferCallExt schema", () => {
   test("decodes a minimal transfer state", () => {
     const value = {
       phase: "refer-authorizing" as const,
@@ -128,7 +129,7 @@ describe("TransferState schema", () => {
       referToUri: "sip:charlie@192.0.2.30",
       startedAtMs: 1_700_000_000_000,
     }
-    const decoded = Schema.decodeUnknownSync(TransferState)(value)
+    const decoded = Schema.decodeUnknownSync(TransferCallExt)(value)
     expect(decoded).toEqual(value)
   })
 
@@ -143,45 +144,52 @@ describe("TransferState schema", () => {
       referCSeq: 42,
       startedAtMs: 1_700_000_000_000,
     }
-    const decoded = Schema.decodeUnknownSync(TransferState)(value)
+    const decoded = Schema.decodeUnknownSync(TransferCallExt)(value)
     expect(decoded).toEqual(value)
+  })
+
+  test("cInitialSdp encodes to base64 at rest and re-decodes to bytes", () => {
+    const sdp = new TextEncoder().encode("v=0\r\no=- 1 1 IN IP4 1.1.1.1\r\n")
+    const encoded = encodeTransferCallExt({
+      phase: "c-realigning",
+      referrerLegId: "b-1",
+      referToUri: "sip:c@example.com",
+      cLegId: "b-2",
+      startedAtMs: 1000,
+      cInitialSdp: sdp,
+    })
+    expect(typeof (encoded as { cInitialSdp: unknown }).cInitialSdp).toBe("string")
+    const reDecoded = Schema.decodeUnknownSync(TransferCallExt)(encoded)
+    expect(reDecoded.cInitialSdp).toEqual(sdp)
   })
 })
 
-describe("Call.transfer field", () => {
-  test("roundtrips a call with transfer in c-ringing phase through JSON", () => {
+describe("transfer slice rides inside Call.ext", () => {
+  test("roundtrips a call carrying the transfer slice in ext through JSON", () => {
     const call: typeof Call.Type = {
       ...baseCall(),
-      transfer: {
-        phase: "c-ringing",
-        referrerLegId: "b-1",
-        referToUri: "sip:charlie@192.0.2.30",
-        cLegId: "b-2",
-        referCSeq: 42,
-        startedAtMs: 1_700_000_000_000,
+      ext: {
+        transfer: encodeTransferCallExt({
+          phase: "c-ringing",
+          referrerLegId: "b-1",
+          referToUri: "sip:charlie@192.0.2.30",
+          cLegId: "b-2",
+          referCSeq: 42,
+          startedAtMs: 1_700_000_000_000,
+        }),
       },
     }
     const json = Schema.encodeSync(CallJson)(call)
     const decoded = Schema.decodeUnknownSync(CallJson)(json)
-    expect(decoded.transfer?.phase).toBe("c-ringing")
-    expect(decoded.transfer?.cLegId).toBe("b-2")
-    expect(decoded).toEqual(call)
+    const slice = Schema.decodeUnknownSync(TransferCallExt)(decoded.ext!["transfer"])
+    expect(slice.phase).toBe("c-ringing")
+    expect(slice.cLegId).toBe("b-2")
   })
 
-  test("roundtrips a call with transfer === null through JSON", () => {
-    const call: typeof Call.Type = {
-      ...baseCall(),
-      transfer: null,
-    }
-    const json = Schema.encodeSync(CallJson)(call)
-    const decoded = Schema.decodeUnknownSync(CallJson)(json)
-    expect(decoded.transfer).toBeNull()
-  })
-
-  test("roundtrips a call with transfer omitted entirely (backwards compat)", () => {
+  test("roundtrips a call with no ext (no transfer) through JSON", () => {
     const call = baseCall()
     const json = Schema.encodeSync(CallJson)(call)
     const decoded = Schema.decodeUnknownSync(CallJson)(json)
-    expect(decoded.transfer).toBeUndefined()
+    expect(decoded.ext).toBeUndefined()
   })
 })

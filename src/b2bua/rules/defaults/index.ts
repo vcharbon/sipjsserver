@@ -57,16 +57,20 @@ import {
 // Failure rules
 import { routeFailureRule, noAnswerFailoverRule, absorbStaleFailureRule } from "./FailureRules.js"
 
-// Transfer rules (REFER-driven blind transfer)
-import { transferRules } from "./TransferRules.js"
+// Transfer default rules (REFER seed rules; phase-gated rules live in the
+// referTransfer callflow service — registered as a policy module in B2buaCore).
+import { transferDefaultRules } from "./TransferRules.js"
 
 /**
- * All default rules. Order does not matter — the Matcher selects winners
- * by specificity score (with `overrides` removing displaced rules).
+ * All default rules (CORE_LAYER). ORDER MATTERS: selection is first-match-wins
+ * within a layer (no specificity scoring), so more specific / corner-case rules
+ * MUST precede the broad relay+lifecycle rules they refine. The registry's
+ * reachability lint throws at startup if a later rule is fully shadowed by an
+ * earlier filterless one. `overrides` still removes a displaced rule outright.
  */
 export const defaultRules: ReadonlyArray<AnyRuleDefinition> = [
-  // REFER-driven blind transfer
-  ...transferRules,
+  // REFER-driven blind transfer (seed rules only)
+  ...transferDefaultRules,
 
   // Terminating-state intercept
   resolveByeResponseRule,
