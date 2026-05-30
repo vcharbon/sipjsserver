@@ -397,6 +397,8 @@ The B2BUA maintains a `TagMapping[]` array on the Call that maps between b-leg d
 
 **Relayed via:** `generateRelayedResponse` receives the pre-built To header (with aTag already attached) as the `to` parameter.
 
+**SDK surface (ADR-0015) — the framework owns the A-facing tag.** `add-tag-mapping` and `stamp-dialog-to-tag` are deliberately **not** in `PublicRuleAction`, so a callflow service authored on `@vcharbon/sipjs/rules-sdk` cannot pin the A-facing To-tag explicitly — and for a single, non-forking B it does not need to. The relay path auto-mints the a-facing tag on the first relayed 18x, records the mapping (`addTagMapping`), stamps it on the early dialog, and `send-provisional-to-leg` (with no `toTag`) reuses it, so 180 → 183 → 200 stay in one early dialog with zero tag actions. Pinning the A-facing tag across B **forking / failover** requires composing the service with the in-tree `relayFirst18xTo180` (it pre-seeds the mapping at 18x time so `confirmBridgedCall` reuses the same `aTag` at 200 OK). A public, narrowed tag-pin action would only be added if a forking-service dogfood demanded it ("easier to open than to close").
+
 ### Tag helper functions (`b2buaTag` / `remoteTag`)
 
 The meaning of `fromTag` and `dialog.toTag` flips between a-leg and b-leg. To prevent tag swap bugs, use the helpers in `CallModel.ts`:

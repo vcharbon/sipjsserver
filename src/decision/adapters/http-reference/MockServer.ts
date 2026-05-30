@@ -156,6 +156,15 @@ function buildApiCallResponse(body: NewCallRequestType, instruction: Record<stri
     response.relay_first_18x_to_180 = instruction.relay_first_18x_to_180
   }
 
+  // Typed per-service activation descriptor (ADR-0016). Pass through any
+  // `serviceExt` the X-Api-Call instruction carries so e2e scenarios can
+  // activate an integrator callflow service (e.g. PRBT) by ext-presence,
+  // exactly as a real decision adapter would. Additive: the field is absent
+  // on every legacy instruction, so existing routing behaviour is unchanged.
+  if (instruction.serviceExt !== undefined) {
+    response.serviceExt = instruction.serviceExt
+  }
+
   return response as NewCallResponseType
 }
 

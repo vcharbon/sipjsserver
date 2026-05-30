@@ -8,6 +8,13 @@
  * handles). Internal actions (`send-raw`, PRACK / transfer / tag-mapping
  * plumbing) are unreachable here — emitting one is a compile error.
  *
+ * The framework owns the A-facing To-tag: there is no public `add-tag-mapping` /
+ * `stamp-dialog-to-tag`, and a single, non-forking service does not need one —
+ * the relay path auto-mints, maps, and stamps the a-facing tag on the first
+ * relayed 18x, and `send-provisional-to-leg` (no `toTag`) reuses it. Pinning the
+ * tag across B forking / failover means composing with {@link relayFirst18xTo180}.
+ * See docs/b2bua-sip-headers.md §"Tag mapping".
+ *
  * Quick start:
  *
  * ```ts

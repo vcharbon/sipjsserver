@@ -47,7 +47,21 @@ export interface SchedulerOpts {
    * fall back to the default table.
    */
   readonly weights?: Partial<Record<ChaosEventType, number>>
+  /**
+   * Whether continuous abuse traffic is running this soak. The
+   * overload test (`non-emergency-burst`) measures cross-stream
+   * isolation — emergency-marked baseline streams must sail through
+   * while the 200-CAPS non-emergency spike is shed. Continuous abuse
+   * traffic independently drives the shedders, so it confounds that
+   * measurement (you can't tell a real emergency-bypass regression
+   * from collateral abuse shedding). When abuse is active the burst is
+   * excluded from the schedule; run the overload test at abuse=0.
+   */
+  readonly abuseActive?: boolean
 }
+
+/** Overload-class events that are only meaningful at abuse=0. */
+const OVERLOAD_EVENTS: ReadonlyArray<ChaosEventType> = ["non-emergency-burst"]
 
 const DEFAULT_WEIGHTS: Record<ChaosEventType, number> = {
   "worker-pod-graceful": 3,
@@ -89,6 +103,11 @@ export const buildSchedule = (opts: SchedulerOpts): ReadonlyArray<ScheduledEvent
   const weights: Record<ChaosEventType, number> = {
     ...DEFAULT_WEIGHTS,
     ...(opts.weights ?? {}),
+  }
+  // Gate applied last so it wins over explicit --chaos-weights: the
+  // overload test needs a clean (no-abuse) baseline to be a valid signal.
+  if (opts.abuseActive) {
+    for (const e of OVERLOAD_EVENTS) weights[e] = 0
   }
   const cumulative = buildCumulative(weights)
   const events: Array<ScheduledEvent> = []

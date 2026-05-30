@@ -387,7 +387,21 @@ export function executeActions(
   }
 
   for (const action of actions) {
-    executeAction(action, ctx, state, ruleId)
+    try {
+      executeAction(action, ctx, state, ruleId)
+    } catch (cause) {
+      // A throwing action aborts the whole batch — there is no per-action
+      // recovery (RuleExecutor's defect boundary wraps only handle(), not this
+      // synchronous translation). Re-throw with the rule id + action type named
+      // so SipRouter's top-level "Unhandled error processing event" log
+      // pinpoints the culprit instead of surfacing an opaque inner throw.
+      // See complaint `silent-action-batch-abort`.
+      const reason = cause instanceof globalThis.Error ? cause.message : String(cause)
+      throw new globalThis.Error(
+        `rule "${ruleId}" action "${action.type}" failed: ${reason}`,
+        { cause },
+      )
+    }
   }
 
   return {
@@ -547,7 +561,7 @@ function executeSendProvisionalToLeg(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const { legId, status, reason, body, contentType } = action
+  const { legId, status, reason, body, contentType, toTag: forkTag, pEarlyMedia } = action
 
   const skip = (why: string): void => {
     state.spanEvents.push({
@@ -576,18 +590,30 @@ function executeSendProvisionalToLeg(
     raw: Buffer.from(snapshot.body),
   })
 
-  // Reuse the B2BUA-owned early To-tag so A sees a consistent early dialog
-  // (the tag picked when the first 18x was relayed). When no a-leg dialog
-  // exists yet (this provisional precedes any 18x relay), mint a tag AND
-  // persist it onto the a-leg dialog via the canonical stamp path, so a later
-  // provisional or the real 18x relay reuse the SAME tag (RFC 3261 §12.1).
-  let toTag = b2buaTag(state.call, legId)
-  if (toTag === undefined) {
-    toTag = newTag()
-    executeStampDialogToTag({ type: "stamp-dialog-to-tag", legId, toTag }, state)
+  // Two tag modes (see RuleAction doc):
+  //   - forkTag PROVIDED → an EPHEMERAL forked early dialog: use the given tag
+  //     verbatim and DO NOT touch `legs.a.dialogs[0]`. The authoritative dialog
+  //     is owned by the real callee's eventual 2xx under a different tag.
+  //   - forkTag OMITTED → the B2BUA's own early-dialog identity: reuse the
+  //     leg's tag, or mint + persist one onto dialogs[0] (RFC 3261 §12.1).
+  let toTag: string
+  if (forkTag !== undefined) {
+    toTag = forkTag
+  } else {
+    let owned = b2buaTag(state.call, legId)
+    if (owned === undefined) {
+      owned = newTag()
+      executeStampDialogToTag({ type: "stamp-dialog-to-tag", legId, toTag: owned }, state)
+    }
+    toTag = owned
   }
   const { contact } = legStackIdentity(state.call, legId, ctx.config)
   const ct = contentType ?? (body !== undefined ? "application/sdp" : undefined)
+
+  // RFC 5009: authorise early media rendering when asked.
+  const extraHeaders = pEarlyMedia !== undefined
+    ? [{ name: "P-Early-Media", value: pEarlyMedia }]
+    : undefined
 
   // `reliable: false` ⇒ no Require: 100rel / RSeq — generateResponse adds
   // neither unless asked, so the provisional stays unreliable (sent once).
@@ -596,6 +622,7 @@ function executeSendProvisionalToLeg(
     contact,
     ...(body !== undefined ? { body } : {}),
     ...(ct !== undefined ? { contentType: ct } : {}),
+    ...(extraHeaders !== undefined ? { extraHeaders } : {}),
   })
 
   const dest = legTarget(targetLeg)
@@ -1498,7 +1525,7 @@ function executeSendRequestToLeg(
   ctx: RuleContext,
   state: ExecutionState,
 ): void {
-  const { type, legId, method, body } = action
+  const { type, legId, method, body, contentType } = action
   void type
 
   const leg = findLeg(state.call, legId)
@@ -1515,10 +1542,20 @@ function executeSendRequestToLeg(
   const target = legTarget(leg)
   const requestUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
   const { via, contact } = legStackIdentity(state.call, legId, ctx.config)
+  // `contentType` rides with a body (e.g. application/mediaservercontrol+xml
+  // for an MSCML INFO toward an MRF); defaults to application/sdp when a body
+  // is present but no type was given.
+  const ct = contentType ?? (body !== undefined ? "application/sdp" : undefined)
   const { request, dialog: newSip } = generateInDialogRequest(
     method,
     dialog.sip,
-    { via, contact, requestUri, ...(body !== undefined ? { body } : {}) },
+    {
+      via,
+      contact,
+      requestUri,
+      ...(body !== undefined ? { body } : {}),
+      ...(ct !== undefined ? { contentType: ct } : {}),
+    },
   )
   // Slice 6: removed the bare `[diag] send-request-to-leg` console.log.
   // It bypassed structured logging (no timestamps in pod logs) and the

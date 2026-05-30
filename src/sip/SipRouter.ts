@@ -1243,6 +1243,30 @@ export class SipRouter extends ServiceMap.Service<
               yield* tracing.emitSpanEvents(result.spanEvents)
             }
             yield* processResult(callRef, result, handlers, nowMs, aLeg.legId)
+
+            // ── Call-setup hook for callflow services (ADR-0016) ──────────
+            // After routing has created the B-leg and written the decision
+            // response's `serviceExt` into `Call.ext`, re-enter with a synthetic
+            // `call-routed` internal-event so an active service can act at call
+            // setup — e.g. PRBT dials its MRF media leg IN PARALLEL with the
+            // B-leg instead of waiting for the callee's first 18x. Gated on
+            // ext-presence so a vanilla call pays nothing; forked into the layer
+            // scope and serialized against later events by withCall's call
+            // checkout (same mechanism as the /call/refer re-entry above).
+            const routedCall = result.call
+            if (routedCall.ext !== undefined && Object.keys(routedCall.ext).length > 0) {
+              const routedEvent: CallEvent = {
+                type: "internal-event",
+                callRef,
+                topic: "call-routed",
+                outcome: "ok",
+                payload: undefined,
+              }
+              yield* Effect.forkIn(
+                withCall(handlers, routedEvent).pipe(Effect.withParentSpan(DETACHED_FORK_PARENT)),
+                layerScope,
+              )
+            }
           })
 
           const { traceId, spanId } = yield* tracing.withRootSpan({

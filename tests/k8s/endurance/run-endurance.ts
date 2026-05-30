@@ -539,6 +539,7 @@ const main = (argv: ReadonlyArray<string>) =>
               chaosMinIntervalSec: args.chaosMinIntervalSec,
               chaosMaxIntervalSec: args.chaosMaxIntervalSec,
               soakDurationSec: args.durationSec,
+              abuseActive: args.abuseCaps > 0,
               ...(explicitWeights !== undefined && { weights: explicitWeights }),
             })
       ;(meta as { chaosEventsScheduled: number }).chaosEventsScheduled =
@@ -598,10 +599,20 @@ const main = (argv: ReadonlyArray<string>) =>
       /* ----- ANALYZE --------------------------------------------- */
       if (!args.noAnalyze) {
         yield* Effect.logInfo("phase=ANALYZE")
-        const { runAnalyze } = yield* Effect.tryPromise(
-          () => import("./analyze-endurance.js"),
-        ).pipe(Effect.orDie)
-        yield* Effect.tryPromise(() => runAnalyze(artifactDir)).pipe(Effect.orDie)
+        // Best-effort: a failed verdict pipeline must not skip the HTML
+        // render below (the operator's first view). A hard OOM still
+        // crashes the process — the heap ceiling in the npm script and
+        // the analyzer's own trace-size guards are the defence there.
+        yield* Effect.tryPromise(async () => {
+          const { runAnalyze } = await import("./analyze-endurance.js")
+          await runAnalyze(artifactDir)
+        }).pipe(
+          Effect.matchEffect({
+            onSuccess: () => Effect.void,
+            onFailure: (e) =>
+              Effect.logWarning(`analyze failed: ${String(e)}`),
+          }),
+        )
       }
       /* ----- RENDER HTML ----------------------------------------- */
       // The timeline view is the first thing an operator looks at;

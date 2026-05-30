@@ -350,17 +350,33 @@ export type RuleAction =
   // sent once, not PRACK-tracked) — RFC 3262. The To-tag is the leg's
   // B2BUA-owned early tag; CSeq / Via / From / Call-ID come from the leg's
   // INVITE. `body` (if set) is an informational SDP answer (RFC 3264);
-  // `contentType` defaults to `application/sdp`. Reach: when the A-leg has no
-  // dialog yet, seeds `legs.a.dialogs[0]` with a minted To-tag (same path as
-  // `stamp-dialog-to-tag`) so the early-dialog tag stays stable. ──
+  // `contentType` defaults to `application/sdp`.
+  //
+  // Tag reach (two modes):
+  //   - `toTag` OMITTED — the B2BUA's own early-dialog identity: reuse the
+  //     leg's existing tag, or, when the A-leg has no dialog yet, mint one AND
+  //     seed `legs.a.dialogs[0]` (same path as `stamp-dialog-to-tag`) so a
+  //     later 18x relay / the 2xx reuse the SAME tag (RFC 3261 §12.1).
+  //   - `toTag` PROVIDED — an EPHEMERAL forked early dialog: the provisional
+  //     carries the given tag and `legs.a.dialogs[0]` is NOT touched. Used for
+  //     media-brokering early media (PRBT) that lives in its OWN early dialog
+  //     (RFC 3261 §12 forking) and is abandoned when the real callee's 2xx
+  //     confirms the authoritative dialog under a different tag.
+  //
+  // `pEarlyMedia` (RFC 5009), when set, stamps `P-Early-Media: <value>` (e.g.
+  // `sendrecv`) so an authorising network renders the early media.
   | { readonly type: "send-provisional-to-leg"; readonly legId: string;
       readonly status: number; readonly reason?: string;
       readonly body?: Uint8Array; readonly contentType?: string;
+      readonly toTag?: string; readonly pEarlyMedia?: string;
       readonly reliable: false }
 
   // ── Generate new request to a leg (keepalive OPTIONS, INFO, etc.) ──
+  // `contentType` is stamped when a `body` is present (e.g.
+  // `application/mediaservercontrol+xml` for an MSCML INFO toward an MRF);
+  // defaults to `application/sdp` when omitted but a body is set.
   | { readonly type: "send-request-to-leg"; readonly legId: string; readonly method: string;
-      readonly body?: Uint8Array }
+      readonly body?: Uint8Array; readonly contentType?: string }
 
   // ── Synthesize a PRACK toward a leg in response to a reliable 1xx we
   // received but are not relaying to the peer (RFC 3262 §3-4). Uses the

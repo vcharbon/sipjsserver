@@ -35,7 +35,17 @@ RUN mkdir -p /data/cdr \
     && chown -R node:node /app /data
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+# Reuse the build stage's fully-resolved node_modules rather than
+# `npm ci --omit=dev`. effect + @effect/* are declared as peerDependencies
+# (so the package's integrator consumers supply their own single Effect
+# instance — see ADR-0016), and npm does NOT install a package's own
+# peerDependencies for `npm ci`. A prod-only install would therefore drop
+# effect/@effect (and other runtime deps that live in devDependencies, e.g.
+# sip-parser), crash-looping the worker on ERR_MODULE_NOT_FOUND. Copying the
+# build tree keeps the peerDependency contract intact and is lockfile-exact.
+# Image size is a non-goal here (deploy-from-scratch, never published as the
+# app); same node:22-alpine base + arch makes the tree directly reusable.
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
 
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/dist-bin ./dist-bin
