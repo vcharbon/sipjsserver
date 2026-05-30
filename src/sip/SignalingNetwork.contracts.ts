@@ -471,6 +471,12 @@ export const scopedAudit = (
 
       const bindUdp: SignalingNetworkApi["bindUdp"] = (opts) =>
         Effect.gen(function* () {
+          // Raw (non-SIP) binds — e.g. RTP media — bypass the audit
+          // channel, tracer, and per-bind rule finalizers entirely. They
+          // still share the underlying routing fabric.
+          if (opts.raw === true) {
+            return yield* innerApi.bindUdp(opts).pipe(Effect.orDie)
+          }
           const bindKey = bindKeyOf(opts.ip, opts.port)
           // Capture the bind's declared roles for subject dispatch.
           // Unset → ALL_UA_ROLES (preserve pre-subject behaviour).

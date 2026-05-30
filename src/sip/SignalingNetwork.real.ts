@@ -50,6 +50,9 @@ export function makeRealImpl({
   return {
     bindUdp: (opts: BindUdpOpts) =>
       Effect.gen(function* () {
+        // Raw (non-SIP) binds — e.g. RTP media — are never trace-recorded,
+        // so RTP does not bloat the hop-by-hop report.
+        const recordTraceForBind = recordTrace && opts.raw !== true
         const queue = yield* Queue.bounded<import("./SignalingNetwork.js").UdpPacket, Cause.Done>(opts.queueMax)
         const counters: UdpEndpointCounters = {
           enqueued: 0,
@@ -110,7 +113,7 @@ export function makeRealImpl({
                     return
                   }
                   counters.enqueued++
-                  if (recordTrace) {
+                  if (recordTraceForBind) {
                     trace.push({
                       raw,
                       src: { ip: src.address, port: src.port },
@@ -146,7 +149,7 @@ export function makeRealImpl({
           Effect.callback<void, SendError>((resume) => {
             const sentMs = Date.now()
             socket.send(buf, 0, buf.length, dstPort, dstAddress, (err) => {
-              if ((err === null || err === undefined) && recordTrace) {
+              if ((err === null || err === undefined) && recordTraceForBind) {
                 trace.push({
                   raw: buf,
                   src: { ip: localAddress.ip, port: localAddress.port },

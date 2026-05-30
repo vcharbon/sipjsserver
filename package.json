@@ -25,6 +25,10 @@
       "types": "./dist/sip/index.d.ts",
       "import": "./dist/sip/index.js"
     },
+    "./media": {
+      "types": "./dist/media/index.d.ts",
+      "import": "./dist/media/index.js"
+    },
     "./observability": {
       "types": "./dist/observability/index.d.ts",
       "import": "./dist/observability/index.js"
@@ -83,7 +87,8 @@
     "@opentelemetry/sdk-trace-node": "^2.6.1",
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "ioredis": "^5.10.1",
-    "msgpackr": "^1.11.9"
+    "msgpackr": "^1.11.9",
+    "rtp.js": "^0.15.6"
   },
   "peerDependencies": {
     "@effect/opentelemetry": "4.0.0-beta.42",

@@ -60,6 +60,7 @@ import { WorkerReadiness } from "../../src/cache/WorkerReadiness.js"
 import { HttpReferenceAdapterLayer } from "../../src/decision/adapters/http-reference/HttpReferenceAdapter.js"
 import { Recorder } from "../../src/test-harness/framework/report-recorder/Recorder.js"
 import { RunContext } from "../../src/test-harness/framework/RunContext.js"
+import { MediaEndpointTs } from "../../src/media/ts/MediaEndpointTs.js"
 import { SipHarness } from "../../src/test-harness/framework/SipHarness.js"
 import { b2buaWorkerStackLayer, NoOpCdrLayer, NoOpTracingLayer } from "./networkLeaves.js"
 import { PumpableClockLayer } from "./PumpableClock.js"
@@ -224,12 +225,18 @@ function buildFake(opts: FakeModeOpts) {
     )
   })()
 
+  // MediaEndpoint rides the same SignalingNetwork instance; its binds are
+  // raw, so RTP bypasses the audit channel + tracer. Inert until a scenario
+  // opens a transport (media is opt-in per test).
+  const MediaLayer = MediaEndpointTs.pipe(Layer.provide(NetworkLayer))
+
   const base = b2buaWorkerStackLayer({
     config: opts.config,
     storageLayer: StorageLayer,
     limiterLayer: CallLimiterLayer,
   }).pipe(
     Layer.provideMerge(NetworkLayer),
+    Layer.provideMerge(MediaLayer),
     Layer.provideMerge(SipHarnessLayer),
     Layer.provideMerge(RecorderLayer),
     Layer.provideMerge(RunContextLayer),
@@ -321,7 +328,12 @@ function buildLive(opts: LiveModeOpts) {
 
   const SipHarnessLayer = SipHarness.layer.pipe(Layer.provide(RecorderLayer))
 
+  // MediaEndpoint over the real dgram fabric; raw binds keep RTP out of the
+  // realTracing hop-by-hop trace. Opt-in per test.
+  const MediaLayer = MediaEndpointTs.pipe(Layer.provide(NetworkLayer))
+
   return B2buaCoreLayer.pipe(
+    Layer.provideMerge(MediaLayer),
     Layer.provideMerge(UdpLayer),
     Layer.provideMerge(OverloadLayer),
     Layer.provideMerge(CallStateCacheLayer),

@@ -132,6 +132,15 @@ export interface BindUdpOpts {
    * as `ALL_UA_ROLES`.
    */
   readonly roles?: ReadonlySet<UaRole>
+  /**
+   * Raw (non-SIP) bind — e.g. an RTP media port. The contracts wrapper
+   * bypasses the SIP audit channel, tracer, and per-bind rule
+   * finalizers for raw binds, so media datagrams are not parsed as SIP,
+   * audited against RFC rules, or rendered in the SIP sequence diagram.
+   * The underlying routing fabric is shared, so a raw bind still reaches
+   * SIP binds and vice-versa.
+   */
+  readonly raw?: boolean
 }
 
 // ---------------------------------------------------------------------------

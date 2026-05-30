@@ -41,6 +41,8 @@ const fakeExclude = [
   "tests/fullcall/e2e-register-noRr-realFabric.test.ts",
   "tests/fullcall/replication-stream-medium.test.ts",
   "tests/harness/limiter-rejection.test.ts",
+  // Media play→record over real UDP + real clock (it.live).
+  "tests/media/rtp-media-live.test.ts",
   // K8s suites need a kind cluster and run under `vitest.config.k8s.ts`.
   // The pure parser tests under `tests/k8s/fixtures/` (e.g.
   // sippOutcomes.test.ts) only read checked-in samples and are part
@@ -61,6 +63,8 @@ const liveInclude = [
   // self-skips when TEST_TIER < medium, Redis is unreachable, or
   // `--expose-gc` is not present.
   "tests/fullcall/replication-stream-medium.test.ts",
+  // Media play→record over real UDP + real clock.
+  "tests/media/rtp-media-live.test.ts",
 ]
 
 export default defineConfig({
