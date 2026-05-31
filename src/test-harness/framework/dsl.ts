@@ -502,6 +502,14 @@ function renameStepAgent(step: Step, mapping: Record<string, string>): Step {
       // their cluster-side worker id (`b2b-1`, etc.) rather than the
       // logical agent identifier the rename mapping operates on.
       return step
+    case "media-play":
+      return { ...step, agent: mapping[step.agent] ?? step.agent }
+    case "media-expect":
+      return {
+        ...step,
+        agent: mapping[step.agent] ?? step.agent,
+        source: mapping[step.source] ?? step.source,
+      }
   }
 }
 

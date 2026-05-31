@@ -13,11 +13,25 @@
  */
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
+import { sdpOffer, sdpAnswer, classifySdp } from "../../src/test-harness/framework/helpers/sdp.js"
 import type { SipMessage } from "../../src/sip/types.js"
 
 function contactHasLegTag(msg: SipMessage, legTag: string): boolean {
   return (msg.getHeader("contact")?.uri ?? "").includes(`leg=${legTag}`)
+}
+
+// The a-realign re-INVITE offers A the active answer C gave to A's SDP offer:
+// an answer-shaped (active, sendrecv) body echoing the offer's nonce — never
+// C's initial held/inactive answer.
+function isActiveAnswerFor(msg: SipMessage, offer: Uint8Array): boolean {
+  const offerInfo = classifySdp(offer)
+  const got = classifySdp(msg.body)
+  return (
+    offerInfo.kind === "offer" &&
+    got.kind === "answer" &&
+    got.nonce === offerInfo.nonce &&
+    msg.bodyText()?.includes("a=sendrecv") === true
+  )
 }
 
 const CHARLIE_PORT = 5667
@@ -92,11 +106,11 @@ export const referAllowFullHappy = scenario("refer-allow-full-happy", (s) => {
   })
   charlieDialog.expect("ACK")
 
-  // re-INVITE A with C's initial SDP, Contact has leg=a.
+  // re-INVITE A carries C's active c-realign answer (sendrecv), Contact leg=a.
   const aRealignTxn = aliceDialog.expect("INVITE", {
     skipValidation: ["offerAnswer"],
     predicate: (msg) =>
-      msg.bodyEquals(charlieInitialSdp) && contactHasLegTag(msg, "a"),
+      isActiveAnswerFor(msg, aliceSdp) && contactHasLegTag(msg, "a"),
   })
   aRealignTxn.reply(200, {
     overrides: { body: sdpAnswer(charlieInitialSdp) },

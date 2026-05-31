@@ -43,6 +43,8 @@ const fakeExclude = [
   "tests/harness/limiter-rejection.test.ts",
   // Media play→record over real UDP + real clock (it.live).
   "tests/media/rtp-media-live.test.ts",
+  // Declarative media scenario over real UDP + real clock (it.live).
+  "tests/media/p2p-media-live.test.ts",
   // K8s suites need a kind cluster and run under `vitest.config.k8s.ts`.
   // The pure parser tests under `tests/k8s/fixtures/` (e.g.
   // sippOutcomes.test.ts) only read checked-in samples and are part
@@ -65,6 +67,8 @@ const liveInclude = [
   "tests/fullcall/replication-stream-medium.test.ts",
   // Media play→record over real UDP + real clock.
   "tests/media/rtp-media-live.test.ts",
+  // Declarative media scenario (DSL → real UDP + real clock).
+  "tests/media/p2p-media-live.test.ts",
 ]
 
 export default defineConfig({

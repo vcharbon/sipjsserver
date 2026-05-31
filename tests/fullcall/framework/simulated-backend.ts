@@ -24,6 +24,7 @@ import { pumpAll } from "../../support/pumpAll.js"
 import { TransportError } from "../../../src/test-harness/framework/types.js"
 import type { UdpEndpoint } from "../../../src/sip/SignalingNetwork.js"
 import { SignalingNetwork } from "../../../src/sip/SignalingNetwork.js"
+import { MediaEndpointTs } from "../../../src/media/ts/MediaEndpointTs.js"
 import { SipRouter } from "../../../src/sip/SipRouter.js"
 import { type AppConfigData } from "../../../src/config/AppConfig.js"
 import { testAppConfigDefaults } from "../../../src/test-harness/config-defaults.js"
@@ -270,6 +271,19 @@ export function createSimulatedTransport(opts?: {
             ? registrarFrontProxyFakeStackLayer({ config, recordRoute: true })
             : fakeStackLayer({ config, realClock: opts?.realClock === true })
 
+  // MediaEndpoint rides the SAME SignalingNetwork the stack exposes (one
+  // build → memoised → shared instance), so RTP shares the agents' fabric.
+  // Raw binds keep RTP out of the SIP audit channel + tracer. Inert until a
+  // scenario opens a transport — media is opt-in per test (ADR-0017).
+  //
+  // `StackLayer` is a union across SUT variants; the cast collapses it to a
+  // single SignalingNetwork-providing shape so `provideMerge` typechecks.
+  // It changes nothing at runtime — provideMerge merges StackLayer's full
+  // built environment, so every stack service still flows through.
+  const StackLayerWithMedia = MediaEndpointTs.pipe(
+    Layer.provideMerge(StackLayer as unknown as Layer.Layer<SignalingNetwork>),
+  )
+
   const mockState: MockTransportState = {
     agents: new Map(),
     extNetwork: undefined,
@@ -345,7 +359,7 @@ export function createSimulatedTransport(opts?: {
     // `TestTransport.stackLayer` is the marker type `Layer<never>`; the fully
     // built fake stack provides a service union, which the runner provides and
     // casts away (harness.ts). Narrow to the field's marker type here.
-    stackLayer: StackLayer as Layer.Layer<never>,
+    stackLayer: StackLayerWithMedia as Layer.Layer<never>,
     setup: (agentConfigs, _b2buaTarget) =>
       (Effect.gen(function* () {
         // All services come out of the single FakeStackLayer, so the

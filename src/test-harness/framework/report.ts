@@ -93,6 +93,10 @@ function stepDescription(step: Step): string {
       return `${step.action} ${step.target}`
     case "k8s":
       return `k8s ${step.action.kind}`
+    case "media-play":
+      return `${step.agent} ♪ plays ${step.clip}`
+    case "media-expect":
+      return `${step.agent} hears ${step.source}?`
   }
 }
 

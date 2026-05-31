@@ -491,7 +491,11 @@ transfer.rule({
     Effect.sync(() => {
       const cLegId = ext.cLegId
       if (cLegId === undefined) return undefined
-      const cInitialSdp = ext.cInitialSdp
+
+      // Offer A the active SDP C just answered on the c-realign re-INVITE
+      // (sendrecv, C's real port/codec) so A enables its send path. Using C's
+      // initial held-INVITE answer here would leave A on inactive → one-way audio.
+      const cRealignSdp = ctx.event.message.body
 
       const actions: RuleAction[] = [
         { type: "ack-leg" as const, legId: cLegId },
@@ -508,8 +512,8 @@ transfer.rule({
         {
           type: "send-reinvite" as const,
           legId: "a",
-          bodyUpdate: cInitialSdp !== undefined && cInitialSdp.byteLength > 0
-            ? { kind: "set" as const, value: cInitialSdp }
+          bodyUpdate: cRealignSdp.byteLength > 0
+            ? { kind: "set" as const, value: cRealignSdp }
             : { kind: "drop" as const },
         },
       ]

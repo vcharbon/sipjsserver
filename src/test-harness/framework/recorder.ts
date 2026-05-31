@@ -134,6 +134,25 @@ export interface UasTransaction {
   reply(statusCode: number, opts?: ReplyOpts): StepRef
 }
 
+/**
+ * Media (RTP) handle on a dialog — opt-in per scenario (ADR-0017). The
+ * owning agent must be declared with `media` in its `AgentConfig`. The
+ * SDP body the dialog's INVITE / 200 carries is driven by the bound
+ * `MediaTransport`; these two methods add the audio play + verdict.
+ */
+export interface DialogMediaRef {
+  /** Logical agent that owns this media stream. */
+  readonly agent: string
+  /** Emit RTP playing the named reference clip from this dialog's session. */
+  plays(clip: string): void
+  /**
+   * Assert this dialog hears `source` — classified at the final sweep
+   * against the clip `source` played. The argument is the *source*
+   * dialog's media ref, not a string.
+   */
+  hears(source: DialogMediaRef): void
+}
+
 /** Dialog handle for in-dialog operations. */
 export interface DialogRef {
   /** Send ACK (for 2xx of INVITE). */
@@ -147,6 +166,8 @@ export interface DialogRef {
     method: M,
     opts?: ExpectOpts<InDialogMethodRequest<M>>,
   ): UasTransaction
+  /** Media (RTP) operations for this dialog — opt-in (ADR-0017). */
+  readonly media: DialogMediaRef
 }
 
 /** Result of sending an initial INVITE. */
@@ -519,6 +540,16 @@ export function record(
       return base
     }
 
+    const mediaRef: DialogMediaRef = {
+      agent: agentName,
+      plays: (clip) => {
+        steps.push({ type: "media-play", agent: agentName, clip, ref: makeStepRef() })
+      },
+      hears: (source) => {
+        steps.push({ type: "media-expect", agent: agentName, source: source.agent, ref: makeStepRef() })
+      },
+    }
+
     function makeDialogRef(establisher?: EstablisherCell): DialogRef {
       return {
         ack: (opts) => send("ACK", withImplicitDep(opts, establisher)),
@@ -537,6 +568,7 @@ export function record(
             reply: (statusCode, replyOpts) => expRef.reply(statusCode, replyOpts),
           }
         },
+        media: mediaRef,
       }
     }
 

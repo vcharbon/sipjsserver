@@ -21,6 +21,13 @@ import {
   type RoutingDecisionKind,
   type RoutingMetricsSnapshot,
 } from "../internal/SimulatedK8sCluster.js"
+import { MediaEndpoint, type MediaSession, type MediaTransport } from "../../media/MediaEndpoint.js"
+import { createOfferAnswerEngine, type OfferAnswerEngine } from "../../media/sdp/negotiator.js"
+import { encodeSdp, parseSdp } from "../../media/sdp/parse.js"
+import type { Sdp } from "../../media/sdp/types.js"
+import { classify } from "../media/audio/classify.js"
+import { referenceClip, type ClipName } from "../media/audio/clips.js"
+import type { MediaReport, MediaStreamReport, MediaVerdictReport } from "./types.js"
 
 /**
  * Parse the `lastSeq` field out of a JSON-encoded `replpos:{peer}`
@@ -157,6 +164,54 @@ interface InterpreterState {
    */
   routingMetricsBaseline?: RoutingMetricsSnapshot | undefined
   callNumber: number
+  /** Per-agent media (RTP) state — present only for agents with `media` config. */
+  readonly media: Record<string, AgentMedia>
+  /** `hears(...)` assertions to resolve at the final sweep. */
+  readonly mediaVerdicts: Array<{ hearer: string; source: string; stepIndex: number }>
+}
+
+// ---------------------------------------------------------------------------
+// Media (RTP) — interpreter-side state + SDP driving (ADR-0017)
+// ---------------------------------------------------------------------------
+
+/**
+ * One media agent's live state. The `engine` is the independent O/A
+ * conformance witness; `session` is the per-dialog send/record handle on
+ * the bound `transport`. `receivedOffer` parks the SDP a UAS observed so
+ * its 200 OK can answer it.
+ */
+interface AgentMedia {
+  readonly transport: MediaTransport
+  readonly engine: OfferAnswerEngine
+  session: MediaSession | null
+  receivedOffer: Sdp | null
+  playedClip: string | null
+  committed: boolean
+}
+
+/** One media session per transport — single-dialog scenarios reuse this id. */
+const MEDIA_DIALOG_ID = "primary"
+
+/** Replace a send step's body with an engine-driven SDP body. */
+function withSdpBody(step: SendStep, body: Uint8Array): SendStep {
+  return { ...step, overrides: { ...step.overrides, body } }
+}
+
+/** Return the body iff it is an SDP body (starts with `v=0`). */
+function sdpBodyOf(body: Uint8Array | undefined): Uint8Array | undefined {
+  if (body === undefined || body.byteLength < 3) return undefined
+  const head = new TextDecoder().decode(body.subarray(0, 3))
+  return head === "v=0" ? body : undefined
+}
+
+/** True when the message is a 2xx final response to an INVITE (an answer carrier). */
+function is2xxInviteResponse(msg: SipMessage): boolean {
+  return (
+    msg.type === "response" &&
+    msg.status >= 200 &&
+    msg.status < 300 &&
+    msg.getHeader("cseq").method.toUpperCase() === "INVITE"
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +326,39 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     offerAnswer: new OfferAnswerTracker(),
     k8sKillEvents: [],
     callNumber: 0,
+    media: {},
+    mediaVerdicts: [],
+  }
+
+  // --- Open media transports for opt-in media agents (ADR-0017) ---
+  //
+  // Bound in THIS (the run) scope so the paced senders and source
+  // recorders stay alive through the final sweep, where `hears(...)`
+  // verdicts read the accumulated PCM. The MediaEndpoint is service-
+  // optional: stacks that don't wire it leave media agents inert (their
+  // SDP driving + verdicts no-op with a clear marker).
+  const mediaEndpointOpt = yield* Effect.serviceOption(MediaEndpoint)
+  if (Option.isSome(mediaEndpointOpt)) {
+    const me = mediaEndpointOpt.value
+    for (const [name, config] of Object.entries(scenario.agents)) {
+      if (config.media === undefined) continue
+      const info = agentInfos[name]
+      if (info === undefined) continue
+      const ip = config.media.ip ?? info.ip
+      const transport = yield* me.open(ip, config.media.port)
+      const engine = createOfferAnswerEngine({
+        localAddr: transport.localAddr,
+        codecs: transport.supportedCodecs,
+      })
+      state.media[name] = {
+        transport,
+        engine,
+        session: null,
+        receivedOffer: null,
+        playedClip: null,
+        committed: false,
+      }
+    }
   }
 
   // --- Capture routing-metrics baseline BEFORE any step runs ---
@@ -352,6 +440,9 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
   yield* checkUnexpectedMessages(state, transport)
   yield* checkDanglingReliableProvisionals(state, transport)
   yield* checkDanglingOffers(state, transport)
+  // Media verdicts + RTP rollup — read while transports are still open
+  // (this scope), before the run scope closes and recordings vanish.
+  const mediaReport = yield* collectMediaReport(state)
 
   // --- Verify internal state is clean (no leaked calls/timers) ---
   if (!scenario.skipFinalSweep && transport.verifyCleanState) {
@@ -459,6 +550,7 @@ export const executeScenario = Effect.fn("executeScenario")(function* (
     failed,
     skipped,
     ...(replicationTrace.length > 0 ? { replicationTrace } : {}),
+    ...(mediaReport !== undefined ? { media: mediaReport } : {}),
   }
 
   return result
@@ -485,7 +577,54 @@ function executeStep(
       return executeInfra(step, index, state)
     case "k8s":
       return executeK8s(step, index, state)
+    case "media-play":
+      return executeMediaPlay(step, index, state)
+    case "media-expect":
+      return executeMediaExpect(step, index, state)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Media (RTP) step execution (ADR-0017)
+// ---------------------------------------------------------------------------
+
+function executeMediaPlay(
+  step: import("./types.js").MediaPlayStep,
+  index: number,
+  state: InterpreterState,
+): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const am = state.media[step.agent]
+    if (am === undefined) {
+      state.results.push(makeStepResult({
+        stepIndex: index,
+        step,
+        status: "fail",
+        error: `Agent "${step.agent}" has no media transport — declare it with \`media\` in its AgentConfig`,
+      }))
+      return
+    }
+    const session = am.session ?? (yield* am.transport.session(MEDIA_DIALOG_ID))
+    am.session = session
+    am.playedClip = step.clip
+    // play is non-blocking and silent until the session is the committed,
+    // send-enabled active peer (transport.ts) — so a play before the 200/ACK
+    // simply emits nothing. RTP flows while the following pause advances time.
+    yield* session.play({ kind: "pcm", pcm: referenceClip(step.clip as ClipName) })
+    state.results.push(makeStepResult({ stepIndex: index, step, status: "pass" }))
+  })
+}
+
+function executeMediaExpect(
+  step: import("./types.js").MediaExpectStep,
+  index: number,
+  state: InterpreterState,
+): Effect.Effect<void> {
+  // Register the verdict; the classification runs at the final sweep, once
+  // all RTP has flowed (the recording is continuous).
+  return Effect.sync(() => {
+    state.mediaVerdicts.push({ hearer: step.agent, source: step.source, stepIndex: index })
+  })
 }
 
 // Slice 5 phase E: dispatch InfraStep against `PeerFabricControl` when
@@ -1049,14 +1188,60 @@ function executeSend(
     const clockTs = yield* Clock.currentTimeMillis
     const startTime = Date.now()
 
+    // --- Media (RTP) SDP driving (ADR-0017) ---
+    // For an opt-in media agent whose step carries an SDP body, substitute
+    // the static body with the bound transport's engine offer/answer so the
+    // wire SDP advertises the real RTP (ip,port). A request body is an offer
+    // (localOffer); a 2xx-to-INVITE body is the strict answer to the parked
+    // received offer, after which the send side is configured + committed.
+    let effectiveStep: SendStep = step
+    const sendMedia = state.media[step.agent]
+    const mediaSendErrors: string[] = []
+    if (sendMedia !== undefined && sdpBodyOf(step.overrides?.body) !== undefined) {
+      if (step.statusCode === undefined) {
+        effectiveStep = withSdpBody(step, encodeSdp(sendMedia.engine.localOffer()))
+      } else if (step.statusCode >= 200 && step.statusCode < 300) {
+        if (sendMedia.receivedOffer === null) {
+          mediaSendErrors.push("media answer requested but no SDP offer was received")
+        } else {
+          const answered = yield* sendMedia.engine.answerTo(sendMedia.receivedOffer).pipe(
+            Effect.map((sdp) => ({ ok: true as const, sdp })),
+            Effect.catchTag("SdpNegotiationError", (e) =>
+              Effect.succeed({ ok: false as const, error: `${e.rule} (${e.rfc}): ${e.message}` })),
+          )
+          if (answered.ok) {
+            effectiveStep = withSdpBody(step, encodeSdp(answered.sdp))
+            const negotiated = sendMedia.engine.negotiated()
+            if (negotiated !== null) {
+              const session = yield* sendMedia.transport.session(MEDIA_DIALOG_ID)
+              const cfg = yield* session.configure(negotiated).pipe(
+                Effect.as({ ok: true as const }),
+                Effect.catchTag("MediaNegotiationError", (e) =>
+                  Effect.succeed({ ok: false as const, error: e.reason })),
+              )
+              if (cfg.ok) {
+                yield* session.commit("confirmed")
+                sendMedia.session = session
+                sendMedia.committed = true
+              } else {
+                mediaSendErrors.push(`media configure failed: ${cfg.error}`)
+              }
+            }
+          } else {
+            mediaSendErrors.push(`media answer failed: ${answered.error}`)
+          }
+        }
+      }
+    }
+
     const buildResult = yield* Effect.try({
       try: () => {
-        if (step.statusCode !== undefined) {
-          const result = buildResponse(step, ctx, dialogState)
+        if (effectiveStep.statusCode !== undefined) {
+          const result = buildResponse(effectiveStep, ctx, dialogState)
           const resolvedHeaders = resolvePlaceholders([...result.msg.headers], state.agentInfos)
           return { msg: { ...result.msg, headers: resolvedHeaders } as SipMessage, buf: result.buf }
         } else {
-          const result = buildRequest(step, ctx, dialogState)
+          const result = buildRequest(effectiveStep, ctx, dialogState)
           const resolvedHeaders = resolvePlaceholders([...result.msg.headers], state.agentInfos)
           return { msg: { ...result.msg, headers: resolvedHeaders } as SipMessage, buf: result.buf }
         }
@@ -1159,7 +1344,8 @@ function executeSend(
     }
 
     const durationMs = Date.now() - startTime
-    const sendStatus: StepStatus = outboundOaErrors.length > 0 ? "fail" : "pass"
+    const sendAssertionErrors = [...outboundOaErrors, ...mediaSendErrors]
+    const sendStatus: StepStatus = sendAssertionErrors.length > 0 ? "fail" : "pass"
 
     // Trace: agent → SUT. Prefer the SUT label resolved from the actual
     // wire-level destination so the report shows e.g. `alice → proxy` on
@@ -1195,7 +1381,7 @@ function executeSend(
         step,
         status: "fail",
         durationMs,
-        assertionErrors: outboundOaErrors,
+        assertionErrors: sendAssertionErrors,
       }))
     } else {
       state.results.push(makeStepResult({
@@ -1412,6 +1598,46 @@ function executeExpect(
         )
         if (idx >= 0) {
           dialogState.pendingReliableProvisionals.splice(idx, 1)
+        }
+      }
+    }
+
+    // --- Media (RTP) apply-remote (ADR-0017) ---
+    // A media UAS parks the received offer so its 200 OK can answer it; a
+    // media UAC applies the received answer, then configures + commits its
+    // send side. Negotiation refusals (typed SdpNegotiationError) surface as
+    // assertion failures — never silently swallowed (CLAUDE.md, landmine #7).
+    const recvMedia = state.media[step.agent]
+    if (recvMedia !== undefined) {
+      const inSdp = sdpBodyOf(matched.body)
+      if (inSdp !== undefined) {
+        if (matched.type === "request") {
+          recvMedia.receivedOffer = parseSdp(inSdp)
+        } else if (is2xxInviteResponse(matched)) {
+          const applied = yield* recvMedia.engine
+            .applyRemote(parseSdp(inSdp), { reliable: true })
+            .pipe(
+              Effect.map((neg) => ({ ok: true as const, neg })),
+              Effect.catchTag("SdpNegotiationError", (e) =>
+                Effect.succeed({ ok: false as const, error: `${e.rule} (${e.rfc}): ${e.message}` })),
+            )
+          if (applied.ok) {
+            const session = yield* recvMedia.transport.session(MEDIA_DIALOG_ID)
+            const cfg = yield* session.configure(applied.neg).pipe(
+              Effect.as({ ok: true as const }),
+              Effect.catchTag("MediaNegotiationError", (e) =>
+                Effect.succeed({ ok: false as const, error: e.reason })),
+            )
+            if (cfg.ok) {
+              yield* session.commit("confirmed")
+              recvMedia.session = session
+              recvMedia.committed = true
+            } else {
+              assertionErrors.push(`media configure failed: ${cfg.error}`)
+            }
+          } else {
+            assertionErrors.push(`media apply-answer failed: ${applied.error}`)
+          }
         }
       }
     }
@@ -1811,6 +2037,77 @@ function buildParticipantsAndLanes(state: InterpreterState): {
  * pending offers on any Call-ID, the exchange was never completed — flag each
  * as a failure so regressions in offer/answer modeling are caught automatically.
  */
+/**
+ * Final-sweep media verdicts + RTP/RTCP rollup (ADR-0017). For each
+ * `hears(...)` assertion, classify the hearer's recorded PCM against the
+ * clip the source played and push a pass/fail StepResult. Then gather
+ * per-stream counts from every media transport's `stats()`. Returns the
+ * MediaReport, or undefined when no media agent ran.
+ */
+function collectMediaReport(
+  state: InterpreterState,
+): Effect.Effect<MediaReport | undefined> {
+  return Effect.gen(function* () {
+    const agentNames = Object.keys(state.media)
+    if (agentNames.length === 0) return undefined
+
+    const verdicts: MediaVerdictReport[] = []
+    for (const v of state.mediaVerdicts) {
+      const hearer = state.media[v.hearer]
+      const source = state.media[v.source]
+      const expectedClip = source?.playedClip ?? null
+      const pcm = hearer?.session !== null && hearer?.session !== undefined
+        ? (yield* hearer.session.recorded()).pcm
+        : new Int16Array(0)
+      const verdict = classify(pcm)
+      const pass = expectedClip !== null && verdict.matched === expectedClip
+      verdicts.push({
+        hearer: v.hearer,
+        source: v.source,
+        expectedClip,
+        matched: verdict.matched,
+        classification: verdict.classification,
+        pass,
+      })
+      state.results.push(makeStepResult({
+        stepIndex: state.results.length,
+        step: { type: "media-expect", agent: v.hearer, source: v.source, ref: { _tag: "StepRef", id: -5 } },
+        status: pass ? "pass" : "fail",
+        ...(pass
+          ? {}
+          : {
+              error:
+                `${v.hearer} did not hear ${v.source}: expected clip ` +
+                `"${expectedClip ?? "(source never played)"}", got ` +
+                `${verdict.classification}${verdict.matched ? ` (${verdict.matched})` : ""} — RFC 3264 media path`,
+            }),
+      }))
+    }
+
+    const streams: MediaStreamReport[] = []
+    for (const name of agentNames) {
+      const am = state.media[name]!
+      const stats = yield* am.transport.stats()
+      for (const s of stats) {
+        streams.push({
+          agent: name,
+          direction: s.direction,
+          ssrc: s.ssrc,
+          codec: s.codec,
+          payloadType: s.payloadType,
+          packets: s.packets,
+          bytes: s.bytes,
+          rtcpPacketsSent: s.rtcpPacketsSent,
+          rtcpPacketsReceived: s.rtcpPacketsReceived,
+          ...(s.remote !== undefined ? { remote: { ip: s.remote.ip, port: s.remote.port } } : {}),
+        })
+      }
+    }
+
+    return { streams, verdicts }
+  })
+}
+
 function checkDanglingOffers(state: InterpreterState, transport: TestTransport): Effect.Effect<void> {
   return Effect.gen(function* () {
     const clockTs = yield* Clock.currentTimeMillis

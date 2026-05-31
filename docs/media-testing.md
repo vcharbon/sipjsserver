@@ -95,11 +95,39 @@ window, zero fires when idle. Live: real UDP + real `Effect.sleep`.
 - `tests/media/media-audited-fabric.test.ts` — RTP rides the *audited* fabric
   (raw bind) cleanly; auto port allocation.
 
+## Declarative scenarios (through the real B2BUA)
+
+Opt a scenario agent into media with `media: {}` in its `AgentConfig`; the
+interpreter then drives that agent's SIP SDP body from a bound `MediaTransport`
+(engine offer/answer) instead of the static `sdpOffer()`/`sdpAnswer()` bodies.
+`dialog.media.plays("alice")` emits a reference clip; `dialog.media.hears(other
+.media)` registers a verdict resolved at the final sweep (classify the receiver's
+recording against the clip the source played). RTP/RTCP counts + verdict rows
+render in a dedicated **Media (RTP)** panel of the HTML report (never as SIP
+arrows). Non-media agents are unaffected — engine SDP is unclassified, so the
+`x-offer-id` nonce + port+1 path is left intact for everything else.
+
+- `tests/media/basic-call-media.test.ts` — Alice/Bob hear each other through the
+  real (signaling-only) B2BUA; asserts the HTML media panel + PASS verdicts.
+- `tests/media/reroute-media.test.ts` — media survives an in-dialog re-INVITE
+  re-negotiation (the re-offer path REFER's c-realign also uses).
+- `tests/media/refer-transfer-media.test.ts` — REFER blind transfer; after merge
+  A↔C must hear each other bidirectionally. This caught a real one-way-audio bug:
+  the a-realign re-INVITE to A carried C's initial *held* (`a=inactive`) SDP, so A
+  never enabled its send path (fixed in `referTransfer.ts` to carry C's active
+  c-realign answer). Static SDP tests missed it — `sdpAnswer()` always emits
+  `a=sendrecv`; only a direction-honouring media engine exposes it.
+- `tests/media/p2p-media-live.test.ts` — the same declarative path over **real
+  UDP + real wall-clock** (`it.live`, peer-to-peer, no external server). Proves
+  the interpreter SDP-driving + paced senders + verdicts work on the wire, not
+  just under TestClock. The live runners provide `MediaEndpoint` over
+  `SignalingNetwork.real` (`harness.ts` `LiveMediaLayer`).
+
 ## Not yet (follow-ups)
 
-- Declarative DSL: `media` agent config + `dialog.media.plays/hears`, interpreter
-  SDP-driving (the agent's SIP SDP body comes from the bound session), final-
-  sweep media verdicts, and the HTML report RTP/RTCP rollup + verdict rows.
+- Live media through the *external* B2BUA (`createLiveRunner`) — the runner now
+  provides `MediaEndpoint`, so a `LIVE_ENABLED` declarative scenario against a
+  real server process is a drop-in once a server is running.
 - Real-SBC mode (point endpoints at rtpengine and confirm classification
   survives its transcoding DSP).
 - RTCP field assertions; early-media trio + hold/resume scenarios.

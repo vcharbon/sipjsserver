@@ -13,9 +13,11 @@
  * the same Effect runtime as the test, sharing the same TestClock.
  */
 
-import { Effect } from "effect"
+import { Effect, Layer } from "effect"
 import type { Scope } from "effect"
 import * as TestClock from "effect/testing/TestClock"
+import { SignalingNetwork } from "../../src/sip/SignalingNetwork.js"
+import { MediaEndpointTs } from "../../src/media/ts/MediaEndpointTs.js"
 import type { AppConfigData } from "../../src/config/AppConfig.js"
 import { CallState } from "../../src/call/CallState.js"
 import { CdrWriter } from "../../src/cdr/CdrWriter.js"
@@ -187,6 +189,12 @@ export function flushIndexReport(outputDir: string): void {
 const runScoped = <A, E>(eff: Effect.Effect<A, E, Scope.Scope>): Effect.Effect<A, never> =>
   Effect.orDie(Effect.scoped(eff))
 
+// MediaEndpoint over a real-UDP `SignalingNetwork` for the live / p2p runners.
+// RTP is end-to-end between the agents' media ports (real loopback), so it does
+// not need to share the SIP transport's fabric. Inert until a scenario opens a
+// transport — media is opt-in per test (ADR-0017).
+const LiveMediaLayer = MediaEndpointTs.pipe(Layer.provide(SignalingNetwork.real))
+
 // ---------------------------------------------------------------------------
 // Simulated backend (in-process B2BUA, TestClock-driven)
 // ---------------------------------------------------------------------------
@@ -357,7 +365,7 @@ export function createLiveRunner(opts?: {
         console.log(formatReport(result))
         recordResult(result, outputDir)
         assertScenarioPassed(result)
-      })
+      }).pipe(Effect.provide(LiveMediaLayer))
     )
 }
 
@@ -403,7 +411,7 @@ export function createPeerToPeerRunner(opts: {
         } else {
           assertScenarioPassed(result)
         }
-      })
+      }).pipe(Effect.provide(LiveMediaLayer))
     )
 }
 

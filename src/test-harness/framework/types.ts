@@ -185,6 +185,37 @@ export interface InfraStep {
 }
 
 // ---------------------------------------------------------------------------
+// Media (RTP) steps — opt-in per scenario (ADR-0017)
+// ---------------------------------------------------------------------------
+
+/**
+ * Emit RTP from a media agent's committed session, playing the named
+ * reference clip. Non-blocking: the transport forks a paced sender that
+ * runs while the following `pause` advances the clock.
+ */
+export interface MediaPlayStep {
+  readonly type: "media-play"
+  readonly agent: string
+  /** Reference clip name (`alice` / `bob` / `charlie` / `ringback`). */
+  readonly clip: string
+  readonly ref: StepRef
+  readonly group?: number
+}
+
+/**
+ * Assert that `agent` hears `source` — resolved at the final sweep by
+ * classifying the receiver's recorded PCM against the clip `source`
+ * played. A misdirected SDP rewrite makes this fail (no audio arrives).
+ */
+export interface MediaExpectStep {
+  readonly type: "media-expect"
+  readonly agent: string
+  readonly source: string
+  readonly ref: StepRef
+  readonly group?: number
+}
+
+// ---------------------------------------------------------------------------
 // K8s cluster steps (slice 3b — failover harness DSL extensions)
 // ---------------------------------------------------------------------------
 
@@ -335,7 +366,14 @@ export interface K8sStep {
   readonly group?: number
 }
 
-export type Step = SendStep | ExpectStep | PauseStep | InfraStep | K8sStep
+export type Step =
+  | SendStep
+  | ExpectStep
+  | PauseStep
+  | InfraStep
+  | K8sStep
+  | MediaPlayStep
+  | MediaExpectStep
 
 // ---------------------------------------------------------------------------
 // SUT (System Under Test) target
@@ -542,6 +580,20 @@ export interface AgentConfig {
    * are stable when slice 2 lands.
    */
   readonly network?: NetworkTag
+  /**
+   * Opt this agent into the media (RTP) subsystem. When present the
+   * interpreter opens a `MediaTransport` for the agent and drives the
+   * SIP SDP body from the bound transport (engine offer/answer) instead
+   * of the static `sdpOffer()`/`sdpAnswer()` heuristic bodies. Inert for
+   * agents without it — media is opt-in (ADR-0017).
+   */
+  readonly media?: MediaAgentConfig
+}
+
+/** Media-agent options. Address defaults to the agent's SIP bind IP; port auto-allocates from 40000. */
+export interface MediaAgentConfig {
+  readonly ip?: string
+  readonly port?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -763,6 +815,40 @@ export interface TraceEntry {
   readonly network: NetworkTag
 }
 
+/**
+ * Per-(remote,SSRC) RTP/RTCP rollup for one media stream, attributed to
+ * the agent that owns the transport. Counts only — no per-packet detail
+ * (RTP never appears as a SIP arrow). Surfaced in the report's media panel.
+ */
+export interface MediaStreamReport {
+  readonly agent: string
+  readonly direction: "outbound" | "inbound"
+  readonly ssrc: number
+  readonly codec: string
+  readonly payloadType: number
+  readonly packets: number
+  readonly bytes: number
+  readonly rtcpPacketsSent: number
+  readonly rtcpPacketsReceived: number
+  readonly remote?: { readonly ip: string; readonly port: number }
+}
+
+/** Verdict of a `dialog.media.hears(...)` assertion, resolved at the final sweep. */
+export interface MediaVerdictReport {
+  readonly hearer: string
+  readonly source: string
+  readonly expectedClip: string | null
+  readonly matched: string | null
+  readonly classification: string
+  readonly pass: boolean
+}
+
+/** Media (RTP) rollup attached to a `ScenarioResult` when any media agent ran. */
+export interface MediaReport {
+  readonly streams: ReadonlyArray<MediaStreamReport>
+  readonly verdicts: ReadonlyArray<MediaVerdictReport>
+}
+
 export interface ScenarioResult {
   readonly scenarioName: string
   readonly scenarioDescription?: string | undefined
@@ -812,6 +898,11 @@ export interface ScenarioResult {
   readonly passed: number
   readonly failed: number
   readonly skipped: number
+  /**
+   * Media (RTP) rollup — per-stream counts + `hears(...)` verdicts.
+   * Present only when the scenario had at least one media agent.
+   */
+  readonly media?: MediaReport | undefined
 }
 
 // ---------------------------------------------------------------------------

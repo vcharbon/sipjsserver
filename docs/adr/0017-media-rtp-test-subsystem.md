@@ -2,7 +2,10 @@
 
 ## Status
 
-Implemented through Slice 3a + the Slice 3b foundation. Live: the production
+Implemented end to end, including the declarative DSL (`media: {}` agent config,
+`dialog.media.plays/hears`, interpreter SDP-driving, final-sweep verdicts, HTML
+media panel). The REFER media scenario caught and drove the fix of a one-way-audio
+transfer bug (a-realign carried C's held `a=inactive` SDP to A). Live: the production
 `src/media` package (G.711 codec, RFC 3550 RTP framing, RTCP SR/RR counts,
 `MediaEndpoint` Layer/Tag, per-dialog RFC 3264/3262/5009 offer-answer engine,
 transport demux + active-peer state machine), two engine implementations behind

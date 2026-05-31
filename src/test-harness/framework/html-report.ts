@@ -147,6 +147,47 @@ export function writeScenarioReport(
       </div>`
     : ""
 
+  // Media (RTP) panel — per-stream RTP/RTCP counts + `hears(...)` verdicts.
+  // RTP never appears as a SIP arrow; this dedicated panel is where the
+  // media flow surfaces (ADR-0017). Omitted when no media agent ran.
+  const media = result.media
+  const mediaHtml = media !== undefined && (media.streams.length > 0 || media.verdicts.length > 0)
+    ? `<div class="media">
+        <div class="media-header">Media (RTP) — ${media.streams.length} stream${media.streams.length === 1 ? "" : "s"}, ${media.verdicts.length} verdict${media.verdicts.length === 1 ? "" : "s"}</div>
+        ${media.verdicts.length > 0
+          ? `<table class="media-table">
+              <thead><tr><th>verdict</th><th>hearer</th><th>source</th><th>expected</th><th>classified</th></tr></thead>
+              <tbody>
+                ${media.verdicts.map((v) => `<tr class="${v.pass ? "media-pass" : "media-fail"}">
+                  <td>${v.pass ? "PASS" : "FAIL"}</td>
+                  <td>${escapeHtml(v.hearer)}</td>
+                  <td>${escapeHtml(v.source)}</td>
+                  <td><code>${escapeHtml(v.expectedClip ?? "—")}</code></td>
+                  <td><code>${escapeHtml(v.matched ?? v.classification)}</code></td>
+                </tr>`).join("")}
+              </tbody>
+            </table>`
+          : ""}
+        ${media.streams.length > 0
+          ? `<table class="media-table">
+              <thead><tr><th>agent</th><th>dir</th><th>codec</th><th>ssrc</th><th>packets</th><th>bytes</th><th>rtcp tx/rx</th><th>remote</th></tr></thead>
+              <tbody>
+                ${media.streams.map((s) => `<tr>
+                  <td>${escapeHtml(s.agent)}</td>
+                  <td>${escapeHtml(s.direction)}</td>
+                  <td><code>${escapeHtml(s.codec)}/${s.payloadType}</code></td>
+                  <td><code>${s.ssrc}</code></td>
+                  <td>${s.packets}</td>
+                  <td>${s.bytes}</td>
+                  <td>${s.rtcpPacketsSent}/${s.rtcpPacketsReceived}</td>
+                  <td><code>${s.remote ? escapeHtml(`${s.remote.ip}:${s.remote.port}`) : "—"}</code></td>
+                </tr>`).join("")}
+              </tbody>
+            </table>`
+          : ""}
+      </div>`
+    : ""
+
   // Collect failure details (step errors + assertion errors) for the root-cause panel
   const failureItems: Array<{ stepIndex: number; label: string; reasons: string[] }> = []
   for (const sr of result.stepResults) {
@@ -250,6 +291,19 @@ export function writeScenarioReport(
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
+    .media {
+      margin: 8px 20px;
+      padding: 10px 14px;
+      background: #eef2ff;
+      border: 1px solid #c7d2fe;
+      border-radius: 6px;
+    }
+    .media-header { font-weight: 700; font-size: 13px; color: #3730a3; margin-bottom: 8px; }
+    .media-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 6px; }
+    .media-table th, .media-table td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #e0e7ff; }
+    .media-table th { color: #4338ca; font-weight: 600; }
+    .media-table .media-pass td:first-child { color: #059669; font-weight: 700; }
+    .media-table .media-fail td:first-child { color: #dc2626; font-weight: 700; }
     .anomalies-list { list-style: none; padding: 0; margin: 0; }
     .anomalies-list li {
       font-size: 12px;
@@ -416,6 +470,7 @@ export function writeScenarioReport(
   </header>
   ${failuresHtml}
   ${anomaliesHtml}
+  ${mediaHtml}
   <div class="main">
     <div class="diagram-panel">
       ${svg}

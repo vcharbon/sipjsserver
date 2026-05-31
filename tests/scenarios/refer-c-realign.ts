@@ -16,10 +16,25 @@
  */
 
 import { scenario } from "../../src/test-harness/framework/dsl.js"
-import { sdpOffer, sdpAnswer } from "../../src/test-harness/framework/helpers/sdp.js"
+import { sdpOffer, sdpAnswer, classifySdp } from "../../src/test-harness/framework/helpers/sdp.js"
+import type { SipMessage } from "../../src/sip/types.js"
 
 const CHARLIE_PORT = 5667
 const REFER_TO_CHARLIE = `<sip:charlie@127.0.0.1:${CHARLIE_PORT}>`
+
+// The a-realign re-INVITE offers A the active answer C gave to A's SDP offer:
+// an answer-shaped (active, sendrecv) body echoing the offer's nonce — never
+// C's initial held/inactive answer.
+function isActiveAnswerFor(msg: SipMessage, offer: Uint8Array): boolean {
+  const offerInfo = classifySdp(offer)
+  const got = classifySdp(msg.body)
+  return (
+    offerInfo.kind === "offer" &&
+    got.kind === "answer" &&
+    got.nonce === offerInfo.nonce &&
+    msg.bodyText()?.includes("a=sendrecv") === true
+  )
+}
 
 function xApiAllowC(extras?: Record<string, unknown>): Record<string, string> {
   const instruction: Record<string, unknown> = {
@@ -118,11 +133,11 @@ export const referAllowCRealignHappy = scenario("refer-allow-c-realign-happy", (
   // B2BUA sends ACK for the re-INVITE 200.
   charlieDialog.expect("ACK")
 
-  // B2BUA re-INVITEs A with C's initial SDP, Contact tagged leg=a.
+  // B2BUA re-INVITEs A with C's active c-realign answer, Contact tagged leg=a.
   const aRealignTxn = aliceDialog.expect("INVITE", {
     skipValidation: ["offerAnswer"],
     predicate: (msg) =>
-      msg.bodyEquals(charlieInitialSdp) &&
+      isActiveAnswerFor(msg, aliceSdp) &&
       (msg.getHeader("contact")?.uri ?? "").includes("leg=a"),
   })
   aRealignTxn.reply(200, {
@@ -360,11 +375,11 @@ export const referAllowCRealignCGlare = scenario(
     })
     charlieDialog.expect("ACK")
 
-    // B2BUA re-INVITEs A with C's initial SDP, Contact tagged leg=a.
+    // B2BUA re-INVITEs A with C's active c-realign answer, Contact tagged leg=a.
     const aRealignTxn = aliceDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
       predicate: (msg) =>
-        msg.bodyEquals(charlieInitialSdp) &&
+        isActiveAnswerFor(msg, aliceSdp) &&
         (msg.getHeader("contact")?.uri ?? "").includes("leg=a"),
     })
     aRealignTxn.reply(200, {
@@ -452,11 +467,11 @@ export const referAllowCRealignBNonBye = scenario(
     })
     charlieDialog.expect("ACK")
 
-    // B2BUA re-INVITEs A with C's initial SDP, Contact tagged leg=a.
+    // B2BUA re-INVITEs A with C's active c-realign answer, Contact tagged leg=a.
     const aRealignTxn = aliceDialog.expect("INVITE", {
       skipValidation: ["offerAnswer"],
       predicate: (msg) =>
-        msg.bodyEquals(charlieInitialSdp) &&
+        isActiveAnswerFor(msg, aliceSdp) &&
         (msg.getHeader("contact")?.uri ?? "").includes("leg=a"),
     })
     aRealignTxn.reply(200, {
