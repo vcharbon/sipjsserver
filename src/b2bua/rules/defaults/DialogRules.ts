@@ -7,7 +7,7 @@
  * or `(msg as SipResponse)` casts in the body.
  */
 
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
 import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 import { newTag } from "../../../sip/MessageHelpers.js"
@@ -21,8 +21,6 @@ export const relayProvisionalRule = defineRule({
   id: "relay-provisional",
   name: "Relay Provisional",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "response",
@@ -31,7 +29,6 @@ export const relayProvisionalRule = defineRule({
     direction: "from-b",
   },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     const resp = ctx.event.message
@@ -39,7 +36,7 @@ export const relayProvisionalRule = defineRule({
       { type: "relay-to-peer" },
       { type: "add-cdr-event", eventType: "provisional", legId: ctx.sourceLeg.legId, statusCode: resp.status },
     ]
-    return Effect.succeed({ actions, state: undefined })
+    return Effect.succeed({ actions })
   },
 })
 
@@ -58,8 +55,6 @@ export const confirmDialogRule = defineRule({
   id: "confirm-dialog",
   name: "Confirm Dialog (200 OK INVITE)",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   // Initial-INVITE 200 OK only — legState is trying/early here. On a re-INVITE
   // the source leg is already "confirmed", which steers the event to
@@ -73,7 +68,6 @@ export const confirmDialogRule = defineRule({
     direction: "from-b",
   },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     const resp = ctx.event.message
@@ -140,7 +134,7 @@ export const confirmDialogRule = defineRule({
     // CDR
     actions.push({ type: "add-cdr-event", eventType: "answer", legId: bLeg.legId, statusCode: 200 })
 
-    return Effect.succeed({ actions, state: undefined })
+    return Effect.succeed({ actions })
   },
 })
 
@@ -151,8 +145,6 @@ export const absorbBye200Rule = defineRule({
   id: "absorb-bye-200",
   name: "Absorb BYE/CANCEL 200 OK",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "response",
@@ -160,11 +152,10 @@ export const absorbBye200Rule = defineRule({
     statusClass: "2xx",
   },
 
-  init: () => undefined,
 
   handle: () =>
     // Absorb silently — no actions needed
-    Effect.succeed({ actions: [], state: undefined }),
+    Effect.succeed({ actions: [] }),
 })
 
 // ── absorb-options-200 ─────────────────────────────────────
@@ -180,8 +171,6 @@ export const absorbOptions200Rule = defineRule({
   id: "absorb-options-200",
   name: "Absorb OPTIONS 200 OK (keepalive)",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   // Filter distinguishes a B2BUA-originated keepalive OPTIONS (no pending
   // relay snapshot) from a relayed OPTIONS (snapshot present → falls through
@@ -197,14 +186,12 @@ export const absorbOptions200Rule = defineRule({
     },
   },
 
-  init: () => undefined,
 
   handle: (ctx) =>
     Effect.succeed({
       actions: [
         { type: "cancel-timer", timerId: `keepalive_timeout-${ctx.callRef}-${ctx.sourceLeg.legId}` },
       ],
-      state: undefined,
     }),
 })
 
@@ -222,8 +209,6 @@ export const absorbNotify200Rule = defineRule({
   id: "absorb-notify-200",
   name: "Absorb NOTIFY 200 OK",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "response",
@@ -231,9 +216,8 @@ export const absorbNotify200Rule = defineRule({
     statusClass: "2xx",
   },
 
-  init: () => undefined,
 
-  handle: () => Effect.succeed({ actions: [], state: undefined }),
+  handle: () => Effect.succeed({ actions: [] }),
 })
 
 // ── relay-non-invite-200 ───────────────────────────────────
@@ -243,8 +227,6 @@ export const relayNonInvite200Rule = defineRule({
   id: "relay-non-invite-200",
   name: "Relay Non-INVITE 200 OK",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   // OPTIONS with pending relay snapshot lands here; keepalive OPTIONS is
   // taken by absorb-options-200 (same columns + filter → more specific).
@@ -255,13 +237,11 @@ export const relayNonInvite200Rule = defineRule({
     statusClass: "2xx",
   },
 
-  init: () => undefined,
 
   handle: () =>
     // ActionExecutor resolves the target via activePeer or To-tag fallback
     Effect.succeed({
       actions: [{ type: "relay-to-peer" as const }],
-      state: undefined,
     }),
 })
 

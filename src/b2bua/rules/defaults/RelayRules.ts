@@ -6,7 +6,7 @@
  * They match SIP requests and relay them to the peer leg via the ActionExecutor.
  */
 
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import type { RuleDefinition, SipMethod } from "../framework/RuleDefinition.js"
 
 // ── Transparent in-dialog relay factory ───────────────────────────────────
@@ -20,22 +20,18 @@ import type { RuleDefinition, SipMethod } from "../framework/RuleDefinition.js"
 export function makeTransparentRelayRule(
   method: SipMethod,
   opts: { id: string; name: string },
-): RuleDefinition<undefined, undefined> {
+): RuleDefinition {
   return {
     id: opts.id,
     name: opts.name,
     alwaysActive: true,
-    stateSchema: Schema.Undefined,
-    paramsSchema: Schema.Undefined,
 
     match: { kind: "request", method },
 
-    init: () => undefined,
 
     handle: () =>
       Effect.succeed({
         actions: [{ type: "relay-to-peer" as const }],
-        state: undefined,
       }),
   }
 }
@@ -43,7 +39,7 @@ export function makeTransparentRelayRule(
 // ── relay-options ─────────────────────────────────────────────────────────
 
 /** Relay in-dialog OPTIONS end-to-end (payload-transparent). */
-export const relayOptionsRule: RuleDefinition<undefined, undefined> =
+export const relayOptionsRule: RuleDefinition =
   makeTransparentRelayRule("OPTIONS", {
     id: "relay-options",
     name: "Relay OPTIONS",
@@ -52,7 +48,7 @@ export const relayOptionsRule: RuleDefinition<undefined, undefined> =
 // ── relay-info ────────────────────────────────────────────────────────────
 
 /** Relay in-dialog INFO end-to-end (payload-transparent). */
-export const relayInfoRule: RuleDefinition<undefined, undefined> =
+export const relayInfoRule: RuleDefinition =
   makeTransparentRelayRule("INFO", {
     id: "relay-info",
     name: "Relay INFO",
@@ -61,7 +57,7 @@ export const relayInfoRule: RuleDefinition<undefined, undefined> =
 // ── relay-update ──────────────────────────────────────────────────────────
 
 /** Relay in-dialog UPDATE end-to-end (RFC 3311; payload-transparent). */
-export const relayUpdateRule: RuleDefinition<undefined, undefined> =
+export const relayUpdateRule: RuleDefinition =
   makeTransparentRelayRule("UPDATE", {
     id: "relay-update",
     name: "Relay UPDATE",
@@ -70,7 +66,7 @@ export const relayUpdateRule: RuleDefinition<undefined, undefined> =
 // ── relay-message ─────────────────────────────────────────────────────────
 
 /** Relay in-dialog MESSAGE end-to-end (RFC 3428; payload-transparent). */
-export const relayMessageRule: RuleDefinition<undefined, undefined> =
+export const relayMessageRule: RuleDefinition =
   makeTransparentRelayRule("MESSAGE", {
     id: "relay-message",
     name: "Relay MESSAGE",
@@ -79,16 +75,13 @@ export const relayMessageRule: RuleDefinition<undefined, undefined> =
 // ── relay-bye ──────────────────────────────────────────────
 
 /** Respond 200 to BYE sender, relay BYE to peer, terminate call. */
-export const relayByeRule: RuleDefinition<undefined, undefined> = {
+export const relayByeRule: RuleDefinition = {
   id: "relay-bye",
   name: "Relay BYE",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: { kind: "request", method: "BYE" },
 
-  init: () => undefined,
 
   handle: (ctx) =>
     Effect.succeed({
@@ -98,36 +91,31 @@ export const relayByeRule: RuleDefinition<undefined, undefined> = {
         { type: "add-cdr-event", eventType: "bye" as const, legId: ctx.sourceLeg.legId },
         { type: "begin-termination" },
       ],
-      state: undefined,
     }),
 }
 
 // ── relay-ack ──────────────────────────────────────────────
 
 /** Relay ACK to peer leg. */
-export const relayAckRule: RuleDefinition<undefined, undefined> = {
+export const relayAckRule: RuleDefinition = {
   id: "relay-ack",
   name: "Relay ACK",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: { kind: "request", method: "ACK" },
 
-  init: () => undefined,
 
   handle: () =>
     // ActionExecutor resolves the target via activePeer or To-tag fallback
     Effect.succeed({
       actions: [{ type: "relay-to-peer" as const }],
-      state: undefined,
     }),
 }
 
 // ── relay-reinvite ────────────────────────────────────────────────────────
 
 /** Relay re-INVITE to peer leg. */
-export const relayReinviteRule: RuleDefinition<undefined, undefined> =
+export const relayReinviteRule: RuleDefinition =
   makeTransparentRelayRule("INVITE", {
     id: "relay-reinvite",
     name: "Relay re-INVITE",
@@ -136,7 +124,7 @@ export const relayReinviteRule: RuleDefinition<undefined, undefined> =
 // ── relay-prack ───────────────────────────────────────────────────────────
 
 /** Relay PRACK to peer leg. */
-export const relayPrackRule: RuleDefinition<undefined, undefined> =
+export const relayPrackRule: RuleDefinition =
   makeTransparentRelayRule("PRACK", {
     id: "relay-prack",
     name: "Relay PRACK",

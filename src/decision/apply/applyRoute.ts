@@ -238,6 +238,9 @@ export function applyRoute(
       const serviceExt: Record<string, unknown> = { ...(routing.serviceExt ?? {}) }
       if (strategy === "promote-pem-to-200") {
         serviceExt["promote-pem"] = { promoted: false, windowOpen: false }
+      } else if (strategy !== undefined) {
+        // drop-sdp / keep-sdp / fake-prack — seed the relayFirst18x service.
+        serviceExt["relayFirst18x"] = { strategy, firstRelayed: false }
       }
       if (Object.keys(serviceExt).length > 0) {
         updated = { ...updated, ext: { ...updated.ext, ...serviceExt } }

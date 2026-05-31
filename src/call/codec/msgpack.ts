@@ -34,7 +34,7 @@ import type { Call } from "../CallModel.js"
  * re-running the bootstrap.
  */
 const CALL_STRUCTURES: ReadonlyArray<ReadonlyArray<string>> = [
-  ["callRef","aLeg","bLegs","activePeer","callbackContext","billingContext","aLegInvite","limiterEntries","timers","cdrEvents","state","createdAt","aLegPendingVias","aLegPendingCSeq","tagMap","traceId","rootSpanId","sampled","workerIndex","_topology","emergency","features","policyUpdateHeaders","policyUpdateBody","activeRules","ruleState","messageCount","ext"],
+  ["callRef","aLeg","bLegs","activePeer","callbackContext","billingContext","aLegInvite","limiterEntries","timers","cdrEvents","state","createdAt","aLegPendingVias","aLegPendingCSeq","tagMap","traceId","rootSpanId","sampled","workerIndex","_topology","emergency","features","policyUpdateHeaders","policyUpdateBody","activeRules","messageCount","ext"],
   ["legId","callId","fromTag","source","state","disposition","dialogs","noAnswerTimeoutSec","byeDisposition","localUri","remoteUri","inviteRequestUri","pendingInviteTxn","ext","kind","adopted"],
   ["address","port"],
   ["sip","ext"],
@@ -53,9 +53,8 @@ const CALL_STRUCTURES: ReadonlyArray<ReadonlyArray<string>> = [
   ["pri","bak","gen"],
   ["failoverAllowed"],
   ["X-Foo"],
-  ["id","params","active"],
+  ["id","active"],
   [],
-  ["ruleId","state"],
   // transfer state no longer rides as a dedicated Call field; it lives inside
   // the generic `ext` carry as the transfer service's call-ext slice (decoded
   // JSON, records-mode learns the shape on first encode). This row keeps the

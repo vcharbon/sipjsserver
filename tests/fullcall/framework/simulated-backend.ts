@@ -104,8 +104,8 @@ function buildTestHandlers(policyModules?: ReadonlyArray<PolicyModule>) {
     registry = disableRule(registry, killId)
   }
   registry = transformRegistry(registry, {
-    wrapHandle: (rule, original) => (ctx, state, params) =>
-      Effect.map(original(ctx, state, params), (outcome) => {
+    wrapHandle: (rule, original) => (ctx) =>
+      Effect.map(original(ctx), (outcome) => {
         if (outcome !== undefined && outcome !== null) {
           recordFiring(rule.id)
         }

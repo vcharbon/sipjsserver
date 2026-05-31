@@ -33,15 +33,11 @@ const tagOnInvite = defineRule({
   id: "consumer-tag-on-invite",
   name: "consumer tag on invite",
   match: { kind: "request", method: "INVITE", direction: "from-a" },
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
-  init: () => undefined,
   handle: (ctx) =>
     Effect.succeed({
       actions: [
         { type: "relay-to-peer", transform: { headerUpdates: new Map([[H.Subject, removeH()]]) } },
       ] as ReadonlyArray<RuleAction>,
-      state: undefined,
     }),
 })
 

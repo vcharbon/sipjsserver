@@ -104,24 +104,23 @@ A leg is "resolved" when it has a terminal `byeDisposition`:
 ## Rule Definition
 
 ```typescript
-interface RuleDefinition<TState, TParams> {
+interface RuleDefinition {
   id: string                    // unique identifier
   name: string                  // display name for logging
   alwaysActive?: boolean        // true = runs on every call (built-in rules)
-  stateKey?: string             // rules sharing a stateKey share persisted state
   // layer is framework-stamped (CORE_LAYER / SERVICE_LAYER) — authors never set it.
   composesWith?: string         // RARE: run additively BEFORE this base rule's id
   overrides?: string            // RARE escape hatch: remove this rule from candidates (layer-agnostic)
-  stateSchema: Schema<TState>   // validates rule-specific state
-  paramsSchema: Schema<TParams> // validates params from HTTP response
   match: Match                  // declarative match descriptor (discriminated by kind)
-  init: (params, call) => TState             // initial state on activation
   onError?: "passthrough" | "terminate"      // error policy
-  handle: (ctx, state, params) => Effect<RuleHandleResult | undefined | void>
+  handle: (ctx) => Effect<RuleHandleResult | undefined | void>
 }
 ```
 
-**Decline vs. consume.** A `handle()` returning `undefined`/`void` **declines** the event — the dispatcher moves to the next candidate (next in the same layer, then lower layers, ultimately a core default). Returning `{ actions, state }` **consumes** it; `{ actions: [] }` is a valid "handled, nothing to do" no-op. So `undefined` ≠ `{ actions: [] }`: the first defers to another rule, the second claims the event. Because a declined service rule falls through to core, encode a rule's precondition in its `filter` rather than in a defensive `undefined` return inside `handle()`.
+Per-call rule data (initial config + evolving state) lives in typed `Call.ext` /
+`Leg.ext` slices via [`defineService`](rule-extension-guide.md#callflow-services-defineservice--typed-per-service-ext) (ADR-0016) — there is no `stateSchema` / `paramsSchema` / `init` on the rule and no `Call.ruleState`.
+
+**Decline vs. consume.** A `handle()` returning `undefined`/`void` **declines** the event — the dispatcher moves to the next candidate (next in the same layer, then lower layers, ultimately a core default). Returning `{ actions }` **consumes** it; `{ actions: [] }` is a valid "handled, nothing to do" no-op. So `undefined` ≠ `{ actions: [] }`: the first defers to another rule, the second claims the event. Because a declined service rule falls through to core, encode a rule's precondition in its `filter` rather than in a defensive `undefined` return inside `handle()`.
 
 **Activation must be precise.** A service/policy rule only competes when its guard reports the service active; that guard must be `false` unless the service genuinely owns the call (ADR-0016). An over-broad guard makes the rule compete in a sibling service's flow — a correctness defect the layered model surfaces (it was previously masked by specificity scoring).
 
@@ -145,7 +144,7 @@ Omitting a column means "accept any value". `OneOrMany<T>` accepts either a sing
 
 ### Defining a rule
 
-Always prefer the `defineRule({...})` factory over a hand-typed `RuleDefinition<TState, TParams>` literal — the factory infers `TMatch` from the `match` value and threads it into `RuleContext<TMatch>`, and infers `TState` from `stateSchema` (via `NoInfer` on `init` / `handle`), so neither the handler nor `init` needs an explicit return-type annotation when the schema has optional fields.
+Always prefer the `defineRule({...})` factory over a hand-typed `RuleDefinition` literal — the factory infers `TMatch` from the `match` value and threads it into `RuleContext<TMatch>`, so the handler sees a context already narrowed by the match's `kind` without an explicit annotation.
 
 ### `RuleContext` ext generics + the decode/encode bracket (ADR-0016)
 
@@ -207,7 +206,7 @@ Rules call it from `DialogRules.confirmDialogRule` and `CornerCaseRules.cancel20
 **Enforced by** [tests/b2bua/actions-reach-diff.test.ts](../tests/b2bua/actions-reach-diff.test.ts) using two shared helpers in [tests/b2bua/helpers/reach.ts](../tests/b2bua/helpers/reach.ts):
 
 - `runActions(actions, ctx) → { after, result }` — thin wrapper over `executeActions`.
-- `diffCall(before, after) → Set<string>` — returns the set of dotted paths whose values changed. Legs are keyed by `legId` (not array position); top-level collections like `tagMap`, `timers`, `cdrEvents`, `activeRules`, `ruleState` are reported as a single path; dialog fields surface as `legs.{legId}.dialogs[i].{field}`.
+- `diffCall(before, after) → Set<string>` — returns the set of dotted paths whose values changed. Legs are keyed by `legId` (not array position); top-level collections like `tagMap`, `timers`, `cdrEvents`, `activeRules` are reported as a single path; dialog fields surface as `legs.{legId}.dialogs[i].{field}`.
 
 Each Slice-D test then asserts:
 

@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect, beforeEach } from "vitest"
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import { createRuleRegistry } from "../../src/b2bua/rules/framework/RuleRegistry.js"
 import { executeRules } from "../../src/b2bua/rules/framework/RuleExecutor.js"
 import {
@@ -172,16 +172,13 @@ describe("BYE-disposition regression — Slice 4 framework invariant", () => {
       id: "test-misbehaving-bye-absorber",
       name: "Test misbehaving BYE absorber",
       alwaysActive: true,
-      stateSchema: Schema.Undefined as Schema.Schema<unknown>,
-      paramsSchema: Schema.Undefined as Schema.Schema<unknown>,
       match: {
         kind: "response",
         cseqMethod: "BYE",
         statusClass: "2xx",
         filter: () => true,
       },
-      init: () => undefined,
-      handle: () => Effect.succeed({ actions: [], state: undefined }),
+      handle: () => Effect.succeed({ actions: [] }),
     }
 
     const registry = createRuleRegistry([misbehavingRule])

@@ -63,7 +63,6 @@ export interface Service<Id extends string, TCallExt, TLegExt> {
       legExt: TLegExt | undefined,
     ) => Effect.Effect<ServiceHandleResult<TCallExt> | undefined | void, never, never>
     readonly alwaysActive?: boolean
-    readonly stateKey?: string
     readonly composesWith?: string
     readonly overrides?: string | ReadonlyArray<string>
     readonly onError?: "passthrough" | "terminate"
@@ -138,7 +137,7 @@ export function defineService<Id extends string, TCallExt = never, TLegExt = nev
                   { type: "set-call-ext", serviceId: id, value: Schema.encodeSync(callExt)(r.callExt) },
                 ]
               }
-              return { actions, state: undefined }
+              return { actions }
             }),
           )
 
@@ -146,12 +145,8 @@ export function defineService<Id extends string, TCallExt = never, TLegExt = nev
         id: def.id,
         name: def.name,
         match: { ...def.match, filter: matchFilter as never },
-        stateSchema: Schema.Undefined,
-        paramsSchema: Schema.Undefined,
-        init: () => undefined,
         handle: wrappedHandle as never,
         alwaysActive: def.alwaysActive ?? true,
-        ...(def.stateKey !== undefined ? { stateKey: def.stateKey } : {}),
         ...(def.composesWith !== undefined ? { composesWith: def.composesWith } : {}),
         ...(def.overrides !== undefined ? { overrides: def.overrides } : {}),
         ...(def.onError !== undefined ? { onError: def.onError } : {}),

@@ -27,8 +27,6 @@
  *   - `policyUpdateHeaders` ↔ `policyUpdateHeadersJson`
  *   - `Call.ext` / `Leg.ext` ↔ `extJson`      (opaque per-service slices, JSON;
  *      transfer state now rides inside `ext` as the transfer service slice)
- *   - `ActiveRule.params`     ↔ `paramsJson`  (+ `paramsPresent`)
- *   - `RuleStateEntry.state`  ↔ `stateJson`   (+ `statePresent`)
  *   - `pendingInviteTxn`      ↔ `pendingInviteTxnJson` (best-effort handle)
  *
  * Optional fields with null distinct from absent (e.g. `activePeer`,
@@ -37,7 +35,7 @@
  * null bit is on the wire as a separate boolean.
  *
  * Optional repeated fields (e.g. `aLegPendingVias`, `activeRules`,
- * `ruleState`, `terminatingRefreshLegs`) carry an explicit `*Present`
+ * `terminatingRefreshLegs`) carry an explicit `*Present`
  * flag because `Schema.optional(Schema.Array(_))` admits three states
  * (absent / empty / populated) and proto3 collapses absent and empty.
  */
@@ -45,7 +43,7 @@
 import { Effect, Layer } from "effect"
 import { createRequire } from "node:module"
 import { CallBodyCodec, type CallBodyCodecApi } from "./CallBodyCodec.js"
-import type { ActiveRule, Call, Dialog, Leg, RuleStateEntry } from "../CallModel.js"
+import type { ActiveRule, Call, Dialog, Leg } from "../CallModel.js"
 
 const requireCjs = createRequire(import.meta.url)
 const staticProto = requireCjs("./call.proto.gen.cjs") as {
@@ -102,14 +100,6 @@ const encodeLeg = (l: Leg): unknown => ({
 const encodeActiveRule = (r: ActiveRule): unknown => ({
   id: r.id,
   active: r.active,
-  paramsPresent: r.params !== undefined,
-  paramsJson: r.params === undefined ? undefined : JSON.stringify(r.params),
-})
-
-const encodeRuleState = (r: RuleStateEntry): unknown => ({
-  ruleId: r.ruleId,
-  statePresent: r.state !== undefined,
-  stateJson: r.state === undefined ? undefined : JSON.stringify(r.state),
 })
 
 const toProtoObject = (call: Call): Record<string, unknown> => {
@@ -165,10 +155,6 @@ const toProtoObject = (call: Call): Record<string, unknown> => {
   if (call.activeRules !== undefined) {
     out.activeRules = call.activeRules.map(encodeActiveRule)
     out.activeRulesPresent = true
-  }
-  if (call.ruleState !== undefined) {
-    out.ruleState = call.ruleState.map(encodeRuleState)
-    out.ruleStatePresent = true
   }
   if (call.ext !== undefined) out.extJson = JSON.stringify(call.ext)
   if (call.messageCount !== undefined) out.messageCount = call.messageCount
@@ -310,29 +296,10 @@ const fromProtoObject = (p: Record<string, unknown>): Call => {
     const rules = (p.activeRules ?? []) as ReadonlyArray<{
       id: string
       active: boolean
-      paramsPresent: boolean
-      paramsJson?: string
     }>
     out.activeRules = rules.map((r) => ({
       id: r.id,
       active: r.active,
-      ...(r.paramsPresent
-        ? { params: r.paramsJson === undefined ? undefined : JSON.parse(r.paramsJson) }
-        : {}),
-    }))
-  }
-
-  if (p.ruleStatePresent === true) {
-    const states = (p.ruleState ?? []) as ReadonlyArray<{
-      ruleId: string
-      statePresent: boolean
-      stateJson?: string
-    }>
-    out.ruleState = states.map((r) => ({
-      ruleId: r.ruleId,
-      ...(r.statePresent
-        ? { state: r.stateJson === undefined ? undefined : JSON.parse(r.stateJson) }
-        : {}),
     }))
   }
 

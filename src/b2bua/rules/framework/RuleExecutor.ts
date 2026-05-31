@@ -25,7 +25,7 @@ import { enforceInvariants } from "./InvariantEnforcer.js"
 import { enforceByeDispositionInvariant, type ByeDispositionViolation } from "./ByeDispositionInvariant.js"
 import { handleLimiterRefresh } from "./FrameworkLimiterRefresh.js"
 import { pickRanked } from "./Matcher.js"
-import { getRuleState, setRuleState, isFullyResolved } from "../../../call/CallModel.js"
+import { isFullyResolved } from "../../../call/CallModel.js"
 import type { Call, Leg } from "../../../call/CallModel.js"
 
 // ── Context conversion ─────────────────────────────────────────────────────
@@ -103,24 +103,16 @@ function decodeServiceExt(
 
 // ── Per-call entry bookkeeping ────────────────────────────────────────────
 
-interface RuleActivation {
-  readonly params: unknown
-}
-
 /**
- * Collect activations for this call: per-call rules (from HTTP activation)
- * carry params from ActiveRule; always-active rules use empty params.
- *
- * Returns:
- *   - `defs`: every active rule definition (for the Matcher input list)
- *   - `activations`: id → { params } override map
+ * Collect the rule definitions active for this call: per-call activations
+ * (from `Call.activeRules`) plus always-active built-ins.
  */
 function collectActivations(
   call: Call,
   registry: RuleRegistry,
-): { defs: AnyRuleDefinition[]; activations: Map<string, RuleActivation> } {
+): AnyRuleDefinition[] {
   const defs: AnyRuleDefinition[] = []
-  const activations = new Map<string, RuleActivation>()
+  const seen = new Set<string>()
 
   if (call.activeRules !== undefined) {
     for (const ar of call.activeRules) {
@@ -128,18 +120,17 @@ function collectActivations(
       const def = registry.definitions.get(ar.id)
       if (def === undefined) continue
       defs.push(def)
-      activations.set(ar.id, { params: ar.params ?? {} })
+      seen.add(ar.id)
     }
   }
 
   for (const [id, def] of registry.definitions) {
-    if (activations.has(id)) continue
+    if (seen.has(id)) continue
     if (!def.alwaysActive) continue
     defs.push(def)
-    activations.set(id, { params: {} })
   }
 
-  return { defs, activations }
+  return defs
 }
 
 // ── Rule attribution ──────────────────────────────────────────────────────
@@ -210,8 +201,8 @@ function logByeDispositionViolations(
 // a new Call ref on every relayed message. If *only* `messageCount`
 // changed, skip the flush — the field is restart-tolerant and a
 // missed write will be re-stamped by the next genuine mutation. Any
-// other change (legs, dialogs, timers, ruleState, transfer, ...)
-// still flushes via the shallow reference-inequality test below.
+// other change (legs, dialogs, timers, ext, ...) still flushes via the
+// shallow reference-inequality test below.
 
 // `messageCount` is the only field whose mutation alone does NOT
 // warrant a Redis write. Every other persisted field on the Call
@@ -278,7 +269,7 @@ export function executeRules(
       const { call } = ctx
       const callBefore = call
 
-      const { defs, activations } = collectActivations(call, registry)
+      const defs = collectActivations(call, registry)
       if (defs.length === 0) {
         return yield* defaultHandler(ctx)
       }
@@ -287,9 +278,9 @@ export function executeRules(
 
       // Decode active services' ext into a rule-facing projection used for
       // matching + filters + handlers. The original `ruleCtx` (Encoded ext) is
-      // what reaches setRuleState / executeActions / persistence — the minted
-      // service-rule closures re-encode their slices via set-call-ext /
-      // set-leg-ext, so only Encoded values ever cross the codec.
+      // what reaches executeActions / persistence — the minted service-rule
+      // closures re-encode their slices via set-call-ext / set-leg-ext, so only
+      // Encoded values ever cross the codec.
       const decodedExt = registry.services.size === 0
         ? undefined
         : yield* decodeServiceExt(registry, call, ctx.leg)
@@ -320,33 +311,15 @@ export function executeRules(
         const id = definition.id
         if (composedBaseIds.has(id)) continue
 
-        const params = activations.get(id)?.params ?? {}
-
-        // State key — rules with the same stateKey share persisted state
-        const stKey = definition.stateKey ?? id
-
-        // Decode or initialize rule state.
-        // Note: `undefined` is a valid state for stateless rules (Schema.Undefined).
-        // We use `null` as the sentinel for "init failed / skip this rule".
-        const rawState = getRuleState(call, stKey)
-        const initResult = yield* Effect.catchDefect(
-          Effect.sync(() => rawState !== undefined ? rawState : definition.init(params, call)),
-          (defect) => Effect.logWarning(`Rule ${id}: state init failed: ${defect}`).pipe(
-            Effect.as(null as null),
-          ),
-        )
-        if (initResult === null) continue
-        const state: unknown = initResult
-
         // Run rule handler with defect boundary. The handler reads decoded
         // service ext via `matchCtx`; persistence below uses `ruleCtx`.
-        const outcome: RuleHandleResult<unknown> | undefined | void = yield* Effect.catchDefect(
-          definition.handle(matchCtx, state, params),
+        const outcome: RuleHandleResult | undefined | void = yield* Effect.catchDefect(
+          definition.handle(matchCtx),
           (defect) => {
             const errorPolicy = definition.onError ?? "passthrough"
             if (errorPolicy === "terminate") {
               return Effect.logError(`Rule ${id} failed (terminating): ${defect}`).pipe(
-                Effect.as({ actions: [{ type: "terminate-call" as const }], state } as RuleHandleResult<unknown>),
+                Effect.as({ actions: [{ type: "terminate-call" as const }] } as RuleHandleResult),
               )
             }
             return Effect.logError(`Rule ${id} failed (passing through): ${defect}`).pipe(
@@ -362,25 +335,19 @@ export function executeRules(
         // ── Composed execution path ──
         // When a rule declares composesWith, it runs BEFORE the base rule:
         //   1. Execute this rule's pre-actions (updating working call state)
-        //   2. Run the base rule's handle() with modified state
+        //   2. Run the base rule's handle() on the post-pre-action call
         //   3. Merge results (pre-actions + base actions)
         if (definition.composesWith) {
-          const workingCall = setRuleState(ruleCtx.call, stKey, outcome.state)
-          const preResult = executeActions(outcome.actions, { ...ruleCtx, call: workingCall }, id)
+          const preResult = executeActions(outcome.actions, ruleCtx, id)
 
           // Find and run the base rule with the modified call state
           const baseDef = registry.definitions.get(definition.composesWith)
           if (baseDef) {
             const baseCtx: RuleContext = { ...ruleCtx, call: preResult.call }
-            const baseStKey = baseDef.stateKey ?? definition.composesWith
-            const baseRawState = getRuleState(preResult.call, baseStKey)
-            const baseState = baseRawState !== undefined
-              ? baseRawState : baseDef.init({}, preResult.call)
 
-            const baseOutcome = yield* baseDef.handle(baseCtx, baseState, {})
+            const baseOutcome = yield* baseDef.handle(baseCtx)
             if (baseOutcome != null) {
-              const mergedCall = setRuleState(preResult.call, baseStKey, baseOutcome.state)
-              const baseResult = executeActions(baseOutcome.actions, { ...ruleCtx, call: mergedCall }, definition.composesWith)
+              const baseResult = executeActions(baseOutcome.actions, baseCtx, definition.composesWith)
               // Merge: pre-actions first, then base actions
               const merged = addRuleAttribution(
                 {
@@ -417,9 +384,7 @@ export function executeRules(
         }
 
         // ── Non-composed path ──
-        const workingCall = setRuleState(ruleCtx.call, stKey, outcome.state)
-        const actionCtx: RuleContext = { ...ruleCtx, call: workingCall }
-        const attributed = addRuleAttribution(executeActions(outcome.actions, actionCtx, id), id, definition.name)
+        const attributed = addRuleAttribution(executeActions(outcome.actions, ruleCtx, id), id, definition.name)
         const finalized = finalizeTermination(callBefore, ctx.event, attributed)
         yield* logByeDispositionViolations(finalized.violations, id, ctx.callRef, ctx.event.type)
         return enforceInvariants(callBefore, appendAutoFlush(callBefore, finalized.result))

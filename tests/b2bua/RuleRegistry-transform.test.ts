@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect } from "vitest"
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import {
   createRuleRegistry,
   disableRule,
@@ -16,7 +16,6 @@ import {
 import type {
   AnyRuleDefinition,
   RuleContext,
-  RuleHandleResult,
 } from "../../src/b2bua/rules/framework/RuleDefinition.js"
 import { matchAccepts } from "../../src/b2bua/rules/framework/Matcher.js"
 
@@ -31,14 +30,11 @@ function makeRule(opts: {
     id: opts.id,
     name: opts.id,
     alwaysActive: true as const,
-    stateSchema: Schema.Undefined as Schema.Schema<unknown>,
-    paramsSchema: Schema.Unknown as Schema.Schema<unknown>,
     match: { kind: "cancelled" } as const,
-    init: () => undefined,
     handle: () =>
       Effect.succeed(
         opts.handleReturns === "result"
-          ? ({ actions: [], state: undefined } as RuleHandleResult<unknown>)
+          ? { actions: [] }
           : undefined,
       ),
   }

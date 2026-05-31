@@ -6,7 +6,7 @@
  * The ActionExecutor translates rule actions into SIP messages and call state updates.
  */
 
-import type { Effect, Schema } from "effect"
+import type { Effect } from "effect"
 import type {
   SipRequest,
   SipResponse,
@@ -696,12 +696,10 @@ export type RuleAction =
 
 // ── Rule definition interface ──────────────────────────────────────────────
 
-/** Result returned by a rule handler: a list of actions + updated state. */
-export interface RuleHandleResult<TState> {
+/** Result returned by a rule handler: a list of actions. */
+export interface RuleHandleResult {
   /** Actions for the framework to execute. */
   readonly actions: ReadonlyArray<RuleAction>
-  /** Updated rule state (will be serialized back into Call.ruleState). */
-  readonly state: TState
 }
 
 /**
@@ -742,10 +740,11 @@ export interface RuleHandleResult<TState> {
  * `overrides` / `composesWith` are RARE, layer-agnostic escape hatches (below)
  * — not the normal way to win. Layer + order handle the common case.
  *
- * TState — rule-specific state (serializable via stateSchema)
- * TParams — rule-specific configuration from HTTP response (decoded via paramsSchema)
+ * Per-call rule data (initial config + evolving state) rides in typed
+ * `Call.ext` / `Leg.ext` slices via `defineService` (ADR-0016), not on the rule
+ * definition.
  */
-export interface RuleDefinition<TState = unknown, TParams = unknown> {
+export interface RuleDefinition {
   /** Unique rule identifier (matches ActiveRule.id from HTTP response for per-call rules). */
   readonly id: string
 
@@ -767,13 +766,6 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
 
   /** Display name for logging and tracing. */
   readonly name: string
-
-  /**
-   * Shared state key for call.ruleState persistence.
-   * Defaults to `id`. Rules with the same stateKey share state — used by
-   * policy modules where multiple rules read/write the same typed state.
-   */
-  readonly stateKey?: string
 
   /**
    * Declarative composition — this rule runs BEFORE the named base rule.
@@ -819,18 +811,6 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
    */
   readonly match: Match
 
-  /** Schema for validating/decoding rule-specific state. */
-  readonly stateSchema: Schema.Schema<TState>
-
-  /** Schema for validating/decoding rule params from HTTP response. */
-  readonly paramsSchema: Schema.Schema<TParams>
-
-  /**
-   * Create initial state when the rule is first activated on a call.
-   * Called once, after /call/new returns the rule in its response.
-   */
-  readonly init: (params: TParams, call: Call) => TState
-
   /**
    * Error policy when handle() throws.
    * - "passthrough": fall through to next rule / default (default)
@@ -840,26 +820,22 @@ export interface RuleDefinition<TState = unknown, TParams = unknown> {
 
   /**
    * Process an event. Returns:
-   * - `{ actions, state }`: rule CONSUMES the event (actions execute; `actions:
-   *   []` is a valid "handled, nothing to do" no-op).
+   * - `{ actions }`: rule CONSUMES the event (actions execute; `actions: []` is
+   *   a valid "handled, nothing to do" no-op).
    * - `undefined`/`void`: rule DECLINES — the event flows to the next candidate
    *   (next in this layer, then lower layers, ultimately a core default).
    * See the SELECTION CONTRACT on the interface: `undefined` ≠ `{ actions: [] }`.
    */
   readonly handle: (
     ctx: RuleContext,
-    state: TState,
-    params: TParams,
-  ) => Effect.Effect<RuleHandleResult<TState> | undefined | void, never, never>
+  ) => Effect.Effect<RuleHandleResult | undefined | void, never, never>
 }
 
 /**
- * Type-erased rule definition for use in collections and registries.
- * Individual rules are fully typed via RuleDefinition<TState, TParams>;
- * this alias is used when storing heterogeneous rules together.
+ * Type alias retained for collections and registries; `RuleDefinition` is no
+ * longer generic, so this is simply `RuleDefinition`.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type AnyRuleDefinition = RuleDefinition<any, any>
+export type AnyRuleDefinition = RuleDefinition
 
 // ── Match-aware factory ────────────────────────────────────────────────────
 
@@ -869,10 +845,10 @@ export type AnyRuleDefinition = RuleDefinition<any, any>
  * `defineRule` infers `TMatch` from the literal `match` value, so the handler's
  * `ctx` is typed as `RuleContext<TMatch>` — narrowed event, message, direction,
  * call.state, sourceDialog all derived from the match-criteria. The result
- * is a plain `RuleDefinition<TState, TParams>` (handler context erased to the
- * wide form) which the dispatcher invokes via the same code path as legacy
- * rules; the cast is sound because the dispatcher only invokes the handler
- * after the matcher has verified `match` against the runtime event.
+ * is a plain `RuleDefinition` (handler context erased to the wide form) which
+ * the dispatcher invokes via the same code path; the cast is sound because the
+ * dispatcher only invokes the handler after the matcher has verified `match`
+ * against the runtime event.
  *
  * Example:
  * ```ts
@@ -883,9 +859,6 @@ export type AnyRuleDefinition = RuleDefinition<any, any>
  *     kind: "request", method: "REFER", direction: "from-b",
  *     callState: "bridged",
  *   },
- *   stateSchema: Schema.Undefined,
- *   paramsSchema: Schema.Undefined,
- *   init: () => undefined,
  *   handle: (ctx) => Effect.sync(() => {
  *     // ctx.event.message: InDialogMethodRequest<"REFER"> — to.tag, from.tag both string
  *     // ctx.sourceDialog: Dialog (non-undefined)
@@ -896,30 +869,19 @@ export type AnyRuleDefinition = RuleDefinition<any, any>
  * })
  * ```
  */
-export function defineRule<
-  TMatch extends Match,
-  TState = undefined,
-  TParams = undefined,
->(
+export function defineRule<TMatch extends Match>(
   def: {
     readonly id: string
     readonly name: string
     readonly match: TMatch
-    /** Source of truth for `TState` — `init`/`handle` are NoInfer'd against this. */
-    readonly stateSchema: Schema.Schema<TState>
-    readonly paramsSchema: Schema.Schema<TParams>
-    readonly init: (params: TParams, call: Call) => NoInfer<TState>
     readonly handle: (
       ctx: RuleContext<TMatch>,
-      state: NoInfer<TState>,
-      params: TParams,
-    ) => Effect.Effect<RuleHandleResult<NoInfer<TState>> | undefined | void, never, never>
+    ) => Effect.Effect<RuleHandleResult | undefined | void, never, never>
     readonly alwaysActive?: boolean
-    readonly stateKey?: string
     readonly composesWith?: string
     readonly overrides?: string | ReadonlyArray<string>
     readonly onError?: "passthrough" | "terminate"
   },
-): RuleDefinition<TState, TParams> {
-  return def as unknown as RuleDefinition<TState, TParams>
+): RuleDefinition {
+  return def as unknown as RuleDefinition
 }

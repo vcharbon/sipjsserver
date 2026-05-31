@@ -105,19 +105,16 @@ if (instruction.my_policy_name) {
 
 Create `src/b2bua/rules/custom/myPolicy.ts`:
 
+A policy-module rule is **stateless** — it emits actions from the event + the
+current `Call`/`Leg`. If your flow needs per-call state, author a
+[`defineService`](#callflow-services-defineservice--typed-per-service-ext)
+instead (typed `Call.ext` slice); that is the only place per-call rule state
+lives.
+
 ```typescript
-import { Effect, Schema } from "effect"
-import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
+import { Effect, type RuleAction } from "effect"
+import { defineRule } from "../framework/RuleDefinition.js"
 import { definePolicyModule } from "../framework/PolicyModule.js"
-
-// ── Shared state (module-private) ──────────────────────────────────
-
-const PolicyState = Schema.Struct({
-  // ... rule-specific state fields
-})
-type PolicyState = typeof PolicyState.Type
-
-const STATE_KEY = "my_policy"
 
 // ── Rule 1 (module-private) ────────────────────────────────────────
 
@@ -125,9 +122,6 @@ const myRule = defineRule({
   id: "my-rule",
   name: "My Rule Description",
   alwaysActive: true,
-  stateKey: STATE_KEY,
-  stateSchema: PolicyState,
-  paramsSchema: Schema.Undefined,
 
   // Declarative match descriptor — discriminated union on event kind.
   // The PolicyModule guard is composed into `match.filter` by createRuleRegistry,
@@ -140,18 +134,13 @@ const myRule = defineRule({
     direction: "from-b",
   },
 
-  // `defineRule` infers TState from `stateSchema` via NoInfer — `init` does
-  // not need an explicit return-type annotation even when PolicyState has
-  // optional fields. ctx is RuleContext<TMatch> here, so ctx.event.message
-  // is typed as a SipResponseTagged with INVITE CSeq — no defensive guards.
-  init: () => ({ /* initial state */ }),
-
-  handle: (ctx, state) => {
+  // ctx is RuleContext<TMatch> here, so ctx.event.message is typed as a
+  // SipResponseTagged with INVITE CSeq — no defensive guards.
+  handle: (ctx) => {
     // Return Effect<RuleHandleResult | undefined>
     // undefined = pass through to next rule
     return Effect.succeed({
       actions: [/* RuleAction[] */],
-      state: { /* updated state */ },
     })
   },
 })
@@ -239,27 +228,15 @@ export const myPolicy = myService.toPolicyModule() // register like any policy m
 - **Per-leg writes.** Emit a `set-leg-ext` action with a decoded value; the
   minted closure encodes it via the service's `legExt` schema.
 
-## Shared State via `stateKey`
+## Shared per-call state → `defineService`
 
-Multiple rules in a policy module can share state by using the same `stateKey`:
-
-```typescript
-const rule1 = defineRule({
-  id: "rule-1",
-  stateKey: "shared_key",
-  stateSchema: SharedState,
-  // ...
-})
-
-const rule2 = defineRule({
-  id: "rule-2",
-  stateKey: "shared_key",
-  stateSchema: SharedState,
-  // ...
-})
-```
-
-Both rules read/write the same entry in `call.ruleState`. The `init()` of whichever rule runs first creates the state; subsequent rules find the existing state via `getRuleState()`.
+There is no per-rule state on a `RuleDefinition` and no `Call.ruleState`. When
+several cooperating rules need to share evolving per-call state, bundle them in
+a [`defineService`](#callflow-services-defineservice--typed-per-service-ext):
+every rule minted from the service reads the same decoded `Call.ext[id]` slice
+and returns an updated one (the framework re-encodes it on write). That typed
+`ext` slice — keyed by service id — is the single, replicated channel for both
+the initial config (seeded from `/call/new`) and the evolving state.
 
 ## Composition with `composesWith`
 
@@ -270,7 +247,7 @@ const myPreProcessor = defineRule({
   id: "my-preprocessor",
   composesWith: "confirm-dialog",  // runs before confirm-dialog
   // ...
-  handle: (ctx, state) => {
+  handle: (ctx) => {
     // Return actions that run BEFORE confirm-dialog
     // Return undefined to let confirm-dialog run alone
   },
@@ -279,7 +256,7 @@ const myPreProcessor = defineRule({
 
 **Composition semantics:**
 1. Framework executes this rule's actions first (updating working call state)
-2. Invokes the base rule's `handle()` with the modified state
+2. Invokes the base rule's `handle()` on the post-pre-action call
 3. Appends base rule's actions after this rule's actions
 4. The combined result claims the event
 
@@ -444,7 +421,7 @@ alice.expect(200, {
 | Activation mechanism | `alwaysActive` + PolicyModule guard | Per-call `activeRules` requires HTTP assembling rule lists; guard on Call.policies is simpler |
 | Rule grouping | `PolicyModule` with module-private rules | TypeScript module encapsulation prevents unguarded rules from escaping |
 | Policy field format | Explicit boolean per policy | Type-safe, self-documenting; avoids string matching bugs |
-| State sharing | `stateKey` on RuleDefinition | Multiple rules share typed state without global coupling |
+| Per-call state | typed `Call.ext` slice via `defineService` (ADR-0016) | One replicated, typed channel for config + evolving state; no per-rule `ruleState` |
 | Composition | `composesWith` field (before-only) | Forward-compatible for after/around; clean semantic without breaking first-match-wins |
 | Header overrides | `policyUpdateHeaders` on Call | Persists across failover; merged by both helpers.ts and ActionExecutor.ts |
 | Observability | `rule_handled` span event on ALL rules | Uniform tracing regardless of rule type |

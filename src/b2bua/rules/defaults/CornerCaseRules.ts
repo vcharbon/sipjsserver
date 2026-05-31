@@ -13,7 +13,7 @@
  * `MatchFilter<RequestMatch>` typing on each Match interface.
  */
 
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import { defineRule } from "../framework/RuleDefinition.js"
 import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 import { newTag } from "../../../sip/MessageHelpers.js"
@@ -42,8 +42,6 @@ export const cancel200CrossingRule = defineRule({
   id: "cancel-200-crossing",
   name: "CANCEL/200 Crossing",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "response",
@@ -53,7 +51,6 @@ export const cancel200CrossingRule = defineRule({
     direction: "from-b",
   },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     const resp = ctx.event.message
@@ -74,7 +71,6 @@ export const cancel200CrossingRule = defineRule({
         { type: "ack-leg", legId: bLeg.legId },
         { type: "destroy-leg", legId: bLeg.legId },
       ],
-      state: undefined,
     })
   },
 })
@@ -89,8 +85,6 @@ export const retransmit200Rule = defineRule({
   id: "retransmit-200",
   name: "Retransmit 200 OK",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   // Distinguish retransmitted initial 200 OK (no pending request snapshot)
   // from re-INVITE response (pending snapshot) — the latter is handled by
@@ -107,14 +101,12 @@ export const retransmit200Rule = defineRule({
     },
   },
 
-  init: () => undefined,
 
   handle: (ctx) =>
     Effect.succeed({
       actions: [
         { type: "ack-leg", legId: ctx.sourceLeg.legId },
       ],
-      state: undefined,
     }),
 })
 
@@ -128,8 +120,6 @@ export const reinviteGlareRule = defineRule({
   id: "reinvite-glare",
   name: "Re-INVITE Glare Detection",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   // More specific than relay-reinvite (which has no filter) — wins on glare.
   match: {
@@ -140,14 +130,12 @@ export const reinviteGlareRule = defineRule({
       ctx.sourceDialog.ext.inboundPendingRequests.some((p) => p.method === "INVITE"),
   },
 
-  init: () => undefined,
 
   handle: () =>
     Effect.succeed({
       actions: [
         { type: "respond", status: 491, reason: "Request Pending" },
       ],
-      state: undefined,
     }),
 })
 
@@ -165,8 +153,6 @@ export const relayReinviteResponseRule = defineRule({
   id: "relay-reinvite-response",
   name: "Relay re-INVITE Response",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   // Covers all status classes of a re-INVITE response (1xx/2xx/3xx+). Filter
   // matches presence of a pending relay snapshot — the re-INVITE originated
@@ -181,7 +167,6 @@ export const relayReinviteResponseRule = defineRule({
     },
   },
 
-  init: () => undefined,
 
   handle: () =>
     // ActionExecutor.relayResponseMsg auto-detects the pending re-INVITE on
@@ -191,7 +176,6 @@ export const relayReinviteResponseRule = defineRule({
     // entry on any final response. This rule just signals "yes, relay it".
     Effect.succeed({
       actions: [{ type: "relay-to-peer" }],
-      state: undefined,
     }),
 })
 

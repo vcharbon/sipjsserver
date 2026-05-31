@@ -130,3 +130,12 @@ per-service fields/actions removed as services migrate (`Call.earlyPromote` +
 `features` shrinks to platform-only. ADR-0015's storage decision is
 superseded; its core decisions (own binary, stateless backend, B2BUA owns
 replicated state) stand.
+
+With `relayFirst18xTo180` now migrated onto the service template (its `strategy`
++ `{ firstRelayed, storedATag }` ride in `Call.ext["relayFirst18x"]`, seeded in
+`applyRoute`), the *original* ADR-0015 storage mechanism is fully retired: the
+per-rule state surface (`stateSchema` / `paramsSchema` / `init`, `RuleHandleResult.state`,
+`Call.ruleState`, `getRuleState`/`setRuleState`, `stateKey`) and the never-populated
+`ActiveRule.params` are deleted. `RuleDefinition` is no longer generic; a rule
+`handle(ctx)` returns only `{ actions }`. Typed `ext` is the single channel for
+per-call rule data.

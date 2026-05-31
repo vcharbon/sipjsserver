@@ -8,7 +8,7 @@
  */
 
 import { describe, test, expect } from "vitest"
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import { createRuleRegistry } from "../../src/b2bua/rules/framework/RuleRegistry.js"
 import { executeRules } from "../../src/b2bua/rules/framework/RuleExecutor.js"
 import type { AnyRuleDefinition } from "../../src/b2bua/rules/framework/RuleDefinition.js"
@@ -129,16 +129,12 @@ function mutatingRule(id: string): AnyRuleDefinition {
     id,
     name: id,
     alwaysActive: true,
-    stateSchema: Schema.Undefined as Schema.Schema<unknown>,
-    paramsSchema: Schema.Undefined as Schema.Schema<unknown>,
     match: { kind: "request", method: "INFO" },
-    init: () => undefined,
     handle: (ctx) =>
       Effect.succeed({
         actions: [
           { type: "update-leg-state" as const, legId: ctx.sourceLeg.legId, state: "confirmed" as const, disposition: "bridged" as const },
         ],
-        state: undefined,
       }),
   }
 }
@@ -149,16 +145,12 @@ function manualFlushRule(id: string): AnyRuleDefinition {
     id,
     name: id,
     alwaysActive: true,
-    stateSchema: Schema.Undefined as Schema.Schema<unknown>,
-    paramsSchema: Schema.Undefined as Schema.Schema<unknown>,
     match: { kind: "request", method: "INFO" },
-    init: () => undefined,
     handle: () =>
       Effect.succeed({
         actions: [
           { type: "begin-termination" as const },
         ],
-        state: undefined,
       }),
   }
 }
@@ -169,14 +161,10 @@ function inertRule(id: string): AnyRuleDefinition {
     id,
     name: id,
     alwaysActive: true,
-    stateSchema: Schema.Undefined as Schema.Schema<unknown>,
-    paramsSchema: Schema.Undefined as Schema.Schema<unknown>,
     match: { kind: "request", method: "INFO" },
-    init: () => undefined,
     handle: () =>
       Effect.succeed({
         actions: [],
-        state: undefined,
       }),
   }
 }

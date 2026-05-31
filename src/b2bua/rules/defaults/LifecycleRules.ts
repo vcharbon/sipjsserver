@@ -4,43 +4,36 @@
  * These handle non-SIP events that affect call lifecycle.
  */
 
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 
 // ── handle-timeout ─────────────────────────────────────────
 
 /** Terminate call on transaction timeout. */
-export const handleTimeoutRule: RuleDefinition<undefined, undefined> = {
+export const handleTimeoutRule: RuleDefinition = {
   id: "handle-timeout",
   name: "Handle Transaction Timeout",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: { kind: "timeout" },
 
-  init: () => undefined,
 
   handle: (_ctx) =>
     Effect.succeed({
       actions: [{ type: "begin-termination" }],
-      state: undefined,
     }),
 }
 
 // ── handle-cancel ──────────────────────────────────────────
 
 /** Handle CANCEL from a-leg: destroy all b-legs, begin termination. */
-export const handleCancelRule: RuleDefinition<undefined, undefined> = {
+export const handleCancelRule: RuleDefinition = {
   id: "handle-cancel",
   name: "Handle CANCEL",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: { kind: "cancelled" },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     const actions: RuleAction[] = []
@@ -62,7 +55,7 @@ export const handleCancelRule: RuleDefinition<undefined, undefined> = {
     actions.push({ type: "add-cdr-event", eventType: "cancel" as const, legId: "a" })
     actions.push({ type: "begin-termination" })
 
-    return Effect.succeed({ actions, state: undefined })
+    return Effect.succeed({ actions })
   },
 }
 
@@ -77,13 +70,11 @@ export const handleCancelRule: RuleDefinition<undefined, undefined> = {
  * We do NOT relay the response to a-leg — the a-leg INVITE transaction has
  * already completed via the 487 sent by TransactionLayer when CANCEL arrived.
  */
-export const resolveCancelResponseRule: RuleDefinition<undefined, undefined> = {
+export const resolveCancelResponseRule: RuleDefinition = {
   id: "resolve-cancel-response",
   name: "Resolve CANCEL Response",
   alwaysActive: true,
   overrides: "absorb-stale-failure",
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "response",
@@ -93,7 +84,6 @@ export const resolveCancelResponseRule: RuleDefinition<undefined, undefined> = {
     direction: "from-b",
   },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     const legId = ctx.sourceLeg.legId
@@ -101,7 +91,6 @@ export const resolveCancelResponseRule: RuleDefinition<undefined, undefined> = {
       actions: [
         { type: "terminate-leg" as const, legId, byeDisposition: "cancelled" as const },
       ],
-      state: undefined,
     })
   },
 }
@@ -117,12 +106,10 @@ export const resolveCancelResponseRule: RuleDefinition<undefined, undefined> = {
  * "handle-481"`) can intercept this and create a replacement leg instead
  * of terminating the call.
  */
-export const handle481Rule: RuleDefinition<undefined, undefined> = {
+export const handle481Rule: RuleDefinition = {
   id: "handle-481",
   name: "Handle 481 Dialog Not Exist",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   // cseqMethod left unconstrained — 481 on any method tears the call down.
   // terminating-state override happens via resolve-bye-response (which is
@@ -135,7 +122,6 @@ export const handle481Rule: RuleDefinition<undefined, undefined> = {
     callState: "active",
   },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     const legId = ctx.sourceLeg.legId
@@ -145,7 +131,6 @@ export const handle481Rule: RuleDefinition<undefined, undefined> = {
         { type: "add-cdr-event" as const, eventType: "bye" as const, legId, reason: "481 Dialog Does Not Exist" },
         { type: "begin-termination" as const },
       ],
-      state: undefined,
     })
   },
 }

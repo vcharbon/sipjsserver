@@ -1,8 +1,14 @@
 /**
- * relayFirst18xTo180 — PolicyModule for hiding forking/failover from the caller.
+ * relayFirst18xTo180 — callflow service for hiding forking/failover from the
+ * caller. Migrated from a PolicyModule + the `features.relayFirst18xTo180`
+ * activation + the shared `ruleState` blob onto the typed-ext service template
+ * (ADR-0016): the strategy and the per-call runtime state now ride in a typed
+ * `Call.ext["relayFirst18x"]` slice, seeded in applyRoute from the routing
+ * decision's `relay_first_18x_to_180` feature.
  *
- * When activated by the HTTP routing response (relay_first_18x_to_180: true,
- * or `"drop-sdp"` / `"keep-sdp"` / `"fake-prack"`), this policy:
+ * When active (the slice is present for `"drop-sdp"` / `"keep-sdp"` /
+ * `"fake-prack"`; `"promote-pem-to-200"` is owned by the promote18xPemTo200
+ * service, so this slice is never seeded there), this service:
  *   1. Transforms the first 18x from any b-leg into a bare 180 (no SDP, no 100rel)
  *   2. Suppresses all subsequent 18x messages across all b-legs
  *   3. On 200 OK, forces the a-facing To-tag to match the one from the first 180
@@ -17,17 +23,13 @@
  *   7. Substitute the cached b-leg SDP into the 200 OK INVITE relayed to alice
  *      so she sees a coherent offer/answer at confirmation time.
  *
- * Rules are module-private — only the PolicyModule export is public.
- * Guard is applied by createRuleRegistry at registration time.
- *
- * Each rule uses `defineRule({...})`, so handler bodies see a `ctx` whose
- * event/message are already narrowed by the match — no `as SipResponse`
- * casts and no `?? ""` defaults on `parsed.to.tag`.
+ * Each rule reads its decoded call-ext slice; `firstRelayed` / `storedATag`
+ * are carried back via the returned `callExt`.
  */
 
 import { Effect, Schema } from "effect"
-import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
-import { definePolicyModule } from "../framework/PolicyModule.js"
+import { defineService } from "../framework/Service.js"
+import type { RuleAction } from "../framework/RuleDefinition.js"
 import type { SipResponse } from "../../../sip/types.js"
 import { getHeader, getHeaders, newTag } from "../../../sip/MessageHelpers.js"
 import { splitTopLevelCommas } from "../../../sip/parsers/custom/structured-headers.js"
@@ -55,50 +57,52 @@ function reliableRseq(resp: SipResponse): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
-// ── Shared state (module-private) ─────────────────────────────────────────
+// ── Service id + call-ext schema ───────────────────────────────────────────
 
-const PolicyState = Schema.Struct({
+export const RELAY_FIRST_18X_SERVICE_ID = "relayFirst18x"
+
+/**
+ * Per-call state for the early-media masking strategies. `strategy` replaces
+ * the former `features.relayFirst18xTo180.strategy` activation flag (seeded in
+ * applyRoute); `firstRelayed` / `storedATag` replace the shared `ruleState`
+ * blob. `promote-pem-to-200` is intentionally absent — that strategy is owned
+ * by the promote18xPemTo200 service and never seeds this slice.
+ */
+export const RelayFirst18xCallExt = Schema.Struct({
+  strategy: Schema.Literals(["drop-sdp", "keep-sdp", "fake-prack"]),
   /** Whether the first 18x has been relayed as 180 to the caller. */
   firstRelayed: Schema.Boolean,
   /** The a-facing To-tag generated on the first 18x — reused on 200 OK. */
   storedATag: Schema.optional(Schema.String),
 })
-type PolicyState = typeof PolicyState.Type
+export type RelayFirst18xCallExt = typeof RelayFirst18xCallExt.Type
 
-const STATE_KEY = "relayFirst18x_to_180"
+const relay = defineService({
+  id: RELAY_FIRST_18X_SERVICE_ID,
+  callExt: RelayFirst18xCallExt,
+})
 
-// ── suppress-18x (module-private) ──────────────────────────
+// ── suppress-18x ───────────────────────────────────────────────────────────
 //
-// Runs BEFORE relay-provisional (900). On first 18x: pre-generate a-facing
-// tag, seed tag mapping, relay as bare 180. On subsequent 18x: suppress
-// relay but still record CDR.
+// Runs BEFORE core relay-provisional (wins by SERVICE_LAYER). On first 18x:
+// pre-generate a-facing tag, seed tag mapping, relay as bare 180. On
+// subsequent 18x: suppress relay but still record CDR.
 
-const suppress18x = defineRule({
+relay.rule({
   id: "suppress-18x",
   name: "Suppress 18x -> 180",
-  alwaysActive: true,
-  stateKey: STATE_KEY,
-  stateSchema: PolicyState,
-  paramsSchema: Schema.Undefined,
-
-  // Same match shape as core relay-provisional, but this rule is SERVICE_LAYER:
-  // it wins by layer whenever the policy is active, and it always consumes, so
-  // relay-provisional never runs alongside it — no override needed.
   match: {
     kind: "response",
     cseqMethod: "INVITE",
     statusClass: "1xx",
     direction: "from-b",
   },
-
-  init: () => ({ firstRelayed: false }),
-
-  handle: (ctx, state) => {
+  handle: (ctx, ext) => {
     const resp = ctx.event.message
     const bTag = resp.getHeader("to").tag
     const rseq = reliableRseq(resp)
     const inviteCSeq = resp.getHeader("cseq").seq
-    const strategy = ctx.call.features?.relayFirst18xTo180?.strategy
+    const strategy = ext.strategy
 
     // Reliable 1xx → B2BUA must PRACK the b-leg itself (RFC 3262 §3-4).
     // alice never sees the reliable provisional (downgraded to bare 180 with
@@ -119,7 +123,7 @@ const suppress18x = defineRule({
             legId: ctx.sourceLeg.legId, bTag, body: resp.body }
         : undefined
 
-    if (state.firstRelayed) {
+    if (ext.firstRelayed) {
       // Subsequent 18x — suppress relay, still PRACK if reliable
       const actions: RuleAction[] = []
       if (prackAction) actions.push(prackAction)
@@ -128,7 +132,7 @@ const suppress18x = defineRule({
         type: "add-cdr-event" as const, eventType: "provisional" as const,
         legId: ctx.sourceLeg.legId, statusCode: resp.status,
       })
-      return Effect.succeed({ actions, state })
+      return Effect.succeed({ actions })
     }
 
     // First 18x — pre-generate a-facing tag, relay as bare 180
@@ -157,50 +161,39 @@ const suppress18x = defineRule({
 
     return Effect.succeed({
       actions,
-      state: { firstRelayed: true, storedATag: aFacingTag },
+      callExt: { ...ext, firstRelayed: true, storedATag: aFacingTag },
     })
   },
 })
 
-// ── force-tag-consistency (module-private) ─────────────────
+// ── force-tag-consistency ────────────────────────────────────────────────
 //
-// Composes with confirm-dialog (903). On 200 OK INVITE from b-leg:
-// pre-seeds the tag mapping with the stored a-facing tag so that
-// confirm-dialog's findByBTag() finds it and reuses it instead of
-// generating a new tag. This makes the 200 OK To-tag match the 180.
+// Composes with confirm-dialog. On 200 OK INVITE from b-leg: pre-seeds the
+// tag mapping with the stored a-facing tag so that confirm-dialog's
+// findByBTag() finds it and reuses it instead of generating a new tag. This
+// makes the 200 OK To-tag match the 180.
 
-const forceTagConsistency = defineRule({
+relay.rule({
   id: "force-tag-consistency",
   name: "Force Tag Consistency on 200 OK",
-  alwaysActive: true,
-  stateKey: STATE_KEY,
-  stateSchema: PolicyState,
-  paramsSchema: Schema.Undefined,
-
   composesWith: "confirm-dialog",
-
-  // Same match signature as confirm-dialog — composition layers this rule
-  // before the base rule rather than overriding it.
   match: {
     kind: "response",
     cseqMethod: "INVITE",
     statusClass: "2xx",
     direction: "from-b",
   },
-
-  init: () => ({ firstRelayed: false }),
-
-  handle: (ctx, state) => {
+  handle: (ctx, ext) => {
     const resp = ctx.event.message
     const bTag = resp.getHeader("to").tag
-    const strategy = ctx.call.features?.relayFirst18xTo180?.strategy
+    const strategy = ext.strategy
 
     const actions: RuleAction[] = []
 
     // Existing behavior: pre-seed tag mapping so confirm-dialog reuses the
     // stored a-facing tag (hides forking/failover identity from alice).
-    if (state.storedATag) {
-      actions.push({ type: "add-tag-mapping" as const, aTag: state.storedATag,
+    if (ext.storedATag) {
+      actions.push({ type: "add-tag-mapping" as const, aTag: ext.storedATag,
         bLegId: ctx.sourceLeg.legId, bTag })
     }
 
@@ -227,43 +220,32 @@ const forceTagConsistency = defineRule({
     }
 
     if (actions.length === 0) return Effect.void
-    return Effect.succeed({ actions, state })
+    return Effect.succeed({ actions })
   },
 })
 
-// ── absorb-prack-200 (module-private) ──────────────────────
+// ── absorb-prack-200 ───────────────────────────────────────────────────────
 //
-// Runs BEFORE relay-non-invite-200 (927). The B2BUA synthesizes PRACK toward
-// the b-leg when it absorbs a reliable 1xx (alice never saw it, so alice
-// won't generate the PRACK). Bob's 200 OK for that B2BUA-originated PRACK
-// must not be relayed to alice — absorb it here.
+// Runs BEFORE relay-non-invite-200 (wins by SERVICE_LAYER). The B2BUA
+// synthesizes PRACK toward the b-leg when it absorbs a reliable 1xx (alice
+// never saw it, so alice won't generate the PRACK). Bob's 200 OK for that
+// B2BUA-originated PRACK must not be relayed to alice — absorb it here.
 
-const absorbPrack200 = defineRule({
+relay.rule({
   id: "absorb-prack-200",
   name: "Absorb 200 OK for B2BUA-synthesized PRACK",
-  alwaysActive: true,
-  stateKey: STATE_KEY,
-  stateSchema: PolicyState,
-  paramsSchema: Schema.Undefined,
-
-  // PRACK 2xx from b-leg. SERVICE_LAYER, so it wins over core
-  // relay-non-invite-200 by layer when the policy is active.
   match: {
     kind: "response",
     cseqMethod: "PRACK",
     statusClass: "2xx",
     direction: "from-b",
   },
-
-  init: () => ({ firstRelayed: false }),
-
-  handle: (ctx, state) =>
+  handle: (ctx) =>
     Effect.succeed({
       actions: [
         { type: "add-cdr-event" as const, eventType: "provisional" as const,
           legId: ctx.sourceLeg.legId, statusCode: 200 },
       ],
-      state,
     }),
 })
 
@@ -276,29 +258,17 @@ const absorbPrack200 = defineRule({
 // intersection we reject 488. Either way, the cached SDP for this dialog
 // is replaced with bob's UPDATE offer so alice's eventual 200 OK reflects
 // bob's latest state.
-//
-// SERVICE_LAYER, so this wins over core `relay-update` by layer (and always
-// consumes) when the fake-prack strategy is active.
 
-const fakePrackHandleUpdateFromB = defineRule({
+relay.rule({
   id: "fake-prack-handle-update-from-b",
   name: "Fake-PRACK: locally answer b-leg UPDATE",
-  alwaysActive: true,
-  stateKey: STATE_KEY,
-  stateSchema: PolicyState,
-  paramsSchema: Schema.Undefined,
-
   match: {
     kind: "request",
     method: "UPDATE",
     direction: "from-b",
-    filter: (ctx) =>
-      ctx.call.features?.relayFirst18xTo180?.strategy === "fake-prack",
   },
-
-  init: () => ({ firstRelayed: false }),
-
-  handle: (ctx, state) => {
+  filter: (_ctx, ext) => ext.strategy === "fake-prack",
+  handle: (ctx) => {
     const req = ctx.event.message
     const updateBody = req.body
     const bTag = req.getHeader("from").tag ?? ""
@@ -309,7 +279,6 @@ const fakePrackHandleUpdateFromB = defineRule({
         actions: [
           { type: "respond" as const, status: 200, reason: "OK" },
         ],
-        state,
       })
     }
 
@@ -327,7 +296,6 @@ const fakePrackHandleUpdateFromB = defineRule({
           { type: "cache-sdp-on-leg-dialog" as const,
             legId: ctx.sourceLeg.legId, bTag, body: updateBody },
         ],
-        state,
       })
     }
 
@@ -336,7 +304,6 @@ const fakePrackHandleUpdateFromB = defineRule({
       actions: [
         { type: "respond" as const, status: 488, reason: "Not Acceptable Here" },
       ],
-      state,
     })
   },
 })
@@ -351,52 +318,24 @@ const fakePrackHandleUpdateFromB = defineRule({
 // Restricted to early state (call not yet bridged); after merge, normal
 // in-dialog UPDATE relay applies.
 
-const fakePrackHandleUpdateFromA = defineRule({
+relay.rule({
   id: "fake-prack-handle-update-from-a",
   name: "Fake-PRACK: locally answer a-leg early-dialog UPDATE",
-  alwaysActive: true,
-  stateKey: STATE_KEY,
-  stateSchema: PolicyState,
-  paramsSchema: Schema.Undefined,
-
   match: {
     kind: "request",
     method: "UPDATE",
     direction: "from-a",
     legState: ["trying", "early"],
-    filter: (ctx) =>
-      ctx.call.features?.relayFirst18xTo180?.strategy === "fake-prack",
   },
-
-  init: () => ({ firstRelayed: false }),
-
-  handle: (_ctx, state) =>
+  filter: (_ctx, ext) => ext.strategy === "fake-prack",
+  handle: () =>
     Effect.succeed({
       actions: [
         { type: "respond" as const, status: 200, reason: "OK" },
       ],
-      state,
     }),
 })
 
-// ── Single export: the PolicyModule ───────────────────────────────────────
+// ── Single export: the PolicyModule (ext-presence activation) ────────────
 
-export const relayFirst18xTo180 = definePolicyModule({
-  // Applicable only for THIS module's own early-media strategies. The
-  // `promote-pem-to-200` strategy is owned by the promote18xPemTo200 service
-  // (which seeds its own `ext["promote-pem"]`), so this module's rules must be
-  // inactive there — otherwise `suppress-18x` would compete with PEM's
-  // promotion. The two are mutually exclusive by strategy.
-  id: "relayFirst18x_to_180",
-  guard: (ctx) => {
-    const strategy = ctx.call.features?.relayFirst18xTo180?.strategy
-    return strategy !== undefined && strategy !== "promote-pem-to-200"
-  },
-  rules: [
-    suppress18x,
-    forceTagConsistency,
-    absorbPrack200,
-    fakePrackHandleUpdateFromB,
-    fakePrackHandleUpdateFromA,
-  ],
-})
+export const relayFirst18xTo180 = relay.toPolicyModule()

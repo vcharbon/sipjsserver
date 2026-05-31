@@ -7,7 +7,7 @@
  *   - aLegInvite carries ~20 headers + ~1.5 KB SDP (the actual cost driver)
  *   - inboundPendingRequests has a couple of in-flight entries (re-INVITE churn)
  *   - cachedSdp present on the bLeg's dialog (fake-prack strategy)
- *   - small handfuls of cdrEvents / timers / tagMap / activeRules / ruleState
+ *   - small handfuls of cdrEvents / timers / tagMap / activeRules
  *
  * `messageCount` lives on the Call (Schema.Int) but is a single number,
  * so the body still does NOT grow with N re-INVITEs. What changes per-
@@ -215,13 +215,9 @@ export const representativeCall: Call = {
   _topology: { pri: "worker-0", bak: "worker-1", gen: 3 },
   emergency: true,
   activeRules: [
-    { id: "limit-by-subscriber", params: { limiterId: "subscriber:alice@example.com", limit: 5 }, active: true },
-    { id: "promote-pem-to-200", params: { strategy: "fake-prack" }, active: false },
+    { id: "limit-by-subscriber", active: true },
+    { id: "promote-pem-to-200", active: false },
     { id: "transfer-c-1xx-to-notify", active: true },
-  ],
-  ruleState: [
-    { ruleId: "limit-by-subscriber", state: { admittedAt: 1779440042_000, window: 1779440000 } },
-    { ruleId: "promote-pem-to-200", state: undefined },
   ],
   ext: {
     "promote-pem": { promoted: true, windowOpen: false, resyncReinviteCSeq: 8007 },

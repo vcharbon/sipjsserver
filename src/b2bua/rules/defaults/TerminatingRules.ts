@@ -11,7 +11,7 @@
  * relay rules (relay-bye, etc.) by specificity whenever both can match.
  */
 
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import type { RuleDefinition } from "../framework/RuleDefinition.js"
 
 // ── resolve-bye-response ──────────────────────────────────
@@ -29,12 +29,10 @@ import type { RuleDefinition } from "../framework/RuleDefinition.js"
  * Behavior is identical regardless of status code (200, 408, 481, 5xx) —
  * the leg is done. Only tracing/CDR records the specific code.
  */
-export const resolveByeResponseRule: RuleDefinition<undefined, undefined> = {
+export const resolveByeResponseRule: RuleDefinition = {
   id: "resolve-bye-response",
   name: "Resolve BYE Response",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "response",
@@ -43,7 +41,6 @@ export const resolveByeResponseRule: RuleDefinition<undefined, undefined> = {
     filter: (ctx) => ctx.sourceLeg.byeDisposition === "bye_sent",
   },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     const legId = ctx.sourceLeg.legId
@@ -51,7 +48,6 @@ export const resolveByeResponseRule: RuleDefinition<undefined, undefined> = {
       actions: [
         { type: "terminate-leg" as const, legId, byeDisposition: "bye_confirmed" as const },
       ],
-      state: undefined,
     })
   },
 }
@@ -62,12 +58,10 @@ export const resolveByeResponseRule: RuleDefinition<undefined, undefined> = {
  * Handle BYE request arriving while we're already terminating (cross-BYE
  * race: both sides sent BYE simultaneously). Respond 200 and mark the leg.
  */
-export const resolveCrossByeRule: RuleDefinition<undefined, undefined> = {
+export const resolveCrossByeRule: RuleDefinition = {
   id: "resolve-cross-bye",
   name: "Resolve Cross-BYE",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "request",
@@ -75,7 +69,6 @@ export const resolveCrossByeRule: RuleDefinition<undefined, undefined> = {
     callState: "terminating",
   },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     const legId = ctx.sourceLeg.legId
@@ -84,7 +77,6 @@ export const resolveCrossByeRule: RuleDefinition<undefined, undefined> = {
         { type: "respond" as const, status: 200, reason: "OK" },
         { type: "terminate-leg" as const, legId, byeDisposition: "bye_received" as const },
       ],
-      state: undefined,
     })
   },
 }
@@ -104,12 +96,10 @@ export const resolveCrossByeRule: RuleDefinition<undefined, undefined> = {
  * the structural invariant is broken (auto-arm bypassed, or the
  * timer's handler crashed without reaching forcePurge).
  */
-export const terminatingSafetyTimeoutRule: RuleDefinition<undefined, undefined> = {
+export const terminatingSafetyTimeoutRule: RuleDefinition = {
   id: "terminating-safety-timeout",
   name: "Terminating Safety Timeout (canary)",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "timer",
@@ -117,14 +107,13 @@ export const terminatingSafetyTimeoutRule: RuleDefinition<undefined, undefined> 
     callState: "terminating",
   },
 
-  init: () => undefined,
 
   handle: (ctx) =>
     Effect.gen(function* () {
       yield* Effect.logWarning(
         `[terminating-safety-timeout canary] structural safety net missed; rule-chain fell through for call ${ctx.callRef}`,
       )
-      return { actions: [], state: undefined }
+      return { actions: [] }
     }),
 }
 

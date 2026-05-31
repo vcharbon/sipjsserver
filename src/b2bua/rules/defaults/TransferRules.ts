@@ -18,7 +18,7 @@
  *  - RFC 3891 — Replaces (attended transfer, not supported in v1)
  */
 
-import { Effect, Result, Schema } from "effect"
+import { Effect, Result } from "effect"
 import { defineRule, type RuleAction, type RuleContext } from "../framework/RuleDefinition.js"
 import type { AnyRuleDefinition, RequestMatch } from "../framework/RuleDefinition.js"
 import type { SipRequest } from "../../../sip/types.js"
@@ -88,8 +88,6 @@ export const transferRejectReplacesRule = defineRule({
   name: "Reject REFER with Replaces (attended transfer)",
   alwaysActive: true,
   overrides: "transfer-reject-second-refer",
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "request",
@@ -98,12 +96,10 @@ export const transferRejectReplacesRule = defineRule({
     filter: referToHasReplaces,
   },
 
-  init: () => undefined,
 
   handle: () =>
     Effect.succeed({
       actions: [{ type: "respond" as const, status: 501, reason: "Not Implemented" }],
-      state: undefined,
     }),
 })
 
@@ -114,8 +110,6 @@ export const transferRejectALegReferRule = defineRule({
   id: "transfer-reject-a-leg-refer",
   name: "Reject REFER from A leg",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "request",
@@ -123,12 +117,10 @@ export const transferRejectALegReferRule = defineRule({
     direction: "from-a",
   },
 
-  init: () => undefined,
 
   handle: () =>
     Effect.succeed({
       actions: [{ type: "respond" as const, status: 501, reason: "Not Implemented" }],
-      state: undefined,
     }),
 })
 
@@ -150,8 +142,6 @@ export const transferInterceptReferRule = defineRule({
   id: "transfer-intercept-refer",
   name: "Intercept REFER on bridged B leg",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "request",
@@ -162,7 +152,6 @@ export const transferInterceptReferRule = defineRule({
     filter: (ctx) => referToLacksReplaces(ctx) && noTransferActive(ctx),
   },
 
-  init: () => undefined,
 
   handle: (ctx) =>
     Effect.sync(() => {
@@ -217,7 +206,7 @@ export const transferInterceptReferRule = defineRule({
         },
       ]
 
-      return { actions, state: undefined }
+      return { actions }
     }),
 })
 

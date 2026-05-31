@@ -46,7 +46,6 @@
  */
 
 import type { Effect, Schema } from "effect"
-import type { Call } from "../call/CallModel.js"
 import { defineRule as defineRuleCore } from "../b2bua/rules/framework/RuleDefinition.js"
 import { defineService as defineServiceCore } from "../b2bua/rules/framework/Service.js"
 import type {
@@ -74,9 +73,8 @@ export type RuleContext<
 > = Omit<WideRuleContext<TMatch, TCallExt, TLegExt>, "callControl" | "limiter">
 
 /** Handler result for a plain SDK rule — actions constrained to the public subset. */
-export interface PublicRuleHandleResult<TState> {
+export interface PublicRuleHandleResult {
   readonly actions: ReadonlyArray<PublicRuleAction>
-  readonly state: TState
 }
 
 /** Handler result for a service rule — actions constrained, plus the call-ext write channel. */
@@ -107,7 +105,6 @@ export interface Service<Id extends string, TCallExt, TLegExt> {
       legExt: TLegExt | undefined,
     ) => Effect.Effect<PublicServiceHandleResult<TCallExt> | undefined | void, never, never>
     readonly alwaysActive?: boolean
-    readonly stateKey?: string
     readonly composesWith?: string
     readonly overrides?: string | ReadonlyArray<string>
     readonly onError?: "passthrough" | "terminate"
@@ -123,28 +120,18 @@ export interface Service<Id extends string, TCallExt, TLegExt> {
  * handler's actions are constrained to {@link PublicRuleAction}; the result is a
  * framework `RuleDefinition` ready for {@link definePolicyModule}.
  */
-export function defineRule<
-  TMatch extends Match,
-  TState = undefined,
-  TParams = undefined,
->(def: {
+export function defineRule<TMatch extends Match>(def: {
   readonly id: string
   readonly name: string
   readonly match: TMatch
-  readonly stateSchema: Schema.Schema<TState>
-  readonly paramsSchema: Schema.Schema<TParams>
-  readonly init: (params: TParams, call: Call) => NoInfer<TState>
   readonly handle: (
     ctx: RuleContext<TMatch>,
-    state: NoInfer<TState>,
-    params: TParams,
-  ) => Effect.Effect<PublicRuleHandleResult<NoInfer<TState>> | undefined | void, never, never>
+  ) => Effect.Effect<PublicRuleHandleResult | undefined | void, never, never>
   readonly alwaysActive?: boolean
-  readonly stateKey?: string
   readonly composesWith?: string
   readonly overrides?: string | ReadonlyArray<string>
   readonly onError?: "passthrough" | "terminate"
-}): RuleDefinition<TState, TParams> {
+}): RuleDefinition {
   return defineRuleCore(def as never)
 }
 

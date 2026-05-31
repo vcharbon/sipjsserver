@@ -5,23 +5,20 @@
  * Limiter refresh is a framework concern, not a rule (see InvariantEnforcer).
  */
 
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import type { RuleDefinition, RuleAction } from "../framework/RuleDefinition.js"
 import { allPeeredLegs, findLeg, isAdopted } from "../../../call/CallModel.js"
 
 // ── max-duration ───────────────────────────────────────────
 
 /** Terminate call when global duration timer fires. */
-export const maxDurationRule: RuleDefinition<undefined, undefined> = {
+export const maxDurationRule: RuleDefinition = {
   id: "max-duration",
   name: "Max Duration Timeout",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: { kind: "timer", timerType: "global_duration" },
 
-  init: () => undefined,
 
   handle: () =>
     Effect.succeed({
@@ -29,7 +26,6 @@ export const maxDurationRule: RuleDefinition<undefined, undefined> = {
         { type: "add-cdr-event", eventType: "bye" as const, legId: "a" },
         { type: "begin-termination" },
       ],
-      state: undefined,
     }),
 }
 
@@ -42,12 +38,10 @@ export const maxDurationRule: RuleDefinition<undefined, undefined> = {
  * Uses `send-request-to-leg` action — the ActionExecutor handles CSeq bump,
  * dialog lookup, and message construction for the generated OPTIONS request.
  */
-export const keepaliveRule: RuleDefinition<undefined, undefined> = {
+export const keepaliveRule: RuleDefinition = {
   id: "keepalive",
   name: "Keepalive Timer",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "timer",
@@ -55,7 +49,6 @@ export const keepaliveRule: RuleDefinition<undefined, undefined> = {
     callState: ["active"],
   },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     const actions: RuleAction[] = []
@@ -100,19 +93,17 @@ export const keepaliveRule: RuleDefinition<undefined, undefined> = {
       delaySec: ctx.config.keepaliveIntervalSec,
     })
 
-    return Effect.succeed({ actions, state: undefined })
+    return Effect.succeed({ actions })
   },
 }
 
 // ── keepalive-timeout ──────────────────────────────────────
 
 /** Terminate call when a keepalive timeout fires. */
-export const keepaliveTimeoutRule: RuleDefinition<undefined, undefined> = {
+export const keepaliveTimeoutRule: RuleDefinition = {
   id: "keepalive-timeout",
   name: "Keepalive Timeout",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "timer",
@@ -120,7 +111,6 @@ export const keepaliveTimeoutRule: RuleDefinition<undefined, undefined> = {
     callState: ["active"],
   },
 
-  init: () => undefined,
 
   handle: (ctx) => {
     // Mark the unresponsive leg as timed out so begin-termination
@@ -135,6 +125,6 @@ export const keepaliveTimeoutRule: RuleDefinition<undefined, undefined> = {
     actions.push({ type: "add-cdr-event", eventType: "bye" as const, legId: timedOutLegId ?? "a", reason: "keepalive timeout" })
     actions.push({ type: "begin-termination" })
 
-    return Effect.succeed({ actions, state: undefined })
+    return Effect.succeed({ actions })
   },
 }

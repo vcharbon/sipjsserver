@@ -5,7 +5,7 @@
  * Both support failover via the HTTP /call/failure API.
  */
 
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import { defineRule, type RuleAction } from "../framework/RuleDefinition.js"
 import type { AnyRuleDefinition } from "../framework/RuleDefinition.js"
 import { headerUpdatesFromRecord, toBareUri } from "../framework/actions/factories.js"
@@ -21,8 +21,6 @@ export const routeFailureRule = defineRule({
   id: "route-failure",
   name: "B-Leg Route Failure",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   // resolve-cancel-response (legDisposition=cancelling) and
   // absorb-stale-failure (legState=terminated) carve out by specificity.
@@ -36,7 +34,6 @@ export const routeFailureRule = defineRule({
     filter: (ctx) => isAdopted(ctx.sourceLeg),
   },
 
-  init: () => undefined,
 
   handle: (ctx) =>
     Effect.gen(function* () {
@@ -76,7 +73,7 @@ export const routeFailureRule = defineRule({
             ...(failureResp.new_ruri !== undefined ? { ruri: { kind: "set" as const, value: toBareUri(failureResp.new_ruri) } } : {}),
             ...(failureResp.callback_context !== undefined ? { callbackContext: failureResp.callback_context } : {}),
           })
-          return { actions, state: undefined }
+          return { actions }
         }
       }
 
@@ -84,7 +81,7 @@ export const routeFailureRule = defineRule({
       actions.push({ type: "relay-to-peer" })
       actions.push({ type: "begin-termination" })
 
-      return { actions, state: undefined }
+      return { actions }
     }),
 })
 
@@ -103,12 +100,9 @@ export const noAnswerFailoverRule = defineRule({
   id: "no-answer-failover",
   name: "No-Answer Failover",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: { kind: "timer", timerType: "no_answer" },
 
-  init: () => undefined,
 
   handle: (ctx) =>
     Effect.gen(function* () {
@@ -147,13 +141,13 @@ export const noAnswerFailoverRule = defineRule({
             ...(failureResp.new_ruri !== undefined ? { ruri: { kind: "set" as const, value: toBareUri(failureResp.new_ruri) } } : {}),
             ...(failureResp.callback_context !== undefined ? { callbackContext: failureResp.callback_context } : {}),
           })
-          return { actions, state: undefined }
+          return { actions }
         }
       }
 
       // No failover — begin termination
       actions.push({ type: "begin-termination" })
-      return { actions, state: undefined }
+      return { actions }
     }),
 })
 
@@ -173,8 +167,6 @@ export const absorbStaleFailureRule = defineRule({
   id: "absorb-stale-failure",
   name: "Absorb Stale Failure",
   alwaysActive: true,
-  stateSchema: Schema.Undefined,
-  paramsSchema: Schema.Undefined,
 
   match: {
     kind: "response",
@@ -184,10 +176,9 @@ export const absorbStaleFailureRule = defineRule({
     direction: "from-b",
   },
 
-  init: () => undefined,
 
   handle: () =>
-    Effect.succeed({ actions: [], state: undefined }),
+    Effect.succeed({ actions: [] }),
 })
 
 // Compile-time grouping — keeps the rule list typed as AnyRuleDefinition.

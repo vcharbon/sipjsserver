@@ -490,27 +490,17 @@ export type ALegInviteSnapshot = typeof ALegInviteSnapshot.Type
 // rides inside the generic per-service `ext` carry as the transfer service's
 // typed call-ext slice (`TransferCallExt` in referTransfer.ts). See ADR-0016.
 
-// ── Rule system (active rules + per-rule state on Call) ────────────────────
+// ── Rule system (active rules on Call) ─────────────────────────────────────
 
 /** A rule activated on this call by the HTTP API response. */
 export const ActiveRule = Schema.Struct({
   /** Rule identifier — must match a registered RuleDefinition.id */
   id: Schema.String,
-  /** Rule-specific configuration from HTTP response (frozen at activation) */
-  params: Schema.optional(Schema.Unknown),
   /** Whether this rule is currently active (can be deactivated mid-call) */
   active: Schema.Boolean,
 })
 
 export type ActiveRule = typeof ActiveRule.Type
-
-/** Per-rule opaque state blob, decoded by the owning rule's stateSchema. */
-export const RuleStateEntry = Schema.Struct({
-  ruleId: Schema.String,
-  state: Schema.optional(Schema.Unknown),
-})
-
-export type RuleStateEntry = typeof RuleStateEntry.Type
 
 // ── Call state ──────────────────────────────────────────────────────────────
 
@@ -675,12 +665,6 @@ export const Call = Schema.Struct({
    * Empty/undefined = only built-in always-active rules run.
    */
   activeRules: Schema.optional(Schema.Array(ActiveRule)),
-  /**
-   * Per-rule opaque state blobs, decoded by the owning rule's stateSchema.
-   * Rules update their state via RuleHandleResult.state; the RuleExecutor
-   * persists it here before action execution. Serialized through Redis.
-   */
-  ruleState: Schema.optional(Schema.Array(RuleStateEntry)),
   /**
    * Per-service opaque extension slot, keyed by callflow-service id. Carried
    * by core through the codec, never interpreted; each service decodes its
@@ -1154,34 +1138,6 @@ export function splitLeg(call: Call, legId: string): Call {
 export function allPeeredLegs(call: Call): string[] {
   if (call.activePeer === null) return []
   return [call.activePeer.legA, call.activePeer.legB]
-}
-
-// ── Rule state helpers ───────────────────────────────────────────────────
-
-/** Get the rule state entry for a given rule ID. */
-export function getRuleState(call: Call, ruleId: string): unknown | undefined {
-  return call.ruleState?.find((e) => e.ruleId === ruleId)?.state
-}
-
-/** Update or insert a rule state entry.
- *
- * No-ops (returns the same call reference) when the new state is referentially
- * equal to the existing entry's state, or when no entry exists and the new
- * state is `undefined` — in either case `getRuleState` returns the same value.
- *
- * This reference-stability matters for the auto-flush guard in `RuleExecutor`,
- * which compares `result.call` to the pre-rule call to detect state mutations.
- */
-export function setRuleState(call: Call, ruleId: string, state: unknown): Call {
-  const existing = call.ruleState ?? []
-  const idx = existing.findIndex((e) => e.ruleId === ruleId)
-  if (idx < 0 && state === undefined) return call
-  if (idx >= 0 && existing[idx]!.state === state) return call
-  const entry: RuleStateEntry = { ruleId, state }
-  const updated = idx >= 0
-    ? [...existing.slice(0, idx), entry, ...existing.slice(idx + 1)]
-    : [...existing, entry]
-  return { ...call, ruleState: updated }
 }
 
 // ── Service ext helpers (ADR-0016) ────────────────────────────────────────
