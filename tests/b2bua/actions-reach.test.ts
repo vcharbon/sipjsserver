@@ -293,6 +293,93 @@ describe("add-tag-mapping reach", () => {
   })
 })
 
+// ── pin-a-tag (public composite over stamp + map) ───────────────────────────
+
+describe("pin-a-tag reach", () => {
+  test("supplied toTag stamps a-leg localTag + seeds tagMap; nothing else moves", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("OLD-atag", "tagA"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
+    const call = makeCall(aLeg, bLeg)
+    const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
+
+    const result = executeActions(
+      [{ type: "pin-a-tag", bLegId: "b-1", bTag: "bob-tag", toTag: "PINNED" }],
+      ctx,
+      "test-rule",
+    )
+
+    expect(result.call.aLeg.dialogs[0]!.sip.localTag).toBe("PINNED")
+    expect(result.call.tagMap).toEqual([{ aTag: "PINNED", bLegId: "b-1", bTag: "bob-tag" }])
+    // Reach is exactly the pinned localTag + tagMap.
+    expect(diffCall(call, result.call)).toEqual(
+      new Set(["legs.a.dialogs[0].sip.localTag", "tagMap"]),
+    )
+  })
+
+  test("mints once when unpinned, then reuses; integrator reads it back from dialogs[0]", () => {
+    // Empty a-leg localTag ⇒ "not pinned yet" ⇒ framework mints.
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("", "tagA"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
+    const call = makeCall(aLeg, bLeg)
+    const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
+
+    const result = executeActions(
+      [
+        { type: "pin-a-tag", bLegId: "b-1", bTag: "fork-1-tag" },
+        { type: "pin-a-tag", bLegId: "b-1", bTag: "fork-1-tag" },
+      ],
+      ctx,
+      "test-rule",
+    )
+
+    const pinned = result.call.aLeg.dialogs[0]!.sip.localTag
+    expect(pinned.length).toBeGreaterThan(0)
+    // The tag the caller sees IS the tagMap a-facing tag — one entry (dedup).
+    expect(result.call.tagMap).toEqual([{ aTag: pinned, bLegId: "b-1", bTag: "fork-1-tag" }])
+    // Spans expose mint-then-reuse for diagnosability.
+    const outcomes = (result.spanEvents ?? [])
+      .filter((e) => e.attributes?.["rule.action"] === "pin-a-tag")
+      .map((e) => e.attributes?.["rule.outcome"])
+    expect(outcomes).toEqual(["minted", "reused"])
+  })
+
+  test("empty bTag stamps the identity but skips the mapping with a span", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA", makeALegDialog("", "tagA"))
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
+    const call = makeCall(aLeg, bLeg)
+    const ctx = makeCtx(call, bLeg, bLeg.dialogs[0], "from-b", make200InviteFromB("bob-tag"))
+
+    const result = executeActions(
+      [{ type: "pin-a-tag", bLegId: "b-1", bTag: "" }],
+      ctx,
+      "test-rule",
+    )
+
+    expect(result.call.aLeg.dialogs[0]!.sip.localTag.length).toBeGreaterThan(0)
+    expect(result.call.tagMap).toEqual([]) // no useless mapping seeded
+    const span = (result.spanEvents ?? []).find((e) => e.attributes?.["rule.action"] === "pin-a-tag")
+    expect(span?.attributes?.["rule.outcome"]).toBe("no_b_tag")
+  })
+})
+
+// ── ack-leg precondition skip-spans ─────────────────────────────────────────
+
+describe("ack-leg no-op-with-span", () => {
+  test("missing confirmed dialog emits a skip-span instead of silently dropping", () => {
+    const aLeg = makeLeg("a", "call-1", "tagA") // no dialog ⇒ unconfirmed
+    const bLeg = makeLeg("b-1", "1-call-1", "tagB2BUA", makeDialog(""))
+    const call = makeCall(aLeg, bLeg)
+    const ctx = makeCtx(call, aLeg, undefined, "from-a", make200InviteFromB("bob-tag"))
+
+    const result = executeActions([{ type: "ack-leg", legId: "a" }], ctx, "test-rule")
+
+    expect(result.effects.outbound).toEqual([]) // no ACK on the wire
+    const span = (result.spanEvents ?? []).find((e) => e.attributes?.["rule.action"] === "ack-leg")
+    expect(span?.attributes?.["rule.outcome"]).toBe("unconfirmed_dialog")
+    expect(span?.attributes?.["rule.leg"]).toBe("a")
+  })
+})
+
 // ── cancel-leg (primitive) ──────────────────────────────────────────────────
 
 describe("cancel-leg reach", () => {

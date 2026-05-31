@@ -35,6 +35,7 @@ export type PublicRuleActionType =
   | "terminate-leg"
   | "update-leg-state"
   | "confirm-dialog"
+  | "pin-a-tag"
   | "add-cdr-event"
   | "deactivate-rule"
   | "set-call-ext"

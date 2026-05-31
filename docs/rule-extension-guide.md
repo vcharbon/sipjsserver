@@ -286,8 +286,9 @@ Available actions that rules can emit (see `RuleAction` in `RuleDefinition.ts`):
 | `send-request-to-leg` | Generate a new request to a leg (OPTIONS, INFO) |
 | `confirm-dialog` | Populate `legs.{legId}.dialogs[0]` from the current 200 OK response (toTag, contact, routeSet, CSeq floor). One-dialog reach — does not touch leg state, tagMap, or the peer leg. |
 | `update-leg-state` | Set `legs.{legId}.state` and optionally `legs.{legId}.disposition`. |
-| `stamp-dialog-to-tag` | Stamp an explicit `toTag` onto `legs.{legId}.dialogs[0]` (creates a fresh dialog when none exists — see `makeDialogFromIncoming`/`makeEmptyDialog`). Used on the a-leg (UAS side) at 200-OK-INVITE time. |
-| `add-tag-mapping` | Append `{aTag,bLegId,bTag}` to `call.tagMap`. Idempotent by `(bLegId,bTag)`. |
+| `stamp-dialog-to-tag` | *(internal)* Stamp an explicit `toTag` onto `legs.{legId}.dialogs[0]` (creates a fresh dialog when none exists — see `makeDialogFromIncoming`/`makeEmptyDialog`). Used on the a-leg (UAS side) at 200-OK-INVITE time. |
+| `add-tag-mapping` | *(internal)* Append `{aTag,bLegId,bTag}` to `call.tagMap`. Idempotent by `(bLegId,bTag)`. |
+| `pin-a-tag` | **Public composite over the two above.** Pin a stable caller-facing To-tag and bind a B-leg fork to it: `{ bLegId, bTag, toTag? }`. Mints the a-facing tag once (framework-owned), persists it on `legs.a.dialogs[0].sip.localTag`, and seeds `tagMap`. Idempotent — safe to fire on every B 18x and the 200 OK. See "Pinning the caller-facing tag" below. |
 | `create-leg` | Create a new b-leg from snapshot/INVITE |
 | `destroy-leg` | **Composite.** Tear down a single leg (BYE for confirmed, CANCEL for trying/early, nothing when a CANCEL is already in flight). Reach: `legs.{legId}.state`, `legs.{legId}.byeDisposition`, `legs.{legId}.disposition` (trying/early path only), `call.activePeer` cleared if the leg was peered. |
 | `cancel-leg` | **Primitive.** CANCEL an outstanding INVITE on an early/trying b-leg while keeping the leg alive. Reach: `legs.{legId}.disposition → "cancelling"` only — cancel-resolving rules set the final `byeDisposition` when bob responds. |
@@ -413,6 +414,50 @@ alice.expect(200, {
   },
 })
 ```
+
+## Pinning the caller-facing tag across forking/failover
+
+A B2BUA that hides B-side forking or failover from the caller must show Alice a
+**single, stable To-tag** even as different B dialogs come and go. The public
+`pin-a-tag` action does this without exposing the internal tag-map plumbing.
+
+**Who owns the tag value, and how you reference the early dialog later** — the
+two questions integrators always ask:
+
+- **The framework mints and owns it.** On the first `pin-a-tag` the a-facing
+  tag is generated (you never call `newTag()`) unless you pass `toTag`
+  yourself, then persisted on `legs.a.dialogs[0].sip.localTag`.
+- **There is no opaque handle — the To-tag *is* the reference.** A later rule
+  reads the pinned tag straight back from
+  `ctx.call.aLeg.dialogs[0].sip.localTag`. You do *not* have to mint a tag and
+  stash it in your own `Call.ext` just to find the dialog again (you may, like
+  `relayFirst18x` keeps `storedATag`, but it's convenience, not a requirement).
+- **In-dialog routing is automatic.** Once bound, Alice's in-dialog requests
+  carrying that To-tag resolve to `bLegId` via `findByATag(call.tagMap)`.
+- **Idempotent.** Re-emitting reuses the pinned tag, and `tagMap` dedups by
+  `(bLegId, bTag)` — so fire it on every B 18x and on the 200 OK with no
+  bookkeeping.
+
+```typescript
+// On each B provisional/200 OK, keep Alice's identity stable across the fork:
+service.rule({
+  id: "pin-caller-tag",
+  match: { kind: "response", cseqMethod: "INVITE", statusClass: "1xx", direction: "from-b" },
+  handle: (ctx) => Effect.succeed({
+    actions: [
+      { type: "pin-a-tag", bLegId: ctx.sourceLeg.legId, bTag: ctx.event.message.getHeader("to").tag ?? "" },
+    ],
+  }),
+})
+
+// Anywhere later — recover the pinned tag from call state, no extra storage:
+const callerTag = ctx.call.aLeg.dialogs[0]?.sip.localTag
+```
+
+This is the public, narrowed equivalent of what `relayFirst18xTo180`
+(`src/b2bua/rules/custom/`) does internally with `stamp-dialog-to-tag` +
+`add-tag-mapping`; reach for the in-tree service when you need its full
+early-media masking (drop-SDP / fake-PRACK) behaviour as well.
 
 ## Design Decision Log
 

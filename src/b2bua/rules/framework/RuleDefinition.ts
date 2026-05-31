@@ -458,6 +458,37 @@ export type RuleAction =
       readonly legId: string
       readonly toTag: string
     }
+  | {
+      /**
+       * Pin a stable caller-facing (a-leg) To-tag and bind a b-leg fork to it.
+       * The public, narrowed composite over `stamp-dialog-to-tag` +
+       * `add-tag-mapping` (ADR-0015) — it lets an integrator service hide B-side
+       * forking / failover from the caller without touching internal tag
+       * plumbing.
+       *
+       * Tag ownership (the answer to "who mints it, how do I find it later"):
+       *   - The FRAMEWORK owns the value. On the first emit the a-facing tag is
+       *     minted (`newTag()`, seeded under test) unless `toTag` is supplied,
+       *     then persisted on `legs.a.dialogs[0].sip.localTag`. There is no
+       *     opaque handle — the To-tag IS the dialog reference (same as the
+       *     framework's own `dialogIdentityTag`).
+       *   - A later rule reads the pinned tag straight back from
+       *     `ctx.call.aLeg.dialogs[0].sip.localTag`; copying it into the
+       *     service's own `Call.ext` is optional convenience, not required.
+       *   - Idempotent: re-emitting reuses the already-pinned tag and `tagMap`
+       *     dedups by `(bLegId, bTag)`, so a service can fire it on every B 18x
+       *     and the 200 OK without bookkeeping.
+       *
+       * Once bound, the caller's in-dialog requests carrying the pinned To-tag
+       * route back to `bLegId` automatically via `findByATag(tagMap)`.
+       *
+       * Reach: legs.a.dialogs[0] (localTag, created if absent) + tagMap.
+       */
+      readonly type: "pin-a-tag"
+      readonly bLegId: string
+      readonly bTag: string
+      readonly toTag?: string
+    }
 
   // ── Leg lifecycle ──
   //

@@ -117,3 +117,25 @@ flows are argued by extension from it.
 - The public/internal split must be enforced at the module boundary (a
   dedicated SDK entrypoint), and the dogfood must import *only* that
   entrypoint for the CI contract test to mean anything.
+
+## Addendum — first widening: `pin-a-tag` (2026-05)
+
+The PRBT dogfood asked for the one thing the "tag-mapping plumbing stays
+internal" rule blocked: pinning a stable caller-facing To-tag across B-side
+forking/failover (the `sdk-tag-actions-not-public` finding). Rather than
+export the raw internal `stamp-dialog-to-tag` + `add-tag-mapping` (which would
+freeze the internal tag-map shape as public contract), we opened a single
+**narrowed composite**, `pin-a-tag { bLegId, bTag, toTag? }`. It mints the
+a-facing tag once (framework-owned — integrators never reach `newTag()`),
+persists it on `legs.a.dialogs[0].sip.localTag`, and seeds the `tagMap`
+binding, collapsing into one idempotent verb exactly what `relayFirst18xTo180`
+does internally.
+
+This is the intended "easier to open than to close" motion: the integrator's
+*intent* ("hide this fork behind my stable a-tag") is public; the storage
+mechanism stays internal. **Tag ownership / referencing model:** there is no
+opaque dialog handle — the To-tag *is* the reference (consistent with the
+framework's own `dialogIdentityTag`). The integrator reads the pinned tag back
+from `ctx.call.aLeg.dialogs[0].sip.localTag` in any later rule; it does not
+need to mint or stash a tag of its own. See the `pin-a-tag` doc in
+`RuleDefinition.ts` and the rule-extension guide.

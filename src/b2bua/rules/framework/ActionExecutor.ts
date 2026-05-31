@@ -456,6 +456,9 @@ function executeAction(
     case "stamp-dialog-to-tag":
       executeStampDialogToTag(action, state)
       break
+    case "pin-a-tag":
+      executePinATag(action, state)
+      break
     case "create-leg":
       executeCreateLeg(action, ctx, state)
       break
@@ -1458,6 +1461,54 @@ function executeStampDialogToTag(
   }))
 }
 
+// ── pin-a-tag (public composite over stamp + map) ─────────────────────────
+
+/**
+ * Pin a stable a-facing To-tag and bind a b-leg fork to it. Mints the tag the
+ * first time (framework-owned; integrators never call `newTag()`), persists it
+ * on `legs.a.dialogs[0]` so later rules read it back from call state, and seeds
+ * `tagMap` so the caller's in-dialog requests route to the fork. See the
+ * `pin-a-tag` RuleAction doc for the full ownership model.
+ */
+function executePinATag(
+  action: Extract<RuleAction, { type: "pin-a-tag" }>,
+  state: ExecutionState,
+): void {
+  const { type, bLegId, bTag, toTag } = action
+  void type
+
+  let aTag = toTag
+  let minted = false
+  if (aTag === undefined) {
+    const existing = b2buaTag(state.call, "a")
+    if (existing !== undefined && existing.length > 0) {
+      aTag = existing
+    } else {
+      aTag = newTag()
+      minted = true
+    }
+  }
+
+  // Persist the a-facing identity (idempotent if dialogs[0] already carries it).
+  executeStampDialogToTag({ type: "stamp-dialog-to-tag", legId: "a", toTag: aTag }, state)
+
+  // Bind the fork. A provisional that opens an early dialog always carries a
+  // To-tag (RFC 3261 §12.1); guard the rare empty case with a visible span
+  // rather than seeding a useless mapping.
+  if (bTag.length > 0) {
+    state.call = addTagMapping(state.call, { aTag, bLegId, bTag })
+  }
+
+  state.spanEvents.push({
+    name: "rule_action",
+    attributes: {
+      "rule.action": "pin-a-tag",
+      "rule.outcome": bTag.length > 0 ? (minted ? "minted" : "reused") : "no_b_tag",
+      "rule.leg": bLegId,
+    },
+  })
+}
+
 // ── ack-leg ────────────────────────────────────────────────────────────────
 
 function executeAckLeg(
@@ -1468,10 +1519,23 @@ function executeAckLeg(
   const { type, legId } = action
   void type
 
+  // No-op-with-span instead of a silent early-return: ack-leg needs a
+  // confirmed dialog (e.g. a `confirm-dialog` ran first). When a rule displaces
+  // that confirm — or names the wrong leg — the precondition miss leaves a
+  // visible trace event rather than a silent dropped effect. Mirrors the
+  // `skip()` pattern in send-provisional-to-leg. See complaint
+  // `silent-action-batch-abort`.
+  const skip = (why: string): void => {
+    state.spanEvents.push({
+      name: "rule_action",
+      attributes: { "rule.action": "ack-leg", "rule.outcome": why, "rule.leg": legId },
+    })
+  }
+
   const leg = findLeg(state.call, legId)
-  if (leg === undefined) return
+  if (leg === undefined) return skip("unknown_leg")
   const dialog = leg.dialogs[0]
-  if (dialog === undefined) return
+  if (dialog === undefined) return skip("unconfirmed_dialog")
 
   const target = legTarget(leg)
   const targetUri = dialog.sip.remoteTarget || `sip:${target.host}:${target.port}`
